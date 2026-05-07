@@ -93,8 +93,9 @@ def run_epoch(
         batch = move_batch(batch, model)
         optimizer.zero_grad(set_to_none=True)
         logits, values = model(batch["state_features"], batch["action_features"], batch["action_mask"])
-        policy_loss = nn.functional.cross_entropy(logits, batch["targets"])
-        value_loss = nn.functional.mse_loss(values, batch["value_targets"])
+        weights = normalized_weights(batch["sample_weights"])
+        policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
+        value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
         loss = policy_loss + value_loss * value_weight
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
@@ -117,8 +118,9 @@ def evaluate(
     for batch in loader:
         batch = move_batch(batch, model)
         logits, values = model(batch["state_features"], batch["action_features"], batch["action_mask"])
-        policy_loss = nn.functional.cross_entropy(logits, batch["targets"])
-        value_loss = nn.functional.mse_loss(values, batch["value_targets"])
+        weights = normalized_weights(batch["sample_weights"])
+        policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
+        value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
         loss = policy_loss + value_loss * value_weight
         accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"])
     return finish_metrics(totals)
@@ -149,6 +151,15 @@ def finish_metrics(totals: dict[str, float]) -> dict[str, float]:
         "accuracy": totals["accuracy"] / count,
         "samples": totals["count"],
     }
+
+
+def normalized_weights(weights: torch.Tensor) -> torch.Tensor:
+    mean = weights.mean().clamp_min(1.0e-6)
+    return weights / mean
+
+
+def weighted_mean(losses: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    return (losses * weights).sum() / weights.sum().clamp_min(1.0e-6)
 
 
 def move_batch(batch: dict[str, torch.Tensor], model: CandidatePolicyNet) -> dict[str, torch.Tensor]:

@@ -10,6 +10,7 @@
     "test:train": "tsx src/tests/aiTrainingSmoke.ts",
     "sim:ai": "tsx src/sim/headlessAiVsAi.ts",
     "sim:export-training": "tsx src/sim/exportTrainingExamples.ts",
+    "sim:export-outcome-training": "tsx src/sim/exportOutcomeTrainingExamples.ts",
     "sim:evaluate-model": "tsx src/sim/evaluateModelVsHeuristic.ts"
   },
   "dependencies": {

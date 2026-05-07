@@ -11,7 +11,7 @@ import { buildCombatCandidates } from "../flow/ai/combatPlanner";
 import { getAiPhase } from "./phase";
 import type { AiPhase, LegalAiAction } from "./types";
 
-const FEATURE_COUNT = 18;
+const FEATURE_COUNT = 32;
 
 export function enumerateLegalAiActions(state: GameState, sideId: SideId): LegalAiAction[] {
   const side = state.sides[sideId];
@@ -297,6 +297,27 @@ function features(input: {
   vector[9] = input.targetSlot === undefined ? -1 : input.targetSlot / 4;
   vector[10] = input.amount ?? 0;
   vector[11] = input.endsTurn ? 1 : 0;
+  const sourceCard = input.sourceCardId ? getCard(input.sourceCardId) : null;
+  vector[12] = input.kind === "pass" ? 1 : 0;
+  vector[13] = sourceCard?.kind === "umamusume" ? 1 : sourceCard?.kind === "trainer" ? 0.5 : 0;
+  vector[14] = sourceCard?.kind === "umamusume" ? sourceCard.stage / 2 : 0;
+  vector[15] = sourceCard?.kind === "umamusume" ? sourceCard.hp / 180 : 0;
+  vector[16] = sourceCard?.kind === "umamusume" ? getPrimaryAttack(sourceCard).damage / 150 : 0;
+  vector[17] = sourceCard?.kind === "umamusume" ? Object.values(getPrimaryAttack(sourceCard).cost).reduce((sum, cost) => sum + (cost ?? 0), 0) / 5 : 0;
+  vector[18] = sourceCard?.kind === "trainer" && sourceCard.trainerType === "supporter" ? 1 : 0;
+  vector[19] = sourceCard?.kind === "trainer" && sourceCard.trainerType === "stadium" ? 1 : 0;
+  vector[20] = sourceCard?.kind === "trainer" && sourceCard.trainerType === "tool" ? 1 : 0;
+  vector[21] = sourceCard?.kind === "trainer" ? (sourceCard.effect.draw ?? 0) / 5 : 0;
+  vector[22] = sourceCard?.kind === "trainer" && (sourceCard.effect.searchUmamusume || sourceCard.effect.searchEvolutionUmamusume || sourceCard.effect.searchRandomBasicUmamusume) ? 1 : 0;
+  vector[23] = sourceCard?.kind === "trainer" && (sourceCard.effect.extraEnergyAttach || sourceCard.effect.attachEnergyFromZoneToBench) ? 1 : 0;
+  vector[24] = sourceCard?.kind === "trainer" ? (sourceCard.effect.activeAttackDamageBonus ?? 0) / 100 : 0;
+  vector[25] = input.target ? input.target.maxHp / 180 : 0;
+  vector[26] = input.target ? attachedEnergyCount(input.target) / 6 : 0;
+  vector[27] = input.target ? input.target.specialConditions.length / 4 : 0;
+  vector[28] = input.target && input.target.uid === input.targetSlot ? 1 : 0;
+  vector[29] = input.kind === "attack" || input.kind === "retreatAttack" ? 1 : 0;
+  vector[30] = input.kind === "useAbility" ? 1 : 0;
+  vector[31] = input.kind === "endTurn" ? 1 : 0;
   return vector;
 }
 

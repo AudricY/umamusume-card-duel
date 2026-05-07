@@ -44,6 +44,8 @@ type Args = {
   maxSteps: number;
   modelSide: SideId | "both";
   details: boolean;
+  selection: "policy" | "value" | "rollout";
+  rolloutSteps: number;
 };
 
 type GameResult = {
@@ -73,7 +75,7 @@ async function main() {
   console.log(JSON.stringify(args.details ? { summary, results } : { summary }, null, 2));
 }
 
-async function runModelVsHeuristicGame(args: Args, seed: string, modelSide: SideId): Promise<GameResult> {
+export async function runModelVsHeuristicGame(args: Args, seed: string, modelSide: SideId): Promise<GameResult> {
   const rng = createSeededRng(`${seed}:${modelSide}`, "model-vs-heuristic");
   return withRng(rng, () => runModelVsHeuristicGameWithRng(args, seed, modelSide, rng));
 }
@@ -93,7 +95,11 @@ async function runModelVsHeuristicGameWithRng(args: Args, seed: string, modelSid
     const sideId = state.currentSide === "player" || state.currentSide === "opponent" ? state.currentSide : "player";
     const forcedCoinResults = getForcedAttackCoinResults(state, rng);
     if (sideId === modelSide) {
-      const decision = await chooseModelAction(args.modelUrl, state, sideId);
+      const decision = args.selection === "value"
+        ? await chooseValueAction(args.modelUrl, state, sideId, rng)
+        : args.selection === "rollout"
+          ? chooseRolloutAction(args, state, sideId, rng)
+        : await chooseModelAction(args.modelUrl, state, sideId);
       modelActions += 1;
       const next = advanceModeledTurnStep(state, sideId, decision.action, forcedCoinResults, rng);
       if (stateHash(next) === beforeHash) {
@@ -147,7 +153,92 @@ async function chooseModelAction(modelUrl: string, state: GameState, sideId: Sid
   return { action: legalActions[selectedIndex] ?? legalActions[0]!, selectedIndex };
 }
 
-function advanceModeledTurnStep(
+async function chooseValueAction(modelUrl: string, state: GameState, sideId: SideId, rng: Rng): Promise<{ action: LegalAiAction; selectedIndex: number }> {
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
+  let bestIndex = 0;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < legalActions.length; index += 1) {
+    const action = legalActions[index]!;
+    const next = advanceModeledTurnStep(state, sideId, action, getForcedAttackCoinResults(state, rng), rng);
+    const score = stateHash(next) === stateHash(state)
+      ? Number.NEGATIVE_INFINITY
+      : next.gameOver
+        ? terminalValue(next, sideId)
+        : await predictStateValue(modelUrl, next, sideId);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+  return { action: legalActions[bestIndex]!, selectedIndex: bestIndex };
+}
+
+async function predictStateValue(modelUrl: string, state: GameState, sideId: SideId): Promise<number> {
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  const response = await fetch(`${modelUrl.replace(/\/$/, "")}/predict`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      observation: buildPublicObservation(state, sideId),
+      legalActions,
+    }),
+  });
+  if (!response.ok) throw new Error(`Model server returned ${response.status}: ${await response.text()}`);
+  const payload = await response.json() as { value?: number[] };
+  return Number(payload.value?.[0] ?? 0);
+}
+
+function terminalValue(state: GameState, sideId: SideId): number {
+  const opponentId: SideId = sideId === "player" ? "opponent" : "player";
+  const pointMargin = (state.sides[sideId].points - state.sides[opponentId].points) / 3;
+  if (state.winner === sideId) return 1 + pointMargin * 0.2;
+  if (state.winner === opponentId) return -1 + pointMargin * 0.2;
+  return pointMargin;
+}
+
+function chooseRolloutAction(args: Args, state: GameState, sideId: SideId, rng: Rng): { action: LegalAiAction; selectedIndex: number } {
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
+  let bestIndex = 0;
+  let bestReward = Number.NEGATIVE_INFINITY;
+  legalActions.forEach((action, index) => {
+    const next = advanceModeledTurnStep(state, sideId, action, getForcedAttackCoinResults(state, rng), rng);
+    const reward = stateHash(next) === stateHash(state)
+      ? Number.NEGATIVE_INFINITY
+      : rewardForRollout(rolloutHeuristic(next, rng, args.rolloutSteps), sideId);
+    if (reward > bestReward) {
+      bestReward = reward;
+      bestIndex = index;
+    }
+  });
+  return { action: legalActions[bestIndex]!, selectedIndex: bestIndex };
+}
+
+function rolloutHeuristic(state: GameState, rng: Rng, maxSteps: number): GameState {
+  let next = cloneGame(state);
+  for (let step = 0; step < maxSteps; step += 1) {
+    if (next.gameOver) break;
+    const before = stateHash(next);
+    const sideId = next.currentSide === "player" || next.currentSide === "opponent" ? next.currentSide : "player";
+    const forcedCoinResults = getForcedAttackCoinResults(next, rng);
+    next = sideId === "player"
+      ? advancePlayerAiTurnStep(next, forcedCoinResults, rng.next)
+      : advanceOpponentTurnStep(next, forcedCoinResults, rng.next);
+    if (stateHash(next) === before) break;
+  }
+  return next;
+}
+
+function rewardForRollout(state: GameState, sideId: SideId): number {
+  const opponentId: SideId = sideId === "player" ? "opponent" : "player";
+  const pointMargin = (state.sides[sideId].points - state.sides[opponentId].points) / 3;
+  if (state.winner === sideId) return 1 + pointMargin * 0.2;
+  if (state.winner === opponentId) return -1 + pointMargin * 0.2;
+  return pointMargin;
+}
+
+export function advanceModeledTurnStep(
   state: GameState,
   sideId: SideId,
   action: LegalAiAction,
@@ -298,7 +389,7 @@ function finishTurn(state: GameState): void {
   }
 }
 
-function setupAiVsAiGame(): GameState {
+export function setupAiVsAiGame(): GameState {
   let state = createGame(undefined, undefined, "Opponent", "hard", false, "Player AI");
   state.humanBySide.player = false;
   state.humanBySide.opponent = false;
@@ -313,7 +404,7 @@ function setupAiVsAiGame(): GameState {
   return state;
 }
 
-function getForcedAttackCoinResults(state: GameState, rng: Rng): CoinFlipResult | CoinFlipResult[] | undefined {
+export function getForcedAttackCoinResults(state: GameState, rng: Rng): CoinFlipResult | CoinFlipResult[] | undefined {
   if (state.phase !== "play") return undefined;
   if (state.currentSide !== "player" && state.currentSide !== "opponent") return undefined;
   if (state.opponentTurnStep !== "attack") return undefined;
@@ -350,7 +441,7 @@ function resolveContinuousKnockouts(state: GameState): void {
   }
 }
 
-function stateHash(state: GameState): string {
+export function stateHash(state: GameState): string {
   return JSON.stringify({
     phase: state.phase,
     currentSide: state.currentSide,
@@ -420,10 +511,19 @@ function parseArgs(argv: string[]): Args {
     maxSteps: Number(get("--max-steps", "500")),
     modelSide,
     details: argv.includes("--details"),
+    selection: parseSelection(get("--selection", "policy")),
+    rolloutSteps: Number(get("--rollout-steps", "500")),
   };
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+function parseSelection(raw: string): Args["selection"] {
+  if (raw === "value" || raw === "rollout") return raw;
+  return "policy";
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}

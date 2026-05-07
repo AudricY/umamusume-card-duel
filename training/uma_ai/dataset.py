@@ -18,6 +18,7 @@ class PolicySample:
     action_features: np.ndarray
     target_index: int
     value_target: float
+    sample_weight: float
     example: dict[str, Any]
 
 
@@ -56,6 +57,7 @@ def load_policy_samples(path: str | Path, *, min_actions: int = 2) -> Iterable[P
                 action_features=action_features,
                 target_index=target_index,
                 value_target=_value_target(example),
+                sample_weight=_sample_weight(example),
                 example=example,
             )
 
@@ -69,6 +71,7 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
     action_mask = np.zeros((batch_size, max_actions), dtype=np.bool_)
     targets = np.zeros((batch_size,), dtype=np.int64)
     value_targets = np.zeros((batch_size,), dtype=np.float32)
+    sample_weights = np.ones((batch_size,), dtype=np.float32)
 
     for row, sample in enumerate(samples):
         count = sample.action_features.shape[0]
@@ -77,6 +80,7 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
         action_mask[row, :count] = True
         targets[row] = sample.target_index
         value_targets[row] = sample.value_target
+        sample_weights[row] = sample.sample_weight
 
     return {
         "state_features": torch.from_numpy(state_features),
@@ -84,6 +88,7 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
         "action_mask": torch.from_numpy(action_mask),
         "targets": torch.from_numpy(targets),
         "value_targets": torch.from_numpy(value_targets),
+        "sample_weights": torch.from_numpy(sample_weights),
     }
 
 
@@ -91,5 +96,14 @@ def _value_target(example: dict[str, Any]) -> float:
     winner = example.get("result", {}).get("winner")
     side_id = example.get("sideId")
     if winner is None or side_id not in ("player", "opponent"):
-        return 0.0
+        target = example.get("valueTarget")
+        return float(target) if target is not None else 0.0
     return 1.0 if winner == side_id else -1.0
+
+
+def _sample_weight(example: dict[str, Any]) -> float:
+    raw = example.get("sampleWeight", 1.0)
+    try:
+        return max(0.05, float(raw))
+    except (TypeError, ValueError):
+        return 1.0

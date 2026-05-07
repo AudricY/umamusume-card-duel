@@ -4,8 +4,8 @@ from typing import Any
 
 import numpy as np
 
-STATE_DIM = 64
-ACTION_DIM = 18
+STATE_DIM = 96
+ACTION_DIM = 32
 
 PHASES = [
     "setup",
@@ -49,6 +49,9 @@ def observation_to_features(observation: dict[str, Any]) -> np.ndarray:
     features[29] = 1.0 if own.get("usedSupporterThisTurn") else 0.0
     features[30] = 1.0 if own.get("usedRetreatThisTurn") else 0.0
     features[31] = 1.0 if own.get("usedStadiumThisTurn") else 0.0
+    features[32:48] = _identity_features(own, opponent)
+    features[48:58] = _energy_vector((own.get("active") or {}).get("energies", {}))
+    features[58:68] = _energy_vector((opponent.get("active") or {}).get("energies", {}))
     return features
 
 
@@ -92,3 +95,43 @@ def _side_board_features(side: dict[str, Any]) -> np.ndarray:
         ],
         dtype=np.float32,
     )
+
+
+def _identity_features(own: dict[str, Any], opponent: dict[str, Any]) -> np.ndarray:
+    values = np.zeros(16, dtype=np.float32)
+    own_active = own.get("active") or {}
+    opponent_active = opponent.get("active") or {}
+    values[0] = _hash_to_unit(str(own_active.get("cardId", "")))
+    values[1] = _hash_to_unit(str(opponent_active.get("cardId", "")))
+    for offset, entry in enumerate((own.get("bench") or [])[:4], start=2):
+        values[offset] = _hash_to_unit(str((entry or {}).get("cardId", "")))
+    for offset, entry in enumerate((opponent.get("bench") or [])[:4], start=6):
+        values[offset] = _hash_to_unit(str((entry or {}).get("cardId", "")))
+    values[10] = _hash_average(own.get("handCardIds") or [])
+    values[11] = _hash_average(own.get("discard") or [])
+    values[12] = _hash_average(opponent.get("discard") or [])
+    values[13] = float(len(own.get("handCardIds") or [])) / 10.0
+    values[14] = float(len(own.get("bench") or [])) / 4.0
+    values[15] = float(len(opponent.get("bench") or [])) / 4.0
+    return values
+
+
+def _energy_vector(energies: dict[str, Any]) -> np.ndarray:
+    types = ["grass", "fire", "water", "lightning", "psychic", "fighting", "darkness", "steel", "colorless", "dragon"]
+    return np.asarray([float(energies.get(energy_type, 0)) / 4.0 for energy_type in types], dtype=np.float32)
+
+
+def _hash_average(items: list[Any]) -> float:
+    if not items:
+        return 0.0
+    return float(sum(_hash_to_unit(str(item)) for item in items) / len(items))
+
+
+def _hash_to_unit(text: str) -> float:
+    if not text:
+        return 0.0
+    value = 2166136261
+    for char in text:
+        value ^= ord(char)
+        value = (value * 16777619) & 0xFFFFFFFF
+    return float(value) / 4294967295.0
