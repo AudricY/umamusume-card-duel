@@ -42,6 +42,8 @@ def main() -> None:
         "2",
     ]
     subprocess.run(train, cwd=repo_root, check=True)
+    manifest = json.loads((model_dir / "manifest.json").read_text(encoding="utf8"))
+    assert_grouped_split(manifest)
     subprocess.run([
         sys.executable,
         str(repo_root / "training" / "export_onnx.py"),
@@ -90,6 +92,19 @@ def main() -> None:
         "servedSelectedIndex": served_prediction["selectedIndex"][0],
         "servedSelectedActionId": served_prediction.get("selectedActionId", [None])[0],
     }, indent=2))
+
+
+def assert_grouped_split(manifest: dict) -> None:
+    split = manifest.get("split", {})
+    if split.get("split_by") != "episode":
+        raise AssertionError(f"Expected episode split, got {split}")
+    train_groups = set(split.get("train_groups", []))
+    val_groups = set(split.get("val_groups", []))
+    if not val_groups:
+        raise AssertionError(f"Expected validation groups, got {split}")
+    leaked = train_groups.intersection(val_groups)
+    if leaked:
+        raise AssertionError(f"Train/val group leakage: {sorted(leaked)}")
 
 
 def run_onnx_prediction(model_path: Path, example: dict) -> dict[str, int]:

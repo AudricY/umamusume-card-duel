@@ -9,6 +9,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from uma_ai.dataset import JsonlPolicyDataset, collate_policy_batch
+from uma_ai.features import ACTION_DIM, ACTION_FEATURE_SCHEMA_VERSION, STATE_DIM, STATE_FEATURE_SCHEMA_VERSION
 from uma_ai.model import CandidatePolicyNet, ModelConfig
 
 
@@ -22,7 +23,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = JsonlPolicyDataset(args.data, min_actions=2)
-    train_indices, val_indices = split_indices(len(dataset), args.seed)
+    train_indices, val_indices, split_metadata = split_dataset(dataset, args.seed, args.split_by)
     train_loader = DataLoader(
         Subset(dataset, train_indices),
         batch_size=args.batch_size,
@@ -54,11 +55,13 @@ def main() -> None:
     checkpoint = {
         "model_state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
         "model_config": config.to_dict(),
+        "feature_schema": feature_schema_metadata(),
         "training": {
             "data": str(args.data),
             "samples": len(dataset),
             "train_samples": len(train_indices),
             "val_samples": len(val_indices),
+            "split": split_metadata,
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "lr": args.lr,
@@ -73,7 +76,11 @@ def main() -> None:
     manifest = {
         "checkpoint": "checkpoint.pt",
         "model_config": config.to_dict(),
+        "feature_schema": feature_schema_metadata(),
         "device": str(device),
+        "data": str(args.data),
+        "samples": len(dataset),
+        "split": split_metadata,
         "metrics": {"train": final_train, "val": final_val},
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
@@ -162,6 +169,15 @@ def weighted_mean(losses: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     return (losses * weights).sum() / weights.sum().clamp_min(1.0e-6)
 
 
+def feature_schema_metadata() -> dict[str, int]:
+    return {
+        "state_dim": STATE_DIM,
+        "action_dim": ACTION_DIM,
+        "state_feature_schema_version": STATE_FEATURE_SCHEMA_VERSION,
+        "action_feature_schema_version": ACTION_FEATURE_SCHEMA_VERSION,
+    }
+
+
 def move_batch(batch: dict[str, torch.Tensor], model: CandidatePolicyNet) -> dict[str, torch.Tensor]:
     device = next(model.parameters()).device
     return {key: value.to(device) for key, value in batch.items()}
@@ -183,6 +199,49 @@ def split_indices(size: int, seed: int) -> tuple[list[int], list[int]]:
     return indices[val_size:], indices[:val_size]
 
 
+def split_dataset(dataset: JsonlPolicyDataset, seed: int, split_by: str) -> tuple[list[int], list[int], dict]:
+    if split_by == "row":
+        train_indices, val_indices = split_indices(len(dataset), seed)
+        return train_indices, val_indices, {
+            "split_by": "row",
+            "seed": seed,
+            "train_rows": len(train_indices),
+            "val_rows": len(val_indices),
+        }
+
+    groups: dict[str, list[int]] = {}
+    for index, sample in enumerate(dataset.samples):
+        key = group_key(sample.example, split_by)
+        groups.setdefault(key, []).append(index)
+
+    generator = torch.Generator().manual_seed(seed)
+    group_keys = sorted(groups)
+    if group_keys:
+        order = torch.randperm(len(group_keys), generator=generator).tolist()
+        group_keys = [group_keys[index] for index in order]
+    val_group_count = max(1, int(len(group_keys) * 0.2)) if len(group_keys) >= 5 else 0
+    val_keys = set(group_keys[:val_group_count])
+    train_indices = [index for key in group_keys if key not in val_keys for index in groups[key]]
+    val_indices = [index for key in group_keys if key in val_keys for index in groups[key]]
+    return train_indices, val_indices, {
+        "split_by": split_by,
+        "seed": seed,
+        "train_rows": len(train_indices),
+        "val_rows": len(val_indices),
+        "train_groups": sorted(key for key in group_keys if key not in val_keys),
+        "val_groups": sorted(val_keys),
+    }
+
+
+def group_key(example: dict, split_by: str) -> str:
+    raw = example.get(split_by)
+    if raw is None and split_by == "episode":
+        raw = example.get("episodeId")
+    if raw is None:
+        raise ValueError(f"Cannot split by {split_by}: example is missing that field")
+    return str(raw)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train candidate-conditioned behavior cloning policy.")
     parser.add_argument("--data", required=True)
@@ -196,6 +255,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--value-weight", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--split-by", choices=["row", "episode", "seed"], default="episode")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()

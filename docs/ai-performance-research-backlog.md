@@ -8,6 +8,8 @@ The blocker is strength, not plumbing. `docs/ai-training-findings.md` shows the 
 
 A card-aware feature pass has already expanded action and state semantics, and it did not solve closed-loop strength. A credible 80% win-rate target now depends on a stronger teacher, model-visited-state data, feature schema/versioning discipline, ablation diagnostics, and tighter evaluation gates.
 
+Active execution notes are tracked in `docs/ai-performance-research-progress.md`.
+
 This backlog is ordered by expected impact on closed-loop win rate, then by risk reduction.
 
 ## P0: Build A Stronger Teacher Before More Distillation

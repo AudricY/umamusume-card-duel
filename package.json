@@ -16,6 +16,7 @@
     "sim:export-training": "npm --workspace backend run sim:export-training --",
     "sim:export-outcome-training": "npm --workspace backend run sim:export-outcome-training --",
     "sim:evaluate-model": "npm --workspace backend run sim:evaluate-model --",
+    "sim:eval-gate": "npm --workspace backend run sim:eval-gate --",
     "setup:python-train": "python3 -m venv training/.venv && training/.venv/bin/pip install -r training/requirements.txt",
     "setup:python-train:gpu": "python3 -m venv training/.venv && training/.venv/bin/pip install -r training/requirements-gpu.txt",
     "test:train": "npm --workspace backend run test:train",

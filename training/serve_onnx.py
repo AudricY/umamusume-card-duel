@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import onnxruntime as ort
 
-from uma_ai.features import legal_actions_to_features, observation_to_features
+from uma_ai.features import ACTION_DIM, STATE_DIM, legal_actions_to_features, observation_to_features
 
 
 class PolicyServer(ThreadingHTTPServer):
@@ -86,8 +86,12 @@ def request_to_arrays(payload: dict[str, Any]) -> tuple[dict[str, np.ndarray], l
         action_ids = None
     if state_features.ndim != 2:
         raise ValueError("state_features must have shape [batch,state_dim]")
+    if state_features.shape[1] != STATE_DIM:
+        raise ValueError(f"state_features dimension mismatch: got {state_features.shape[1]}, expected {STATE_DIM}")
     if action_features.ndim != 3:
         raise ValueError("action_features must have shape [batch,actions,action_dim]")
+    if action_features.shape[2] != ACTION_DIM:
+        raise ValueError(f"action_features dimension mismatch: got {action_features.shape[2]}, expected {ACTION_DIM}")
     if action_mask.shape != action_features.shape[:2]:
         raise ValueError("action_mask must have shape [batch,actions]")
     return {

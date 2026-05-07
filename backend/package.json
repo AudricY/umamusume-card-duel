@@ -8,11 +8,12 @@
     "start": "tsx src/server.ts",
     "test:ai": "tsx src/tests/aiCombatScenarios.ts",
     "test:action-contract": "tsx src/tests/aiActionContractSmoke.ts",
-    "test:train": "tsx src/tests/aiTrainingSmoke.ts",
+    "test:train": "tsx src/tests/stateFingerprintSmoke.ts && tsx src/tests/aiTrainingSmoke.ts",
     "sim:ai": "tsx src/sim/headlessAiVsAi.ts",
     "sim:export-training": "tsx src/sim/exportTrainingExamples.ts",
     "sim:export-outcome-training": "tsx src/sim/exportOutcomeTrainingExamples.ts",
-    "sim:evaluate-model": "tsx src/sim/evaluateModelVsHeuristic.ts"
+    "sim:evaluate-model": "tsx src/sim/evaluateModelVsHeuristic.ts",
+    "sim:eval-gate": "tsx src/sim/evalGate.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -14,6 +14,8 @@ import {
   getUmamusumeCard,
   tickSetupCountdown,
 } from "../../../frontend/src/game/engine";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { chooseAiSetupSelection } from "../../../frontend/src/app/gameUiHelpers";
 import { enumerateLegalAiActions, chooseHighestScoredAction } from "../../../frontend/src/game/engine/ai-policy/actions";
 import { buildPublicObservation } from "../../../frontend/src/game/engine/ai-policy/observation";
@@ -38,19 +40,26 @@ import { getAbilityMoveEnergyTypes } from "../../../frontend/src/game/engine/flo
 import { drawCards } from "../../../frontend/src/game/engine/flow/turn";
 import type { PlayChoices } from "../../../frontend/src/game/engine/core/playTypes";
 import type { CoinFlipResult, EnergyType, GameState, SideId, SideState, UmamusumeInstance } from "../../../shared/src/types";
+import { stateFingerprint } from "./stateFingerprint";
+import { rankLegalActions, type CandidateRankerMode } from "./candidateRanker";
 
-type Args = {
+export type EvaluateModelArgs = {
   modelUrl: string;
   games: number;
   seedStart: number;
   maxSteps: number;
   modelSide: SideId | "both";
   details: boolean;
-  selection: "policy" | "value" | "rollout" | "search";
+  selection: "policy" | "value" | "rollout" | "search" | "planner";
   rolloutSteps: number;
   searchDepth: number;
   searchTopK: number;
   searchSamples: number;
+  ranker: CandidateRankerMode;
+  decisionTraceOut: string | null;
+  plannerTopK: number;
+  plannerMaxSequences: number;
+  plannerMaxDepth: number;
 };
 
 type GameResult = {
@@ -64,32 +73,68 @@ type GameResult = {
   points: Record<SideId, number>;
   modelActions: number;
   heuristicFallbacks: number;
+  selectedCandidateRanks: number[];
+  decisionTraces: DecisionTraceRow[];
+};
+
+type DecisionTraceRow = {
+  schemaVersion: 1;
+  source: "model-visited";
+  seed: string;
+  modelSide: SideId;
+  step: number;
+  sideId: SideId;
+  selection: EvaluateModelArgs["selection"];
+  observation: ReturnType<typeof buildPublicObservation>;
+  legalActions: LegalAiAction[];
+  selectedActionId: string;
+  selectedActionIndex: number;
+  selectedOriginalRank?: number;
+  heuristicSelectedActionId: string;
+  heuristicSelectedActionIndex: number;
+  fallback: boolean;
+  result: {
+    winner: SideId | null;
+    modelWon: boolean;
+    points: Record<SideId, number>;
+    terminalReason: GameResult["terminalReason"];
+  } | null;
 };
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sides: SideId[] = args.modelSide === "both" ? ["player", "opponent"] : [args.modelSide];
   const results: GameResult[] = [];
+  if (args.decisionTraceOut) {
+    mkdirSync(dirname(args.decisionTraceOut), { recursive: true });
+    writeFileSync(args.decisionTraceOut, "", "utf8");
+  }
   for (const modelSide of sides) {
     for (let index = 0; index < args.games; index += 1) {
       const seed = String(args.seedStart + index);
-      results.push(await runModelVsHeuristicGame(args, seed, modelSide));
+      const result = await runModelVsHeuristicGame(args, seed, modelSide);
+      if (args.decisionTraceOut && result.decisionTraces.length) {
+        appendFileSync(args.decisionTraceOut, result.decisionTraces.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+      }
+      results.push(result);
     }
   }
   const summary = summarize(results);
   console.log(JSON.stringify(args.details ? { summary, results } : { summary }, null, 2));
 }
 
-export async function runModelVsHeuristicGame(args: Args, seed: string, modelSide: SideId): Promise<GameResult> {
+export async function runModelVsHeuristicGame(args: EvaluateModelArgs, seed: string, modelSide: SideId): Promise<GameResult> {
   const rng = createSeededRng(`${seed}:${modelSide}`, "model-vs-heuristic");
   return withRng(rng, () => runModelVsHeuristicGameWithRng(args, seed, modelSide, rng));
 }
 
-async function runModelVsHeuristicGameWithRng(args: Args, seed: string, modelSide: SideId, rng: Rng): Promise<GameResult> {
+async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: string, modelSide: SideId, rng: Rng): Promise<GameResult> {
   let state = setupAiVsAiGame();
   let terminalReason: GameResult["terminalReason"] = "maxSteps";
   let modelActions = 0;
   let heuristicFallbacks = 0;
+  const selectedCandidateRanks: number[] = [];
+  const decisionTraces: DecisionTraceRow[] = [];
 
   for (let step = 0; step < args.maxSteps; step += 1) {
     if (state.gameOver) {
@@ -100,16 +145,44 @@ async function runModelVsHeuristicGameWithRng(args: Args, seed: string, modelSid
     const sideId = state.currentSide === "player" || state.currentSide === "opponent" ? state.currentSide : "player";
     const forcedCoinResults = getForcedAttackCoinResults(state, rng);
     if (sideId === modelSide) {
+      const legalActions = enumerateLegalAiActions(state, sideId);
+      const heuristic = chooseHighestScoredAction(legalActions);
+      const heuristicSelectedActionIndex = Math.max(0, legalActions.findIndex((action) => action.id === heuristic.id));
       const decision = args.selection === "value"
         ? await chooseValueAction(args.modelUrl, state, sideId, rng)
         : args.selection === "rollout"
           ? chooseRolloutAction(args, state, sideId, rng)
         : args.selection === "search"
           ? chooseSearchAction(args, state, sideId, `${seed}:${modelSide}:${step}`)
+        : args.selection === "planner"
+          ? choosePlannerAction(args, state, sideId, `${seed}:${modelSide}:${step}`)
         : await chooseModelAction(args.modelUrl, state, sideId);
       modelActions += 1;
+      if (decision.selectedOriginalRank !== undefined) selectedCandidateRanks.push(decision.selectedOriginalRank);
       const next = advanceModeledTurnStep(state, sideId, decision.action, forcedCoinResults, rng);
-      if (stateHash(next) === beforeHash) {
+      const fallback = stateHash(next) === beforeHash;
+      if (args.decisionTraceOut) {
+        const trace: DecisionTraceRow = {
+          schemaVersion: 1,
+          source: "model-visited",
+          seed,
+          modelSide,
+          step,
+          sideId,
+          selection: args.selection,
+          observation: buildPublicObservation(state, sideId),
+          legalActions,
+          selectedActionId: decision.action.id,
+          selectedActionIndex: decision.selectedIndex,
+          heuristicSelectedActionId: heuristic.id,
+          heuristicSelectedActionIndex,
+          fallback,
+          result: null,
+        };
+        if (decision.selectedOriginalRank !== undefined) trace.selectedOriginalRank = decision.selectedOriginalRank;
+        decisionTraces.push(trace);
+      }
+      if (fallback) {
         heuristicFallbacks += 1;
         state = sideId === "player"
           ? advancePlayerAiTurnStep(state, forcedCoinResults, rng.next)
@@ -129,7 +202,7 @@ async function runModelVsHeuristicGameWithRng(args: Args, seed: string, modelSid
     if (step === args.maxSteps - 1 && state.gameOver) terminalReason = "gameOver";
   }
 
-  return {
+  const result: GameResult = {
     seed,
     modelSide,
     winner: state.winner,
@@ -140,10 +213,21 @@ async function runModelVsHeuristicGameWithRng(args: Args, seed: string, modelSid
     points: { player: state.sides.player.points, opponent: state.sides.opponent.points },
     modelActions,
     heuristicFallbacks,
+    selectedCandidateRanks,
+    decisionTraces,
   };
+  decisionTraces.forEach((trace) => {
+    trace.result = {
+      winner: result.winner,
+      modelWon: result.modelWon,
+      points: result.points,
+      terminalReason: result.terminalReason,
+    };
+  });
+  return result;
 }
 
-async function chooseModelAction(modelUrl: string, state: GameState, sideId: SideId): Promise<{ action: LegalAiAction; selectedIndex: number }> {
+async function chooseModelAction(modelUrl: string, state: GameState, sideId: SideId): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number }> {
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
   const response = await fetch(`${modelUrl.replace(/\/$/, "")}/predict`, {
@@ -160,7 +244,7 @@ async function chooseModelAction(modelUrl: string, state: GameState, sideId: Sid
   return { action: legalActions[selectedIndex] ?? legalActions[0]!, selectedIndex };
 }
 
-async function chooseValueAction(modelUrl: string, state: GameState, sideId: SideId, rng: Rng): Promise<{ action: LegalAiAction; selectedIndex: number }> {
+async function chooseValueAction(modelUrl: string, state: GameState, sideId: SideId, rng: Rng): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number }> {
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
   let bestIndex = 0;
@@ -204,7 +288,7 @@ function terminalValue(state: GameState, sideId: SideId): number {
   return pointMargin;
 }
 
-function chooseRolloutAction(args: Args, state: GameState, sideId: SideId, rng: Rng): { action: LegalAiAction; selectedIndex: number } {
+function chooseRolloutAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, rng: Rng): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
   let bestIndex = 0;
@@ -219,10 +303,10 @@ function chooseRolloutAction(args: Args, state: GameState, sideId: SideId, rng: 
       bestIndex = index;
     }
   });
-  return { action: legalActions[bestIndex]!, selectedIndex: bestIndex };
+  return rankedDecision(legalActions, bestIndex);
 }
 
-function chooseSearchAction(args: Args, state: GameState, sideId: SideId, seed: string): { action: LegalAiAction; selectedIndex: number } {
+function chooseSearchAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
   const memo = new Map<string, number>();
@@ -238,11 +322,87 @@ function chooseSearchAction(args: Args, state: GameState, sideId: SideId, seed: 
       bestIndex = index;
     }
   });
-  return { action: legalActions[bestIndex]!, selectedIndex: bestIndex };
+  return rankedDecision(legalActions, bestIndex);
+}
+
+function choosePlannerAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
+  const bundles = enumerateTurnBundles(args, state, sideId, seed);
+  let best = bundles[0];
+  let bestReward = Number.NEGATIVE_INFINITY;
+  bundles.forEach((bundle, index) => {
+    const reward = rewardForRollout(rolloutHeuristic(bundle.state, createSeededRng(`${seed}:bundle:${index}:leaf`, "planner-leaf"), args.rolloutSteps), sideId);
+    if (reward > bestReward) {
+      bestReward = reward;
+      best = bundle;
+    }
+  });
+  return best?.first ?? rankedDecision(legalActions, 0);
+}
+
+type TurnBundle = {
+  first: { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number };
+  state: GameState;
+};
+
+function enumerateTurnBundles(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string): TurnBundle[] {
+  type PartialBundle = {
+    first: TurnBundle["first"] | null;
+    state: GameState;
+    depth: number;
+  };
+  const complete: TurnBundle[] = [];
+  const queue: PartialBundle[] = [{ first: null, state: cloneGame(state), depth: 0 }];
+  while (queue.length && complete.length < args.plannerMaxSequences) {
+    const current = queue.shift()!;
+    if (current.state.gameOver || current.state.currentSide !== sideId || current.depth >= args.plannerMaxDepth) {
+      if (current.first) complete.push({ first: current.first, state: current.state });
+      continue;
+    }
+    const legalActions = enumerateLegalAiActions(current.state, sideId);
+    const candidates = rankLegalActions(legalActions, {
+      topK: Math.max(1, args.plannerTopK),
+      mode: args.ranker,
+      baseline: chooseHighestScoredAction(legalActions),
+      rng: createSeededRng(`${seed}:d${current.depth}:ranker`, "planner-ranker"),
+    });
+    candidates.forEach(({ action, index, originalRank }) => {
+      if (complete.length + queue.length >= args.plannerMaxSequences) return;
+      const rng = createSeededRng(`${seed}:d${current.depth}:a${index}`, "planner-action");
+      const before = stateHash(current.state);
+      const next = advanceModeledTurnStep(current.state, sideId, action, getForcedAttackCoinResults(current.state, rng), rng);
+      if (stateHash(next) === before) return;
+      const first = current.first ?? firstDecision(action, index, originalRank);
+      if (next.gameOver || next.currentSide !== sideId || action.kind === "attack" || action.kind === "endTurn") {
+        complete.push({ first, state: next });
+      } else {
+        queue.push({ first, state: next, depth: current.depth + 1 });
+      }
+    });
+  }
+  return complete;
+}
+
+function firstDecision(action: LegalAiAction, selectedIndex: number, originalRank: number): TurnBundle["first"] {
+  return { action, selectedIndex, selectedOriginalRank: originalRank };
+}
+
+function rankedDecision(
+  legalActions: LegalAiAction[],
+  selectedIndex: number,
+): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
+  const originalRank = rankLegalActions(legalActions, { topK: legalActions.length, mode: "heuristic" }).find((entry) => entry.index === selectedIndex)?.originalRank;
+  const result: { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } = {
+    action: legalActions[selectedIndex]!,
+    selectedIndex,
+  };
+  if (originalRank !== undefined) result.selectedOriginalRank = originalRank;
+  return result;
 }
 
 function scoreRootSearchAction(
-  args: Args,
+  args: EvaluateModelArgs,
   state: GameState,
   modelSide: SideId,
   action: LegalAiAction,
@@ -257,7 +417,7 @@ function scoreRootSearchAction(
 }
 
 function evaluateSearchState(
-  args: Args,
+  args: EvaluateModelArgs,
   state: GameState,
   modelSide: SideId,
   depth: number,
@@ -277,10 +437,12 @@ function evaluateSearchState(
   }
 
   const legalActions = enumerateLegalAiActions(modelDecisionState, modelSide);
-  const candidates = legalActions
-    .map((action, index) => ({ action, index }))
-    .sort((left, right) => (right.action.features[0] ?? 0) - (left.action.features[0] ?? 0))
-    .slice(0, Math.max(1, args.searchTopK));
+  const candidates = rankLegalActions(legalActions, {
+    topK: Math.max(1, args.searchTopK),
+    mode: args.ranker,
+    baseline: chooseHighestScoredAction(legalActions),
+    rng: createSeededRng(`${seed}:ranker`, "search-ranker"),
+  });
   if (candidates.length === 0) return rewardForRollout(modelDecisionState, modelSide);
 
   let best = Number.NEGATIVE_INFINITY;
@@ -613,48 +775,7 @@ function resolveContinuousKnockouts(state: GameState): void {
 }
 
 export function stateHash(state: GameState): string {
-  const compactSide = (side: SideState) => ({
-    hand: side.hand.length,
-    deck: side.deck.length,
-    discard: side.discard.length,
-    energyZone: [...side.energyZone],
-    energyAttachmentsThisTurn: side.energyAttachmentsThisTurn,
-    bonusEnergyAttachments: side.bonusEnergyAttachments,
-    usedSupporterThisTurn: side.usedSupporterThisTurn,
-    usedRetreatThisTurn: side.usedRetreatThisTurn,
-    usedStadiumThisTurn: side.usedStadiumThisTurn,
-    active: side.active ? compactUmamusume(side.active) : null,
-    bench: side.bench.map(compactUmamusume),
-  });
-  return JSON.stringify({
-    phase: state.phase,
-    currentSide: state.currentSide,
-    step: state.opponentTurnStep,
-    pending: state.pendingPlayerChoice,
-    turn: state.turnNumber,
-    gameOver: state.gameOver,
-    winner: state.winner,
-    points: { player: state.sides.player.points, opponent: state.sides.opponent.points },
-    sides: {
-      player: compactSide(state.sides.player),
-      opponent: compactSide(state.sides.opponent),
-    },
-    logHead: state.log[0] ?? null,
-  });
-}
-
-function compactUmamusume(umamusume: UmamusumeInstance) {
-  return {
-    uid: umamusume.uid,
-    cardId: umamusume.cardId,
-    hp: umamusume.hp,
-    maxHp: umamusume.maxHp,
-    energies: umamusume.energies,
-    specialConditions: umamusume.specialConditions,
-    usedAbilityThisTurn: umamusume.usedAbilityThisTurn,
-    toolCardId: umamusume.toolCardId,
-    attackBlockedUntilOwnTurn: umamusume.attackBlockedUntilOwnTurn,
-  };
+  return stateFingerprint(state);
 }
 
 function summarize(results: GameResult[]) {
@@ -670,6 +791,7 @@ function summarize(results: GameResult[]) {
     averageModelPoints: results.length ? totalModelPoints / results.length : 0,
     averageHeuristicPoints: results.length ? totalHeuristicPoints / results.length : 0,
     heuristicFallbacks: results.reduce((sum, result) => sum + result.heuristicFallbacks, 0),
+    averageSelectedCandidateRank: averageSelectedCandidateRank(results),
     byModelSide: {
       player: summarizeSide(results.filter((result) => result.modelSide === "player")),
       opponent: summarizeSide(results.filter((result) => result.modelSide === "opponent")),
@@ -688,10 +810,17 @@ function summarizeSide(results: GameResult[]) {
     averageModelPoints: results.length ? totalModelPoints / results.length : 0,
     averageHeuristicPoints: results.length ? totalHeuristicPoints / results.length : 0,
     heuristicFallbacks: results.reduce((sum, result) => sum + result.heuristicFallbacks, 0),
+    averageSelectedCandidateRank: averageSelectedCandidateRank(results),
   };
 }
 
-function parseArgs(argv: string[]): Args {
+function averageSelectedCandidateRank(results: GameResult[]): number | null {
+  const ranks = results.flatMap((result) => result.selectedCandidateRanks);
+  if (ranks.length === 0) return null;
+  return ranks.reduce((sum, rank) => sum + rank, 0) / ranks.length;
+}
+
+function parseArgs(argv: string[]): EvaluateModelArgs {
   const get = (name: string, fallback: string) => {
     const index = argv.indexOf(name);
     return index >= 0 ? argv[index + 1] ?? fallback : fallback;
@@ -712,12 +841,22 @@ function parseArgs(argv: string[]): Args {
     searchDepth: Number(get("--search-depth", "2")),
     searchTopK: Number(get("--search-top-k", "4")),
     searchSamples: Number(get("--search-samples", "1")),
+    ranker: parseRanker(get("--ranker", "heuristic")),
+    decisionTraceOut: get("--decision-trace-out", ""),
+    plannerTopK: Number(get("--planner-top-k", get("--search-top-k", "4"))),
+    plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
+    plannerMaxDepth: Number(get("--planner-max-depth", "8")),
   };
 }
 
-function parseSelection(raw: string): Args["selection"] {
-  if (raw === "value" || raw === "rollout" || raw === "search") return raw;
+function parseSelection(raw: string): EvaluateModelArgs["selection"] {
+  if (raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
   return "policy";
+}
+
+function parseRanker(raw: string): CandidateRankerMode {
+  if (raw === "phase-diverse" || raw === "epsilon") return raw;
+  return "heuristic";
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

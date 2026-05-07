@@ -16,6 +16,8 @@ import {
   setupAiVsAiGame,
   stateHash,
 } from "./evaluateModelVsHeuristic";
+import { writeManifestFor } from "./manifest";
+import { rankLegalActions, type CandidateRankerMode } from "./candidateRanker";
 
 type Args = {
   out: string;
@@ -25,12 +27,18 @@ type Args = {
   rolloutSteps: number;
   maxExamples: number;
   maxActions: number;
+  samples: number;
+  tieThreshold: number;
+  ranker: CandidateRankerMode;
 };
 
 type ScoredAction = {
   action: LegalAiAction;
   index: number;
   reward: number;
+  rewards: number[];
+  variance: number;
+  originalRank: number;
 };
 
 const args = parseArgs(process.argv.slice(2));
@@ -40,6 +48,7 @@ const metadata = {
   statesConsidered: 0,
   oracleExamples: 0,
   skippedSingleAction: 0,
+  baselineFallbacks: 0,
 };
 
 for (let gameIndex = 0; gameIndex < args.games && examples.length < args.maxExamples; gameIndex += 1) {
@@ -51,7 +60,18 @@ for (let gameIndex = 0; gameIndex < args.games && examples.length < args.maxExam
 
 mkdirSync(dirname(args.out), { recursive: true });
 writeFileSync(args.out, examples.map((example) => JSON.stringify(example)).join("\n") + "\n", "utf8");
-console.log(JSON.stringify({ out: args.out, examples: examples.length, ...metadata }, null, 2));
+const manifestOut = writeManifestFor(args.out, {
+  artifact: args.out,
+  sourceTaxonomy: { trajectorySource: "ai-policy-baseline-visited", labelSource: "rollout-labeled" },
+  args,
+  examples: examples.length,
+  ...metadata,
+  phaseCounts: countBy(examples, (example) => example.phase),
+  actionKindCounts: countBy(examples, (example) => example.legalActions[example.selectedActionIndex]?.kind ?? "unknown"),
+  marginBuckets: countMargins(examples),
+  featureSchemas: { observationSchemaVersion: 1, actionFeatureDimensions: 48, stateFeatureDimensions: 96 },
+});
+console.log(JSON.stringify({ out: args.out, manifest: manifestOut, examples: examples.length, ...metadata }, null, 2));
 
 function collectGame(seed: string, rng: Rng): void {
   let state = setupAiVsAiGame();
@@ -74,11 +94,14 @@ function collectGame(seed: string, rng: Rng): void {
     const forcedCoinResults = getForcedAttackCoinResults(state, rng);
     const baselineAction = chooseHighestScoredAction(legalActions);
     const modeled = advanceModeledTurnStep(state, sideId, baselineAction, forcedCoinResults, rng);
-    state = stateHash(modeled) === stateHash(before)
-      ? sideId === "player"
+    if (stateHash(modeled) === stateHash(before)) {
+      metadata.baselineFallbacks += 1;
+      state = sideId === "player"
         ? advancePlayerAiTurnStep(state, forcedCoinResults, rng.next)
-        : advanceOpponentTurnStep(state, forcedCoinResults, rng.next)
-      : modeled;
+        : advanceOpponentTurnStep(state, forcedCoinResults, rng.next);
+    } else {
+      state = modeled;
+    }
     if (stateHash(state) === stateHash(before)) break;
   }
 }
@@ -91,25 +114,28 @@ function buildOutcomeExample(
   step: number,
 ): TrainingExample | null {
   const baseline = chooseHighestScoredAction(legalActions);
-  const actionPool = legalActions
-    .map((action, index) => ({ action, index }))
-    .sort((left, right) => (right.action.features[0] ?? 0) - (left.action.features[0] ?? 0))
-    .slice(0, args.maxActions);
-  if (!actionPool.some((entry) => entry.action.id === baseline.id)) {
-    const baselineIndex = legalActions.findIndex((action) => action.id === baseline.id);
-    if (baselineIndex >= 0) actionPool.push({ action: baseline, index: baselineIndex });
-  }
+  const actionPool = rankLegalActions(legalActions, {
+    topK: args.maxActions,
+    mode: args.ranker,
+    baseline,
+    rng: createSeededRng(`${seed}:${step}:ranker`, "outcome-ranker"),
+  });
 
-  const rolloutSeed = `${seed}:${step}`;
-  const scored = actionPool.map(({ action, index }): ScoredAction => {
-    const reward = withRng(createSeededRng(rolloutSeed, "outcome-action"), () => scoreAction(state, sideId, action, rolloutSeed));
-    return { action, index, reward };
-  }).sort((left, right) => right.reward - left.reward);
+  const sampleSeedIds = Array.from({ length: Math.max(1, args.samples) }, (_, sample) => `${seed}:${step}:s${sample}`);
+  const scored = actionPool.map(({ action, index, originalRank }): ScoredAction => {
+    const rewards = sampleSeedIds.map((sampleSeed) => withRng(
+      createSeededRng(sampleSeed, "outcome-action"),
+      () => scoreAction(state, sideId, action, sampleSeed),
+    ));
+    const reward = mean(rewards);
+    return { action, index, reward, rewards, variance: variance(rewards), originalRank };
+  }).sort((left, right) => (right.reward - left.reward) || left.action.id.localeCompare(right.action.id));
 
   const best = scored[0];
   if (!best || !Number.isFinite(best.reward)) return null;
   const baselineReward = scored.find((entry) => entry.action.id === baseline.id)?.reward ?? best.reward;
-  const margin = best.reward - baselineReward;
+  const runnerUp = scored.find((entry) => entry.action.id !== best.action.id);
+  const margin = best.reward - (runnerUp?.reward ?? best.reward);
   const sampleWeight = 1 + Math.min(4, Math.max(0, margin) * 2);
   return {
     schemaVersion: 1,
@@ -122,13 +148,38 @@ function buildOutcomeExample(
     legalActions,
     selectedActionId: best.action.id,
     selectedActionIndex: best.index,
-    policy: "rollout-outcome-v1",
+    policy: "rollout-outcome-v2",
     result: {
       winner: null,
       points: { player: state.sides.player.points, opponent: state.sides.opponent.points },
     },
     valueTarget: Math.max(-1, Math.min(1, best.reward)),
     sampleWeight,
+    source: "ai-policy-baseline-visited",
+    labelSource: "rollout-labeled",
+    oracle: {
+      sampleCount: sampleSeedIds.length,
+      sampleSeedIds,
+      rewardMean: best.reward,
+      rewardVariance: best.variance,
+      selectedVsRunnerUpMargin: margin,
+      selectedVsBaselineMargin: best.reward - baselineReward,
+      tiePolicy: "action-id-lexicographic",
+      tieThreshold: args.tieThreshold,
+      lowMargin: margin < args.tieThreshold,
+      selectedOriginalRank: best.originalRank,
+      candidateCount: actionPool.length,
+      legalActionCount: legalActions.length,
+      candidates: scored.map((entry) => ({
+        actionId: entry.action.id,
+        index: entry.index,
+        kind: entry.action.kind,
+        originalRank: entry.originalRank,
+        rewardMean: entry.reward,
+        rewardVariance: entry.variance,
+        rewards: entry.rewards,
+      })),
+    },
   } as TrainingExample & { valueTarget: number; sampleWeight: number };
 }
 
@@ -176,5 +227,41 @@ function parseArgs(argv: string[]): Args {
     rolloutSteps: Number(get("--rollout-steps", "500")),
     maxExamples: Number(get("--max-examples", "2500")),
     maxActions: Number(get("--max-actions", "6")),
+    samples: Number(get("--samples", "1")),
+    tieThreshold: Number(get("--tie-threshold", "0.02")),
+    ranker: parseRanker(get("--ranker", "heuristic")),
   };
+}
+
+function parseRanker(raw: string): CandidateRankerMode {
+  if (raw === "phase-diverse" || raw === "epsilon") return raw;
+  return "heuristic";
+}
+
+function mean(values: number[]): number {
+  return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+}
+
+function variance(values: number[]): number {
+  if (values.length <= 1) return 0;
+  const average = mean(values);
+  return values.reduce((sum, value) => sum + (value - average) ** 2, 0) / values.length;
+}
+
+function countBy<T>(items: T[], keyOf: (item: T) => string): Record<string, number> {
+  return items.reduce<Record<string, number>>((counts, item) => {
+    const key = keyOf(item);
+    counts[key] = (counts[key] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function countMargins(rows: TrainingExample[]): Record<string, number> {
+  const buckets: Record<string, number> = {};
+  rows.forEach((row) => {
+    const margin = Number((row as TrainingExample & { oracle?: { selectedVsRunnerUpMargin?: number } }).oracle?.selectedVsRunnerUpMargin ?? 0);
+    const key = margin < 0.02 ? "<0.02" : margin < 0.1 ? "0.02-0.1" : ">=0.1";
+    buckets[key] = (buckets[key] ?? 0) + 1;
+  });
+  return buckets;
 }

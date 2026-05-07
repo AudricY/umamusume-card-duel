@@ -9,6 +9,8 @@ import numpy as np
 
 STATE_DIM = 96
 ACTION_DIM = 48
+STATE_FEATURE_SCHEMA_VERSION = 1
+ACTION_FEATURE_SCHEMA_VERSION = 2
 
 PHASES = [
     "setup",
@@ -63,10 +65,11 @@ def legal_actions_to_features(actions: list[dict[str, Any]]) -> np.ndarray:
     rows = []
     for action in actions:
         raw = action.get("features", [])
+        if len(raw) != ACTION_DIM:
+            action_id = action.get("id", "<unknown>")
+            raise ValueError(f"Action feature length mismatch for {action_id}: got {len(raw)}, expected {ACTION_DIM}")
         row = np.zeros(ACTION_DIM, dtype=np.float32)
-        limit = min(ACTION_DIM, len(raw))
-        if limit:
-            row[:limit] = np.asarray(raw[:limit], dtype=np.float32)
+        row[:] = np.asarray(raw, dtype=np.float32)
         rows.append(row)
     if not rows:
         return np.zeros((0, ACTION_DIM), dtype=np.float32)

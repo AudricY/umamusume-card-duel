@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { runHeadlessBatch } from "./headlessAiVsAi";
+import { writeManifestFor } from "./manifest";
 
 type Args = {
   out: string;
@@ -16,16 +17,34 @@ const examples = runs.flatMap((run) => run.examples);
 
 mkdirSync(dirname(args.out), { recursive: true });
 writeFileSync(args.out, examples.map((example) => JSON.stringify(example)).join("\n") + "\n", "utf8");
+const manifestOut = writeManifestFor(args.out, {
+  artifact: args.out,
+  sourceTaxonomy: { source: "rule-bot" },
+  args,
+  seeds,
+  games: runs.length,
+  examples: examples.length,
+  phaseCounts: countBy(examples, (example) => example.phase),
+  actionKindCounts: countBy(examples, (example) => example.legalActions[example.selectedActionIndex]?.kind ?? "unknown"),
+  terminalReasons: countBy(runs, (run) => run.terminalReason),
+  featureSchemas: { observationSchemaVersion: 1, actionFeatureDimensions: 48, stateFeatureDimensions: 96 },
+});
 
 console.log(JSON.stringify({
   out: args.out,
+  manifest: manifestOut,
   games: runs.length,
   examples: examples.length,
-  terminalReasons: runs.reduce<Record<string, number>>((counts, run) => {
-    counts[run.terminalReason] = (counts[run.terminalReason] ?? 0) + 1;
-    return counts;
-  }, {}),
+  terminalReasons: countBy(runs, (run) => run.terminalReason),
 }, null, 2));
+
+function countBy<T>(items: T[], keyOf: (item: T) => string): Record<string, number> {
+  return items.reduce<Record<string, number>>((counts, item) => {
+    const key = keyOf(item);
+    counts[key] = (counts[key] ?? 0) + 1;
+    return counts;
+  }, {});
+}
 
 function parseArgs(argv: string[]): Args {
   const get = (name: string, fallback: string) => {

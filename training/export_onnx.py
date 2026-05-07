@@ -13,6 +13,11 @@ def main() -> None:
     args = parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     config = ModelConfig.from_dict(checkpoint.get("model_config"))
+    if config.state_dim != STATE_DIM or config.action_dim != ACTION_DIM:
+        raise ValueError(
+            f"Checkpoint feature dimensions {config.state_dim}/{config.action_dim} "
+            f"do not match current {STATE_DIM}/{ACTION_DIM}"
+        )
     model = CandidatePolicyNet(config)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
