@@ -97,7 +97,7 @@ function canImmediateOpponentKoByRisk(state: GameState, sideId: SideId, riskMode
   if (!hasEnoughEnergy(attacker, getPrimaryAttack(getUmamusumeCard(attacker)).cost)) return false;
   const ownInPlayCount = 1 + opponent.bench.length;
   const allInPlayCount = ownInPlayCount + 1 + side.bench.length;
-  const predicted = predictAttackDamageWithRisk(attacker, active, opponent.activeAttackDamageBonus, ownInPlayCount, allInPlayCount, state.turnNumber, riskMode);
+  const predicted = predictAttackDamageWithRisk(attacker, active, opponent.activeAttackDamageBonus, ownInPlayCount, allInPlayCount, state.turnNumber, riskMode, areToolEffectsDisabled(state));
   return predicted >= active.hp;
 }
 
@@ -108,6 +108,7 @@ export function predictAttackDamage(
   ownInPlayCount: number,
   allInPlayCount: number,
   turnNumber?: number,
+  toolsDisabled = false,
 ): number {
   const attack = getPrimaryAttack(getUmamusumeCard(attacker));
   let damage = attack.damage + bonusDamage;
@@ -123,7 +124,7 @@ export function predictAttackDamage(
   if (attack.damagePerUmamusumeInPlay) {
     damage += (attack.damagePerUmamusumeInPlay.side === "all" ? allInPlayCount : ownInPlayCount) * attack.damagePerUmamusumeInPlay.amount;
   }
-  if (attack.attackDamageBonusIfToolAttached && attacker.toolCardId) damage += attack.attackDamageBonusIfToolAttached;
+  if (attack.attackDamageBonusIfToolAttached && attacker.toolCardId && !toolsDisabled) damage += attack.attackDamageBonusIfToolAttached;
   if (attack.attackDamageBonusPerDiscardedHandCard) damage += attack.attackDamageBonusPerDiscardedHandCard.maxDiscard * attack.attackDamageBonusPerDiscardedHandCard.bonusPerCard;
   const attackerCard = getUmamusumeCard(attacker);
   const defenderCard = getUmamusumeCard(defender);
@@ -145,8 +146,9 @@ export function predictAttackDamageWithRisk(
   allInPlayCount: number,
   turnNumber: number | undefined,
   riskMode: "min" | "expected" | "max",
+  toolsDisabled = false,
 ): number {
-  const base = predictAttackDamage(attacker, defender, bonusDamage, ownInPlayCount, allInPlayCount, turnNumber);
+  const base = predictAttackDamage(attacker, defender, bonusDamage, ownInPlayCount, allInPlayCount, turnNumber, toolsDisabled);
   const attack = getPrimaryAttack(getUmamusumeCard(attacker));
   let adjustment = 0;
   if (attack.coinBonus) {
@@ -159,6 +161,12 @@ export function predictAttackDamageWithRisk(
     if (riskMode === "min") adjustment -= koChanceDamageProxy;
   }
   return Math.max(0, base + adjustment);
+}
+
+export function areToolEffectsDisabled(state: GameState): boolean {
+  if (!state.stadium) return false;
+  const stadium = getCard(state.stadium.cardId);
+  return stadium.kind === "trainer" && Boolean(stadium.effect.disableTools);
 }
 
 export function countDiscardedUmamusume(cardIds: string[]): number {

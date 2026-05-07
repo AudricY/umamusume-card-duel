@@ -4,7 +4,7 @@ import { getCard, getPrimaryAttack, getUmamusumeCard } from "../../core/catalog"
 import { attachEnergy, hasEnoughEnergy } from "../energy";
 import { effectiveRetreatCost } from "../retreat";
 import { attachedEnergyCount, getAllUmamusume } from "../../core/umamusume";
-import { predictAttackDamage } from "./combatUtils";
+import { areToolEffectsDisabled, predictAttackDamage } from "./combatUtils";
 import type { AiTurnGoal } from "./types";
 
 const ENERGY_TYPES: EnergyType[] = ["grass", "fire", "water", "lightning", "psychic", "fighting", "darkness", "steel", "colorless", "dragon"];
@@ -91,7 +91,7 @@ export function estimateAttackDamageOutput(
   const allInPlayCount = ownInPlayCount + 1 + defendingSide.bench.length;
   const targets = attack.targetOpponent === "any" ? getAllUmamusume(defendingSide) : defendingSide.active ? [defendingSide.active] : [];
   if (targets.length === 0) return 0;
-  return Math.max(...targets.map((target) => predictAttackDamage(attacker, target, attackingSide.activeAttackDamageBonus, ownInPlayCount, allInPlayCount, state.turnNumber)));
+  return Math.max(...targets.map((target) => predictAttackDamage(attacker, target, attackingSide.activeAttackDamageBonus, ownInPlayCount, allInPlayCount, state.turnNumber, areToolEffectsDisabled(state))));
 }
 
 function shouldAttachForDamageScaling(umamusume: UmamusumeInstance, nextEnergyType: keyof UmamusumeInstance["energies"]): boolean {

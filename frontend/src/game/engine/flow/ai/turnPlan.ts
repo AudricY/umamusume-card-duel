@@ -1,6 +1,6 @@
 import type { GameState, SideState } from "../../../../../../shared/src/types";
 import { getCard, getPrimaryAttack, getUmamusumeCard } from "../../core/catalog";
-import { canImmediateOpponentKoConservative, predictAttackDamage } from "./combatUtils";
+import { areToolEffectsDisabled, canImmediateOpponentKoConservative, predictAttackDamage } from "./combatUtils";
 import type { AiTurnGoal } from "./types";
 import { canAttack } from "../eligibility";
 import { hasEnoughEnergy } from "../energy";
@@ -66,6 +66,7 @@ function canSetUpTwoTurnLethal(state: GameState, side: SideState): boolean {
     ownInPlayCount,
     allInPlayCount,
     state.turnNumber,
+    areToolEffectsDisabled(state),
   );
   const neededToKo = opponent.active.hp - damageNow;
   if (neededToKo <= 0) return false;
@@ -91,6 +92,7 @@ function canSecureImmediateLethal(state: GameState, side: SideState): boolean {
     ownInPlayCount,
     allInPlayCount,
     state.turnNumber,
+    areToolEffectsDisabled(state),
   );
   return damage >= opponent.active.hp;
 }

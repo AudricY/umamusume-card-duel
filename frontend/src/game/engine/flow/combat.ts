@@ -64,7 +64,7 @@ export function performAttack(
       : getAllUmamusume(attacker).length;
     damage += inPlayCount * attack.damagePerUmamusumeInPlay.amount;
   }
-  if (attack.attackDamageBonusIfToolAttached && attacker.active.toolCardId) {
+  if (attack.attackDamageBonusIfToolAttached && attacker.active.toolCardId && !areToolsDisabled(state)) {
     damage += attack.attackDamageBonusIfToolAttached;
   }
   if (switchTarget && attack.switchSelfAfterAttack?.bonusDamage) {

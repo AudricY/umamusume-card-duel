@@ -289,7 +289,9 @@ function scenarioBurningPassionThresholdBonus() {
   const player = state.sides.player;
   const opponent = state.sides.opponent;
   player.active = withEnergy(createUma("agnesDigitalStage1"), { fire: 4 });
+  player.bench = [createUma("riceShowerBasic"), createUma("nishinoFlowerBasic")];
   opponent.active = createUma("superCreekStage1");
+  opponent.bench = [createUma("superCreekBasic")];
   opponent.active.hp = 120;
 
   const next = playerAttack(state);
