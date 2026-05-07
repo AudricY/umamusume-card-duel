@@ -11,6 +11,8 @@ import {
   getUmamusumeCard,
   tickSetupCountdown,
 } from "../../../frontend/src/game/engine";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { createSeededRng, randomFloat, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
 import { chooseAiSetupSelection } from "../../../frontend/src/app/gameUiHelpers";
 import type { CoinFlipResult, GameState, SideId } from "../../../shared/src/types";
@@ -187,7 +189,13 @@ function parseArgs(argv: string[]): HeadlessRunOptions {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const result = runHeadlessAiVsAi(parseArgs(process.argv.slice(2)));
+  const argv = process.argv.slice(2);
+  const result = runHeadlessAiVsAi(parseArgs(argv));
+  const examplesOut = getArg(argv, "--examples-out");
+  if (examplesOut) {
+    mkdirSync(dirname(examplesOut), { recursive: true });
+    writeFileSync(examplesOut, result.examples.map((example) => JSON.stringify(example)).join("\n") + "\n", "utf8");
+  }
   const output = {
     seed: result.seed,
     episodeId: result.episodeId,
@@ -200,4 +208,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     finalLog: result.finalLog,
   };
   console.log(JSON.stringify(output, null, 2));
+}
+
+function getArg(argv: string[], name: string): string | null {
+  const index = argv.indexOf(name);
+  return index >= 0 ? argv[index + 1] ?? null : null;
 }

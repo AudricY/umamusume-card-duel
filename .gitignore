@@ -1,5 +1,9 @@
 node_modules
 dist
 *.tsbuildinfo
+__pycache__/
+*.pyc
 *:Zone.Identifier
 local-data/
+training/.venv/
+training/runs/
