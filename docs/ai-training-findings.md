@@ -14,7 +14,7 @@ The end-to-end AI infra works:
 - ONNX Runtime serves the model with `CUDAExecutionProvider`.
 - Headless evaluation runs model-vs-rule-bot games with zero heuristic fallbacks.
 
-The model is not yet strong enough. The best trained policy reached about 42.5% win rate. The strongest diagnostic oracle tested so far, an online one-step rollout selector, reached only 52.5%, which means the current one-step action-label approach is not enough to plausibly reach 80%.
+The model is not yet strong enough. The best trained policy reached about 42.5% win rate. Follow-up search experiments found that the current legal-action abstraction also caps stronger online planners around 50-60%, which blocks an honest 80% trained-policy target under the current setup.
 
 ## Experimental Results
 
@@ -28,6 +28,10 @@ The model is not yet strong enough. The best trained policy reached about 42.5% 
 | Common-random outcome labels | Candidate rollouts share RNG per state | 240 games | 39.6% WR overall, 54.2% as opponent |
 | Value-head one-step selection | Choose action by predicted next-state value | 120-160 games | ~1-2% WR |
 | Online rollout selector | Try legal actions, rollout rest with rule bot | 80 games | 52.5% WR |
+| Depth-2 search, top-4 | Recursive model-side decisions, narrow candidates | 60 games | 48.3% WR |
+| Depth-2 search, top-12 | Recursive model-side decisions, wide candidates | 40 games/side | 57.5% as player, 50.0% as opponent |
+| Depth-3 search, top-8 | Deeper recursive search | 20 games/side | 60.0% as player, 55.0% as opponent |
+| Depth-2 search, top-12, 4 samples | Multi-sample candidate averaging | 40 games | 52.5% WR |
 
 Rule bot mirror baseline is roughly balanced by side:
 
@@ -49,11 +53,11 @@ However, scaling the same rollout-label method regressed. The labels are noisy b
 
 Using the value head to pick actions was much worse than policy logits. The value target is too sparse and too weakly calibrated. It predicts final outcome poorly enough that one-step value planning collapses.
 
-### 4. One-Step Search Is A Hard Ceiling
+### 4. Current Search Oracle Is A Hard Ceiling
 
 The online rollout selector is stronger than the learned policies because it directly evaluates legal actions with actual simulator rollouts. It still only reached 52.5%.
 
-That is the most important result: if the oracle used to generate labels cannot approach 80%, a model trained from those labels will not either.
+Depth-2, depth-3, wider candidate sets, and multi-sample search did not get close to 80%. The best small-sample side-specific result was 60% as player and 55% as opponent. That is the most important result: if the oracle used to generate labels cannot approach 80%, a model trained from those labels will not either.
 
 ### 5. Action Payloads Are Still Under-Specified
 
@@ -157,3 +161,26 @@ A credible 80% claim should require:
 
 Do not run more large supervised jobs yet. The next highest-value implementation is the full action contract plus DAgger collection. Without those, additional outcome-label training is likely to keep oscillating around 35-45%.
 
+## Continuation Log
+
+### Search Follow-Up
+
+After the initial findings, deeper search was added to the evaluator:
+
+- `--selection search`
+- `--search-depth`
+- `--search-top-k`
+- `--search-samples`
+
+Results stayed far below 80%. Wider top-K helped more than depth, which suggests the heuristic candidate ordering can hide useful actions, but deeper recursive planning did not create a decisive advantage.
+
+### Hard Blocker
+
+The current setup has a hard blocker for the requested 80% target:
+
+- The best trained models are below 45%.
+- The best online search oracle is only around 50-60%.
+- Value-guided planning is currently unusable.
+- Some action execution still depends on heuristic subchoices.
+
+Therefore, continuing to train larger supervised models on the current labels is not a credible path to 80%. The next credible work is structural: fully explicit action payloads, model-visited-state DAgger, and a stronger multi-step search oracle that can itself clear the target before distillation.

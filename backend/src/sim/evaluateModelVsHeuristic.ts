@@ -44,8 +44,11 @@ type Args = {
   maxSteps: number;
   modelSide: SideId | "both";
   details: boolean;
-  selection: "policy" | "value" | "rollout";
+  selection: "policy" | "value" | "rollout" | "search";
   rolloutSteps: number;
+  searchDepth: number;
+  searchTopK: number;
+  searchSamples: number;
 };
 
 type GameResult = {
@@ -99,6 +102,8 @@ async function runModelVsHeuristicGameWithRng(args: Args, seed: string, modelSid
         ? await chooseValueAction(args.modelUrl, state, sideId, rng)
         : args.selection === "rollout"
           ? chooseRolloutAction(args, state, sideId, rng)
+        : args.selection === "search"
+          ? chooseSearchAction(args, state, sideId, `${seed}:${modelSide}:${step}`)
         : await chooseModelAction(args.modelUrl, state, sideId);
       modelActions += 1;
       const next = advanceModeledTurnStep(state, sideId, decision.action, forcedCoinResults, rng);
@@ -213,6 +218,96 @@ function chooseRolloutAction(args: Args, state: GameState, sideId: SideId, rng: 
     }
   });
   return { action: legalActions[bestIndex]!, selectedIndex: bestIndex };
+}
+
+function chooseSearchAction(args: Args, state: GameState, sideId: SideId, seed: string): { action: LegalAiAction; selectedIndex: number } {
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
+  const memo = new Map<string, number>();
+  let bestIndex = 0;
+  let bestReward = Number.NEGATIVE_INFINITY;
+  legalActions.forEach((action, index) => {
+    const rewards = Array.from({ length: Math.max(1, args.searchSamples) }, (_, sample) => (
+      scoreRootSearchAction(args, state, sideId, action, args.searchDepth, `${seed}:root:s${sample}`, memo)
+    ));
+    const reward = rewards.reduce((sum, value) => sum + value, 0) / rewards.length;
+    if (reward > bestReward) {
+      bestReward = reward;
+      bestIndex = index;
+    }
+  });
+  return { action: legalActions[bestIndex]!, selectedIndex: bestIndex };
+}
+
+function scoreRootSearchAction(
+  args: Args,
+  state: GameState,
+  modelSide: SideId,
+  action: LegalAiAction,
+  depth: number,
+  seed: string,
+  memo: Map<string, number>,
+): number {
+  const rng = createSeededRng(seed, "root-search-action");
+  const next = advanceModeledTurnStep(state, modelSide, action, getForcedAttackCoinResults(state, rng), rng);
+  if (stateHash(next) === stateHash(state)) return Number.NEGATIVE_INFINITY;
+  return evaluateSearchState(args, next, modelSide, Math.max(0, depth - 1), `${seed}:after`, memo);
+}
+
+function evaluateSearchState(
+  args: Args,
+  state: GameState,
+  modelSide: SideId,
+  depth: number,
+  seed: string,
+  memo: Map<string, number>,
+): number {
+  if (state.gameOver) return rewardForRollout(state, modelSide);
+  const key = `${depth}:${stateHash(state)}`;
+  const cached = memo.get(key);
+  if (cached !== undefined) return cached;
+
+  const modelDecisionState = advanceHeuristicUntilModelTurnOrTerminal(state, modelSide, seed, args.rolloutSteps);
+  if (modelDecisionState.gameOver || depth <= 0) {
+    const reward = rewardForRollout(rolloutHeuristic(modelDecisionState, createSeededRng(`${seed}:leaf`, "search-leaf"), args.rolloutSteps), modelSide);
+    memo.set(key, reward);
+    return reward;
+  }
+
+  const legalActions = enumerateLegalAiActions(modelDecisionState, modelSide);
+  const candidates = legalActions
+    .map((action, index) => ({ action, index }))
+    .sort((left, right) => (right.action.features[0] ?? 0) - (left.action.features[0] ?? 0))
+    .slice(0, Math.max(1, args.searchTopK));
+  if (candidates.length === 0) return rewardForRollout(modelDecisionState, modelSide);
+
+  let best = Number.NEGATIVE_INFINITY;
+  candidates.forEach(({ action, index }) => {
+    const rng = createSeededRng(`${seed}:d${depth}:a${index}`, "search-action");
+    const next = advanceModeledTurnStep(modelDecisionState, modelSide, action, getForcedAttackCoinResults(modelDecisionState, rng), rng);
+    const reward = stateHash(next) === stateHash(modelDecisionState)
+      ? Number.NEGATIVE_INFINITY
+      : evaluateSearchState(args, next, modelSide, depth - 1, `${seed}:d${depth}:a${index}`, memo);
+    if (reward > best) best = reward;
+  });
+  memo.set(key, best);
+  return best;
+}
+
+function advanceHeuristicUntilModelTurnOrTerminal(state: GameState, modelSide: SideId, seed: string, maxSteps: number): GameState {
+  let next = cloneGame(state);
+  const rng = createSeededRng(`${seed}:heuristic`, "search-heuristic");
+  for (let step = 0; step < maxSteps; step += 1) {
+    if (next.gameOver || next.currentSide === modelSide) break;
+    const before = stateHash(next);
+    const sideId = next.currentSide === "player" || next.currentSide === "opponent" ? next.currentSide : "player";
+    const forcedCoinResults = getForcedAttackCoinResults(next, rng);
+    next = sideId === "player"
+      ? advancePlayerAiTurnStep(next, forcedCoinResults, rng.next)
+      : advanceOpponentTurnStep(next, forcedCoinResults, rng.next);
+    if (stateHash(next) === before) break;
+  }
+  return next;
 }
 
 function rolloutHeuristic(state: GameState, rng: Rng, maxSteps: number): GameState {
@@ -513,11 +608,14 @@ function parseArgs(argv: string[]): Args {
     details: argv.includes("--details"),
     selection: parseSelection(get("--selection", "policy")),
     rolloutSteps: Number(get("--rollout-steps", "500")),
+    searchDepth: Number(get("--search-depth", "2")),
+    searchTopK: Number(get("--search-top-k", "4")),
+    searchSamples: Number(get("--search-samples", "1")),
   };
 }
 
 function parseSelection(raw: string): Args["selection"] {
-  if (raw === "value" || raw === "rollout") return raw;
+  if (raw === "value" || raw === "rollout" || raw === "search") return raw;
   return "policy";
 }
 
