@@ -42,7 +42,7 @@ import { canUseStadium, useStadium } from "./engine/flow/trainers";
 import { chooseAiTurnGoal } from "./engine/flow/ai/turnPlan";
 import { clearAiTelemetry } from "./engine/flow/ai/telemetry";
 import { getUmamusumeAbility } from "./engine/flow/abilityRules";
-import { shuffle } from "./engine/core/random";
+import { randomFloat, randomInt, shuffle } from "./engine/core/random";
 import { clearSpecialConditions } from "./engine/flow/specialConditions";
 
 export type { PlayChoices };
@@ -300,11 +300,11 @@ export function opponentAbandonedMatch(state: GameState): GameState {
   return next;
 }
 
-export function advanceOpponentTurnStep(state: GameState, forcedAttackCoinResult?: CoinFlipResult | CoinFlipResult[], random: () => number = Math.random): GameState {
+export function advanceOpponentTurnStep(state: GameState, forcedAttackCoinResult?: CoinFlipResult | CoinFlipResult[], random: () => number = randomFloat): GameState {
   return advanceAiTurnStep(state, "opponent", forcedAttackCoinResult, random);
 }
 
-export function advancePlayerAiTurnStep(state: GameState, forcedAttackCoinResult?: CoinFlipResult | CoinFlipResult[], random: () => number = Math.random): GameState {
+export function advancePlayerAiTurnStep(state: GameState, forcedAttackCoinResult?: CoinFlipResult | CoinFlipResult[], random: () => number = randomFloat): GameState {
   return advanceAiTurnStep(state, "player", forcedAttackCoinResult, random);
 }
 
@@ -312,7 +312,7 @@ function advanceAiTurnStep(
   state: GameState,
   actingSideId: SideId,
   forcedAttackCoinResult?: CoinFlipResult | CoinFlipResult[],
-  random: () => number = Math.random,
+  random: () => number = randomFloat,
 ): GameState {
   const next = cloneGame(state);
   if (next.phase !== "play" || next.pendingPlayerChoice || next.gameOver || next.currentSide !== actingSideId) return next;
@@ -541,7 +541,7 @@ export function usePlayerAbility(
     if (count <= 0) return next;
     const shuffledCardIds: string[] = [];
     for (let picked = 0; picked < count; picked += 1) {
-      const randomIndex = Math.floor(Math.random() * side.discard.length);
+      const randomIndex = randomInt(side.discard.length);
       const [cardId] = side.discard.splice(randomIndex, 1);
       if (cardId) shuffledCardIds.push(cardId);
     }
@@ -569,7 +569,7 @@ function flipCoin(side: SideState): CoinFlipResult {
     side.guaranteedCoinFlipHeads -= 1;
     return "heads";
   }
-  return Math.random() >= 0.5 ? "heads" : "tails";
+  return randomFloat() >= 0.5 ? "heads" : "tails";
 }
 
 export function completePregameSetup(state: GameState, activeHandIndex: number, benchHandIndexes: number[]): GameState {
@@ -613,7 +613,7 @@ export function chooseOpeningCoin(state: GameState, choice: CoinFlipResult): Gam
   const setup = next.setup;
   if (!setup || setup.coinFlipResult) return next;
 
-  const result: CoinFlipResult = Math.random() >= 0.5 ? "heads" : "tails";
+  const result: CoinFlipResult = randomFloat() >= 0.5 ? "heads" : "tails";
   const firstPlayer: SideId = result === choice ? "player" : "opponent";
   setup.coinChoice = choice;
   setup.coinFlipResult = result;

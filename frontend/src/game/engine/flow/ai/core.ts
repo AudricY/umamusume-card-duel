@@ -27,6 +27,7 @@ import { canUseStadium } from "../trainers";
 import { choosePreferredActiveIndex } from "../board";
 import { emitAiTelemetry } from "./telemetry";
 import { scoreAttackEnergyPoolFit } from "./energyAwareness";
+import { randomFloat } from "../../core/random";
 
 const BASE_THREAT_PENALTY = 120;
 
@@ -282,7 +283,7 @@ export function aiResolveCombatDecision(
   side: SideState,
   forcedAttackCoinResult: CoinFlipResult | CoinFlipResult[] | undefined,
   deps: AiCombatDeps,
-  random: () => number = Math.random,
+  random: () => number = randomFloat,
 ): AiCombatDecisionResult {
   if (!side.active) return { resolved: true, usedAttack: false, didRetreat: false };
 
@@ -348,7 +349,7 @@ export function aiUseOneAbility(
   state: GameState,
   side: SideState,
   deps: AiCombatDeps,
-  random: () => number = Math.random,
+  random: () => number = randomFloat,
   turnGoal: AiTurnGoal = "maximize_progress",
 ): boolean {
   emitAiTelemetry("turn_goal", {

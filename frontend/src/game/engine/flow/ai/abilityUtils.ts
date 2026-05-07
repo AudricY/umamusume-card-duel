@@ -60,11 +60,12 @@ export function aiUseMoveBenchedEnergyAbility(
       if (threshold && threshold.type === energyType && active.energies[energyType] < threshold.min && simulatedActive.energies[energyType] >= threshold.min) {
         score += 60;
       }
-      if (sourceBeforeDamage > sourceAfterDamage) {
-        score -= (sourceBeforeDamage - sourceAfterDamage) * 2.2;
+      const activeDamageGain = Math.max(0, afterActiveDamage - beforeActiveDamage);
+      if (sourceBeforeDamage > sourceAfterDamage && activeDamageGain <= 0) {
+        score -= (sourceBeforeDamage - sourceAfterDamage) * 1.2;
       }
       if (hasEnoughEnergy(source, getPrimaryAttack(getUmamusumeCard(source)).cost) && !hasEnoughEnergy(simulatedSource, getPrimaryAttack(getUmamusumeCard(source)).cost)) {
-        score -= 120;
+        score -= activeDamageGain > 0 ? 8 : 60;
       }
       if (!opponent.active) score -= 20;
       return { source, energyType, score };

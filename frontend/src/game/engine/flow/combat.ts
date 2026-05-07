@@ -5,7 +5,7 @@ import { actorLowerPossessive, actorName, actorPossessive, energyLabel, formatCa
 import { log } from "../core/log";
 import { findMostDamagedUmamusume, findOwnUmamusumeByUid, getAllUmamusume } from "../core/umamusume";
 import { drawCards } from "./turn";
-import { shuffle } from "../core/random";
+import { randomFloat, randomInt, shuffle } from "../core/random";
 import { evolveUmamusume } from "./evolution";
 import { getUmamusumeAbility } from "./abilityRules";
 import { clearSpecialConditions } from "./specialConditions";
@@ -199,7 +199,7 @@ export function performAttack(
   if (attack.discardRandomOpponentHandOnHeads && coinFlipHeads) {
     const shouldUseOptionalDiscard = defender.hand.length > 0 && attacker.active.hp > attack.discardRandomOpponentHandOnHeads.selfDamage;
     if (shouldUseOptionalDiscard) {
-      const randomHandIndex = Math.floor(Math.random() * defender.hand.length);
+      const randomHandIndex = randomInt(defender.hand.length);
       const [discardedCardId] = defender.hand.splice(randomHandIndex, 1);
       if (discardedCardId) {
         defender.discard.push(discardedCardId);
@@ -232,7 +232,7 @@ export function performAttack(
   if (attack.evolveFromDeck && attacker.active) {
     evolveActiveFromDeck(state, attacker, evolutionDeckCardIndex);
   }
-  const shouldShuffleSelfIntoDeck = useShuffleSelfIntoDeck ?? !state.humanBySide[attackerId];
+  const shouldShuffleSelfIntoDeck = useShuffleSelfIntoDeck ?? true;
   if (attack.shuffleSelfIntoDeck && attacker.active && shouldShuffleSelfIntoDeck) {
     shuffleActiveIntoDeckIfPaid(state, attacker, attack.shuffleSelfIntoDeck, deps);
   }
@@ -286,7 +286,7 @@ function shuffleRandomDiscardIntoDeck(state: GameState, side: SideState, attackN
   if (side.discard.length === 0) return;
   const discardIndex = randomDiscardIndex !== undefined && randomDiscardIndex >= 0 && randomDiscardIndex < side.discard.length
     ? randomDiscardIndex
-    : Math.floor(Math.random() * side.discard.length);
+    : randomInt(side.discard.length);
   const [cardId] = side.discard.splice(discardIndex, 1);
   if (!cardId) return;
   side.deck = shuffle([...side.deck, cardId]);
@@ -504,7 +504,7 @@ function flipCoin(side: SideState, forcedCoinResults: CoinFlipResult[]): CoinFli
     if (forcedCoinResults.length > 0) forcedCoinResults.shift();
     return "heads";
   }
-  return forcedCoinResults.shift() ?? (Math.random() >= 0.5 ? "heads" : "tails");
+  return forcedCoinResults.shift() ?? (randomFloat() >= 0.5 ? "heads" : "tails");
 }
 
 function formatCoinFlipResultLog(results: CoinFlipResult[]): string {

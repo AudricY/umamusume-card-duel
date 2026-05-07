@@ -5,7 +5,7 @@ import { actorLowerPossessive, actorName, actorPossessive, energyLabel, formatCa
 import { log, logPrimaryFirst } from "../core/log";
 import { findMostDamagedUmamusume, findOwnUmamusumeByUid } from "../core/umamusume";
 import { drawCards } from "./turn";
-import { rollEnergyFromPool, shuffle } from "../core/random";
+import { randomInt, rollEnergyFromPool, shuffle } from "../core/random";
 import type { PlayChoices } from "../core/playTypes";
 import { clearSpecialConditions } from "./specialConditions";
 
@@ -166,7 +166,7 @@ function searchRandomBasicUmamusumeFromDeck(state: GameState, side: SideState, r
   const candidates = side.deck
     .map((cardId, index) => ({ card: getCard(cardId), index }))
     .filter(({ card }) => card.kind === "umamusume" && card.stage === 0);
-  const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+  const chosen = candidates[randomInt(candidates.length)];
   moveDeckCardToHand(state, side, chosen?.index ?? -1, reveal);
 }
 
@@ -175,7 +175,7 @@ function moveRandomBasicUmamusumeFromDiscardToHand(state: GameState, side: SideS
   const candidates = side.discard
     .map((cardId, index) => ({ card: getCard(cardId), index }))
     .filter(({ card }) => card.kind === "umamusume" && card.stage === 0);
-  const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+  const chosen = candidates[randomInt(candidates.length)];
   if (!chosen) return;
   const [cardId] = side.discard.splice(chosen.index, 1);
   if (!cardId) return;
@@ -193,7 +193,7 @@ function discardRandomOpponentActiveEnergy(state: GameState, side: SideState, tr
   if (!active) return;
   const energyPool = (Object.entries(active.energies) as [EnergyType, number][])
     .flatMap(([energyType, count]) => Array.from({ length: count }, () => energyType));
-  const energyType = energyPool[Math.floor(Math.random() * energyPool.length)];
+  const energyType = energyPool[randomInt(energyPool.length)];
   if (!energyType) return;
   active.energies[energyType] = Math.max(0, active.energies[energyType] - 1);
   log(state, `${trainer.name} discarded 1 ${energyLabel(energyType)} from ${actorPossessive(opponent)} Active Umamusume.`);
