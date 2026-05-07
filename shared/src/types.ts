@@ -10,7 +10,7 @@ export type TrainerType = "supporter" | "item" | "stadium" | "tool";
 export type SpecialCondition = "asleep" | "burned" | "frozen" | "paralysed" | "poisoned";
 export type CardRarity = "common" | "uncommon" | "uncommonPlus" | "rare" | "artRare" | "specialArtRare" | "secretRare" | "ultraRare";
 export type CardPrintVariant = "standard" | "holographic";
-export type OpponentTurnStep = "bench" | "trainerBefore" | "evolve" | "attach" | "trainerAfter" | "attack" | "finish";
+export type OpponentTurnStep = "bench" | "trainerBefore" | "evolve" | "attach" | "trainerAfter" | "ability" | "attack" | "finish";
 export type PremadeDeck = {
   id: string;
   name: string;

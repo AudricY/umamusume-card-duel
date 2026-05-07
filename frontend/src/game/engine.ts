@@ -320,6 +320,7 @@ function advanceAiTurnStep(
   if (!actingSide.active) return next;
   const trainerBeforeResume = actingSideId === "opponent" ? "resumeOpponentAfterFirstTrainerPass" : "none";
   const trainerAfterResume = actingSideId === "opponent" ? "resumeOpponentAfterSecondTrainerPass" : "none";
+  let abilityPhaseResolved = false;
 
   for (let transitions = 0; transitions < 8; transitions += 1) {
     const step = next.opponentTurnStep ?? "bench";
@@ -355,14 +356,25 @@ function advanceAiTurnStep(
     if (step === "trainerAfter") {
       if (aiPlayOneBasic(next, actingSide)) return next;
       if (aiPlayOneTrainer(next, actingSide, trainerAfterResume, { refreshContinuousEffects, switchOutOpponentActive })) return next;
+      next.opponentTurnStep = "ability";
+      continue;
+    }
+
+    if (step === "ability") {
+      refreshContinuousEffects(next);
+      const turnGoal = chooseAiTurnGoal(next, actingSide);
+      if (aiUseOneAbility(next, actingSide, { refreshContinuousEffects, choosePreferredActiveIndex }, random, turnGoal)) return next;
+      abilityPhaseResolved = true;
       next.opponentTurnStep = "attack";
       continue;
     }
 
     if (step === "attack") {
       refreshContinuousEffects(next);
-      const turnGoal = chooseAiTurnGoal(next, actingSide);
-      if (aiUseOneAbility(next, actingSide, { refreshContinuousEffects, choosePreferredActiveIndex }, random, turnGoal)) return next;
+      if (!abilityPhaseResolved) {
+        const turnGoal = chooseAiTurnGoal(next, actingSide);
+        if (aiUseOneAbility(next, actingSide, { refreshContinuousEffects, choosePreferredActiveIndex }, random, turnGoal)) return next;
+      }
       const combat = aiResolveCombatDecision(next, actingSide, forcedAttackCoinResult, { refreshContinuousEffects, choosePreferredActiveIndex }, random);
       if (!combat.resolved) return next;
       if (combat.didRetreat) return next;

@@ -17,6 +17,8 @@ export function getAiPhase(state: GameState, sideId: SideId): AiPhase {
       return "attach";
     case "trainerAfter":
       return "trainerAfter";
+    case "ability":
+      return "ability";
     case "attack":
       return "combat";
     case "finish":

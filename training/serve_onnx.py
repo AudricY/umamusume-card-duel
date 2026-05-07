@@ -21,6 +21,7 @@ class PolicyServer(ThreadingHTTPServer):
         provider: str,
     ) -> None:
         super().__init__(address, handler)
+        preload_cuda_libraries(provider)
         self.session = ort.InferenceSession(model_path, providers=resolve_providers(provider))
 
 
@@ -31,7 +32,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/health":
             self.send_error(404)
             return
-        self.respond({"status": "ok"})
+        self.respond({"status": "ok", "providers": self.server.session.get_providers()})
 
     def do_POST(self) -> None:
         if self.path != "/predict":
@@ -121,6 +122,26 @@ def resolve_providers(provider: str) -> list[str]:
     if "CUDAExecutionProvider" in available:
         return ["CUDAExecutionProvider", "CPUExecutionProvider"]
     return ["CPUExecutionProvider"]
+
+
+def preload_cuda_libraries(provider: str) -> None:
+    if provider == "cpu":
+        return
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        return
+    preload = getattr(ort, "preload_dlls", None)
+    if callable(preload):
+        try:
+            preload()
+        except Exception:
+            pass
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.init()
+    except Exception:
+        return
 
 
 def parse_args() -> argparse.Namespace:
