@@ -1,5 +1,5 @@
 import { MAX_BENCH } from "../../../../../shared/src/gameData";
-import type { GameState, SideId, SideState, TrainerCard, UmamusumeInstance } from "../../../../../shared/src/types";
+import type { Card, EnergyType, GameState, SideId, SideState, TrainerCard, UmamusumeInstance } from "../../../../../shared/src/types";
 import { getCard, getPrimaryAttack, getUmamusumeCard } from "../core/catalog";
 import { attachedEnergyCount, getAllUmamusume } from "../core/umamusume";
 import { choosePreferredActiveIndex, refreshContinuousHp } from "../flow/board";
@@ -8,12 +8,13 @@ import { findEvolutionTarget } from "../flow/evolution";
 import { getPlayableAction, getRainbowUncapEvolutionHandOptions, getRainbowUncapTargets, getToolTargets } from "../flow/playRules";
 import { canUseStadium } from "../flow/trainers";
 import { buildCombatCandidates } from "../flow/ai/combatPlanner";
-import { getAbilityMoveEnergyTypes } from "../flow/energy";
+import { getAbilityMoveEnergyTypes, hasEnoughEnergy } from "../flow/energy";
 import { getAiPhase } from "./phase";
 import type { AiPhase, LegalAiAction } from "./types";
 import type { PlayChoices } from "../core/playTypes";
 
-const FEATURE_COUNT = 32;
+const FEATURE_COUNT = 48;
+const ENERGY_TYPES: EnergyType[] = ["grass", "fire", "water", "lightning", "psychic", "fighting", "darkness", "steel", "colorless", "dragon"];
 
 export function enumerateLegalAiActions(state: GameState, sideId: SideId): LegalAiAction[] {
   const side = state.sides[sideId];
@@ -137,6 +138,7 @@ function enumerateTrainerActions(state: GameState, side: SideState, phase: Extra
       const target = choices.umamusumeTargetUid !== undefined
         ? getAllUmamusume(side).find((umamusume) => umamusume.uid === choices.umamusumeTargetUid)
         : undefined;
+      const choiceCardId = getChoiceCardId(side, choices);
       return {
         id: `${phase}:trainer:${handIndex}:${cardId}:${choiceKey(choices)}`,
         phase,
@@ -148,6 +150,7 @@ function enumerateTrainerActions(state: GameState, side: SideState, phase: Extra
           kind: "playTrainer",
           sourceCardId: cardId,
           sourceHandIndex: handIndex,
+          ...(choiceCardId ? { choiceCardId } : {}),
           ...(target ? { target } : {}),
         }),
       };
@@ -257,6 +260,7 @@ function enumerateAbilityActions(state: GameState, side: SideState): LegalAiActi
           phase: "ability",
           kind: "useAbility",
           sourceCardId: source.cardId,
+          ...(side.hand[discardHandIndex] ? { choiceCardId: side.hand[discardHandIndex] } : {}),
           target: source,
           targetSlot: slot,
         }),
@@ -428,6 +432,7 @@ function features(input: {
   kind: string;
   sourceCardId?: string;
   sourceHandIndex?: number;
+  choiceCardId?: string;
   target?: UmamusumeInstance;
   targetSlot?: number;
   amount?: number;
@@ -467,6 +472,23 @@ function features(input: {
   vector[29] = input.kind === "attack" || input.kind === "retreatAttack" ? 1 : 0;
   vector[30] = input.kind === "useAbility" ? 1 : 0;
   vector[31] = input.kind === "endTurn" ? 1 : 0;
+  vector[32] = sourceCard?.kind === "trainer" && sourceCard.trainerType === "item" ? 1 : 0;
+  vector[33] = sourceCard?.kind === "trainer" && (sourceCard.effect.gustOpponent || sourceCard.effect.discardRandomOpponentActiveEnergy || sourceCard.effect.disableTools) ? 1 : 0;
+  vector[34] = sourceCard?.kind === "trainer" && (sourceCard.effect.heal || sourceCard.effect.recoverActiveSpecialConditions) ? 1 : 0;
+  vector[35] = sourceCard?.kind === "trainer" && (sourceCard.effect.discardOtherCard || sourceCard.effect.randomBasicUmamusumeFromDiscard) ? 1 : 0;
+  vector[36] = sourceCard?.kind === "trainer" && (sourceCard.effect.shuffleHandIntoDeckDraw || sourceCard.effect.rainbowUncapCrystal || sourceCard.effect.basicHpBonus || sourceCard.effect.globalRetreatCostReduction) ? 1 : 0;
+  vector[37] = sourceCard?.kind === "umamusume" && sourceCard.ability ? 1 : 0;
+  vector[38] = sourceCard?.kind === "umamusume" ? typedAttackCost(sourceCard) / 4 : 0;
+  vector[39] = sourceCard?.kind === "umamusume" ? colorlessAttackCost(sourceCard) / 4 : 0;
+  vector[40] = sourceCard?.kind === "umamusume" && hasFlexibleAttackTarget(sourceCard) ? 1 : 0;
+  vector[41] = sourceCard?.kind === "umamusume" && hasConditionalAttackOrAbility(sourceCard) ? 1 : 0;
+  const choiceCard = input.choiceCardId ? getCard(input.choiceCardId) : null;
+  vector[42] = choiceCard ? cardRoleKind(choiceCard) : 0;
+  vector[43] = choiceCard ? cardRoleProgression(choiceCard) : 0;
+  vector[44] = choiceCard ? cardRoleOutput(choiceCard) : 0;
+  vector[45] = choiceCard ? cardRoleUtility(choiceCard) : 0;
+  vector[46] = input.target ? attackReadiness(input.target) : 0;
+  vector[47] = input.target ? typedEnergyDeficit(input.target) / 4 : 0;
   return vector;
 }
 
@@ -481,6 +503,99 @@ function phaseIndex(phase: AiPhase): number {
 
 function kindIndex(kind: string): number {
   return ["pass", "setupChooseBoard", "resolvePendingChoice", "playBasic", "playTrainer", "evolve", "attachEnergy", "useAbility", "retreat", "retreatAttack", "attack", "useStadium", "endTurn"].indexOf(kind);
+}
+
+function getChoiceCardId(side: SideState, choices: PlayChoices): string | undefined {
+  if (choices.deckCardIndex !== undefined) return side.deck[choices.deckCardIndex];
+  if (choices.discardHandIndex !== undefined) return side.hand[choices.discardHandIndex];
+  if (choices.rainbowEvolutionHandIndex !== undefined) return side.hand[choices.rainbowEvolutionHandIndex];
+  return undefined;
+}
+
+function cardRoleKind(card: Card): number {
+  if (card.kind === "umamusume") return 1;
+  if (card.trainerType === "supporter") return 0.75;
+  if (card.trainerType === "item") return 0.55;
+  if (card.trainerType === "tool") return 0.35;
+  return 0.2;
+}
+
+function cardRoleProgression(card: Card): number {
+  if (card.kind === "umamusume") return card.stage / 2;
+  if (card.trainerType === "supporter") return 0.75;
+  if (card.trainerType === "item") return 0.5;
+  if (card.trainerType === "tool") return 0.35;
+  return 0.2;
+}
+
+function cardRoleOutput(card: Card): number {
+  if (card.kind === "umamusume") return Math.max(card.hp / 180, getPrimaryAttack(card).damage / 150);
+  const effect = card.effect;
+  return Math.max(
+    (effect.draw ?? effect.shuffleHandIntoDeckDraw ?? 0) / 5,
+    (effect.heal ?? 0) / 80,
+    (effect.activeAttackDamageBonus ?? 0) / 100,
+  );
+}
+
+function cardRoleUtility(card: Card): number {
+  if (card.kind === "umamusume") return card.ability ? 1 : (hasFlexibleAttackTarget(card) || hasConditionalAttackOrAbility(card) ? 0.5 : 0);
+  const effect = card.effect;
+  if (effect.searchUmamusume || effect.searchEvolutionUmamusume || effect.searchRandomBasicUmamusume || effect.rainbowUncapCrystal) return 1;
+  if (effect.extraEnergyAttach || effect.attachEnergyFromZoneToBench || effect.gustOpponent || effect.discardRandomOpponentActiveEnergy) return 0.85;
+  if (effect.heal || effect.retreatCostReduction || effect.globalRetreatCostReduction || card.trainerType === "tool") return 0.55;
+  return 0.25;
+}
+
+function typedAttackCost(card: Extract<Card, { kind: "umamusume" }>): number {
+  const cost = getPrimaryAttack(card).cost;
+  return ENERGY_TYPES.reduce((sum, type) => type === "colorless" ? sum : sum + (cost[type] ?? 0), 0);
+}
+
+function colorlessAttackCost(card: Extract<Card, { kind: "umamusume" }>): number {
+  return getPrimaryAttack(card).cost.colorless ?? 0;
+}
+
+function hasFlexibleAttackTarget(card: Extract<Card, { kind: "umamusume" }>): boolean {
+  const attack = getPrimaryAttack(card);
+  return attack.targetOpponent === "any" || Boolean(attack.benchDamage || attack.healTarget === "any");
+}
+
+function hasConditionalAttackOrAbility(card: Extract<Card, { kind: "umamusume" }>): boolean {
+  const attack = getPrimaryAttack(card);
+  return Boolean(
+    card.ability
+      || attack.coinBonus
+      || attack.drawOnHeads
+      || attack.discardEnergy
+      || attack.damagePerAttachedEnergy
+      || attack.damagePerUniqueAttachedEnergy
+      || attack.damagePerUmamusumeInPlay
+      || attack.attackDamageBonusIfToolAttached
+      || attack.attackDamageBonusIfDiscardHandCard
+      || attack.attackDamageBonusPerDiscardedHandCard
+      || attack.shuffleSelfIntoDeck
+      || attack.switchSelfAfterAttack
+      || attack.preventDamageNextTurn
+      || attack.bonusIfTookDamageLastTurn
+      || attack.cannotAttackNextTurn
+      || attack.inflictSpecialCondition,
+  );
+}
+
+function attackReadiness(target: UmamusumeInstance): number {
+  const attack = getPrimaryAttack(getUmamusumeCard(target));
+  const totalCost = Object.values(attack.cost).reduce((sum, cost) => sum + (cost ?? 0), 0);
+  const energyRatio = attachedEnergyCount(target) / Math.max(1, totalCost);
+  return hasEnoughEnergy(target, attack.cost) ? Math.max(1, energyRatio) : Math.min(0.99, energyRatio);
+}
+
+function typedEnergyDeficit(target: UmamusumeInstance): number {
+  const attack = getPrimaryAttack(getUmamusumeCard(target));
+  return ENERGY_TYPES.reduce((sum, type) => {
+    if (type === "colorless") return sum;
+    return sum + Math.max(0, (attack.cost[type] ?? 0) - target.energies[type]);
+  }, 0);
 }
 
 function hashToUnit(text: string): number {

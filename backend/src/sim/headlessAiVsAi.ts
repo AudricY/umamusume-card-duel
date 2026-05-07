@@ -15,7 +15,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createSeededRng, randomFloat, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
 import { chooseAiSetupSelection } from "../../../frontend/src/app/gameUiHelpers";
-import type { CoinFlipResult, GameState, SideId } from "../../../shared/src/types";
+import type { CoinFlipResult, GameState, SideId, SideState, UmamusumeInstance } from "../../../shared/src/types";
 import { enumerateLegalAiActions, chooseHighestScoredAction } from "../../../frontend/src/game/engine/ai-policy/actions";
 import { buildPublicObservation } from "../../../frontend/src/game/engine/ai-policy/observation";
 import type { TrainingExample } from "../../../frontend/src/game/engine/ai-policy/types";
@@ -157,6 +157,19 @@ function makeTrainingExample(state: GameState, sideId: SideId, episodeId: string
 }
 
 function stateHash(state: GameState): string {
+  const compactSide = (side: SideState) => ({
+    hand: side.hand.length,
+    deck: side.deck.length,
+    discard: side.discard.length,
+    energyZone: [...side.energyZone],
+    energyAttachmentsThisTurn: side.energyAttachmentsThisTurn,
+    bonusEnergyAttachments: side.bonusEnergyAttachments,
+    usedSupporterThisTurn: side.usedSupporterThisTurn,
+    usedRetreatThisTurn: side.usedRetreatThisTurn,
+    usedStadiumThisTurn: side.usedStadiumThisTurn,
+    active: side.active ? compactUmamusume(side.active) : null,
+    bench: side.bench.map(compactUmamusume),
+  });
   return JSON.stringify({
     phase: state.phase,
     currentSide: state.currentSide,
@@ -166,14 +179,26 @@ function stateHash(state: GameState): string {
     gameOver: state.gameOver,
     winner: state.winner,
     points: { player: state.sides.player.points, opponent: state.sides.opponent.points },
-    active: {
-      player: state.sides.player.active?.uid ?? null,
-      opponent: state.sides.opponent.active?.uid ?? null,
+    sides: {
+      player: compactSide(state.sides.player),
+      opponent: compactSide(state.sides.opponent),
     },
-    handSizes: { player: state.sides.player.hand.length, opponent: state.sides.opponent.hand.length },
-    deckSizes: { player: state.sides.player.deck.length, opponent: state.sides.opponent.deck.length },
     logHead: state.log[0] ?? null,
   });
+}
+
+function compactUmamusume(umamusume: UmamusumeInstance) {
+  return {
+    uid: umamusume.uid,
+    cardId: umamusume.cardId,
+    hp: umamusume.hp,
+    maxHp: umamusume.maxHp,
+    energies: umamusume.energies,
+    specialConditions: umamusume.specialConditions,
+    usedAbilityThisTurn: umamusume.usedAbilityThisTurn,
+    toolCardId: umamusume.toolCardId,
+    attackBlockedUntilOwnTurn: umamusume.attackBlockedUntilOwnTurn,
+  };
 }
 
 function parseArgs(argv: string[]): HeadlessRunOptions {

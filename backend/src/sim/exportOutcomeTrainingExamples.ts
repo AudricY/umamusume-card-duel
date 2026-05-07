@@ -72,9 +72,13 @@ function collectGame(seed: string, rng: Rng): void {
     }
 
     const forcedCoinResults = getForcedAttackCoinResults(state, rng);
-    state = sideId === "player"
-      ? advancePlayerAiTurnStep(state, forcedCoinResults, rng.next)
-      : advanceOpponentTurnStep(state, forcedCoinResults, rng.next);
+    const baselineAction = chooseHighestScoredAction(legalActions);
+    const modeled = advanceModeledTurnStep(state, sideId, baselineAction, forcedCoinResults, rng);
+    state = stateHash(modeled) === stateHash(before)
+      ? sideId === "player"
+        ? advancePlayerAiTurnStep(state, forcedCoinResults, rng.next)
+        : advanceOpponentTurnStep(state, forcedCoinResults, rng.next)
+      : modeled;
     if (stateHash(state) === stateHash(before)) break;
   }
 }

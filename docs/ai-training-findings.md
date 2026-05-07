@@ -204,3 +204,33 @@ The current setup has a hard blocker for the requested 80% target:
 - The sampled legal-action executor contract passes, so the remaining blocker is planner/training signal strength, not basic action executability.
 
 Therefore, continuing to train larger supervised models on the current labels is not a credible path to 80%. The next credible work is structural: build a stronger full-turn planner or RL/self-play loop that can itself clear the target before distillation. Until the teacher clears 80%, a distilled model should not be expected to do so.
+
+### Card-Awareness Follow-Up
+
+Implemented a card-aware representation pass:
+
+- Expanded action features from 32 to 48 dimensions with source-card attack semantics, trainer effect flags, explicit searched/discarded/rainbow choice-card features, and target attack-readiness features.
+- Filled the unused state feature tail with hand role counts, evolution availability, active/opponent readiness, known discard composition, next-energy fit, and KO threat indicators.
+- Fixed simulator/evaluator `stateHash` so HP, attached energy, energy zone, board contents, tools, and ability usage count as state changes. This removed false no-op/fallback accounting for valid energy/ability actions.
+- Fixed outcome export to advance by one explicit modeled legal action instead of compressed rule-bot turn steps. The old export path skipped empty phases and often failed to collect attach/ability decision states even though the model is evaluated phase-by-phase.
+
+Fresh experiments with the card-aware path:
+
+| Run | Dataset / Method | Eval | Result |
+| --- | --- | --- | --- |
+| Card-aware v1 | 1,203 fresh outcome examples, expanded features | 120 games | 38.3% WR, 95 false/no-op fallbacks before hash fix |
+| Card-aware v2 | rich-hybrid corpus + v1 fresh examples | 120 games after hash fix | 40.0% WR, zero fallbacks |
+| Card-aware v3 | 4,383 fresh outcome examples after hash/export fixes | 120 games | 40.0% WR, zero fallbacks |
+| Card-aware v4 | 5,000 corrected one-action outcome examples with attach/ability phases | 120 games | 34.2% WR, zero fallbacks |
+| Corrected rollout selector | online rollout selector after hash fix | 80 games | 42.5% WR, zero fallbacks |
+| Corrected depth-2/top-12 search | shallow search after hash fix | 80 games | 37.5% WR, zero fallbacks |
+
+Target for this pass was 47.5%+ side-balanced win rate, a 5 percentage point lift over the prior 42.5% trained-policy result. The target was not met.
+
+Interpretation:
+
+- Card awareness fixed a real representation weakness and the exporter/hash fixes removed measurement and data-distribution bugs.
+- The corrected one-action exporter now teaches attach and ability phases, but the resulting supervised policy still does not improve closed-loop play.
+- The current rollout/search teacher is itself below the 47.5% short-run gate on the corrected evaluator, so distillation has no reliable stronger target to learn from.
+
+Hard blocker remains teacher/planner quality, not card feature availability. The next useful step is not more feature-only supervised training; it is a stronger full-turn planner, MCTS-style search, DAgger from model-visited states labeled by that stronger planner, or self-play/RL.

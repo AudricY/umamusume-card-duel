@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 STATE_DIM = 96
-ACTION_DIM = 32
+ACTION_DIM = 48
 
 PHASES = [
     "setup",
@@ -52,6 +55,7 @@ def observation_to_features(observation: dict[str, Any]) -> np.ndarray:
     features[32:48] = _identity_features(own, opponent)
     features[48:58] = _energy_vector((own.get("active") or {}).get("energies", {}))
     features[58:68] = _energy_vector((opponent.get("active") or {}).get("energies", {}))
+    features[68:96] = _card_awareness_features(own, opponent, shared)
     return features
 
 
@@ -119,6 +123,194 @@ def _identity_features(own: dict[str, Any], opponent: dict[str, Any]) -> np.ndar
 def _energy_vector(energies: dict[str, Any]) -> np.ndarray:
     types = ["grass", "fire", "water", "lightning", "psychic", "fighting", "darkness", "steel", "colorless", "dragon"]
     return np.asarray([float(energies.get(energy_type, 0)) / 4.0 for energy_type in types], dtype=np.float32)
+
+
+def _card_awareness_features(own: dict[str, Any], opponent: dict[str, Any], shared: dict[str, Any]) -> np.ndarray:
+    values = np.zeros(28, dtype=np.float32)
+    hand_ids = own.get("handCardIds") or []
+    discard_ids = own.get("discard") or []
+    own_board = _board_entries(own)
+    opponent_board = _board_entries(opponent)
+    own_active = own.get("active") or {}
+    opponent_active = opponent.get("active") or {}
+
+    values[0:9] = _hand_role_features(hand_ids)
+    values[9] = _matching_evolution_count(hand_ids, own_board) / 4.0
+    values[10:14] = _uma_readiness_features(own_active)
+    values[14] = _ready_attacker_count(own_board) / 4.0
+    values[15] = _ability_ready_count(own_board) / 4.0
+    values[16:19] = _discard_role_features(discard_ids)
+    values[19:23] = _uma_readiness_features(opponent_active)
+    values[23] = _can_ko(opponent_active, own_active)
+    values[24] = _can_ko(own_active, opponent_active)
+    values[25] = _next_energy_matches_active_need(own)
+    values[26] = _hash_to_unit(str(shared.get("stadiumCardId", "")))
+    values[27] = _ready_attacker_count(opponent_board) / 4.0
+    return values
+
+
+def _hand_role_features(card_ids: list[Any]) -> np.ndarray:
+    values = np.zeros(9, dtype=np.float32)
+    if not card_ids:
+        return values
+    attack_damage_total = 0.0
+    attack_cards = 0
+    for raw_id in card_ids:
+        card = _get_card(str(raw_id))
+        if not card:
+            continue
+        if card.get("kind") == "umamusume":
+            stage = float(card.get("stage", 0))
+            values[0 if stage <= 0 else 1] += 1
+            attack = _primary_attack(card)
+            attack_damage_total += float(attack.get("damage", 0))
+            attack_cards += 1
+            if card.get("ability"):
+                values[8] += 1
+            continue
+        if card.get("kind") == "trainer":
+            effect = card.get("effect") or {}
+            values[2] += 1
+            if effect.get("draw") or effect.get("shuffleHandIntoDeckDraw"):
+                values[3] += 1
+            if effect.get("searchUmamusume") or effect.get("searchEvolutionUmamusume") or effect.get("searchRandomBasicUmamusume"):
+                values[4] += 1
+            if effect.get("extraEnergyAttach") or effect.get("attachEnergyFromZoneToBench"):
+                values[5] += 1
+            if effect.get("heal") or effect.get("recoverActiveSpecialConditions"):
+                values[6] += 1
+            if effect.get("gustOpponent") or effect.get("discardRandomOpponentActiveEnergy") or card.get("trainerType") == "tool":
+                values[7] += 1
+    values[:8] /= 10.0
+    values[8] = (attack_damage_total / max(1, attack_cards)) / 120.0
+    return values
+
+
+def _discard_role_features(card_ids: list[Any]) -> np.ndarray:
+    values = np.zeros(3, dtype=np.float32)
+    for raw_id in card_ids:
+        card = _get_card(str(raw_id))
+        if not card:
+            continue
+        if card.get("kind") == "trainer":
+            values[0] += 1
+        elif float(card.get("stage", 0)) <= 0:
+            values[1] += 1
+        else:
+            values[2] += 1
+    return np.asarray([values[0] / 20.0, values[1] / 10.0, values[2] / 10.0], dtype=np.float32)
+
+
+def _uma_readiness_features(entry: dict[str, Any]) -> np.ndarray:
+    values = np.zeros(4, dtype=np.float32)
+    card = _get_card(str(entry.get("cardId", "")))
+    if not card or card.get("kind") != "umamusume":
+        return values
+    attack = _primary_attack(card)
+    cost = attack.get("cost") or {}
+    energies = entry.get("energies") or {}
+    typed_deficit = _typed_energy_deficit(energies, cost)
+    total_cost = _total_cost(cost)
+    energy_total = float(entry.get("energyTotal", 0))
+    values[0] = min(1.5, energy_total / max(1.0, total_cost))
+    values[1] = typed_deficit / 4.0
+    values[2] = float(attack.get("damage", 0)) / 150.0
+    values[3] = 1.0 if typed_deficit <= 0 and energy_total >= total_cost else 0.0
+    return values
+
+
+def _matching_evolution_count(hand_ids: list[Any], board: list[dict[str, Any]]) -> float:
+    species_in_play = {str(entry.get("species", "")) for entry in board if entry}
+    count = 0.0
+    for raw_id in hand_ids:
+        card = _get_card(str(raw_id))
+        if card and card.get("kind") == "umamusume" and float(card.get("stage", 0)) > 0 and str(card.get("species", "")) in species_in_play:
+            count += 1.0
+    return count
+
+
+def _ready_attacker_count(board: list[dict[str, Any]]) -> float:
+    return sum(float(_uma_readiness_features(entry)[3] > 0) for entry in board)
+
+
+def _ability_ready_count(board: list[dict[str, Any]]) -> float:
+    count = 0.0
+    for entry in board:
+        card = _get_card(str(entry.get("cardId", "")))
+        if card and card.get("ability") and not entry.get("usedAbilityThisTurn"):
+            count += 1.0
+    return count
+
+
+def _can_ko(attacker: dict[str, Any], defender: dict[str, Any]) -> float:
+    if not attacker or not defender:
+        return 0.0
+    readiness = _uma_readiness_features(attacker)
+    if readiness[3] <= 0:
+        return 0.0
+    damage = readiness[2] * 150.0
+    return 1.0 if damage >= float(defender.get("hp", 0)) else 0.0
+
+
+def _next_energy_matches_active_need(side: dict[str, Any]) -> float:
+    zone = side.get("energyZone") or []
+    active = side.get("active") or {}
+    if not zone or not active:
+        return 0.0
+    card = _get_card(str(active.get("cardId", "")))
+    if not card:
+        return 0.0
+    attack = _primary_attack(card)
+    energy_type = str(zone[0])
+    required = float((attack.get("cost") or {}).get(energy_type, 0))
+    attached = float((active.get("energies") or {}).get(energy_type, 0))
+    return 1.0 if required > attached else 0.0
+
+
+def _board_entries(side: dict[str, Any]) -> list[dict[str, Any]]:
+    board = []
+    active = side.get("active")
+    if active:
+        board.append(active)
+    board.extend(entry for entry in side.get("bench", []) if entry)
+    return board
+
+
+def _typed_energy_deficit(energies: dict[str, Any], cost: dict[str, Any]) -> float:
+    deficit = 0.0
+    for energy_type, amount in cost.items():
+        if energy_type == "colorless":
+            continue
+        deficit += max(0.0, float(amount or 0) - float(energies.get(energy_type, 0)))
+    return deficit
+
+
+def _total_cost(cost: dict[str, Any]) -> float:
+    return float(sum(float(amount or 0) for amount in cost.values()))
+
+
+def _primary_attack(card: dict[str, Any]) -> dict[str, Any]:
+    attacks = card.get("attacks") or []
+    return attacks[0] if attacks else {}
+
+
+@lru_cache(maxsize=1)
+def _card_catalog() -> dict[str, dict[str, Any]]:
+    path = Path(__file__).resolve().parents[2] / "shared" / "src" / "data" / "cards.json"
+    raw = json.loads(path.read_text(encoding="utf8"))
+    return raw.get("baseCards", {})
+
+
+def _get_card(card_id: str) -> dict[str, Any] | None:
+    cards = _card_catalog()
+    if card_id in cards:
+        return cards[card_id]
+    for suffix in ("FullArtGold", "FullArt", "UncommonPlus"):
+        if card_id.endswith(suffix):
+            base_id = card_id[: -len(suffix)]
+            if base_id in cards:
+                return cards[base_id]
+    return None
 
 
 def _hash_average(items: list[Any]) -> float:

@@ -613,6 +613,19 @@ function resolveContinuousKnockouts(state: GameState): void {
 }
 
 export function stateHash(state: GameState): string {
+  const compactSide = (side: SideState) => ({
+    hand: side.hand.length,
+    deck: side.deck.length,
+    discard: side.discard.length,
+    energyZone: [...side.energyZone],
+    energyAttachmentsThisTurn: side.energyAttachmentsThisTurn,
+    bonusEnergyAttachments: side.bonusEnergyAttachments,
+    usedSupporterThisTurn: side.usedSupporterThisTurn,
+    usedRetreatThisTurn: side.usedRetreatThisTurn,
+    usedStadiumThisTurn: side.usedStadiumThisTurn,
+    active: side.active ? compactUmamusume(side.active) : null,
+    bench: side.bench.map(compactUmamusume),
+  });
   return JSON.stringify({
     phase: state.phase,
     currentSide: state.currentSide,
@@ -622,14 +635,26 @@ export function stateHash(state: GameState): string {
     gameOver: state.gameOver,
     winner: state.winner,
     points: { player: state.sides.player.points, opponent: state.sides.opponent.points },
-    active: {
-      player: state.sides.player.active?.uid ?? null,
-      opponent: state.sides.opponent.active?.uid ?? null,
+    sides: {
+      player: compactSide(state.sides.player),
+      opponent: compactSide(state.sides.opponent),
     },
-    handSizes: { player: state.sides.player.hand.length, opponent: state.sides.opponent.hand.length },
-    deckSizes: { player: state.sides.player.deck.length, opponent: state.sides.opponent.deck.length },
     logHead: state.log[0] ?? null,
   });
+}
+
+function compactUmamusume(umamusume: UmamusumeInstance) {
+  return {
+    uid: umamusume.uid,
+    cardId: umamusume.cardId,
+    hp: umamusume.hp,
+    maxHp: umamusume.maxHp,
+    energies: umamusume.energies,
+    specialConditions: umamusume.specialConditions,
+    usedAbilityThisTurn: umamusume.usedAbilityThisTurn,
+    toolCardId: umamusume.toolCardId,
+    attackBlockedUntilOwnTurn: umamusume.attackBlockedUntilOwnTurn,
+  };
 }
 
 function summarize(results: GameResult[]) {
