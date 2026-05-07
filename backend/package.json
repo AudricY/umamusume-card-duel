@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/server.ts",
     "test:ai": "tsx src/tests/aiCombatScenarios.ts",
+    "test:action-contract": "tsx src/tests/aiActionContractSmoke.ts",
     "test:train": "tsx src/tests/aiTrainingSmoke.ts",
     "sim:ai": "tsx src/sim/headlessAiVsAi.ts",
     "sim:export-training": "tsx src/sim/exportTrainingExamples.ts",

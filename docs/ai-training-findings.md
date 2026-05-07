@@ -14,7 +14,7 @@ The end-to-end AI infra works:
 - ONNX Runtime serves the model with `CUDAExecutionProvider`.
 - Headless evaluation runs model-vs-rule-bot games with zero heuristic fallbacks.
 
-The model is not yet strong enough. The best trained policy reached about 42.5% win rate. Follow-up search experiments found that the current legal-action abstraction also caps stronger online planners around 50-60%, which blocks an honest 80% trained-policy target under the current setup.
+The model is not yet strong enough. The best trained policy reached about 42.5% win rate. Follow-up search experiments found that the current oracle/planning setup caps stronger online planners around parity, which blocks an honest 80% trained-policy target under the current setup.
 
 ## Experimental Results
 
@@ -32,6 +32,8 @@ The model is not yet strong enough. The best trained policy reached about 42.5% 
 | Depth-2 search, top-12 | Recursive model-side decisions, wide candidates | 40 games/side | 57.5% as player, 50.0% as opponent |
 | Depth-3 search, top-8 | Deeper recursive search | 20 games/side | 60.0% as player, 55.0% as opponent |
 | Depth-2 search, top-12, 4 samples | Multi-sample candidate averaging | 40 games | 52.5% WR |
+| Explicit action contract smoke | Sample and apply exported legal actions | 24 games / 1,867 actions | PASS, zero sampled no-op actions |
+| Depth-3 search, top-16, 2 samples after explicit payloads | Recursive search over expanded trainer/ability payloads | 30 games/side | 46.7% as player, 53.3% as opponent, zero fallbacks |
 
 Rule bot mirror baseline is roughly balanced by side:
 
@@ -59,18 +61,19 @@ The online rollout selector is stronger than the learned policies because it dir
 
 Depth-2, depth-3, wider candidate sets, and multi-sample search did not get close to 80%. The best small-sample side-specific result was 60% as player and 55% as opponent. That is the most important result: if the oracle used to generate labels cannot approach 80%, a model trained from those labels will not either.
 
-### 5. Action Payloads Are Still Under-Specified
+### 5. Action Contract Is No Longer The Main Blocker
 
-The system now executes model-selected legal actions without fallback, but some action kinds still rely on heuristic subchoices inside execution, especially trainer and ability details. This limits both learning and fair attribution.
+The action payload has been expanded for the high-impact hidden-choice cases:
 
-The model should eventually choose full actions, including:
+- trainer discard/search/target choices
+- rainbow uncap target/evolution choices
+- ability damage targets
+- ability energy-source and energy-type choices
+- ability discard-to-draw choices
 
-- trainer target choices
-- discard choices
-- search choices
-- ability targets
-- attack ancillary choices
-- multi-step tactical bundles
+`test:action-contract` now samples exported legal actions and verifies that applying them mutates state unless the action is an explicit pass. The latest run checked 1,867 actions and passed.
+
+This removed an important attribution risk, but it did not raise the search ceiling. The remaining issue is not that legal actions cannot execute; it is that the available oracle is still not finding decisively stronger play.
 
 ### 6. Feature Quality Improved, But Did Not Solve The Core Issue
 
@@ -93,12 +96,16 @@ A realistic path:
 
 ### Phase 1: Fix The Action Contract
 
-Make legal actions fully executable without hidden heuristic subchoices.
+Status: mostly complete for the current high-impact action surface.
 
-Deliverables:
+Completed:
 
-- Extend `LegalAiAction.payload` for all trainer, ability, search, discard, and attack choices.
-- Add executor tests that replay every exported legal action kind.
+- Extended `LegalAiAction.payload` for trainer discard/search/target choices and major ability target/discard/energy choices.
+- Added `test:action-contract`, which samples exported legal actions and verifies that each non-pass action mutates state.
+
+Still useful later:
+
+- Broaden the contract test into targeted fixtures for every card/effect family instead of relying only on sampled headless games.
 - Add an eval invariant: `heuristicFallbacks === 0` and no no-op selected action unless the action is explicit pass.
 
 ### Phase 2: DAgger From Model-Visited States
@@ -159,7 +166,7 @@ A credible 80% claim should require:
 
 ## Next Implementation Step
 
-Do not run more large supervised jobs yet. The next highest-value implementation is the full action contract plus DAgger collection. Without those, additional outcome-label training is likely to keep oscillating around 35-45%.
+Do not run more large supervised jobs yet. The explicit action contract now passes a sampled executor smoke test, and stronger depth/top-K search still stayed around parity. The next highest-value implementation is a qualitatively stronger planner/training loop: full-turn or turn-bundle MCTS, model-visited-state DAgger from that planner, and then distillation only after the planner itself clears the target.
 
 ## Continuation Log
 
@@ -174,13 +181,26 @@ After the initial findings, deeper search was added to the evaluator:
 
 Results stayed far below 80%. Wider top-K helped more than depth, which suggests the heuristic candidate ordering can hide useful actions, but deeper recursive planning did not create a decisive advantage.
 
+### Explicit Action Contract Follow-Up
+
+Implemented explicit payload enumeration/execution for trainer choices and the major ability choice types. Added `test:action-contract` to sample exported legal actions during headless games and assert that each selected non-pass action changes state.
+
+Latest verification:
+
+- `npm --workspace backend run build`: pass.
+- `TMPDIR=/tmp npm --workspace backend run test:action-contract`: pass, 1,867 sampled actions.
+- Depth-3/top-16/two-sample search after the action expansion: 46.7% WR as player over 30 games, 53.3% WR as opponent over 30 games, zero fallbacks.
+
+Interpretation: hidden trainer/ability subchoices were a real correctness gap, but not the dominant strength blocker. Once those choices were exposed, the stronger search still performed roughly like the rule bot.
+
 ### Hard Blocker
 
 The current setup has a hard blocker for the requested 80% target:
 
 - The best trained models are below 45%.
-- The best online search oracle is only around 50-60%.
+- The best online search oracle is only around parity to 60% in small side-specific runs.
+- After explicit action payloads, a fresh stronger run was 46.7%/53.3% by side, not better.
 - Value-guided planning is currently unusable.
-- Some action execution still depends on heuristic subchoices.
+- The sampled legal-action executor contract passes, so the remaining blocker is planner/training signal strength, not basic action executability.
 
-Therefore, continuing to train larger supervised models on the current labels is not a credible path to 80%. The next credible work is structural: fully explicit action payloads, model-visited-state DAgger, and a stronger multi-step search oracle that can itself clear the target before distillation.
+Therefore, continuing to train larger supervised models on the current labels is not a credible path to 80%. The next credible work is structural: build a stronger full-turn planner or RL/self-play loop that can itself clear the target before distillation. Until the teacher clears 80%, a distilled model should not be expected to do so.

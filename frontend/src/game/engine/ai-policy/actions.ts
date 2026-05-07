@@ -1,15 +1,17 @@
 import { MAX_BENCH } from "../../../../../shared/src/gameData";
-import type { GameState, SideId, SideState, UmamusumeInstance } from "../../../../../shared/src/types";
+import type { GameState, SideId, SideState, TrainerCard, UmamusumeInstance } from "../../../../../shared/src/types";
 import { getCard, getPrimaryAttack, getUmamusumeCard } from "../core/catalog";
 import { attachedEnergyCount, getAllUmamusume } from "../core/umamusume";
 import { choosePreferredActiveIndex, refreshContinuousHp } from "../flow/board";
 import { canAttachEnergy, canAttachEnergyToUmamusume, canAttack, canRetreat, canUseUmamusumeAbility } from "../flow/eligibility";
 import { findEvolutionTarget } from "../flow/evolution";
-import { getPlayableAction, getToolTargets } from "../flow/playRules";
+import { getPlayableAction, getRainbowUncapEvolutionHandOptions, getRainbowUncapTargets, getToolTargets } from "../flow/playRules";
 import { canUseStadium } from "../flow/trainers";
 import { buildCombatCandidates } from "../flow/ai/combatPlanner";
+import { getAbilityMoveEnergyTypes } from "../flow/energy";
 import { getAiPhase } from "./phase";
 import type { AiPhase, LegalAiAction } from "./types";
+import type { PlayChoices } from "../core/playTypes";
 
 const FEATURE_COUNT = 32;
 
@@ -131,13 +133,25 @@ function enumerateTrainerActions(state: GameState, side: SideState, phase: Extra
     if (card.effect.extraEnergyAttach || card.effect.attachEnergyFromZoneToBench) score += 36;
     if (card.effect.heal) score += 16;
     if (card.trainerType === "tool" && getToolTargets(side).length > 0) score += 20;
-    return [{
-      id: `${phase}:trainer:${handIndex}:${cardId}`,
-      phase,
-      kind: "playTrainer",
-      payload: { handIndex },
-      features: features({ score, phase, kind: "playTrainer", sourceCardId: cardId, sourceHandIndex: handIndex }),
-    }];
+    return enumerateTrainerChoices(state, side, card, handIndex).map((choices) => {
+      const target = choices.umamusumeTargetUid !== undefined
+        ? getAllUmamusume(side).find((umamusume) => umamusume.uid === choices.umamusumeTargetUid)
+        : undefined;
+      return {
+        id: `${phase}:trainer:${handIndex}:${cardId}:${choiceKey(choices)}`,
+        phase,
+        kind: "playTrainer",
+        payload: { handIndex, choices },
+        features: features({
+          score: score + scoreTrainerChoices(side, choices) * 0.05,
+          phase,
+          kind: "playTrainer",
+          sourceCardId: cardId,
+          sourceHandIndex: handIndex,
+          ...(target ? { target } : {}),
+        }),
+      };
+    });
   });
 }
 
@@ -197,6 +211,57 @@ function enumerateAbilityActions(state: GameState, side: SideState): LegalAiActi
     if (ability.moveBenchedEnergyToActive) score += 38;
     if (ability.discardToDraw) score += ability.discardToDraw.draw * 8;
     if (ability.coinFlipDrawOrActiveDamageCounter) score += 18;
+    const opponent = state.sides[side.id === "player" ? "opponent" : "player"];
+    if (ability.moveBenchedEnergyToActive) {
+      return side.bench.flatMap((energySource) => getAbilityMoveEnergyTypes(ability)
+        .filter((energyType) => energySource.energies[energyType] > 0)
+        .map((energyType) => ({
+          id: `ability:${source.uid}:${ability.name}:move:${energySource.uid}:${energyType}`,
+          phase: "ability" as const,
+          kind: "useAbility",
+          payload: { sourceUid: source.uid, abilityName: ability.name, energySourceUid: energySource.uid, energyType },
+          features: features({
+            score: score + (side.active ? scoreUmamusume(side.active) * 0.04 : 0),
+            phase: "ability",
+            kind: "useAbility",
+            sourceCardId: source.cardId,
+            target: energySource,
+            targetSlot: slot,
+          }),
+        })));
+    }
+    if (ability.damageOpponent && ability.damageOpponentTarget === "any") {
+      return getAllUmamusume(opponent).map((target, targetSlot) => ({
+        id: `ability:${source.uid}:${ability.name}:damage:${target.uid}`,
+        phase: "ability" as const,
+        kind: "useAbility",
+        payload: { sourceUid: source.uid, abilityName: ability.name, targetUid: target.uid },
+        features: features({
+          score: score + (target.hp <= ability.damageOpponent! ? 80 : 0) + scoreUmamusume(target) * 0.05,
+          phase: "ability",
+          kind: "useAbility",
+          sourceCardId: source.cardId,
+          target,
+          targetSlot,
+        }),
+      }));
+    }
+    if (ability.discardToDraw) {
+      return discardChoiceIndexes(side, -1).map((discardHandIndex) => ({
+        id: `ability:${source.uid}:${ability.name}:discard:${discardHandIndex}`,
+        phase: "ability" as const,
+        kind: "useAbility",
+        payload: { sourceUid: source.uid, abilityName: ability.name, discardHandIndex },
+        features: features({
+          score: score - discardHandIndex * 0.2,
+          phase: "ability",
+          kind: "useAbility",
+          sourceCardId: source.cardId,
+          target: source,
+          targetSlot: slot,
+        }),
+      }));
+    }
     return [{
       id: `ability:${source.uid}:${ability.name}`,
       phase: "ability" as const,
@@ -205,6 +270,90 @@ function enumerateAbilityActions(state: GameState, side: SideState): LegalAiActi
       features: features({ score, phase: "ability", kind: "useAbility", sourceCardId: source.cardId, target: source, targetSlot: slot }),
     }];
   });
+}
+
+function enumerateTrainerChoices(state: GameState, side: SideState, card: TrainerCard, handIndex: number): PlayChoices[] {
+  let choices: PlayChoices[] = [{}];
+  if (card.effect.discardOtherCard) {
+    choices = expandChoices(choices, discardChoiceIndexes(side, handIndex).map((discardHandIndex) => ({ discardHandIndex })));
+  }
+  if (card.effect.searchUmamusume || card.effect.searchEvolutionUmamusume) {
+    choices = expandChoices(choices, searchDeckIndexes(side, card).map((deckCardIndex) => ({ deckCardIndex })));
+  }
+  if (card.effect.attachEnergyFromZoneToBench && side.bench.length > 0) {
+    choices = expandChoices(choices, side.bench.map((target) => ({ umamusumeTargetUid: target.uid })));
+  }
+  if (card.effect.heal && card.effect.healTarget === "any") {
+    const targets = getAllUmamusume(side).filter((target) => target.hp < target.maxHp);
+    if (targets.length > 0) choices = expandChoices(choices, targets.map((target) => ({ umamusumeTargetUid: target.uid })));
+  }
+  if (card.trainerType === "tool") {
+    choices = expandChoices(choices, getToolTargets(side).map((target) => ({ umamusumeTargetUid: target.uid })));
+  }
+  if (card.effect.rainbowUncapCrystal) {
+    const rainbowChoices = getRainbowUncapTargets(state, side).flatMap((target) => (
+      getRainbowUncapEvolutionHandOptions(side, target).map((option) => ({
+        umamusumeTargetUid: target.uid,
+        rainbowEvolutionHandIndex: option.handIndex,
+      }))
+    ));
+    choices = expandChoices(choices, rainbowChoices);
+  }
+  return choices.length > 0 ? choices : [{}];
+}
+
+function expandChoices(base: PlayChoices[], additions: PlayChoices[]): PlayChoices[] {
+  if (additions.length === 0) return [];
+  return base.flatMap((choice) => additions.map((addition) => ({ ...choice, ...addition })));
+}
+
+function discardChoiceIndexes(side: SideState, playedHandIndex: number): number[] {
+  return side.hand
+    .map((cardId, handIndex) => ({ handIndex, score: scoreDiscardCandidate(cardId) + (handIndex === playedHandIndex ? 10000 : 0) }))
+    .filter(({ handIndex }) => handIndex !== playedHandIndex)
+    .sort((left, right) => left.score - right.score)
+    .slice(0, 4)
+    .map(({ handIndex }) => handIndex);
+}
+
+function searchDeckIndexes(side: SideState, trainer: TrainerCard): number[] {
+  return side.deck
+    .map((cardId, deckCardIndex) => ({ cardId, deckCardIndex, card: getCard(cardId) }))
+    .filter(({ card }) => {
+      if (trainer.effect.searchEvolutionUmamusume) return card.kind === "umamusume" && card.stage > 0;
+      return trainer.effect.searchUmamusume ? card.kind === "umamusume" : false;
+    })
+    .sort((left, right) => scoreSearchCandidate(right.cardId) - scoreSearchCandidate(left.cardId))
+    .slice(0, 8)
+    .map(({ deckCardIndex }) => deckCardIndex);
+}
+
+function scoreSearchCandidate(cardId: string): number {
+  const card = getCard(cardId);
+  if (card.kind !== "umamusume") return 0;
+  return card.hp + getPrimaryAttack(card).damage * 1.5 + card.stage * 24;
+}
+
+function scoreDiscardCandidate(cardId: string): number {
+  const card = getCard(cardId);
+  if (card.kind === "trainer") return card.trainerType === "stadium" ? 18 : 28;
+  return card.hp + getPrimaryAttack(card).damage + card.stage * 35;
+}
+
+function scoreTrainerChoices(side: SideState, choices: PlayChoices): number {
+  const target = choices.umamusumeTargetUid !== undefined
+    ? getAllUmamusume(side).find((umamusume) => umamusume.uid === choices.umamusumeTargetUid)
+    : undefined;
+  return (target ? scoreUmamusume(target) : 0) - (choices.discardHandIndex ?? 0);
+}
+
+function choiceKey(choices: PlayChoices): string {
+  return [
+    choices.discardHandIndex ?? "x",
+    choices.deckCardIndex ?? "x",
+    choices.umamusumeTargetUid ?? "x",
+    choices.rainbowEvolutionHandIndex ?? "x",
+  ].join(":");
 }
 
 function enumerateCombatActions(state: GameState, side: SideState): LegalAiAction[] {

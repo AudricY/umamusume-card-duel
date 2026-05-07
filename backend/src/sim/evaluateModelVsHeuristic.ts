@@ -31,11 +31,13 @@ import { canUseStadium, useStadium } from "../../../frontend/src/game/engine/flo
 import { aiRetreatToTarget } from "../../../frontend/src/game/engine/flow/ai/combatPlanner";
 import { aiUseCoinFlipDrawAbility, aiUseDamageAbility, aiUseMoveBenchedEnergyAbility } from "../../../frontend/src/game/engine/flow/ai/abilityUtils";
 import { estimateAttackDamageOutput, markAbilityUsed, withEnergyShift } from "../../../frontend/src/game/engine/flow/ai/attachUtils";
-import { getAiRainbowUncapChoice, getAiTrainerChoices } from "../../../frontend/src/game/engine/flow/ai/trainerUtils";
 import type { AiCombatDecision } from "../../../frontend/src/game/engine/flow/ai/types";
 import { findOwnUmamusumeByUid, getAllUmamusume } from "../../../frontend/src/game/engine/core/umamusume";
 import { getUmamusumeAbility } from "../../../frontend/src/game/engine/flow/abilityRules";
-import type { CoinFlipResult, GameState, SideId, SideState, UmamusumeInstance } from "../../../shared/src/types";
+import { getAbilityMoveEnergyTypes } from "../../../frontend/src/game/engine/flow/energy";
+import { drawCards } from "../../../frontend/src/game/engine/flow/turn";
+import type { PlayChoices } from "../../../frontend/src/game/engine/core/playTypes";
+import type { CoinFlipResult, EnergyType, GameState, SideId, SideState, UmamusumeInstance } from "../../../shared/src/types";
 
 type Args = {
   modelUrl: string;
@@ -351,12 +353,12 @@ export function advanceModeledTurnStep(
   }
 
   if (action.kind === "playBasic" || action.kind === "playTrainer") {
-    playSelectedHandCard(next, side, Number(action.payload.handIndex ?? -1));
+    playSelectedHandCard(next, side, Number(action.payload.handIndex ?? -1), readPlayChoices(action.payload));
     return next;
   }
 
   if (action.kind === "evolve") {
-    playSelectedHandCard(next, side, Number(action.payload.handIndex ?? -1), Number(action.payload.targetUid));
+    playSelectedHandCard(next, side, Number(action.payload.handIndex ?? -1), { umamusumeTargetUid: Number(action.payload.targetUid) });
     return next;
   }
 
@@ -370,7 +372,7 @@ export function advanceModeledTurnStep(
   }
 
   if (action.kind === "useAbility") {
-    const used = useSelectedAbility(next, side, Number(action.payload.sourceUid), rng);
+    const used = useSelectedAbility(next, side, action.payload, rng);
     if (!used) next.opponentTurnStep = "attack";
     return next;
   }
@@ -389,42 +391,116 @@ export function advanceModeledTurnStep(
   return next;
 }
 
-function playSelectedHandCard(state: GameState, side: SideState, handIndex: number, targetUid?: number): void {
+function playSelectedHandCard(state: GameState, side: SideState, handIndex: number, choices: PlayChoices = {}): void {
   const cardId = side.hand[handIndex];
   if (!cardId) return;
   const card = getCard(cardId);
   const play = getPlayableAction(state, side, cardId);
   if (!play.canPlay) return;
-  const turnGoal = "maximize_progress";
-  const trainerChoices = card.kind === "trainer" ? getAiTrainerChoices(state, side, card, handIndex, turnGoal) : {};
-  const rainbowChoice = card.kind === "trainer" && card.effect.rainbowUncapCrystal ? getAiRainbowUncapChoice(state, side) : null;
-  const choices = {
-    ...trainerChoices,
-    ...(targetUid !== undefined ? { umamusumeTargetUid: targetUid } : {}),
-    ...(rainbowChoice ? { umamusumeTargetUid: rainbowChoice.targetUid, rainbowEvolutionHandIndex: rainbowChoice.evolutionHandIndex } : {}),
-  };
   side.hand.splice(handIndex, 1);
   resolveCardPlay(state, side, card, play, adjustHandChoices(choices, handIndex), switchOutOpponentActive);
   normalizeBoardState(state);
   refreshContinuousEffects(state);
 }
 
-function useSelectedAbility(state: GameState, side: SideState, sourceUid: number, rng: Rng): boolean {
+function useSelectedAbility(state: GameState, side: SideState, payload: Record<string, unknown>, rng: Rng): boolean {
+  const sourceUid = Number(payload.sourceUid);
   const source = getAllUmamusume(side).find((umamusume) => umamusume.uid === sourceUid);
   if (!source || !canUseUmamusumeAbility(state, side, source.uid)) return false;
   const ability = getUmamusumeAbility(state, side.id, source);
   if (!ability) return false;
   const deps = { refreshContinuousEffects, choosePreferredActiveIndex };
+  if (ability.damageOpponent) {
+    const opponentId: SideId = side.id === "player" ? "opponent" : "player";
+    const opponent = state.sides[opponentId];
+    const targetUid = payload.targetUid === undefined ? undefined : Number(payload.targetUid);
+    const target = ability.damageOpponentTarget === "any"
+      ? (targetUid !== undefined ? getAllUmamusume(opponent).find((umamusume) => umamusume.uid === targetUid) : undefined) ?? opponent.active
+      : opponent.active;
+    if (!target) return false;
+    if (ability.discardEnergy) {
+      const canPay = Object.entries(ability.discardEnergy).every(([type, amount]) => source.energies[type as EnergyType] >= (amount ?? 0));
+      if (!canPay) return false;
+      Object.entries(ability.discardEnergy).forEach(([type, amount]) => {
+        source.energies[type as EnergyType] = Math.max(0, source.energies[type as EnergyType] - (amount ?? 0));
+      });
+    }
+    target.hp = Math.max(0, target.hp - ability.damageOpponent);
+    target.tookDamageThisTurn = ability.damageOpponent > 0;
+    markSelectedAbilityUsed(side, source, ability.name, Boolean(ability.oncePerGame));
+    if (target.hp <= 0) {
+      if (knockOutUmamusume(state, side.id, opponentId, target, choosePreferredActiveIndex)) {
+        if (!state.gameOver) refreshContinuousEffects(state);
+      }
+    }
+    return true;
+  }
+  if (ability.moveBenchedEnergyToActive) {
+    if (!side.active) return false;
+    const energySourceUid = Number(payload.energySourceUid);
+    const energyType = payload.energyType as EnergyType | undefined;
+    if (!energyType || !getAbilityMoveEnergyTypes(ability).includes(energyType)) return false;
+    const energySource = side.bench.find((umamusume) => umamusume.uid === energySourceUid);
+    if (!energySource || energySource.energies[energyType] <= 0) return false;
+    energySource.energies[energyType] -= 1;
+    side.active.energies[energyType] += 1;
+    markSelectedAbilityUsed(side, source, ability.name, Boolean(ability.oncePerGame));
+    return true;
+  }
+  if (ability.discardToDraw) {
+    if (side.hand.length < ability.discardToDraw.discard) return false;
+    const discardHandIndex = payload.discardHandIndex === undefined ? 0 : Number(payload.discardHandIndex);
+    if (discardHandIndex < 0 || discardHandIndex >= side.hand.length) return false;
+    for (let count = 0; count < ability.discardToDraw.discard; count += 1) {
+      const index = Math.min(discardHandIndex, side.hand.length - 1);
+      const [discardedCardId] = side.hand.splice(index, 1);
+      if (discardedCardId) side.discard.push(discardedCardId);
+    }
+    drawCards(state, side, ability.discardToDraw.draw);
+    markSelectedAbilityUsed(side, source, ability.name, Boolean(ability.oncePerGame));
+    return true;
+  }
+  if (ability.coinFlipDrawOrActiveDamageCounter) {
+    return aiUseCoinFlipDrawAbility(state, side, source, rng.next, deps, state.aiDifficulty);
+  }
+  if (ability.shuffleRandomDiscardIntoDeck) {
+    const count = Math.min(ability.shuffleRandomDiscardIntoDeck, side.discard.length);
+    if (count <= 0) return false;
+    const picked: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const discardIndex = Math.floor(rng.next() * side.discard.length);
+      const [cardId] = side.discard.splice(discardIndex, 1);
+      if (cardId) picked.push(cardId);
+    }
+    side.deck.push(...picked);
+    markSelectedAbilityUsed(side, source, ability.name, Boolean(ability.oncePerGame));
+    return true;
+  }
   if (ability.damageOpponent && aiUseDamageAbility(state, side, source, deps)) return true;
   if (ability.moveBenchedEnergyToActive && aiUseMoveBenchedEnergyAbility(state, side, source, state.aiDifficulty, {
     estimateAttackDamageOutput,
     withEnergyShift,
     markAbilityUsed,
   })) return true;
-  if (ability.coinFlipDrawOrActiveDamageCounter) {
-    return aiUseCoinFlipDrawAbility(state, side, source, rng.next, deps, state.aiDifficulty);
-  }
   return false;
+}
+
+function readPlayChoices(payload: Record<string, unknown>): PlayChoices {
+  const raw = payload.choices;
+  if (!raw || typeof raw !== "object") return {};
+  const record = raw as Record<string, unknown>;
+  const choices: PlayChoices = {};
+  if (record.discardHandIndex !== undefined) choices.discardHandIndex = Number(record.discardHandIndex);
+  if (record.deckCardIndex !== undefined) choices.deckCardIndex = Number(record.deckCardIndex);
+  if (record.umamusumeTargetUid !== undefined) choices.umamusumeTargetUid = Number(record.umamusumeTargetUid);
+  if (record.rainbowEvolutionHandIndex !== undefined) choices.rainbowEvolutionHandIndex = Number(record.rainbowEvolutionHandIndex);
+  return choices;
+}
+
+function markSelectedAbilityUsed(side: SideState, source: UmamusumeInstance, abilityName: string, oncePerGame: boolean): void {
+  source.usedAbilityThisTurn = true;
+  if (!side.usedAbilityNamesThisTurn.includes(abilityName)) side.usedAbilityNamesThisTurn.push(abilityName);
+  if (oncePerGame && !side.usedAbilityNamesThisGame.includes(abilityName)) side.usedAbilityNamesThisGame.push(abilityName);
 }
 
 function resolveSelectedCombat(
