@@ -18,7 +18,12 @@ export type AiCombatDecision =
     retreatTargetUid?: number;
     attackTargetUid?: number;
     healTargetUid?: number;
+    attackIndex: number;
     usesCoinFlip: boolean;
+    discardHandIndex?: number;
+    evolutionDeckCardIndex?: number;
+    randomDiscardIndex?: number;
+    switchTargetUid?: number;
     useShuffleSelfIntoDeck?: boolean;
   };
 

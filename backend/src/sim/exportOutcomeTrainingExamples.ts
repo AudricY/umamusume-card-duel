@@ -4,7 +4,7 @@ import {
   advanceOpponentTurnStep,
   advancePlayerAiTurnStep,
 } from "../../../frontend/src/game/engine";
-import { enumerateLegalAiActions, chooseHighestScoredAction } from "../../../frontend/src/game/engine/ai-policy/actions";
+import { ACTION_FEATURE_COUNT, ACTION_FEATURE_SCHEMA_VERSION, enumerateLegalAiActions, chooseHighestScoredAction } from "../../../frontend/src/game/engine/ai-policy/actions";
 import { buildPublicObservation } from "../../../frontend/src/game/engine/ai-policy/observation";
 import type { LegalAiAction, TrainingExample } from "../../../frontend/src/game/engine/ai-policy/types";
 import { createSeededRng, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
@@ -69,7 +69,7 @@ const manifestOut = writeManifestFor(args.out, {
   phaseCounts: countBy(examples, (example) => example.phase),
   actionKindCounts: countBy(examples, (example) => example.legalActions[example.selectedActionIndex]?.kind ?? "unknown"),
   marginBuckets: countMargins(examples),
-  featureSchemas: { observationSchemaVersion: 1, actionFeatureDimensions: 48, stateFeatureDimensions: 96 },
+  featureSchemas: { observationSchemaVersion: 1, actionFeatureSchemaVersion: ACTION_FEATURE_SCHEMA_VERSION, actionFeatureDimensions: ACTION_FEATURE_COUNT, stateFeatureDimensions: 96 },
 });
 console.log(JSON.stringify({ out: args.out, manifest: manifestOut, examples: examples.length, ...metadata }, null, 2));
 

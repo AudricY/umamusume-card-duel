@@ -1,13 +1,14 @@
-import type { CoinFlipResult, GameState, SideId, SideState } from "../../../../../../shared/src/types";
+import type { Attack, CoinFlipResult, GameState, SideId, SideState } from "../../../../../../shared/src/types";
 import type { AiCombatDecision, AiCombatDeps, CombatCandidate } from "./types";
 import { cloneGame } from "../../core/stateClone";
-import { getPrimaryAttack, getUmamusumeCard } from "../../core/catalog";
+import { getCard, getUmamusumeCard } from "../../core/catalog";
 import { actorName, formatUmamusumeInstanceName } from "../../core/labels";
-import { canAttack, canRetreat } from "../eligibility";
+import { canRetreat } from "../eligibility";
 import { effectiveRetreatCost, payRetreatCost } from "../retreat";
 import { attachedEnergyCount, getAllUmamusume } from "../../core/umamusume";
 import { log } from "../../core/log";
 import { performAttack } from "../combat";
+import { hasEnoughEnergy } from "../energy";
 import {
   buildAttackDecision,
   canImmediateOpponentKo,
@@ -34,7 +35,7 @@ export function buildCombatCandidates(
 ): CombatCandidate[] {
   const candidates: CombatCandidate[] = [];
 
-  if (canAttack(state, side)) {
+  if (canUseAnyAttack(state, side)) {
     candidates.push(...buildAttackCandidates(state, side, deps, forcedAttackCoinResult));
   }
 
@@ -43,7 +44,7 @@ export function buildCombatCandidates(
       const simulatedRetreat = cloneGame(state);
       const simulatedSide = simulatedRetreat.sides[side.id];
       if (!aiRetreatToTarget(simulatedRetreat, simulatedSide, retreatTarget.uid)) continue;
-      if (!canAttack(simulatedRetreat, simulatedSide)) continue;
+      if (!canUseAnyAttack(simulatedRetreat, simulatedSide)) continue;
       candidates.push(...buildAttackCandidates(simulatedRetreat, simulatedSide, deps, forcedAttackCoinResult, retreatTarget.uid));
     }
   }
@@ -81,56 +82,103 @@ function buildAttackCandidates(
 ): CombatCandidate[] {
   const active = side.active;
   if (!active) return [];
-  const attack = getPrimaryAttack(getUmamusumeCard(active));
+  const card = getUmamusumeCard(active);
   const opponent = state.sides[side.id === "player" ? "opponent" : "player"];
-  const attackTargetUids = attack.targetOpponent === "any"
-    ? getAllUmamusume(opponent).map((umamusume) => umamusume.uid)
-    : [undefined];
-  const healTargetUids = attack.heal && attack.healTarget === "any"
-    ? getAllUmamusume(side).filter((umamusume) => umamusume.hp < umamusume.maxHp).map((umamusume) => umamusume.uid)
-    : [undefined];
-  const resolvedAttackTargets = attackTargetUids.length > 0 ? attackTargetUids : [undefined];
-  const resolvedHealTargets = healTargetUids.length > 0 ? healTargetUids : [undefined];
-  const usesCoinFlip = Boolean(attack.coinBonus || attack.drawOnHeads || attack.knockOutActiveIfAllCoinHeads);
-  const shuffleOptions = attack.shuffleSelfIntoDeck ? [false, true] : [undefined];
   const candidates: CombatCandidate[] = [];
 
-  resolvedAttackTargets.forEach((attackTargetUid) => {
-    resolvedHealTargets.forEach((healTargetUid) => {
-      shuffleOptions.forEach((useShuffleSelfIntoDeck) => {
-        const shuffleTag = useShuffleSelfIntoDeck === undefined ? "auto" : (useShuffleSelfIntoDeck ? "shuffle" : "keep");
-        if (!usesCoinFlip || forcedAttackCoinResult) {
-          const decision = buildAttackDecision(retreatTargetUid, attackTargetUid, healTargetUid, usesCoinFlip, useShuffleSelfIntoDeck);
-          candidates.push(scoreCandidate(state, side.id, deps, decision, `${retreatTargetUid ?? "stay"}-${attackTargetUid ?? "active"}-${healTargetUid ?? "auto"}-${shuffleTag}-${forcedAttackCoinResult ?? "none"}`));
-          return;
-        }
+  card.attacks.forEach((attack, attackIndex) => {
+    if (!hasEnoughEnergy(active, attack.cost)) return;
+    const attackTargetUids = attack.targetOpponent === "any"
+      ? getAllUmamusume(opponent).map((umamusume) => umamusume.uid)
+      : [undefined];
+    const healTargetUids = attack.heal && attack.healTarget === "any"
+      ? getAllUmamusume(side).filter((umamusume) => umamusume.hp < umamusume.maxHp).map((umamusume) => umamusume.uid)
+      : [undefined];
+    const resolvedAttackTargets = attackTargetUids.length > 0 ? attackTargetUids : [undefined];
+    const resolvedHealTargets = healTargetUids.length > 0 ? healTargetUids : [undefined];
+    const usesCoinFlip = Boolean(attack.coinBonus || attack.drawOnHeads || attack.discardRandomOpponentHandOnHeads || attack.knockOutActiveIfAllCoinHeads);
+    const shuffleOptions = attack.shuffleSelfIntoDeck ? [false, true] : [undefined];
+    const discardHandIndexes = attack.attackDamageBonusIfDiscardHandCard ? [undefined, ...choiceIndexes(side.hand.length, 4)] : [undefined];
+    const evolutionDeckIndexes = attack.evolveFromDeck ? explicitEvolutionDeckIndexes(side, attack) : [undefined];
+    const randomDiscardIndexes = attack.shuffleRandomDiscardIntoDeck && side.discard.length > 0 ? choiceIndexes(side.discard.length, 4) : [undefined];
+    const switchTargetUids = attack.switchSelfAfterAttack && side.bench.length > 0 ? side.bench.map((umamusume) => umamusume.uid) : [undefined];
 
-        const heads = scoreCandidate(
-          state,
-          side.id,
-          deps,
-          buildAttackDecision(retreatTargetUid, attackTargetUid, healTargetUid, true, useShuffleSelfIntoDeck),
-          `${retreatTargetUid ?? "stay"}-${attackTargetUid ?? "active"}-${healTargetUid ?? "auto"}-${shuffleTag}-heads`,
-          "heads",
-        );
-        const tails = scoreCandidate(
-          state,
-          side.id,
-          deps,
-          buildAttackDecision(retreatTargetUid, attackTargetUid, healTargetUid, true, useShuffleSelfIntoDeck),
-          `${retreatTargetUid ?? "stay"}-${attackTargetUid ?? "active"}-${healTargetUid ?? "auto"}-${shuffleTag}-tails`,
-          "tails",
-        );
-        candidates.push({
-          ...heads,
-          id: `${retreatTargetUid ?? "stay"}-${attackTargetUid ?? "active"}-${healTargetUid ?? "auto"}-${shuffleTag}-expected`,
-          score: (heads.score + tails.score) / 2,
+    resolvedAttackTargets.forEach((attackTargetUid) => {
+      resolvedHealTargets.forEach((healTargetUid) => {
+        shuffleOptions.forEach((useShuffleSelfIntoDeck) => {
+          discardHandIndexes.forEach((discardHandIndex) => {
+            evolutionDeckIndexes.forEach((evolutionDeckCardIndex) => {
+              randomDiscardIndexes.forEach((randomDiscardIndex) => {
+                switchTargetUids.forEach((switchTargetUid) => {
+                  const choiceTag = [
+                    `a${attackIndex}`,
+                    retreatTargetUid ?? "stay",
+                    attackTargetUid ?? "active",
+                    healTargetUid ?? "auto",
+                    useShuffleSelfIntoDeck === undefined ? "auto" : (useShuffleSelfIntoDeck ? "shuffle" : "keep"),
+                    discardHandIndex ?? "noDiscard",
+                    evolutionDeckCardIndex ?? "autoEvolve",
+                    randomDiscardIndex ?? "randomDiscard",
+                    switchTargetUid ?? "autoSwitch",
+                  ].join("-");
+                  const decision = buildAttackDecision(
+                    attackIndex,
+                    retreatTargetUid,
+                    attackTargetUid,
+                    healTargetUid,
+                    usesCoinFlip,
+                    discardHandIndex,
+                    evolutionDeckCardIndex,
+                    randomDiscardIndex,
+                    switchTargetUid,
+                    useShuffleSelfIntoDeck,
+                  );
+                  if (!usesCoinFlip || forcedAttackCoinResult) {
+                    candidates.push(scoreCandidate(state, side.id, deps, decision, `${choiceTag}-${forcedAttackCoinResult ?? "none"}`));
+                    return;
+                  }
+
+                  const heads = scoreCandidate(state, side.id, deps, decision, `${choiceTag}-heads`, "heads");
+                  const tails = scoreCandidate(state, side.id, deps, decision, `${choiceTag}-tails`, "tails");
+                  candidates.push({
+                    ...heads,
+                    id: `${choiceTag}-expected`,
+                    score: (heads.score + tails.score) / 2,
+                  });
+                });
+              });
+            });
+          });
         });
       });
     });
   });
 
   return candidates;
+}
+
+function canUseAnyAttack(state: GameState, side: SideState): boolean {
+  if (state.phase !== "play" || state.pendingPlayerChoice || state.gameOver || state.currentSide !== side.id || !side.active) return false;
+  if (side.active.specialConditions.includes("paralysed")) return false;
+  if (side.active.attackBlockedUntilOwnTurn === state.turnsTakenBySide[side.id]) return false;
+  return getUmamusumeCard(side.active).attacks.some((attack) => hasEnoughEnergy(side.active!, attack.cost));
+}
+
+function choiceIndexes(length: number, limit: number): Array<number | undefined> {
+  return Array.from({ length: Math.min(length, limit) }, (_, index) => index);
+}
+
+function explicitEvolutionDeckIndexes(side: SideState, attack: Attack): Array<number | undefined> {
+  if (!attack.evolveFromDeck || !side.active) return [undefined];
+  const indexes = side.deck
+    .map((cardId, deckCardIndex) => ({ cardId, deckCardIndex }))
+    .filter(({ cardId }) => {
+      const card = getCard(cardId);
+      return card.kind === "umamusume" && card.evolvesFrom === side.active?.species && card.stage === (side.active?.stage ?? 0) + 1;
+    })
+    .slice(0, 6)
+    .map(({ deckCardIndex }) => deckCardIndex);
+  return indexes.length > 0 ? indexes : [undefined];
 }
 
 function scoreCandidate(
@@ -159,11 +207,11 @@ function scoreCandidate(
       decision.attackTargetUid,
       decision.healTargetUid,
       forcedCoinResult,
-      undefined,
-      0,
-      undefined,
-      undefined,
-      undefined,
+      decision.evolutionDeckCardIndex,
+      decision.attackIndex,
+      decision.discardHandIndex,
+      decision.randomDiscardIndex,
+      decision.switchTargetUid,
       decision.useShuffleSelfIntoDeck,
     );
   }

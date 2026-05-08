@@ -682,7 +682,6 @@ function resolveSelectedCombat(
     if (decision.kind !== "attack") return;
   }
 
-  if (decision.usesCoinFlip && !forcedAttackCoinResult) return;
   performAttack(
     state,
     side.id,
@@ -690,11 +689,11 @@ function resolveSelectedCombat(
     decision.attackTargetUid,
     decision.healTargetUid,
     forcedAttackCoinResult,
-    undefined,
-    0,
-    undefined,
-    undefined,
-    undefined,
+    decision.evolutionDeckCardIndex,
+    decision.attackIndex,
+    decision.discardHandIndex,
+    decision.randomDiscardIndex,
+    decision.switchTargetUid,
     decision.useShuffleSelfIntoDeck,
   );
   if (state.pendingPlayerChoice) {

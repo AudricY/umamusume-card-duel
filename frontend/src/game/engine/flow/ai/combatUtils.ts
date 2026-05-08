@@ -174,16 +174,25 @@ export function countDiscardedUmamusume(cardIds: string[]): number {
 }
 
 export function buildAttackDecision(
+  attackIndex: number,
   retreatTargetUid: number | undefined,
   attackTargetUid: number | undefined,
   healTargetUid: number | undefined,
   usesCoinFlip: boolean,
+  discardHandIndex?: number,
+  evolutionDeckCardIndex?: number,
+  randomDiscardIndex?: number,
+  switchTargetUid?: number,
   useShuffleSelfIntoDeck?: boolean,
 ): Extract<AiCombatDecision, { kind: "attack" }> {
-  const decision: Extract<AiCombatDecision, { kind: "attack" }> = { kind: "attack", usesCoinFlip };
+  const decision: Extract<AiCombatDecision, { kind: "attack" }> = { kind: "attack", attackIndex, usesCoinFlip };
   if (retreatTargetUid !== undefined) decision.retreatTargetUid = retreatTargetUid;
   if (attackTargetUid !== undefined) decision.attackTargetUid = attackTargetUid;
   if (healTargetUid !== undefined) decision.healTargetUid = healTargetUid;
+  if (discardHandIndex !== undefined) decision.discardHandIndex = discardHandIndex;
+  if (evolutionDeckCardIndex !== undefined) decision.evolutionDeckCardIndex = evolutionDeckCardIndex;
+  if (randomDiscardIndex !== undefined) decision.randomDiscardIndex = randomDiscardIndex;
+  if (switchTargetUid !== undefined) decision.switchTargetUid = switchTargetUid;
   if (useShuffleSelfIntoDeck !== undefined) decision.useShuffleSelfIntoDeck = useShuffleSelfIntoDeck;
   return decision;
 }

@@ -3,17 +3,19 @@ import type { Card, EnergyType, GameState, SideId, SideState, TrainerCard, Umamu
 import { getCard, getPrimaryAttack, getUmamusumeCard } from "../core/catalog";
 import { attachedEnergyCount, getAllUmamusume } from "../core/umamusume";
 import { choosePreferredActiveIndex, refreshContinuousHp } from "../flow/board";
-import { canAttachEnergy, canAttachEnergyToUmamusume, canAttack, canRetreat, canUseUmamusumeAbility } from "../flow/eligibility";
+import { canAttachEnergy, canAttachEnergyToUmamusume, canUseUmamusumeAbility } from "../flow/eligibility";
 import { findEvolutionTarget } from "../flow/evolution";
 import { getPlayableAction, getRainbowUncapEvolutionHandOptions, getRainbowUncapTargets, getToolTargets } from "../flow/playRules";
 import { canUseStadium } from "../flow/trainers";
 import { buildCombatCandidates } from "../flow/ai/combatPlanner";
+import type { AiCombatDecision } from "../flow/ai/types";
 import { getAbilityMoveEnergyTypes, hasEnoughEnergy } from "../flow/energy";
 import { getAiPhase } from "./phase";
 import type { AiPhase, LegalAiAction } from "./types";
 import type { PlayChoices } from "../core/playTypes";
 
-const FEATURE_COUNT = 48;
+export const ACTION_FEATURE_SCHEMA_VERSION = 2;
+export const ACTION_FEATURE_COUNT = 48;
 const ENERGY_TYPES: EnergyType[] = ["grass", "fire", "water", "lightning", "psychic", "fighting", "darkness", "steel", "colorless", "dragon"];
 
 export function enumerateLegalAiActions(state: GameState, sideId: SideId): LegalAiAction[] {
@@ -362,7 +364,7 @@ function choiceKey(choices: PlayChoices): string {
 
 function enumerateCombatActions(state: GameState, side: SideState): LegalAiAction[] {
   const actions: LegalAiAction[] = [];
-  if (canAttack(state, side) || canRetreat(state, side)) {
+  if (side.active) {
     const candidates = buildCombatCandidates(state, side, {
       refreshContinuousEffects: refreshContinuousHp,
       choosePreferredActiveIndex,
@@ -372,6 +374,7 @@ function enumerateCombatActions(state: GameState, side: SideState): LegalAiActio
       const target = targetUid !== undefined
         ? getAllUmamusume(state.sides[side.id === "player" ? "opponent" : "player"]).find((umamusume) => umamusume.uid === targetUid)
         : undefined;
+      const sourceCardId = combatSourceCardId(side, candidate.decision);
       const featureInput = {
         score: candidate.score + (candidate.lethalTarget ? 100 : 0) + (candidate.keepsSafe ? 20 : 0),
         phase: "combat" as const,
@@ -384,11 +387,23 @@ function enumerateCombatActions(state: GameState, side: SideState): LegalAiActio
         phase: "combat",
         kind: candidate.decision.kind === "attack" && candidate.decision.retreatTargetUid !== undefined ? "retreatAttack" : candidate.decision.kind,
         payload: { decision: candidate.decision },
-        features: features(target ? { ...featureInput, target } : featureInput),
+        features: features({
+          ...featureInput,
+          ...(sourceCardId ? { sourceCardId } : {}),
+          ...(target ? { target } : {}),
+        }),
       });
     });
   }
   return actions.length > 0 ? actions : [passAction("combat")];
+}
+
+function combatSourceCardId(side: SideState, decision: AiCombatDecision): string | undefined {
+  if (decision.kind !== "attack") return undefined;
+  if (decision.retreatTargetUid !== undefined) {
+    return side.bench.find((umamusume) => umamusume.uid === decision.retreatTargetUid)?.cardId;
+  }
+  return side.active?.cardId;
 }
 
 function enumerateStadiumOrEndActions(state: GameState, side: SideState): LegalAiAction[] {
@@ -438,7 +453,7 @@ function features(input: {
   amount?: number;
   endsTurn?: boolean;
 }): number[] {
-  const vector = Array.from({ length: FEATURE_COUNT }, () => 0);
+  const vector = Array.from({ length: ACTION_FEATURE_COUNT }, () => 0);
   vector[0] = input.score / 100;
   vector[1] = phaseIndex(input.phase) / 10;
   vector[2] = kindIndex(input.kind) / 16;

@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { runHeadlessBatch } from "./headlessAiVsAi";
 import { writeManifestFor } from "./manifest";
+import { ACTION_FEATURE_COUNT, ACTION_FEATURE_SCHEMA_VERSION } from "../../../frontend/src/game/engine/ai-policy/actions";
 
 type Args = {
   out: string;
@@ -27,7 +28,7 @@ const manifestOut = writeManifestFor(args.out, {
   phaseCounts: countBy(examples, (example) => example.phase),
   actionKindCounts: countBy(examples, (example) => example.legalActions[example.selectedActionIndex]?.kind ?? "unknown"),
   terminalReasons: countBy(runs, (run) => run.terminalReason),
-  featureSchemas: { observationSchemaVersion: 1, actionFeatureDimensions: 48, stateFeatureDimensions: 96 },
+  featureSchemas: { observationSchemaVersion: 1, actionFeatureSchemaVersion: ACTION_FEATURE_SCHEMA_VERSION, actionFeatureDimensions: ACTION_FEATURE_COUNT, stateFeatureDimensions: 96 },
 });
 
 console.log(JSON.stringify({
