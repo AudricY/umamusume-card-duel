@@ -53,6 +53,9 @@ export type EvaluateModelArgs = {
   details: boolean;
   selection: "policy" | "baseline" | "inverted-baseline" | "value" | "rollout" | "search" | "planner";
   cycleWindow: number;
+  plannerCrnSamples: number;
+  plannerLeafAggregate: "mean" | "max" | "median";
+  plannerFirstActionAggregate: "max" | "mean";
   rolloutSteps: number;
   searchDepth: number;
   searchTopK: number;
@@ -404,16 +407,53 @@ function choosePlannerAction(args: EvaluateModelArgs, state: GameState, sideId: 
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
   const bundles = enumerateTurnBundles(args, state, sideId, seed);
-  let best = bundles[0];
-  let bestReward = Number.NEGATIVE_INFINITY;
-  bundles.forEach((bundle, index) => {
-    const reward = rewardForRollout(rolloutHeuristic(bundle.state, createSeededRng(`${seed}:bundle:${index}:leaf`, "planner-leaf"), args.rolloutSteps), sideId);
-    if (reward > bestReward) {
-      bestReward = reward;
-      best = bundle;
+  if (bundles.length === 0) return rankedDecision(legalActions, 0);
+  const samples = Math.max(1, args.plannerCrnSamples);
+  // CRN: every bundle is scored against the same K shared rollout seeds. The
+  // pairing reduces between-bundle variance — differences in returns now come
+  // from the choices, not from RNG.
+  const sharedSeeds = Array.from({ length: samples }, (_, i) => `${seed}:crn-seed-${i}`);
+  const bundleScores = bundles.map((bundle, bundleIndex) => {
+    const rewards = sharedSeeds.map((rolloutSeed) => {
+      const rng = createSeededRng(rolloutSeed, "planner-leaf-crn");
+      return rewardForRollout(rolloutHeuristic(bundle.state, rng, args.rolloutSteps), sideId);
+    });
+    return { bundle, bundleIndex, rewards, leafScore: aggregateScores(rewards, args.plannerLeafAggregate) };
+  });
+
+  // Group bundles by their first action; pick the first action whose grouped
+  // score is best. This avoids letting one lucky deep continuation overrule
+  // the actual first-action question.
+  const grouped = new Map<string, { first: TurnBundle["first"]; scores: number[] }>();
+  bundleScores.forEach(({ bundle, leafScore }) => {
+    const key = bundle.first.action.id;
+    const entry = grouped.get(key);
+    if (entry) entry.scores.push(leafScore);
+    else grouped.set(key, { first: bundle.first, scores: [leafScore] });
+  });
+
+  let bestKey: string | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  grouped.forEach((entry, key) => {
+    const aggregated = aggregateScores(entry.scores, args.plannerFirstActionAggregate);
+    if (aggregated > bestScore) {
+      bestScore = aggregated;
+      bestKey = key;
     }
   });
-  return best?.first ?? rankedDecision(legalActions, 0);
+  if (bestKey === null) return bundles[0]?.first ?? rankedDecision(legalActions, 0);
+  return grouped.get(bestKey)!.first;
+}
+
+function aggregateScores(scores: number[], mode: "mean" | "max" | "median"): number {
+  if (scores.length === 0) return Number.NEGATIVE_INFINITY;
+  if (mode === "max") return Math.max(...scores);
+  if (mode === "median") {
+    const sorted = [...scores].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+  }
+  return scores.reduce((sum, value) => sum + value, 0) / scores.length;
 }
 
 type TurnBundle = {
@@ -938,7 +978,20 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
     cycleWindow: Number(get("--cycle-window", "8")),
+    plannerCrnSamples: Number(get("--planner-crn-samples", "3")),
+    plannerLeafAggregate: parseAggregate(get("--planner-leaf-aggregate", "mean")),
+    plannerFirstActionAggregate: parseFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
   };
+}
+
+function parseAggregate(raw: string): "mean" | "max" | "median" {
+  if (raw === "max" || raw === "median") return raw;
+  return "mean";
+}
+
+function parseFirstActionAggregate(raw: string): "max" | "mean" {
+  if (raw === "mean") return raw;
+  return "max";
 }
 
 function parseSelection(raw: string): EvaluateModelArgs["selection"] {

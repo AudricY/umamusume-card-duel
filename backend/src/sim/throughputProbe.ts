@@ -148,6 +148,9 @@ function makePlannerArgs(args: ProbeArgs): EvaluateModelArgs {
     plannerMaxSequences: args.plannerMaxSequences,
     plannerMaxDepth: args.plannerMaxDepth,
     cycleWindow: 0,
+    plannerCrnSamples: 1,
+    plannerLeafAggregate: "mean",
+    plannerFirstActionAggregate: "max",
   };
 }
 

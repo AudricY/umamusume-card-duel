@@ -147,6 +147,9 @@ function parseArgs(argv: string[]): Args {
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
     cycleWindow: Number(get("--cycle-window", "8")),
+    plannerCrnSamples: Number(get("--planner-crn-samples", "3")),
+    plannerLeafAggregate: parsePlannerLeafAggregate(get("--planner-leaf-aggregate", "mean")),
+    plannerFirstActionAggregate: parsePlannerFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
     traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
     minGames: Number(get("--min-games", "500")),
     minWinRate: Number(get("--min-win-rate", "0")),
@@ -167,6 +170,16 @@ function parseSelection(raw: string): EvaluateModelArgs["selection"] {
 function parseRanker(raw: string): CandidateRankerMode {
   if (raw === "phase-diverse" || raw === "epsilon") return raw;
   return "heuristic";
+}
+
+function parsePlannerLeafAggregate(raw: string): "mean" | "max" | "median" {
+  if (raw === "max" || raw === "median") return raw;
+  return "mean";
+}
+
+function parsePlannerFirstActionAggregate(raw: string): "max" | "mean" {
+  if (raw === "mean") return raw;
+  return "max";
 }
 
 function parseTraceTeacher(raw: string): EvaluateModelArgs["traceTeacher"] {

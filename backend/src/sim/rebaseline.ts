@@ -32,6 +32,9 @@ type RebaselineArgs = {
   plannerTopK: number;
   plannerMaxSequences: number;
   plannerMaxDepth: number;
+  plannerCrnSamples: number;
+  plannerLeafAggregate: "mean" | "max" | "median";
+  plannerFirstActionAggregate: "max" | "mean";
   cycleWindow: number;
   modelUrl: string;
   methods: string;
@@ -103,6 +106,9 @@ async function runMethodAsModel(args: RebaselineArgs, method: MethodKey) {
     plannerMaxSequences: args.plannerMaxSequences,
     plannerMaxDepth: args.plannerMaxDepth,
     cycleWindow: args.cycleWindow,
+    plannerCrnSamples: args.plannerCrnSamples,
+    plannerLeafAggregate: args.plannerLeafAggregate,
+    plannerFirstActionAggregate: args.plannerFirstActionAggregate,
   };
   const sides: SideId[] = ["player", "opponent"];
   const results = [];
@@ -274,11 +280,24 @@ function parseArgs(argv: string[]): RebaselineArgs {
     plannerTopK: Number(get("--planner-top-k", "4")),
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
+    plannerCrnSamples: Number(get("--planner-crn-samples", "3")),
+    plannerLeafAggregate: parsePlannerLeafAggregate(get("--planner-leaf-aggregate", "mean")),
+    plannerFirstActionAggregate: parsePlannerFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
     cycleWindow: Number(get("--cycle-window", "8")),
     modelUrl: get("--model-url", "http://127.0.0.1:8765"),
     methods: get("--methods", "rule-mirror,baseline,inverted-baseline,rollout,search,planner"),
     outDir: get("--out-dir", "runs/rebaseline"),
   };
+}
+
+function parsePlannerLeafAggregate(raw: string): "mean" | "max" | "median" {
+  if (raw === "max" || raw === "median") return raw;
+  return "mean";
+}
+
+function parsePlannerFirstActionAggregate(raw: string): "max" | "mean" {
+  if (raw === "mean") return raw;
+  return "max";
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
