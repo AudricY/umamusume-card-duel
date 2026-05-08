@@ -22,7 +22,8 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = JsonlPolicyDataset(args.data, min_actions=2)
+    ablations = set(args.ablate)
+    dataset = JsonlPolicyDataset(args.data, min_actions=2, ablations=ablations)
     train_indices, val_indices, split_metadata = split_dataset(dataset, args.seed, args.split_by)
     train_loader = DataLoader(
         Subset(dataset, train_indices),
@@ -66,6 +67,7 @@ def main() -> None:
             "train_samples": len(train_indices),
             "val_samples": len(val_indices),
             "split": split_metadata,
+            "feature_ablations": sorted(ablations),
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "lr": args.lr,
@@ -86,6 +88,7 @@ def main() -> None:
         "data": str(args.data),
         "samples": len(dataset),
         "split": split_metadata,
+        "feature_ablations": sorted(ablations),
         "metrics": {"train": final_train, "val": final_val, "diagnostics": diagnostics},
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
@@ -322,6 +325,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--value-weight", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--split-by", choices=["row", "episode", "seed"], default="episode")
+    parser.add_argument("--ablate", action="append", choices=[
+        "state_identity_hashes",
+        "state_energy_vectors",
+        "state_card_awareness",
+        "state_semantic",
+        "action_source_target",
+        "action_trainer_semantic",
+        "action_tactical",
+        "action_semantic",
+    ], default=[])
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()

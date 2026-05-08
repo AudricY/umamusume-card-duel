@@ -28,7 +28,10 @@ PHASES = [
 SIDES = ["player", "opponent"]
 
 
-def observation_to_features(observation: dict[str, Any]) -> np.ndarray:
+FeatureAblation = str
+
+
+def observation_to_features(observation: dict[str, Any], ablations: set[FeatureAblation] | None = None) -> np.ndarray:
     features = np.zeros(STATE_DIM, dtype=np.float32)
     phase = observation.get("phase", "stadiumOrEnd")
     side = observation.get("sideToAct", "player")
@@ -58,10 +61,11 @@ def observation_to_features(observation: dict[str, Any]) -> np.ndarray:
     features[48:58] = _energy_vector((own.get("active") or {}).get("energies", {}))
     features[58:68] = _energy_vector((opponent.get("active") or {}).get("energies", {}))
     features[68:96] = _card_awareness_features(own, opponent, shared)
+    apply_state_ablations(features, ablations or set())
     return features
 
 
-def legal_actions_to_features(actions: list[dict[str, Any]]) -> np.ndarray:
+def legal_actions_to_features(actions: list[dict[str, Any]], ablations: set[FeatureAblation] | None = None) -> np.ndarray:
     rows = []
     for action in actions:
         raw = action.get("features", [])
@@ -70,10 +74,41 @@ def legal_actions_to_features(actions: list[dict[str, Any]]) -> np.ndarray:
             raise ValueError(f"Action feature length mismatch for {action_id}: got {len(raw)}, expected {ACTION_DIM}")
         row = np.zeros(ACTION_DIM, dtype=np.float32)
         row[:] = np.asarray(raw, dtype=np.float32)
+        apply_action_ablations(row, ablations or set())
         rows.append(row)
     if not rows:
         return np.zeros((0, ACTION_DIM), dtype=np.float32)
     return np.stack(rows, axis=0)
+
+
+def apply_state_ablations(features: np.ndarray, ablations: set[FeatureAblation]) -> None:
+    if "state_identity_hashes" in ablations:
+        features[32:48] = 0
+    if "state_energy_vectors" in ablations:
+        features[48:68] = 0
+    if "state_card_awareness" in ablations:
+        features[68:96] = 0
+    if "state_semantic" in ablations:
+        features[10:32] = 0
+        features[48:96] = 0
+
+
+def apply_action_ablations(features: np.ndarray, ablations: set[FeatureAblation]) -> None:
+    if "action_source_target" in ablations:
+        features[3:10] = 0
+        features[13:18] = 0
+        features[25:29] = 0
+        features[37:48] = 0
+    if "action_trainer_semantic" in ablations:
+        features[18:25] = 0
+        features[32:37] = 0
+        features[42:46] = 0
+    if "action_tactical" in ablations:
+        features[10:12] = 0
+        features[29:32] = 0
+        features[46:48] = 0
+    if "action_semantic" in ablations:
+        features[12:48] = 0
 
 
 def _side_board_features(side: dict[str, Any]) -> np.ndarray:

@@ -23,9 +23,10 @@ class PolicySample:
 
 
 class JsonlPolicyDataset(Dataset[PolicySample]):
-    def __init__(self, path: str | Path, *, min_actions: int = 2) -> None:
+    def __init__(self, path: str | Path, *, min_actions: int = 2, ablations: set[str] | None = None) -> None:
         self.path = Path(path)
-        self.samples = list(load_policy_samples(self.path, min_actions=min_actions))
+        self.ablations = ablations or set()
+        self.samples = list(load_policy_samples(self.path, min_actions=min_actions, ablations=self.ablations))
         if not self.samples:
             raise ValueError(f"No usable policy samples found in {self.path}")
 
@@ -36,7 +37,7 @@ class JsonlPolicyDataset(Dataset[PolicySample]):
         return self.samples[index]
 
 
-def load_policy_samples(path: str | Path, *, min_actions: int = 2) -> Iterable[PolicySample]:
+def load_policy_samples(path: str | Path, *, min_actions: int = 2, ablations: set[str] | None = None) -> Iterable[PolicySample]:
     with Path(path).open("r", encoding="utf8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -46,8 +47,8 @@ def load_policy_samples(path: str | Path, *, min_actions: int = 2) -> Iterable[P
             target_index = int(example.get("selectedActionIndex", -1))
             if len(actions) < min_actions or target_index < 0 or target_index >= len(actions):
                 continue
-            state_features = observation_to_features(example.get("observation", {}))
-            action_features = legal_actions_to_features(actions)
+            state_features = observation_to_features(example.get("observation", {}), ablations=ablations)
+            action_features = legal_actions_to_features(actions, ablations=ablations)
             if state_features.shape != (STATE_DIM,):
                 raise ValueError(f"Bad state feature shape at line {line_number}: {state_features.shape}")
             if action_features.shape[1:] != (ACTION_DIM,):
