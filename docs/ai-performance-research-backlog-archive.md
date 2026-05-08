@@ -1,6 +1,6 @@
 # AI Performance Research Backlog Archive
 
-Last refined: 2026-05-08 (v4 — evidence-driven pass after the first real DAgger run).
+Last refined: 2026-05-08 (v4.1 — adversarial pass on v4; four parallel reviewers).
 
 This file keeps the useful discarded signal from the original `ai-performance-research-backlog.md` and `ai-performance-research-backlog-v2.md` after consolidation into `docs/ai-performance-research-backlog.md`.
 
@@ -78,6 +78,25 @@ The v4 refinement is anchored to fresh empirical data from the first real DAgger
 Status fields (`✓ done`, `~ partial`, `· pending`, `↑/↓` priority change vs v3) added to every active item so the next refinement can diff against v4 cleanly.
 
 The named-status convention is durable; the priority-change arrows are diff-against-v3 only and should be removed at v5.
+
+## Adversarial Pass v4.1 (2026-05-08)
+
+Four parallel reviewer subagents critiqued v4 on independent angles: dependency/ordering soundness, failure-mode review of items already done or partial, per-item adversarial pass on acceptance signals and status flags, and an empirical-claim audit. Patches in v4.1:
+
+- **Item 2 decision rule rewritten.** v4's rule used AND between two thresholds and was logically inconsistent with the F1 reframe elsewhere in the doc. v4.1 replaces it with: "the teacher used by the orchestrator is whichever measured method has the highest Wilson lower bound at n≥100; the 65% bar is aspirational, the 55% bar is the launch criterion." Adds an explicit three-branch fork on item-7's outcome so failing the value head no longer cascades silently.
+- **Item 7 dual-gate amendment.** Tiebreaker-grade (Wilson-significant lift over point-margin) is sufficient for item 2's tiebreaker fallback. GAE-grade (calibration + drift envelope + bounded variance) is required for F1's GAE. If only the tiebreaker-grade gate clears, F1 falls back to point-margin advantages and the GAE-grade work is logged as a follow-up.
+- **Item 13 residual scope made explicit.** v4 implied item 12 closes item 13's gap; v4.1 records that item 12 only *unblocks* item 13 and that item 13 retains explicit work: per-matchup computation/thresholding, halt-after-2 trigger, and a confidence-band tolerance on the aggregate floor (so iteration-on-iteration noise at small n doesn't ratchet the floor monotonically).
+- **Item 14 acceptance falsifiable.** v4 had "manifest records throughput numbers" — passes trivially. v4.1 adds the ≤4h wall-clock and ≥200 dec/s thresholds as actual acceptance, with a "recorded escalation memo" escape hatch.
+- **New item 17: larger-scale DAgger sweep.** v4 named this in narrative prose; v4.1 makes it an explicit item with acceptance (≥250 trace games × ≥3 iters, eval n≥500, KL anti-forgetting on, ≥30 epochs, rollout-steps aligned with the rebaseline gate). Includes a pre-registered escalation: only after item 17 trips its escalation does the v4 reframe ("F1 is the path through the cap") graduate from working hypothesis to finding.
+- **New item 18: F1 plumbing prep.** Behavior-policy logging at serving time, reward shaping spec, episode boundary, default buffer N, GAE-λ/γ, KL/entropy controls, HP sweep methodology — all unblocked today, sequenced in parallel with item 7 because behavior-policy logging must be in the serving path before the warm-start checkpoint generates F1's rollouts.
+- **B1 promoted to "may move above the gate."** v4 left B1 ("margin/phase/action-kind training mixes") behind the SL→RL handoff. With the v4 warm-start reframe, the warm-start's quality matters more than v3 assumed. If item 17's error analysis shows margin signal as the bottleneck, B1 graduates to a P1-Optional enhancer of item 17.
+- **Empirical block hedged.** v4 said "the v3 55-65% imitation ceiling is empirically too optimistic." v4.1 retreats to "the imitation cap is ≥34% at n=50, current data scale; the v3 range is *not yet falsified* — falsification requires n≥500 + ≥30 epochs + KL anchor, which lands as item 17."
+- **Recipe bug recorded.** Trace generation in `runs/dagger-real-2026-05-08/` ran with `--rollout-steps 200`, but the rebaseline that produced the 68% rollout-CRN number used 500. The teacher generating training labels was weaker than the teacher measured for promotion. Item 17 must align rollout-steps with the rebaseline config.
+- **Planner "exhausted" → "one config tried."** v4's archive said "pre-registered escalations exhausted." v4.1 corrects: only one planner config (CRN samples=3, max-depth 8, top-K 4) was measured; bundle-depth, top-K sweep, ranker mode, and planner+rollout composition are unrun.
+- **Header / status / cross-ref hygiene.** Item 7 split out of the "P1-Optional" section into a new "P0 — De-facto Critical Path After Orchestrator's First Real Sweep" section. Item 11 prereq list rephrased as "what landed" rather than "what must land first." Item 0's stale 24h-escalation clause struck. Item 14's "establish targets first" sub-task closed by item 0. Item 5 sub-status reformatted (5a ✓ done; 5b · pending) to fit the legend. Item 12 cycling-detector wording aligned with the Loop Promotion Gate. Item 13's "≥0pp tolerance" tightened with a confidence-band fallback at small n. F1's reframe contingencied on item 17.
+- **Code-level issues from reviewer 2 (zombie serve_onnx, mix-source rounding, promotion ratchet under noise, hidden-info leak fixture extension, N-step cycle false-positives, lru_cache vocab caching) deferred to separate code commits.** Documented here so v5 can verify they were either fixed or explicitly deferred.
+
+Reviewers' raw reports preserved in conversation history.
 
 ## Historical Results Policy
 
