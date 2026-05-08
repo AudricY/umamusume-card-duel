@@ -1,470 +1,224 @@
-# AI Performance Research Backlog
+# Unified AI Performance Research Backlog
 
-## Context
+Last refined: 2026-05-08.
 
-The current AI stack is functional end to end: TypeScript exports legal-action examples, Python trains candidate-conditioned policy/value models, ONNX serving works, and headless model-vs-heuristic evaluation runs with no heuristic fallback requirement.
+This is the canonical working backlog for AI strength research. It merges the original performance backlog and the v2 capacity track into one ordered list.
 
-The blocker is strength, not plumbing. `docs/ai-training-findings.md` shows the best trained policies below 45% win rate. Historical online teacher/search runs reached parity to 60% in small side-specific runs, but corrected-evaluator/card-aware follow-ups reset that picture lower: corrected trained policies landed around 34-40%, corrected rollout around 42.5%, and corrected shallow search around 37.5%.
+The active goal is not to train a larger supervised model on the current labels. The current blocker is still teacher/planner quality: corrected trained policies are around 34-40% win rate, corrected rollout is 42.5%, and corrected depth-2/top-12 search is 37.5%. The next useful work must either improve the teacher, improve model-visited data, or remove a measurement/representation bottleneck that blocks those steps.
 
-A card-aware feature pass has already expanded action and state semantics, and it did not solve closed-loop strength. A credible 80% win-rate target now depends on a stronger teacher, model-visited-state data, feature schema/versioning discipline, ablation diagnostics, and tighter evaluation gates.
+Archived and absorbed items are tracked in `docs/ai-performance-research-backlog-archive.md`. Progress notes remain in `docs/ai-performance-research-progress.md`.
 
-Active execution notes are tracked in `docs/ai-performance-research-progress.md`.
+## Promotion Standard
 
-This backlog is ordered by expected impact on closed-loop win rate, then by risk reduction.
+Use this standard before calling a research change successful:
 
-## P0: Build A Stronger Teacher Before More Distillation
+- 500 side-balanced held-out games, unless a tiny smoke is explicitly labeled as a smoke.
+- Fixed non-training seed range and documented deck or matchup pool.
+- Zero heuristic fallbacks and zero selected no-op actions except explicit legal pass.
+- Report win rate with Wilson 95% CI, side split, average points, terminal reasons, selected candidate rank, and fallback/no-op counts.
+- Promote policy/model changes only when closed-loop evaluation improves. Row-level accuracy alone is not enough.
 
-### 1. Full-Turn Or Turn-Bundle Planner
+## P0: Measurement And Teacher Quality
 
-**Problem:** Current search chooses one micro-phase action at a time. Strong turns often require coordinated trainer, evolve, attach, ability, retreat, and attack sequencing.
+### 1. Run The Corrected Rebaseline Suite
 
-**Direction:** Add a planner that enumerates bounded action sequences until attack/end-turn, applies each sequence with `advanceModeledTurnStep`, then scores the resulting state via rollout/search. Start with top-K sequence expansion per phase and hard caps on total sequences.
+**Why:** Historical results are not comparable after the corrected evaluator, state fingerprint, modeled action export, and card-aware feature changes. The eval gate exists, but the full corrected suite has not been run at the promotion standard.
 
-**Expected impact:** Very high. This is the clearest path to labels better than the rule bot.
+**Work:**
 
-**Acceptance signal:**
-
-- Planner beats the rule bot by at least 65% over 500 side-balanced held-out games before distillation.
-- `heuristicFallbacks === 0`.
-- Results report win rate by side, average points, terminal reasons, and confidence interval.
-
-**Evidence:**
-
-- Current phase stepping is explicit in `backend/src/sim/evaluateModelVsHeuristic.ts`.
-- Existing docs already recommend full-turn or turn-bundle MCTS as the next credible step.
-- Combat has clone-and-score machinery, but non-combat phases mostly do not.
-
-### 2. Controlled Common-Random Rollout/Search Samples
-
-**Problem:** Noisy action labels make near-tie decisions look meaningful. Outcome export has moved toward seeded candidate comparison, but the current teacher still needs multi-sample rewards, margin/confidence tracking, deterministic tie handling, and candidate-order invariance tests. Evaluator rollout/search paths also need the same discipline.
-
-**Direction:** For each decision, generate N sample seeds and score every candidate against the same seed set. Store sample count, mean reward, reward variance, selected-vs-runner-up margin, and tie policy. Drop or down-weight low-margin labels instead of treating every selected action as equally reliable.
-
-**Expected impact:** High. Lower-variance oracle labels should improve both search quality and supervised targets.
+- Run rule-bot mirror, `ai-policy` baseline, rollout selector, search selector, planner selector, and the best current trained model on one fixed held-out suite.
+- Finish eval-gate residuals: explicit selected no-op count, enforced zero-fallback/zero-no-op thresholds, and manifest output for every comparable run.
+- Add the missing bad-policy strength regression so a deliberately bad model fails the gate.
 
 **Acceptance signal:**
 
-- Outcome export records reward mean, variance, and margin per selected label.
-- Exported examples include `sampleCount`, per-candidate seed IDs, selected-vs-runner-up margin, and deterministic tie-policy metadata.
-- Repeating the same export seed produces identical selected labels.
-- Candidate order randomization does not change labels except when margins are below a configured tie threshold.
-- Training reports margin-bucket performance, including whether low-margin labels hurt closed-loop win rate.
+- One comparable table covers all baseline methods with the same seeds, decks/matchups, side split, terminal reasons, average points, confidence intervals, selected ranks, fallbacks, and no-op counts.
+- The report labels older pre-correction results as historical only.
 
-**Evidence:**
+### 2. Make The Full-Turn Planner A Real Teacher
 
-- `backend/src/sim/exportOutcomeTrainingExamples.ts` has a rollout-label path.
-- `backend/src/sim/evaluateModelVsHeuristic.ts` has rollout/search selectors but needs more controlled candidate comparison.
+**Why:** The initial `--selection planner` mode exists, but its tiny smoke was 0/2. The teacher must clear a higher bar before distillation or DAgger can credibly improve closed-loop strength.
 
-### 3. Stop Pruning Search By `features[0]` Alone
+**Work:**
 
-**Problem:** Outcome export and search candidate pools sort by one heuristic score. The findings doc notes wider top-K helped more than depth, which suggests useful actions are being pruned.
-
-**Direction:** Add candidate ranker modes:
-
-- heuristic score
-- model policy prior
-- phase-diverse top-K
-- epsilon/random exploratory candidates
-- always include baseline and pass/end-turn where legal
-
-Baseline inclusion is expected in the current outcome export path, but pass/end-turn inclusion and ranker modes remain open. Log dropped-best analysis when exhaustive scoring is affordable.
-
-**Expected impact:** High. A better candidate frontier can raise the teacher ceiling without changing the model.
+- Tune bounded turn-bundle expansion across trainer, evolve, attach, ability, retreat, and combat phases.
+- Combine planner leaves with common-random rollout/search scoring.
+- Use ranker diversity and exhaustive small-state audits to avoid pruning the best candidate before search sees it.
+- Track selected original rank, dropped-best rate, bundle length, and tie/low-margin rates.
 
 **Acceptance signal:**
 
-- Search reports ranker mode, candidate coverage, and selected candidate original rank.
-- Exhaustive small-state audits show low dropped-best rate.
-- Top-K sensitivity decreases in held-out evaluation.
+- Planner beats the rule bot by at least 65% over 500 side-balanced held-out games with zero fallbacks/no-ops.
+- Top-K sensitivity decreases, and exhaustive small-state audits show a low dropped-best rate.
 
-**Evidence:**
+### 3. Score Trainer And Ability Choices By Marginal Outcome
 
-- `exportOutcomeTrainingExamples.ts` and `evaluateModelVsHeuristic.ts` both sort candidates by `action.features[0]`.
+**Why:** Search, discard, target, and ability choices still use mostly local/static scores. These decisions often define the turn plan and are a likely teacher-quality bottleneck.
 
-## P0: Train On The States The Model Actually Visits
+**Work:**
 
-### 4. Policy-Baseline-Visited Outcome Export
-
-**Problem:** Rule-bot trajectories skip some model-facing decision states. The corrected outcome exporter now advances games with explicit modeled legal actions selected by `chooseHighestScoredAction`, which creates an `ai-policy` baseline state distribution. That is useful, but it is not the same as model-visited DAgger.
-
-**Direction:** Treat `ai-policy-baseline-visited` as a first-class dataset source. Keep it separate from rule-bot, trained-model, rollout-labeled, and search-labeled examples in manifests and training mixes.
-
-**Expected impact:** Medium-high. This is an intermediate distribution-fix before full DAgger and should improve attach/ability phase coverage.
+- Simulate trainer and ability choice effects, continue through the best remaining same-turn phases, and score marginal outcome.
+- Include pass/skip when an ability consumes resources or worsens survival.
+- Prioritize search trainers, discard-to-draw, Rainbow Uncap, damage abilities, and energy movement.
 
 **Acceptance signal:**
 
-- Export manifests report source taxonomy: `rule-bot`, `ai-policy-baseline-visited`, `model-visited`, `rollout-labeled`, and `search-labeled`.
-- Baseline-modeled exports show phase/action-kind coverage, especially attach and ability decisions.
-- The exporter records when it falls back from modeled baseline action to hard AI because a selected action did not mutate state.
+- Targeted fixtures improve for search/discard/target decisions.
+- Rollout/planner labels produce fewer low-margin discard/search choices.
+- Ability use correlates with point gain or survival improvement in held-out eval summaries.
 
-**Evidence:**
+### 4. Turn DAgger Traces Into A Training Loop
 
-- `backend/src/sim/exportOutcomeTrainingExamples.ts` now advances by one explicit modeled legal action, falling back to hard AI only on no-op.
+**Why:** `--decision-trace-out` exists and can attach rollout/search/planner teacher labels, but there is no explicit trace-to-training recipe or mixed DAgger run yet.
 
-### 5. DAgger-Style Model-Visited-State Export
+**Work:**
 
-**Problem:** Rule-bot trajectory data does not match the learned model's state distribution. The model drifts into states that were rare or absent during training.
-
-**Direction:** Add `--decision-trace-out` to model evaluation. For every model decision, write JSONL with:
-
-- observation and legal actions
-- model selected action
-- heuristic selected action
-- rollout/search selected action, if enabled
-- scores, margins, fallback status, seed, game result
-
-Use this trace as a mixed dataset for DAgger rounds.
-
-**Expected impact:** Very high once a stronger teacher exists.
+- Convert model-visited decision traces into loadable training rows without hidden opponent-hand leakage.
+- Define a repeatable mix of rule-bot, `ai-policy-baseline-visited`, model-visited, rollout-labeled, search-labeled, and planner-labeled rows.
+- Run one DAgger round only after the teacher in item 2 or item 3 clears a meaningful gate.
 
 **Acceptance signal:**
 
-- A DAgger dataset contains model-visited decisions from both sides with zero hidden opponent-hand leakage.
-- Training manifests report source mix: rule-bot, `ai-policy-baseline-visited`, model-visited, rollout-labeled, and search-labeled.
-- Closed-loop eval improves over training only on rule-bot trajectories.
+- Training manifests report the exact source mix and trace teacher.
+- A model trained with model-visited rows beats the same architecture trained only on rule-bot/baseline trajectories under the corrected rebaseline suite.
 
-**Evidence:**
+## P1: Representation, Data Scale, And Training Mix
 
-- `evaluateModelVsHeuristic.ts` counts model actions but discards decision states.
-- `docs/ai-training-findings.md` explicitly calls for model-visited-state labeling.
+### 5. Ship One Versioned Feature Migration For Card Identity And Context
 
-### 6. Episode/Seed-Based Train/Validation Split
+**Why:** The current state/action vectors still contain lossy card hashes and positional feature semantics. The v2 capacity track is valid, but it should land as one disciplined schema migration instead of scattered feature churn.
 
-**Problem:** Random per-sample splitting can put examples from the same game in both train and validation. That inflates validation accuracy and hides trajectory overfit.
+**Work:**
 
-**Direction:** Split by `episodeId` or `seed`, not row index. Preserve complete games in train or validation.
-
-**Expected impact:** Medium. This improves model selection quality and prevents false confidence.
-
-**Acceptance signal:**
-
-- `train_bc.py` supports `--split-by row|episode|seed`, defaulting to seed/episode.
-- Manifest records train/validation seed sets.
-- Validation accuracy may drop, but held-out closed-loop eval correlates better with validation metrics.
-
-**Evidence:**
-
-- `training/train_bc.py` currently splits shuffled row indices.
-- `training/uma_ai/dataset.py` keeps the raw example, including seed/episode fields.
-
-## P1: Fix Action And Feature Fidelity
-
-### 7. Enumerate All Legal Attacks And Attack Choices
-
-**Problem:** AI combat planning uses the primary attack, while the combat engine supports `attackIndex` and additional choices.
-
-**Direction:** Extend `AiCombatDecision` and `buildAttackCandidates` to enumerate legal attacks on the active card. Include attack index, discard choices, switch targets, evolve-from-deck choices, and self-shuffle options where relevant. Coordinate this with feature fidelity work so combat action features include attacker/source card, attack index, attack choice metadata, and target side/slot semantics.
-
-**Expected impact:** High for cards whose best line is not the primary attack.
+- Add a shared TS/Python card vocabulary and per-card embeddings.
+- Replace hand/bench/discard aggregate hashes with set/permutation-invariant encoders.
+- Add card metadata used by decisions: weakness, retreat cost, attack count, secondary attack costs, ability presence/recharge state, expected weakness-adjusted damage, and target-survives flags.
+- Add a fixed recent-action history slice that also travels in DAgger traces.
+- Finish row-level feature schema versions, slot fixture tests, semantic state fixtures, hidden-information safety tests, and closed-loop ablation reporting.
 
 **Acceptance signal:**
 
-- Action contract covers every attack on representative multi-attack cards.
-- Legal combat action export includes attack index.
-- Search/eval can attribute win-rate changes by attack index usage.
+- Exports, manifests, checkpoints, ONNX export, and serving all fail fast on schema/vocab mismatch.
+- Ablations compare hash baseline, embeddings only, set encoder, metadata/history, and combined features.
+- Promotion requires corrected closed-loop improvement or a documented targeted failure-mode fix.
 
-**Evidence:**
+### 6. Parallelize Generation And Add Matchup Sampling
 
-- `frontend/src/game/engine/flow/ai/combatPlanner.ts` calls `getPrimaryAttack`.
-- `frontend/src/game/engine/flow/combat.ts` supports richer attack resolution parameters.
+**Why:** Larger or richer datasets are not credible while generation is single-threaded and tied to one fixed deck pair.
 
-### 8. Finish Candidate Feature Schema Migration
+**Work:**
 
-**Problem:** Candidate action features have been expanded from 32 to 48 dimensions with trainer effect flags, choice-card role features, attack readiness, and typed deficit. The migration is still incomplete: positional semantics are unversioned, old 32-wide JSONL rows can be silently zero-padded by Python, `target.uid === targetSlot` still looks invalid, and combat actions do not yet pass attacker/source metadata for the new source-card slots.
-
-**Direction:** Version the action-feature schema and finish replacing weak slots with explicit tactical signals:
-
-- target is active / benched / own / opponent
-- KO available now
-- target survives expected response
-- can attack after attach
-- energy shortfall by type and total
-- points remaining
-- under immediate KO threat
-- action ends turn
-- attacker/source card for combat actions
-- attack index and attack choice metadata
-
-**Expected impact:** Medium-high for both learned and score-based policies.
+- Add worker-thread sharding for rule-bot, outcome, planner, and trace exporters.
+- Write per-shard manifests and a deterministic concat manifest.
+- Add deck-pool or deck-pair sampling for generation and eval.
 
 **Acceptance signal:**
 
-- Feature schema version increments.
-- TS exports, JSONL examples, training manifests, checkpoints, and ONNX serving all record compatible state/action feature schema versions.
-- TS and Python dimensions/constants stay in lockstep, and mismatches fail clearly instead of silently padding/truncating.
-- Feature smoke tests validate named slot semantics for trainer choice-card, ability discard choice-card, attach target readiness, combat attacker metadata, and target side/slot fields.
+- `--workers N` scales near-linearly up to physical core count on representative exports.
+- Same seed and shard config produces stable rows.
+- Manifests record seed shards and deck pair per game.
+- Eval reports per-matchup breakdowns.
 
-**Evidence:**
+### 7. Use Margin, Phase, And Action-Kind Signals In Training Mixes
 
-- `frontend/src/game/engine/ai-policy/actions.ts` builds 48 action features, but the semantics are positional and unversioned.
-- `training/uma_ai/features.py` copies action features into model tensors without schema validation.
+**Why:** CRN metadata, margin buckets, and phase/action metrics now exist, but they are not yet used to control training weights or sampling.
 
-### 9. Validate And Ablate State Feature Semantics
+**Work:**
 
-**Problem:** State features now fill the 96-wide vector tail with hand role, discard role, readiness, KO, energy-zone, stadium, and ready-attacker aggregates. The remaining risk is that these features may add capacity without improving decisions, and Python now depends directly on `shared/src/data/cards.json` path/schema and variant suffix normalization.
-
-**Direction:** Validate the semantic aggregates, reduce residual hashes where useful, and evaluate learned card embeddings. Add fixture coverage for card-catalog access and hidden-information safety.
-
-**Expected impact:** Medium-high. Better generalization and more informed trainer/search/discard choices.
+- Run low-margin down-weighting and filtering experiments.
+- Add adaptive CRN sample expansion for close decisions.
+- Add stratified sampling by phase, action kind, game stage, and one-legal-action pass/end-turn rows.
 
 **Acceptance signal:**
 
-- State feature schema/version is recorded in exports, manifests, checkpoints, and ONNX serving.
-- Ablation compares hashed-only, semantic state features, semantic action features, and combined features.
-- Phase-level metrics improve for trainer, attach, ability, and combat decisions.
-- Feature tests cover hand composition, discard composition, ready attacker, KO availability, variant card IDs, catalog path/schema, and no hidden opponent-hand leakage.
+- Training manifests record weighting, filtering, sampler config, and adaptive sample settings.
+- Margin-bucket and phase/action-kind metrics improve without common-phase regressions.
+- Matched wall-clock comparisons beat fixed one-sample CRN or uniform sampling.
 
-**Evidence:**
+### 8. Harden Procedural Scoring And Turn Goals Under The Gate
 
-- `training/uma_ai/features.py` now adds semantic card-awareness features, but still contains residual hash features and direct card-catalog loading.
-- `docs/ai-training-findings.md` reports that card-aware features did not improve corrected closed-loop win rate.
+**Why:** Some hard-AI scoring has been ported into `ai-policy`, and midgame turn goals exist, but both need larger proof. This remains useful because candidate ordering still feeds search and export.
 
-### 10. Feature Ablation And Slot-Importance Runs
+**Work:**
 
-**Problem:** The card-aware feature pass fixed real representation gaps but did not improve closed-loop strength. Without ablation, it is unclear whether the features are useful, noisy, undertrained, or simply blocked by teacher quality.
-
-**Direction:** Run controlled comparisons across feature sets and report results by phase/action kind:
-
-- hash-only baseline
-- semantic state features only
-- semantic action features only
-- combined semantic state/action features
-- top slot groups removed one at a time
-
-**Expected impact:** Medium. This prevents spending more effort on feature work that the current teacher cannot exploit.
+- Port remaining bench, combat, trainer-choice, and survival-aware scorers without creating engine import cycles.
+- Use turn-goal telemetry to validate protect-active, backup-attacker, evolution-dig, and point-lead conversion behavior.
 
 **Acceptance signal:**
 
-- Ablation report includes row-level metrics, closed-loop win rate, phase/action-kind accuracy, margin buckets, and selected candidate rank.
-- Feature changes are promoted only when they improve corrected held-out evaluation or explain a targeted failure mode.
-
-**Evidence:**
-
-- Card-aware v1-v4 results in `docs/ai-training-findings.md` did not clear the short-run improvement gate.
-
-## P1: Improve Procedural And Hybrid Policy Quality
-
-### 11. Port Strong Procedural Heuristics Into `ai-policy`
-
-**Problem:** `ai-policy` scoring is shallow compared with the hand-written hard AI. This weakens default action ranking, search pruning, and model candidate features.
-
-**Direction:** Share state-aware scorers between `flow/ai` and `ai-policy`, or create a common policy-evaluation module. Prioritize bench, evolution, attach, trainer, and combat candidate scores.
-
-**Expected impact:** High, especially because search currently depends on candidate ordering.
-
-**Acceptance signal:**
-
-- `chooseHighestScoredAction(enumerateLegalAiActions(...))` performs closer to the hard AI in mirror eval.
+- `chooseHighestScoredAction(enumerateLegalAiActions(...))` approaches hard-AI strength in a side-balanced held-out gate.
+- Average points improve even when win-rate movement is noisy.
 - Search top-K can shrink without losing strength.
-- No new import cycle across engine modules.
 
-**Evidence:**
+## P2: Value, Architecture, And Scale Infrastructure
 
-- `ai-policy/actions.ts` scores many phases with static constants.
-- `flow/ai/core.ts`, `trainerUtils.ts`, `attachUtils.ts`, and `combatPlanner.ts` contain more contextual logic.
+### 9. Calibrate Value And Action-Value Before Using Them In Search
 
-### 12. Outcome-Based Trainer And Ability Choice Scoring
+**Why:** The current value head is unusable for planning. Value work should be treated as a gated research item, not an action selector toggle.
 
-**Problem:** Search/discard/target/ability choices are mostly generic scores, not tied to the board plan.
+**Work:**
 
-**Direction:** For each trainer or ability choice, simulate the effect, run best remaining phases through combat/end-turn, and score marginal value. Include pass/skip when using an ability consumes energy or worsens survival.
-
-**Expected impact:** High for search trainers, discard-to-draw, Rainbow Uncap, damage abilities, and move-energy abilities.
+- Train value on model-visited states with terminal outcome, point-margin, and candidate rollout/search rewards.
+- Evaluate scalar value, action-value, distributional/quantile value, and auxiliary heads as ablations.
+- Consider auxiliary heads for public opponent hand size, next-turn KO risk, turn-end value distance, and opponent next action kind.
 
 **Acceptance signal:**
 
-- Target/discard choice accuracy improves on targeted fixtures.
-- Rollout teacher selects fewer low-margin discard/search labels.
-- Ability use rate correlates with point gain or survival improvements.
-
-**Evidence:**
-
-- `ai-policy/actions.ts` expands trainer choices but scores them with tiny target/discard adjustments.
-- Procedural ability ordering in `flow/ai/core.ts` is mostly stage/order driven.
-
-### 13. Broaden Turn-Goal Detection
-
-**Problem:** Goals currently cover immediate lethal, narrow two-turn lethal, immediate KO threat, and no-bench recovery. Strategic midgame goals are missing.
-
-**Direction:** Add goals for:
-
-- build backup attacker
-- protect loaded active
-- deny opponent setup
-- dig for evolution
-- stabilize low-deck or low-bench states
-- convert point lead safely
-
-Feed goals into trainer, attach, bench, ability, and combat scoring.
-
-**Expected impact:** Medium. This improves strategic consistency across phases.
-
-**Acceptance signal:**
-
-- Telemetry shows goal distribution by turn bucket and side.
-- Goal-specific fixtures validate expected action preferences.
-- Closed-loop eval improves average points even before win-rate gains.
-
-**Evidence:**
-
-- `frontend/src/game/engine/flow/ai/turnPlan.ts` is compact and currently narrow.
-- Attachment and trainer selection already consume `AiTurnGoal`.
-
-## P1: Make Value Useful For Planning
-
-### 14. Train A Calibrated Value Or Action-Value Head
-
-**Problem:** The current value head performed poorly when used for planning. It is trained on sparse game outcomes and not calibrated by turn/phase.
-
-**Direction:** Train value as a first-class objective:
-
-- use model-visited states
-- include terminal outcome and point-margin targets
-- report AUC/calibration by turn bucket and phase
-- consider an action-value head trained from candidate rollout/search rewards
-
-Only use value-guided selection after it beats simple point-margin heuristics.
-
-**Expected impact:** Medium-high. Useful value estimates can reduce rollout cost and improve search leaves.
-
-**Acceptance signal:**
-
-- Value calibration plots/metrics are written to manifest.
-- One-step value selection beats point-margin and heuristic-score baselines.
+- Calibration metrics by turn bucket and phase beat simple point-margin baselines.
+- One-step value/action-value selection beats heuristic and point-margin baselines.
 - Value-augmented search improves win rate without increasing fallback/no-op rate.
 
-**Evidence:**
+### 10. Make Training Scale-Ready Before Large Sweeps
 
-- `training/uma_ai/model.py` has a state value head.
-- `training/train_bc.py` trains value with a small weighted MSE.
-- `evaluateModelVsHeuristic.ts` already supports value-based selection for experiments.
+**Why:** Bigger encoders and datasets need observability and reliable resume behavior before multi-hour experiments are worth running.
 
-## P2: Evaluation, Reproducibility, And Regression Gates
+**Work:**
 
-### 15. Corrected-Evaluator Rebaseline And Comparability
-
-**Problem:** The state-hash and one-action exporter fixes changed the meaning of historical results. Older rollout/search numbers are not directly comparable with corrected-evaluator/card-aware runs.
-
-**Direction:** Establish a corrected-evaluator baseline suite on one fixed held-out seed set. Run rule-bot mirror, `ai-policy` baseline, rollout selector, search selector, and trained model evaluations on the same side-balanced seeds.
-
-**Expected impact:** High for research quality. This separates real strength gains from measurement changes.
+- Add opt-in TensorBoard or wandb logging for per-batch losses, gradient norms, LR, and per-epoch eval.
+- Add sharded JSONL.gz / bounded-memory iterable loading while keeping small map-style smoke tests.
+- Add AMP, LR warmup/cosine schedule, gradient accumulation, and optimizer/scheduler/RNG resume.
 
 **Acceptance signal:**
 
-- A single table reports all baseline methods on the same corrected evaluator, seed range, decks, model side split, and max step settings.
-- Historical results are labeled non-comparable unless rerun under the corrected evaluator.
-- Reports include side split, average points, fallback/no-op count, terminal reasons, selected candidate rank, and confidence interval.
+- Smoke tests run unchanged with logging disabled.
+- Resume-from-checkpoint matches uninterrupted smoke metrics.
+- Manifests record loader, optimizer, scheduler, AMP, accumulation, and resume settings.
 
-**Evidence:**
+### 11. Try Entity-Aware Architecture Only After Feature Tokens Exist
 
-- `docs/ai-training-findings.md` now contains historical results plus corrected card-aware/evaluator results with lower rollout/search numbers.
+**Why:** Cross-attention or transformer work is not useful on the current hash-heavy snapshot. It becomes meaningful after item 5 creates card/entity tokens.
 
-### 16. Deterministic Progress Fingerprint And No-Op Detection
+**Work:**
 
-**Problem:** No-op detection, stall detection, fallback accounting, and search memoization depend on state fingerprints. The active hash expansion catches more real mutations, but duplicated local implementations and count-only hand/deck/discard summaries still leave blind spots.
-
-**Direction:** Move state fingerprinting into a shared helper and define its contract. Include all public and simulator-relevant mutation fields, and explicitly document any intentionally excluded private contents.
-
-**Expected impact:** High for trustworthy measurement and label generation.
+- Start with action-to-board cross-attention over active, bench, hand pool, discard pool, stadium, energy-zone, and history entities.
+- Sweep asymmetric tower scaling after logging and eval gates are stable.
+- Keep the transformer encoder as a stretch path only after 100K+ useful rows and entity-token baselines exist.
 
 **Acceptance signal:**
 
-- `headlessAiVsAi.ts`, `evaluateModelVsHeuristic.ts`, action-contract tests, and search memoization use one shared fingerprint helper.
-- Fixture tests prove the fingerprint changes for active/bench HP, energies, special conditions, tools, ability usage, phase, pending choice, points, turn flags, energy zone, and board movement.
-- Tests document whether same-count hand/deck/discard content swaps are intentionally ignored or included.
+- Cross-attention beats concat-fusion on corrected held-out eval and placement-sensitive phase metrics.
+- ONNX export and serving smoke pass with fixed token counts and masks.
+- Attention checks on fixtures focus on the relevant target slot/action entity.
 
-**Evidence:**
+### 12. Close Narrow Fidelity And Regression Gaps
 
-- `backend/src/sim/evaluateModelVsHeuristic.ts` and `backend/src/sim/headlessAiVsAi.ts` currently have duplicated compact state hashing logic.
+**Why:** Several old backlog items are no longer broad active projects, but their residual gaps should be tracked so they do not disappear.
 
-### 17. Evaluation Gate With Confidence Intervals
+**Work:**
 
-**Problem:** Evaluation emits summary JSON but no pass/fail gate, confidence interval, seed split discipline, or phase/action breakdowns.
-
-**Direction:** Add an eval gate script around `sim:evaluate-model` that runs side-balanced held-out seeds and fails below configured thresholds.
-
-**Expected impact:** Medium. Prevents chasing noisy improvements.
+- Add a representative multi-attack fixture once card data includes a real multi-attack card, or add a focused test fixture card.
+- Add explicit row-level schema-version fixtures for trainer choice-card, ability discard choice-card, attach readiness, combat attacker metadata, attack index, and target side/slot.
+- Enforce manifest presence for ad hoc eval commands that claim comparability.
 
 **Acceptance signal:**
 
-- Reports win rate, Wilson CI, side split, average points, terminal reasons, fallback count, and no-op count.
-- Fails if fallback count is nonzero or sample size is below target.
-- Standard 500-game held-out run is documented.
+- `npm run test:train` and backend AI tests cover these residual contracts.
+- A missing schema version, missing manifest, selected no-op, or incompatible checkpoint fails clearly.
 
-**Evidence:**
+## Not Active Until Gated
 
-- `evaluateModelVsHeuristic.ts` summarizes aggregate win rate and points.
-- Root `package.json` exposes eval scripts but no gated command.
-
-### 18. Dataset And Run Manifests
-
-**Problem:** Export scripts write JSONL and minimal console metadata. Training manifests do not preserve simulator/search parameters, git SHA, or dataset distributions.
-
-**Direction:** Write `manifest.json` beside every export, training run, and eval result with:
-
-- command args
-- git SHA and dirty flag
-- seed ranges
-- feature schema versions and source taxonomy
-- phase/action-kind counts
-- terminal reasons
-- reward margin distribution
-- sample-weight distribution
-- fallback/no-op counts
-
-**Expected impact:** Medium. Makes experiments reproducible and comparable.
-
-**Acceptance signal:**
-
-- Every generated JSONL or checkpoint has a sibling manifest.
-- Manifest is sufficient to rerun the experiment.
-- Training README documents the experiment artifact layout.
-
-**Evidence:**
-
-- `exportTrainingExamples.ts` and `exportOutcomeTrainingExamples.ts` only print metadata.
-- `train_bc.py` writes model metrics but not full dataset/export provenance.
-
-### 19. Stronger AI Training Smoke Tests
-
-**Problem:** Current training smoke proves a tiny model can reduce loss on deterministic rule-bot labels. It does not test outcome labels, trace export, evaluator integration, or worst-action detection.
-
-**Direction:** Add smoke tests for:
-
-- outcome-export schema and sample weights
-- deterministic oracle labels across repeated seeds
-- DAgger trace export
-- fake model server that chooses best/pass/worst actions
-- eval gate failure on intentionally bad policies
-- feature-schema compatibility across TS export, Python training, ONNX export, and serving
-- corrected fingerprint/no-op regression fixtures
-- diagnostics by phase, action kind, card family, selected candidate rank, regret, and margin bucket
-
-**Expected impact:** Medium. Catches training-signal regressions before expensive jobs.
-
-**Acceptance signal:**
-
-- `npm run test:train` covers heuristic export, outcome export, and fake-model eval.
-- Train/export/serve fails clearly when checkpoint dimensions do not match current `STATE_DIM`/`ACTION_DIM`.
-- Modeled baseline action either mutates state or records exactly one fallback to hard AI.
-- Action contract remains zero no-op for sampled legal actions.
-
-**Evidence:**
-
-- `backend/src/tests/aiTrainingSmoke.ts` checks only a simple rule-bot imitation loop.
-- `backend/src/tests/aiActionContractSmoke.ts` checks mutating legal actions but not label quality.
-
-## Suggested Implementation Order
-
-1. Fix measurement first: corrected-evaluator rebaseline, deterministic progress fingerprint, common-random samples, eval gate, and manifests.
-2. Build full-turn/turn-bundle planner and ranker diversity until the teacher itself clears a higher win-rate bar.
-3. Use policy-baseline-visited exports as an intermediate source, then add DAgger trace export and train on model-visited states labeled by the stronger teacher.
-4. Finish feature migration: schema versioning, compatibility checks, feature smoke tests, ablations, and checkpoint/dataset regeneration policy before larger training runs. Old checkpoints and ONNX exports are incompatible after `STATE_DIM`/`ACTION_DIM` changes unless regenerated.
-5. Calibrate value/action-value heads and use them as search accelerators only after offline calibration passes.
-
-## Non-Goals For The Next Round
-
-- Do not run larger supervised jobs on the current label setup and expect an 80% result.
-- Do not promote policy/value changes based only on row-level accuracy.
-- Do not use value-guided action selection until calibration beats simple baselines.
-- Do not weaken the zero-fallback/no-op action contract to make experiments pass.
+- Larger supervised jobs on current labels.
+- Self-play or RL before a stronger teacher/planner clears a useful gate.
+- Multi-GPU/DDP before single-GPU training becomes the measured bottleneck.
+- Masked card/action pretraining unless labeled-data scaling stalls.
+- Transformer destination architecture before embeddings, set encoders, cross-attention, and 100K+ useful rows exist.
