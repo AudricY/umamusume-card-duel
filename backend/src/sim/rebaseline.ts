@@ -37,6 +37,7 @@ type RebaselineArgs = {
   plannerFirstActionAggregate: "max" | "mean";
   rolloutCrnSamples: number;
   cycleWindow: number;
+  cycleMinVisits: number;
   modelUrl: string;
   methods: string;
   outDir: string;
@@ -107,6 +108,7 @@ async function runMethodAsModel(args: RebaselineArgs, method: MethodKey) {
     plannerMaxSequences: args.plannerMaxSequences,
     plannerMaxDepth: args.plannerMaxDepth,
     cycleWindow: args.cycleWindow,
+    cycleMinVisits: args.cycleMinVisits,
     plannerCrnSamples: args.plannerCrnSamples,
     plannerLeafAggregate: args.plannerLeafAggregate,
     plannerFirstActionAggregate: args.plannerFirstActionAggregate,
@@ -152,6 +154,8 @@ function runRuleMirrorGameWithRng(seed: string, scoringSide: SideId, args: Rebas
   let state = setupAiVsAiGame();
   let terminalReason: "gameOver" | "maxSteps" | "stalled" | "cycleStalled" = "maxSteps";
   const recentHashes: string[] = [];
+  const cycleMinVisits = Math.max(2, args.cycleMinVisits);
+  const hashVisitCounts = new Map<string, number>();
   for (let step = 0; step < args.maxSteps; step += 1) {
     if (state.gameOver) {
       terminalReason = "gameOver";
@@ -169,12 +173,19 @@ function runRuleMirrorGameWithRng(seed: string, scoringSide: SideId, args: Rebas
       break;
     }
     if (args.cycleWindow > 0) {
-      if (recentHashes.includes(after)) {
+      const nextCount = (hashVisitCounts.get(after) ?? 0) + 1;
+      hashVisitCounts.set(after, nextCount);
+      recentHashes.push(after);
+      if (recentHashes.length > args.cycleWindow) {
+        const evicted = recentHashes.shift()!;
+        const remaining = (hashVisitCounts.get(evicted) ?? 0) - 1;
+        if (remaining <= 0) hashVisitCounts.delete(evicted);
+        else hashVisitCounts.set(evicted, remaining);
+      }
+      if (nextCount >= cycleMinVisits) {
         terminalReason = "cycleStalled";
         break;
       }
-      recentHashes.push(after);
-      if (recentHashes.length > args.cycleWindow) recentHashes.shift();
     }
   }
   return {
@@ -287,6 +298,7 @@ function parseArgs(argv: string[]): RebaselineArgs {
     plannerFirstActionAggregate: parsePlannerFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
     rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
     cycleWindow: Number(get("--cycle-window", "8")),
+    cycleMinVisits: Number(get("--cycle-min-visits", "3")),
     modelUrl: get("--model-url", "http://127.0.0.1:8765"),
     methods: get("--methods", "rule-mirror,baseline,inverted-baseline,rollout,search,planner"),
     outDir: get("--out-dir", "runs/rebaseline"),

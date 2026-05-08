@@ -53,6 +53,7 @@ export type EvaluateModelArgs = {
   details: boolean;
   selection: "policy" | "baseline" | "inverted-baseline" | "value" | "rollout" | "search" | "planner";
   cycleWindow: number;
+  cycleMinVisits: number;
   plannerCrnSamples: number;
   plannerLeafAggregate: "mean" | "max" | "median";
   plannerFirstActionAggregate: "max" | "mean";
@@ -160,6 +161,12 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
   const decisionTraces: DecisionTraceRow[] = [];
   const recentHashes: string[] = [];
   const cycleWindow = Math.max(0, args.cycleWindow);
+  // Require a hash to appear cycleMinVisits times in the window before declaring
+  // a cycle stall. Default 3 (= 2 repeats) so transient state aliasing — e.g. a
+  // turn-end fingerprint that recurs at a later draw step — does not falsely
+  // trip the gate. Reviewer 2 #5.
+  const cycleMinVisits = Math.max(2, args.cycleMinVisits);
+  const hashVisitCounts = new Map<string, number>();
 
   for (let step = 0; step < args.maxSteps; step += 1) {
     if (state.gameOver) {
@@ -234,12 +241,19 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
       break;
     }
     if (cycleWindow > 0) {
-      if (recentHashes.includes(afterHash)) {
+      const nextCount = (hashVisitCounts.get(afterHash) ?? 0) + 1;
+      hashVisitCounts.set(afterHash, nextCount);
+      recentHashes.push(afterHash);
+      if (recentHashes.length > cycleWindow) {
+        const evicted = recentHashes.shift()!;
+        const remaining = (hashVisitCounts.get(evicted) ?? 0) - 1;
+        if (remaining <= 0) hashVisitCounts.delete(evicted);
+        else hashVisitCounts.set(evicted, remaining);
+      }
+      if (nextCount >= cycleMinVisits) {
         terminalReason = "cycleStalled";
         break;
       }
-      recentHashes.push(afterHash);
-      if (recentHashes.length > cycleWindow) recentHashes.shift();
     }
     if (step === args.maxSteps - 1 && state.gameOver) terminalReason = "gameOver";
   }
@@ -1006,6 +1020,7 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
     cycleWindow: Number(get("--cycle-window", "8")),
+    cycleMinVisits: Number(get("--cycle-min-visits", "3")),
     plannerCrnSamples: Number(get("--planner-crn-samples", "3")),
     plannerLeafAggregate: parseAggregate(get("--planner-leaf-aggregate", "mean")),
     plannerFirstActionAggregate: parseFirstActionAggregate(get("--planner-first-action-aggregate", "max")),

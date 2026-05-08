@@ -129,6 +129,32 @@ try {
   const cyclePayload = JSON.parse(cycleRun.stdout);
   assert.equal(cyclePayload.summary.games, 2, "cycle-window run should still complete games");
 
+  // Reviewer 2 #5: cycle detection at the default --cycle-min-visits=3 must
+  // tolerate transient hash aliasing — i.e. a single repeat in the window must
+  // not trip cycleStalled. Compare against --cycle-min-visits=2 (legacy
+  // strict) to confirm the looser default is actually behaving as intended.
+  // We compare cycleStalled rates at a small game count; the strict mode
+  // should be ≥ the loose mode by construction.
+  async function cycleStalledRate(minVisits: string): Promise<number> {
+    const run = await execFileAsync("tsx", [
+      "src/sim/evaluateModelVsHeuristic.ts",
+      "--selection", "baseline",
+      "--games", "8",
+      "--model-side", "both",
+      "--max-steps", "300",
+      "--cycle-window", "4",
+      "--cycle-min-visits", minVisits,
+    ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 16 });
+    const payload = JSON.parse(run.stdout);
+    return Number(payload.summary.terminalReasons?.cycleStalled ?? 0);
+  }
+  const strictStalled = await cycleStalledRate("2");
+  const looseStalled = await cycleStalledRate("3");
+  assert.ok(
+    looseStalled <= strictStalled,
+    `--cycle-min-visits=3 should never report more cycleStalled games than =2: loose=${looseStalled} strict=${strictStalled}`,
+  );
+
   const traceDir = mkdtempSync(join(tmpdir(), "uma-trace-smoke-"));
   const traceOut = join(traceDir, "trace.jsonl");
   await execFileAsync("tsx", [

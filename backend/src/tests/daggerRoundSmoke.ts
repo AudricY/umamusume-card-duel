@@ -96,25 +96,38 @@ const writableExample = mixed[0];
 assert.ok(writableExample.legalActions.length >= 1, "mixed row must retain legalActions for trainer");
 assert.ok(writableExample.observation, "mixed row must retain observation for trainer");
 
-const planted = traceRows.map((row) => ({
-  ...row,
-  observation: { ...row.observation, opponent: { ...row.observation.opponent, handCardIds: ["leak"] } },
-}));
-const plantedPath = join(root, "leak.jsonl");
-writeFileSync(plantedPath, planted.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
-let leakCaught = false;
-try {
-  await execFileAsync("tsx", [
-    "src/sim/dagger/relabelDecisionTrace.ts",
-    "--in", plantedPath,
-    "--out", join(root, "leak.relabeled.jsonl"),
-  ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 16 });
-} catch (error) {
-  leakCaught = true;
-  const stderr = String((error as { stderr?: unknown }).stderr ?? "");
-  assert.ok(stderr.includes("Hidden-info leak"), `relabel must error on opponent.handCardIds leak: ${stderr}`);
+// Reviewer 2 #6: extend the leak fixture beyond opponent.handCardIds. Plant
+// each known leak field independently and assert the relabeler aborts on each.
+// Without this, a regression that allowed opponent.hand or opponent.deck through
+// would slip past the smoke even though the production detector is supposed to
+// catch them.
+const leakFields: Array<{ field: string; mutate: (opp: Record<string, unknown>) => Record<string, unknown> }> = [
+  { field: "opponent.handCardIds", mutate: (opp) => ({ ...opp, handCardIds: ["leak-card"] }) },
+  { field: "opponent.hand", mutate: (opp) => ({ ...opp, hand: [{ id: "leak-card" }] }) },
+  { field: "opponent.deck", mutate: (opp) => ({ ...opp, deck: ["leak-card"] }) },
+];
+for (const { field, mutate } of leakFields) {
+  const planted = traceRows.map((row) => ({
+    ...row,
+    observation: { ...row.observation, opponent: mutate(row.observation.opponent) },
+  }));
+  const plantedPath = join(root, `leak-${field.replace(/\./g, "-")}.jsonl`);
+  writeFileSync(plantedPath, planted.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+  let leakCaught = false;
+  try {
+    await execFileAsync("tsx", [
+      "src/sim/dagger/relabelDecisionTrace.ts",
+      "--in", plantedPath,
+      "--out", join(root, `leak-${field.replace(/\./g, "-")}.relabeled.jsonl`),
+    ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 16 });
+  } catch (error) {
+    leakCaught = true;
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "");
+    assert.ok(stderr.includes("Hidden-info leak"), `relabel must error on planted ${field} leak: ${stderr}`);
+    assert.ok(stderr.includes(field), `relabel error must name the leaked field ${field}: ${stderr}`);
+  }
+  assert.equal(leakCaught, true, `planted ${field} leak must abort the relabel run`);
 }
-assert.equal(leakCaught, true, "planted opponent.handCardIds leak must abort the relabel run");
 
 console.log(JSON.stringify({ status: "PASS", traceRows: traceRows.length, relabeled: relabeled.length, mixed: mixed.length, ruleBot: ruleBotRows.length, dir: root }, null, 2));
 

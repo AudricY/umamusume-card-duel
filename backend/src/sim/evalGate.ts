@@ -160,6 +160,7 @@ function parseArgs(argv: string[]): Args {
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
     cycleWindow: Number(get("--cycle-window", "8")),
+    cycleMinVisits: Number(get("--cycle-min-visits", "3")),
     plannerCrnSamples: Number(get("--planner-crn-samples", "3")),
     plannerLeafAggregate: parsePlannerLeafAggregate(get("--planner-leaf-aggregate", "mean")),
     plannerFirstActionAggregate: parsePlannerFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
