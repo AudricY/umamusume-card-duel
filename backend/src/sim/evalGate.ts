@@ -163,6 +163,7 @@ function parseArgs(argv: string[]): Args {
     plannerCrnSamples: Number(get("--planner-crn-samples", "3")),
     plannerLeafAggregate: parsePlannerLeafAggregate(get("--planner-leaf-aggregate", "mean")),
     plannerFirstActionAggregate: parsePlannerFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
+    rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
     traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
     minGames: Number(get("--min-games", "500")),
     minWinRate: Number(get("--min-win-rate", "0")),

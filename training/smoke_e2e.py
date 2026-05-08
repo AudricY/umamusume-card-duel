@@ -86,6 +86,7 @@ def main() -> None:
 
     assert_export_rejects_vocab_mismatch(repo_root, model_dir, run_dir)
     assert_dataset_rejects_bad_schema(repo_root, run_dir, examples_path)
+    assert_resume_continues_training(repo_root, run_dir, examples_path)
 
     print(json.dumps({
         "status": "PASS",
@@ -96,6 +97,51 @@ def main() -> None:
         "servedSelectedIndex": served_prediction["selectedIndex"][0],
         "servedSelectedActionId": served_prediction.get("selectedActionId", [None])[0],
     }, indent=2))
+
+
+def assert_resume_continues_training(repo_root: Path, run_dir: Path, source_jsonl: Path) -> None:
+    seed_dir = run_dir / "resume" / "seed"
+    resume_dir = run_dir / "resume" / "resumed"
+    base_args = [
+        sys.executable,
+        str(repo_root / "training" / "train_bc.py"),
+        "--data",
+        str(source_jsonl),
+        "--epochs",
+        "4",
+        "--batch-size",
+        "16",
+        "--hidden-dim",
+        "32",
+        "--depth",
+        "1",
+        "--lr-schedule",
+        "cosine",
+        "--lr-warmup-steps",
+        "2",
+        "--grad-accum",
+        "2",
+    ]
+    seed_args = base_args + ["--out-dir", str(seed_dir)]
+    subprocess.run(seed_args, cwd=repo_root, check=True, capture_output=True, text=True)
+    seed_manifest = json.loads((seed_dir / "manifest.json").read_text(encoding="utf8"))
+    if seed_manifest.get("onnx_roundtrip_smoke", {}).get("status") != "PASS":
+        raise AssertionError(f"Seed run did not pass ONNX roundtrip smoke: {seed_manifest.get('onnx_roundtrip_smoke')}")
+
+    resume_args = base_args + [
+        "--out-dir",
+        str(resume_dir),
+        "--epochs",
+        "8",
+        "--resume",
+        str(seed_dir / "checkpoint.pt"),
+    ]
+    subprocess.run(resume_args, cwd=repo_root, check=True, capture_output=True, text=True)
+    resume_manifest = json.loads((resume_dir / "manifest.json").read_text(encoding="utf8"))
+    if resume_manifest.get("training_kwargs", {}).get("resume_from") != str(seed_dir / "checkpoint.pt"):
+        raise AssertionError(f"Resume manifest did not record resume_from path: {resume_manifest.get('training_kwargs')}")
+    if resume_manifest.get("onnx_roundtrip_smoke", {}).get("status") != "PASS":
+        raise AssertionError(f"Resume run did not pass ONNX roundtrip smoke: {resume_manifest.get('onnx_roundtrip_smoke')}")
 
 
 def assert_dataset_rejects_bad_schema(repo_root: Path, run_dir: Path, source_jsonl: Path) -> None:

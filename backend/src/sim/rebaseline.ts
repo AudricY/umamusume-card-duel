@@ -35,6 +35,7 @@ type RebaselineArgs = {
   plannerCrnSamples: number;
   plannerLeafAggregate: "mean" | "max" | "median";
   plannerFirstActionAggregate: "max" | "mean";
+  rolloutCrnSamples: number;
   cycleWindow: number;
   modelUrl: string;
   methods: string;
@@ -109,6 +110,7 @@ async function runMethodAsModel(args: RebaselineArgs, method: MethodKey) {
     plannerCrnSamples: args.plannerCrnSamples,
     plannerLeafAggregate: args.plannerLeafAggregate,
     plannerFirstActionAggregate: args.plannerFirstActionAggregate,
+    rolloutCrnSamples: args.rolloutCrnSamples,
   };
   const sides: SideId[] = ["player", "opponent"];
   const results = [];
@@ -283,6 +285,7 @@ function parseArgs(argv: string[]): RebaselineArgs {
     plannerCrnSamples: Number(get("--planner-crn-samples", "3")),
     plannerLeafAggregate: parsePlannerLeafAggregate(get("--planner-leaf-aggregate", "mean")),
     plannerFirstActionAggregate: parsePlannerFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
+    rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
     cycleWindow: Number(get("--cycle-window", "8")),
     modelUrl: get("--model-url", "http://127.0.0.1:8765"),
     methods: get("--methods", "rule-mirror,baseline,inverted-baseline,rollout,search,planner"),

@@ -56,6 +56,7 @@ export type EvaluateModelArgs = {
   plannerCrnSamples: number;
   plannerLeafAggregate: "mean" | "max" | "median";
   plannerFirstActionAggregate: "max" | "mean";
+  rolloutCrnSamples: number;
   rolloutSteps: number;
   searchDepth: number;
   searchTopK: number;
@@ -179,7 +180,7 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
         : args.selection === "inverted-baseline"
           ? chooseInvertedBaselineAction(state, sideId)
         : args.selection === "rollout"
-          ? chooseRolloutAction(args, state, sideId, rng)
+          ? chooseRolloutAction(args, state, sideId, `${seed}:${modelSide}:${step}`, rng)
         : args.selection === "search"
           ? chooseSearchAction(args, state, sideId, `${seed}:${modelSide}:${step}`)
         : args.selection === "planner"
@@ -278,7 +279,7 @@ function chooseTraceTeacher(
 ): DecisionTraceRow["teacher"] | undefined {
   if (args.traceTeacher === "none") return undefined;
   const decision = args.traceTeacher === "rollout"
-    ? chooseRolloutAction(args, state, sideId, createSeededRng(seed, "trace-teacher-rollout"))
+    ? chooseRolloutAction(args, state, sideId, seed, createSeededRng(seed, "trace-teacher-rollout"))
     : args.traceTeacher === "search"
       ? chooseSearchAction(args, state, sideId, seed)
       : choosePlannerAction(args, state, sideId, seed);
@@ -366,21 +367,48 @@ function terminalValue(state: GameState, sideId: SideId): number {
   return pointMargin;
 }
 
-function chooseRolloutAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, rng: Rng): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
+function chooseRolloutAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string, fallbackRng: Rng): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
+  const samples = Math.max(1, args.rolloutCrnSamples);
+  // CRN: every candidate is scored against the same K shared seeds. The
+  // pairing reduces between-candidate variance — differences in returns
+  // come from the choice, not from RNG drift between calls.
+  const sharedSeeds = Array.from({ length: samples }, (_, i) => `${seed}:rollout-crn-${i}`);
   let bestIndex = 0;
   let bestReward = Number.NEGATIVE_INFINITY;
   legalActions.forEach((action, index) => {
-    const next = advanceModeledTurnStep(state, sideId, action, getForcedAttackCoinResults(state, rng), rng);
-    const reward = stateHash(next) === stateHash(state)
+    const rewards = sharedSeeds.map((sharedSeed) => {
+      const advanceRng = createSeededRng(`${sharedSeed}:advance:${index}`, "rollout-crn-advance");
+      const next = advanceModeledTurnStep(state, sideId, action, getForcedAttackCoinResults(state, advanceRng), advanceRng);
+      if (stateHash(next) === stateHash(state)) return Number.NEGATIVE_INFINITY;
+      const rolloutRng = createSeededRng(`${sharedSeed}:rollout`, "rollout-crn-rollout");
+      return rewardForRollout(rolloutHeuristic(next, rolloutRng, args.rolloutSteps), sideId);
+    });
+    const allInvalid = rewards.every((r) => !Number.isFinite(r));
+    const reward = allInvalid
       ? Number.NEGATIVE_INFINITY
-      : rewardForRollout(rolloutHeuristic(next, rng, args.rolloutSteps), sideId);
+      : rewards.filter((r) => Number.isFinite(r)).reduce((sum, r) => sum + r, 0) / rewards.filter((r) => Number.isFinite(r)).length;
     if (reward > bestReward) {
       bestReward = reward;
       bestIndex = index;
     }
   });
+  if (bestReward === Number.NEGATIVE_INFINITY) {
+    // No CRN sample produced a state change; fall back to the original
+    // single-rollout path on the live rng so we still pick the best option
+    // observed under the running game seed.
+    legalActions.forEach((action, index) => {
+      const next = advanceModeledTurnStep(state, sideId, action, getForcedAttackCoinResults(state, fallbackRng), fallbackRng);
+      const reward = stateHash(next) === stateHash(state)
+        ? Number.NEGATIVE_INFINITY
+        : rewardForRollout(rolloutHeuristic(next, fallbackRng, args.rolloutSteps), sideId);
+      if (reward > bestReward) {
+        bestReward = reward;
+        bestIndex = index;
+      }
+    });
+  }
   return rankedDecision(legalActions, bestIndex);
 }
 
@@ -981,6 +1009,7 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     plannerCrnSamples: Number(get("--planner-crn-samples", "3")),
     plannerLeafAggregate: parseAggregate(get("--planner-leaf-aggregate", "mean")),
     plannerFirstActionAggregate: parseFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
+    rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
   };
 }
 

@@ -43,10 +43,29 @@ def main() -> None:
     config = ModelConfig(hidden_dim=args.hidden_dim, depth=args.depth, dropout=args.dropout)
     model = CandidatePolicyNet(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = build_scheduler(optimizer, args, total_steps=max(1, args.epochs * max(1, len(train_loader))))
+    use_amp = args.amp and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    grad_accum = max(1, int(args.grad_accum))
+    start_epoch = 1
+    history: list[dict[str, Any]] = []
+    resume_metadata: dict[str, Any] | None = None
+    if args.resume:
+        resume_path = Path(args.resume)
+        resume_metadata = load_resume(resume_path, model, optimizer, scheduler, scaler)
+        start_epoch = int(resume_metadata.get("next_epoch", 1))
+        history = list(resume_metadata.get("history", []))
 
-    history = []
-    for epoch in range(1, args.epochs + 1):
-        train_metrics = run_epoch(model, train_loader, optimizer, value_weight=args.value_weight)
+    for epoch in range(start_epoch, args.epochs + 1):
+        train_metrics = run_epoch(
+            model,
+            train_loader,
+            optimizer,
+            value_weight=args.value_weight,
+            scaler=scaler,
+            grad_accum=grad_accum,
+            scheduler=scheduler,
+        )
         val_metrics = evaluate(model, val_loader, value_weight=args.value_weight) if val_loader else {}
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
         history.append(record)
@@ -59,10 +78,20 @@ def main() -> None:
         "train": evaluate_grouped(model, dataset, train_indices, value_weight=args.value_weight, batch_size=args.batch_size),
         "val": evaluate_grouped(model, dataset, val_indices, value_weight=args.value_weight, batch_size=args.batch_size) if val_indices else {},
     }
+    rng_state = {
+        "torch": torch.get_rng_state().tolist(),
+        "cuda": [tensor.tolist() for tensor in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else [],
+    }
     checkpoint = {
         "model_state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
         "model_config": config.to_dict(),
         "feature_schema": feature_schema_metadata(),
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+        "scaler_state": scaler.state_dict() if scaler is not None else None,
+        "rng_state": rng_state,
+        "next_epoch": args.epochs + 1,
+        "history": history,
         "training": {
             "data": str(args.data),
             "samples": len(dataset),
@@ -75,6 +104,11 @@ def main() -> None:
             "batch_size": args.batch_size,
             "lr": args.lr,
             "value_weight": args.value_weight,
+            "amp": use_amp,
+            "grad_accum": grad_accum,
+            "lr_schedule": args.lr_schedule,
+            "lr_warmup_steps": args.lr_warmup_steps,
+            "resume_from": str(args.resume) if args.resume else None,
             "device": str(device),
             "history": history,
             "final_train": final_train,
@@ -83,6 +117,7 @@ def main() -> None:
         },
     }
     torch.save(checkpoint, out_dir / "checkpoint.pt")
+    onnx_smoke = run_onnx_roundtrip_smoke(model, config, out_dir, device)
     manifest = {
         "checkpoint": "checkpoint.pt",
         "model_config": config.to_dict(),
@@ -93,10 +128,108 @@ def main() -> None:
         "split": split_metadata,
         "dataset_summary": dataset_summary,
         "feature_ablations": sorted(ablations),
+        "training_kwargs": {
+            "amp": use_amp,
+            "grad_accum": grad_accum,
+            "lr_schedule": args.lr_schedule,
+            "lr_warmup_steps": args.lr_warmup_steps,
+            "resume_from": str(args.resume) if args.resume else None,
+        },
+        "onnx_roundtrip_smoke": onnx_smoke,
         "metrics": {"train": final_train, "val": final_val, "diagnostics": diagnostics},
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
     print(json.dumps({"status": "PASS", "out_dir": str(out_dir), **manifest}, indent=2))
+
+
+def build_scheduler(optimizer: torch.optim.Optimizer, args: argparse.Namespace, *, total_steps: int):
+    if args.lr_schedule == "none":
+        return None
+    if args.lr_schedule == "cosine":
+        warmup = max(0, int(args.lr_warmup_steps))
+        cosine_steps = max(1, total_steps - warmup)
+        if warmup > 0:
+            warmup_sched = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0 / max(1, warmup), total_iters=warmup)
+            cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_steps)
+            return torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup])
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_steps)
+    if args.lr_schedule == "step":
+        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=max(1, total_steps // 4), gamma=0.5)
+    return None
+
+
+def load_resume(
+    path: Path,
+    model: CandidatePolicyNet,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    scaler: "torch.cuda.amp.GradScaler | None",
+) -> dict[str, Any]:
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    model.load_state_dict(payload["model_state"])
+    if "optimizer_state" in payload and payload["optimizer_state"] is not None:
+        optimizer.load_state_dict(payload["optimizer_state"])
+    if scheduler is not None and payload.get("scheduler_state") is not None:
+        scheduler.load_state_dict(payload["scheduler_state"])
+    if scaler is not None and payload.get("scaler_state") is not None:
+        scaler.load_state_dict(payload["scaler_state"])
+    rng_state = payload.get("rng_state") or {}
+    if isinstance(rng_state.get("torch"), list):
+        torch.set_rng_state(torch.tensor(rng_state["torch"], dtype=torch.uint8))
+    return payload
+
+
+def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out_dir: Path, device: torch.device) -> dict[str, Any]:
+    """Export a tiny ONNX, run both PyTorch and ONNX, ensure logits agree.
+
+    Promoted checkpoints must be deployable; this is the per-training-run
+    guarantee that requirement is met.
+    """
+
+    try:
+        import onnxruntime as ort
+    except Exception as exc:  # pragma: no cover - exercised only if onnxruntime missing
+        return {"status": "skipped", "reason": f"onnxruntime not importable: {exc}"}
+
+    model.eval()
+    cpu_model = CandidatePolicyNet(config).cpu()
+    cpu_model.load_state_dict({k: v.cpu() for k, v in model.state_dict().items()})
+    cpu_model.eval()
+    onnx_path = out_dir / "policy.smoke.onnx"
+    state = torch.zeros((1, STATE_DIM), dtype=torch.float32)
+    actions = torch.zeros((1, 4, ACTION_DIM), dtype=torch.float32)
+    mask = torch.ones((1, 4), dtype=torch.bool)
+    torch.onnx.export(
+        cpu_model,
+        (state, actions, mask),
+        onnx_path,
+        input_names=["state_features", "action_features", "action_mask"],
+        output_names=["logits", "value"],
+        dynamic_axes={
+            "state_features": {0: "batch"},
+            "action_features": {0: "batch", 1: "actions"},
+            "action_mask": {0: "batch", 1: "actions"},
+            "logits": {0: "batch", 1: "actions"},
+            "value": {0: "batch"},
+        },
+        opset_version=17,
+    )
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    onnx_logits, onnx_value = session.run(None, {
+        "state_features": state.numpy(),
+        "action_features": actions.numpy(),
+        "action_mask": mask.numpy(),
+    })
+    with torch.no_grad():
+        torch_logits, torch_value = cpu_model(state, actions, mask)
+    max_logit_diff = float((torch.from_numpy(onnx_logits) - torch_logits).abs().max())
+    max_value_diff = float((torch.from_numpy(onnx_value) - torch_value).abs().max())
+    onnx_path.unlink(missing_ok=True)
+    if max_logit_diff > 1e-3 or max_value_diff > 1e-3:
+        raise RuntimeError(
+            f"ONNX roundtrip mismatch: logits {max_logit_diff} value {max_value_diff}"
+        )
+    return {"status": "PASS", "max_logit_diff": max_logit_diff, "max_value_diff": max_value_diff}
 
 
 def run_epoch(
@@ -105,22 +238,54 @@ def run_epoch(
     optimizer: torch.optim.Optimizer,
     *,
     value_weight: float,
+    scaler=None,
+    grad_accum: int = 1,
+    scheduler=None,
 ) -> dict[str, float]:
     model.train()
     totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "count": 0.0}
-    for batch in loader:
+    optimizer.zero_grad(set_to_none=True)
+    use_amp = scaler is not None
+    accum_step = 0
+    for batch_index, batch in enumerate(loader):
         batch = move_batch(batch, model)
-        optimizer.zero_grad(set_to_none=True)
-        logits, values = model(batch["state_features"], batch["action_features"], batch["action_mask"])
-        weights = normalized_weights(batch["sample_weights"])
-        policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
-        value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
-        loss = policy_loss + value_loss * value_weight
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
-        optimizer.step()
+        autocast_ctx = torch.cuda.amp.autocast() if use_amp else _NullContext()
+        with autocast_ctx:
+            logits, values = model(batch["state_features"], batch["action_features"], batch["action_mask"])
+            weights = normalized_weights(batch["sample_weights"])
+            policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
+            value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
+            loss = policy_loss + value_loss * value_weight
+        scaled = loss / max(1, grad_accum)
+        if use_amp:
+            scaler.scale(scaled).backward()
+        else:
+            scaled.backward()
+        accum_step += 1
+        is_last = batch_index == len(loader) - 1
+        if accum_step >= grad_accum or is_last:
+            if use_amp:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            if scheduler is not None:
+                scheduler.step()
+            accum_step = 0
         accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"])
     return finish_metrics(totals)
+
+
+class _NullContext:
+    def __enter__(self):  # noqa: D401, ANN001
+        return None
+
+    def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+        return False
 
 
 @torch.no_grad()
@@ -363,6 +528,11 @@ def parse_args() -> argparse.Namespace:
     ], default=[])
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--amp", action="store_true", help="Use mixed precision when CUDA is available.")
+    parser.add_argument("--grad-accum", type=int, default=1)
+    parser.add_argument("--lr-schedule", choices=["none", "cosine", "step"], default="cosine")
+    parser.add_argument("--lr-warmup-steps", type=int, default=0)
+    parser.add_argument("--resume", default=None, help="Path to a checkpoint.pt to resume training state from.")
     return parser.parse_args()
 
 
