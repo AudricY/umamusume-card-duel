@@ -17,7 +17,7 @@ import {
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { chooseAiSetupSelection } from "../../../frontend/src/app/gameUiHelpers";
-import { enumerateLegalAiActions, chooseHighestScoredAction } from "../../../frontend/src/game/engine/ai-policy/actions";
+import { enumerateLegalAiActions, chooseHighestScoredAction, chooseLowestScoredAction } from "../../../frontend/src/game/engine/ai-policy/actions";
 import { buildPublicObservation } from "../../../frontend/src/game/engine/ai-policy/observation";
 import type { LegalAiAction } from "../../../frontend/src/game/engine/ai-policy/types";
 import { getAiPhase } from "../../../frontend/src/game/engine/ai-policy/phase";
@@ -51,7 +51,8 @@ export type EvaluateModelArgs = {
   maxSteps: number;
   modelSide: SideId | "both";
   details: boolean;
-  selection: "policy" | "baseline" | "value" | "rollout" | "search" | "planner";
+  selection: "policy" | "baseline" | "inverted-baseline" | "value" | "rollout" | "search" | "planner";
+  cycleWindow: number;
   rolloutSteps: number;
   searchDepth: number;
   searchTopK: number;
@@ -70,12 +71,14 @@ type GameResult = {
   modelSide: SideId;
   winner: SideId | null;
   modelWon: boolean;
-  terminalReason: "gameOver" | "maxSteps" | "stalled";
+  terminalReason: "gameOver" | "maxSteps" | "stalled" | "cycleStalled";
   steps: number;
   turnNumber: number;
   points: Record<SideId, number>;
   modelActions: number;
   heuristicFallbacks: number;
+  selectedNoOps: number;
+  selectedExplicitPasses: number;
   selectedCandidateRanks: number[];
   decisionTraces: DecisionTraceRow[];
 };
@@ -147,8 +150,12 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
   let terminalReason: GameResult["terminalReason"] = "maxSteps";
   let modelActions = 0;
   let heuristicFallbacks = 0;
+  let selectedNoOps = 0;
+  let selectedExplicitPasses = 0;
   const selectedCandidateRanks: number[] = [];
   const decisionTraces: DecisionTraceRow[] = [];
+  const recentHashes: string[] = [];
+  const cycleWindow = Math.max(0, args.cycleWindow);
 
   for (let step = 0; step < args.maxSteps; step += 1) {
     if (state.gameOver) {
@@ -166,6 +173,8 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
         ? await chooseValueAction(args.modelUrl, state, sideId, rng)
         : args.selection === "baseline"
           ? chooseBaselineAction(state, sideId)
+        : args.selection === "inverted-baseline"
+          ? chooseInvertedBaselineAction(state, sideId)
         : args.selection === "rollout"
           ? chooseRolloutAction(args, state, sideId, rng)
         : args.selection === "search"
@@ -202,10 +211,12 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
       }
       if (fallback) {
         heuristicFallbacks += 1;
+        if (decision.action.kind !== "pass") selectedNoOps += 1;
         state = sideId === "player"
           ? advancePlayerAiTurnStep(state, forcedCoinResults, rng.next)
           : advanceOpponentTurnStep(state, forcedCoinResults, rng.next);
       } else {
+        if (decision.action.kind === "pass") selectedExplicitPasses += 1;
         state = next;
       }
     } else {
@@ -213,9 +224,18 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
         ? advancePlayerAiTurnStep(state, forcedCoinResults, rng.next)
         : advanceOpponentTurnStep(state, forcedCoinResults, rng.next);
     }
-    if (stateHash(state) === beforeHash) {
+    const afterHash = stateHash(state);
+    if (afterHash === beforeHash) {
       terminalReason = "stalled";
       break;
+    }
+    if (cycleWindow > 0) {
+      if (recentHashes.includes(afterHash)) {
+        terminalReason = "cycleStalled";
+        break;
+      }
+      recentHashes.push(afterHash);
+      if (recentHashes.length > cycleWindow) recentHashes.shift();
     }
     if (step === args.maxSteps - 1 && state.gameOver) terminalReason = "gameOver";
   }
@@ -231,6 +251,8 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
     points: { player: state.sides.player.points, opponent: state.sides.opponent.points },
     modelActions,
     heuristicFallbacks,
+    selectedNoOps,
+    selectedExplicitPasses,
     selectedCandidateRanks,
     decisionTraces,
   };
@@ -286,6 +308,13 @@ async function chooseModelAction(modelUrl: string, state: GameState, sideId: Sid
 function chooseBaselineAction(state: GameState, sideId: SideId): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
   const legalActions = enumerateLegalAiActions(state, sideId);
   const selected = chooseHighestScoredAction(legalActions);
+  const selectedIndex = Math.max(0, legalActions.findIndex((action) => action.id === selected.id));
+  return rankedDecision(legalActions, selectedIndex);
+}
+
+function chooseInvertedBaselineAction(state: GameState, sideId: SideId): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  const selected = chooseLowestScoredAction(legalActions);
   const selectedIndex = Math.max(0, legalActions.findIndex((action) => action.id === selected.id));
   return rankedDecision(legalActions, selectedIndex);
 }
@@ -847,6 +876,8 @@ function summarize(results: GameResult[]) {
     averageModelPoints: results.length ? totalModelPoints / results.length : 0,
     averageHeuristicPoints: results.length ? totalHeuristicPoints / results.length : 0,
     heuristicFallbacks: results.reduce((sum, result) => sum + result.heuristicFallbacks, 0),
+    selectedNoOps: results.reduce((sum, result) => sum + result.selectedNoOps, 0),
+    selectedExplicitPasses: results.reduce((sum, result) => sum + result.selectedExplicitPasses, 0),
     averageSelectedCandidateRank: averageSelectedCandidateRank(results),
     byModelSide: {
       player: summarizeSide(results.filter((result) => result.modelSide === "player")),
@@ -866,6 +897,8 @@ function summarizeSide(results: GameResult[]) {
     averageModelPoints: results.length ? totalModelPoints / results.length : 0,
     averageHeuristicPoints: results.length ? totalHeuristicPoints / results.length : 0,
     heuristicFallbacks: results.reduce((sum, result) => sum + result.heuristicFallbacks, 0),
+    selectedNoOps: results.reduce((sum, result) => sum + result.selectedNoOps, 0),
+    selectedExplicitPasses: results.reduce((sum, result) => sum + result.selectedExplicitPasses, 0),
     averageSelectedCandidateRank: averageSelectedCandidateRank(results),
   };
 }
@@ -904,11 +937,12 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     plannerTopK: Number(get("--planner-top-k", get("--search-top-k", "4"))),
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
+    cycleWindow: Number(get("--cycle-window", "8")),
   };
 }
 
 function parseSelection(raw: string): EvaluateModelArgs["selection"] {
-  if (raw === "baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
+  if (raw === "baseline" || raw === "inverted-baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
   return "policy";
 }
 

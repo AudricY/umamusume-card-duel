@@ -47,6 +47,66 @@ try {
   }
   assert.equal(failed, true, "eval gate command should exit nonzero on threshold miss");
 
+  // Planted bad-policy regression: inverted-baseline must lose to the rule bot.
+  // The gate is configured with a 50% Wilson-lower-bound floor; an inverted
+  // policy should trip it.
+  let plantedFailed = false;
+  try {
+    await execFileAsync("tsx", [
+      "src/sim/evalGate.ts",
+      "--selection", "inverted-baseline",
+      "--games", "8",
+      "--model-side", "both",
+      "--max-steps", "300",
+      "--min-games", "16",
+      "--min-ci-lower", "0.5",
+      "--allow-fallbacks",
+      "--allow-no-ops",
+    ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 8 });
+  } catch (error) {
+    plantedFailed = true;
+    const stdout = String((error as { stdout?: unknown }).stdout ?? "");
+    const payload = JSON.parse(stdout);
+    assert.equal(payload.status, "FAIL", "inverted-baseline should fail strength gate");
+    assert.ok(
+      payload.failures.some((f: string) => f.includes("wilsonLower") || f.includes("minCiLower")),
+      `inverted-baseline failure should reference Wilson lower bound floor: ${JSON.stringify(payload.failures)}`,
+    );
+  }
+  assert.equal(plantedFailed, true, "planted bad-policy gate must exit nonzero");
+
+  // The same inverted-baseline run should pass when expectFail is set.
+  const plantedPass = await execFileAsync("tsx", [
+    "src/sim/evalGate.ts",
+    "--selection", "inverted-baseline",
+    "--games", "4",
+    "--model-side", "both",
+    "--max-steps", "300",
+    "--min-games", "8",
+    "--min-ci-lower", "0.5",
+    "--allow-fallbacks",
+    "--allow-no-ops",
+    "--expect-fail",
+  ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 8 });
+  const plantedPassPayload = JSON.parse(plantedPass.stdout);
+  assert.equal(plantedPassPayload.status, "PASS", "expectFail flips inverted-baseline FAIL into PASS");
+  assert.ok(typeof plantedPassPayload.summary.selectedNoOps === "number", "summary should report selectedNoOps count");
+  assert.ok(typeof plantedPassPayload.summary.selectedExplicitPasses === "number", "summary should report selectedExplicitPasses count");
+
+  // N-step cycle detection smoke: run a tight cycle window and assert
+  // the field shows up in terminal reasons (or cycleStalled key absent if
+  // no cycle hit). The smoke just verifies the field plumbing.
+  const cycleRun = await execFileAsync("tsx", [
+    "src/sim/evaluateModelVsHeuristic.ts",
+    "--selection", "baseline",
+    "--games", "2",
+    "--model-side", "player",
+    "--max-steps", "80",
+    "--cycle-window", "4",
+  ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 8 });
+  const cyclePayload = JSON.parse(cycleRun.stdout);
+  assert.equal(cyclePayload.summary.games, 2, "cycle-window run should still complete games");
+
   const traceDir = mkdtempSync(join(tmpdir(), "uma-trace-smoke-"));
   const traceOut = join(traceDir, "trace.jsonl");
   await execFileAsync("tsx", [

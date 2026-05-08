@@ -14,7 +14,8 @@
     "sim:export-outcome-training": "tsx src/sim/exportOutcomeTrainingExamples.ts",
     "sim:evaluate-model": "tsx src/sim/evaluateModelVsHeuristic.ts",
     "sim:eval-gate": "tsx src/sim/evalGate.ts",
-    "sim:throughput-probe": "tsx src/sim/throughputProbe.ts"
+    "sim:throughput-probe": "tsx src/sim/throughputProbe.ts",
+    "sim:rebaseline": "tsx src/sim/rebaseline.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

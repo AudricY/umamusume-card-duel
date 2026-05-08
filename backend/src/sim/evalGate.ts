@@ -9,7 +9,10 @@ type Args = EvaluateModelArgs & {
   minGames: number;
   minWinRate: number;
   minCiLower: number;
+  maxCiLower: number | null;
   requireZeroFallbacks: boolean;
+  requireZeroNoOps: boolean;
+  expectFail: boolean;
   manifestOut: string | null;
 };
 
@@ -30,15 +33,22 @@ async function main() {
   if (summary.games < args.minGames) failures.push(`games ${summary.games} < minGames ${args.minGames}`);
   if (summary.modelWinRate < args.minWinRate) failures.push(`winRate ${summary.modelWinRate} < minWinRate ${args.minWinRate}`);
   if (summary.wilson95.lower < args.minCiLower) failures.push(`wilsonLower ${summary.wilson95.lower} < minCiLower ${args.minCiLower}`);
+  if (args.maxCiLower !== null && summary.wilson95.lower > args.maxCiLower) failures.push(`wilsonLower ${summary.wilson95.lower} > maxCiLower ${args.maxCiLower}`);
   if (args.requireZeroFallbacks && summary.heuristicFallbacks !== 0) failures.push(`heuristicFallbacks ${summary.heuristicFallbacks} != 0`);
+  if (args.requireZeroNoOps && summary.selectedNoOps !== 0) failures.push(`selectedNoOps ${summary.selectedNoOps} != 0`);
 
-  const output = { status: failures.length ? "FAIL" : "PASS", failures, args, summary };
+  const passed = failures.length === 0;
+  const status = args.expectFail
+    ? (passed ? "FAIL_UNEXPECTED_PASS" : "PASS")
+    : (passed ? "PASS" : "FAIL");
+  const exitNonZero = status !== "PASS";
+  const output = { status, failures, expectFail: args.expectFail, args, summary };
   if (args.manifestOut) {
     mkdirSync(dirname(args.manifestOut), { recursive: true });
     writeFileSync(args.manifestOut, JSON.stringify(withGitMetadata(output), null, 2) + "\n", "utf8");
   }
   console.log(JSON.stringify(output, null, 2));
-  if (failures.length) process.exit(1);
+  if (exitNonZero) process.exit(1);
 }
 
 function summarize(results: GateResult[]) {
@@ -53,6 +63,8 @@ function summarize(results: GateResult[]) {
     averageModelPoints: results.length ? totalModelPoints / results.length : 0,
     averageHeuristicPoints: results.length ? totalHeuristicPoints / results.length : 0,
     heuristicFallbacks: results.reduce((sum, result) => sum + result.heuristicFallbacks, 0),
+    selectedNoOps: results.reduce((sum, result) => sum + result.selectedNoOps, 0),
+    selectedExplicitPasses: results.reduce((sum, result) => sum + result.selectedExplicitPasses, 0),
     averageSelectedCandidateRank: averageSelectedCandidateRank(results),
     terminalReasons: countBy(results, (result) => result.terminalReason),
     byModelSide: {
@@ -74,6 +86,8 @@ function summarizeSide(results: GateResult[]) {
     averageModelPoints: results.length ? totalModelPoints / results.length : 0,
     averageHeuristicPoints: results.length ? totalHeuristicPoints / results.length : 0,
     heuristicFallbacks: results.reduce((sum, result) => sum + result.heuristicFallbacks, 0),
+    selectedNoOps: results.reduce((sum, result) => sum + result.selectedNoOps, 0),
+    selectedExplicitPasses: results.reduce((sum, result) => sum + result.selectedExplicitPasses, 0),
     averageSelectedCandidateRank: averageSelectedCandidateRank(results),
     terminalReasons: countBy(results, (result) => result.terminalReason),
   };
@@ -132,17 +146,21 @@ function parseArgs(argv: string[]): Args {
     plannerTopK: Number(get("--planner-top-k", get("--search-top-k", "4"))),
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
+    cycleWindow: Number(get("--cycle-window", "8")),
     traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
     minGames: Number(get("--min-games", "500")),
     minWinRate: Number(get("--min-win-rate", "0")),
     minCiLower: Number(get("--min-ci-lower", "0")),
+    maxCiLower: argv.includes("--max-ci-lower") ? Number(get("--max-ci-lower", "1")) : null,
     requireZeroFallbacks: !argv.includes("--allow-fallbacks"),
+    requireZeroNoOps: !argv.includes("--allow-no-ops"),
+    expectFail: argv.includes("--expect-fail"),
     manifestOut: get("--manifest-out", ""),
   };
 }
 
 function parseSelection(raw: string): EvaluateModelArgs["selection"] {
-  if (raw === "baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
+  if (raw === "baseline" || raw === "inverted-baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
   return "policy";
 }
 

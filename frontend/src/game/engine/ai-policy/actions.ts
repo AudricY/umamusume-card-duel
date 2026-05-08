@@ -53,6 +53,10 @@ export function chooseHighestScoredAction(actions: LegalAiAction[]): LegalAiActi
   return [...actions].sort((left, right) => (right.features[0] ?? 0) - (left.features[0] ?? 0))[0] ?? passAction("stadiumOrEnd");
 }
 
+export function chooseLowestScoredAction(actions: LegalAiAction[]): LegalAiAction {
+  return [...actions].sort((left, right) => (left.features[0] ?? 0) - (right.features[0] ?? 0))[0] ?? passAction("stadiumOrEnd");
+}
+
 function enumerateSetupActions(state: GameState, sideId: SideId): LegalAiAction[] {
   const setup = state.setup;
   const side = state.sides[sideId];

@@ -147,6 +147,7 @@ function makePlannerArgs(args: ProbeArgs): EvaluateModelArgs {
     plannerTopK: args.plannerTopK,
     plannerMaxSequences: args.plannerMaxSequences,
     plannerMaxDepth: args.plannerMaxDepth,
+    cycleWindow: 0,
   };
 }
 
