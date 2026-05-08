@@ -250,6 +250,18 @@ def run_iteration(
     ]
     if state.promoted_checkpoint is not None:
         train_args += ["--resume", str(state.promoted_checkpoint)]
+    # Item 17: KL-anchor anti-forgetting against the prior promoted checkpoint.
+    # Per-iteration weight ablation: --kl-anchor-weights iter0,iter1,iter2,...
+    # is consumed positionally; missing positions default to --kl-anchor-weight.
+    if state.promoted_checkpoint is not None and args.kl_anchor_weight > 0.0:
+        kl_weight = _kl_weight_for_iteration(args, cfg.iteration)
+        if kl_weight > 0.0:
+            train_args += [
+                "--kl-anchor-checkpoint",
+                str(state.promoted_checkpoint),
+                "--kl-anchor-weight",
+                str(kl_weight),
+            ]
     subprocess.run(train_args, cwd=repo_root, check=True)
     train_manifest = json.loads((train_dir / "manifest.json").read_text(encoding="utf8"))
 
@@ -609,6 +621,26 @@ def compute_matchup_floor_violations(
     return violations
 
 
+def _kl_weight_for_iteration(args: argparse.Namespace, iteration: int) -> float:
+    """Resolve the KL-anchor weight for a given iteration.
+
+    Item 17 mandates ablating off/low/high on at least one iteration.
+    --kl-anchor-weights "0.0,0.1,0.5" sets per-iteration weights positionally;
+    missing positions fall back to --kl-anchor-weight. Empty string disables
+    the per-iteration override.
+    """
+
+    overrides = (args.kl_anchor_weights or "").strip()
+    if overrides:
+        parts = [p.strip() for p in overrides.split(",") if p.strip()]
+        if 0 <= iteration < len(parts):
+            try:
+                return float(parts[iteration])
+            except ValueError:
+                pass
+    return float(args.kl_anchor_weight)
+
+
 def wilson_band_tolerance(n: int, *, p: float = 0.5, z: float = 1.96) -> float:
     """Half of the Wilson half-width at p=0.5 for a sample size n.
 
@@ -888,6 +920,10 @@ def parse_args() -> argparse.Namespace:
                         help="Use selection=baseline for the gate to avoid the ONNX server bring-up. Useful for smoke runs.")
     parser.add_argument("--pool-eval-games", type=int, default=20,
                         help="Games per pool member during the per-opponent eval phase. Set to 0 to skip pool matchups (escape hatch for smokes).")
+    parser.add_argument("--kl-anchor-weight", type=float, default=0.0,
+                        help="Per-iteration KL-anchor weight against the prior promoted checkpoint (item 17).")
+    parser.add_argument("--kl-anchor-weights", default="",
+                        help="Comma-separated per-iteration overrides, e.g. '0.0,0.1,0.5' for off/low/high ablation.")
     parser.add_argument("--per-matchup-drop-tolerance", type=float, default=0.05,
                         help="Max allowed Wilson lower drop per opponent vs prior recorded eval (item 13).")
     parser.add_argument("--pool-eval-seed-start", type=int, default=20000,

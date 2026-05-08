@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
+import torch
 
 from uma_ai.dataset import load_policy_samples
 from uma_ai.features import card_vocab_metadata, legal_actions_to_features, observation_to_features
@@ -125,6 +126,7 @@ def main() -> None:
     assert_export_rejects_vocab_mismatch(repo_root, model_dir, run_dir)
     assert_dataset_rejects_bad_schema(repo_root, run_dir, examples_path)
     assert_resume_continues_training(repo_root, run_dir, examples_path)
+    assert_kl_anchor_smoke(repo_root, run_dir, examples_path, anchor_checkpoint=model_dir / "checkpoint.pt")
 
     print(json.dumps({
         "status": "PASS",
@@ -135,6 +137,58 @@ def main() -> None:
         "servedSelectedIndex": served_prediction["selectedIndex"][0],
         "servedSelectedActionId": served_prediction.get("selectedActionId", [None])[0],
     }, indent=2))
+
+
+def assert_kl_anchor_smoke(repo_root: Path, run_dir: Path, source_jsonl: Path, *, anchor_checkpoint: Path) -> None:
+    """Item 11/17: KL-anchor anti-forgetting plumbing smoke.
+
+    Trains 2 epochs against a frozen anchor at weight=0.5; asserts the
+    manifest's training_kwargs records the anchor checkpoint path and the
+    weight, and that the per-epoch history carries a kl_loss field.
+    """
+
+    kl_dir = run_dir / "kl-anchor"
+    cmd = [
+        sys.executable,
+        str(repo_root / "training" / "train_bc.py"),
+        "--data",
+        str(source_jsonl),
+        "--out-dir",
+        str(kl_dir),
+        "--epochs",
+        "2",
+        "--batch-size",
+        "16",
+        "--hidden-dim",
+        "32",
+        "--depth",
+        "1",
+        "--kl-anchor-checkpoint",
+        str(anchor_checkpoint),
+        "--kl-anchor-weight",
+        "0.5",
+    ]
+    subprocess.run(cmd, cwd=repo_root, check=True, capture_output=True, text=True)
+    manifest = json.loads((kl_dir / "manifest.json").read_text(encoding="utf8"))
+    kwargs = manifest.get("training_kwargs", {})
+    if kwargs.get("kl_anchor_checkpoint") != str(anchor_checkpoint):
+        raise AssertionError(f"manifest must record kl_anchor_checkpoint, got {kwargs}")
+    if abs(float(kwargs.get("kl_anchor_weight", 0)) - 0.5) > 1e-6:
+        raise AssertionError(f"manifest must record kl_anchor_weight=0.5, got {kwargs}")
+    checkpoint = torch.load(kl_dir / "checkpoint.pt", map_location="cpu", weights_only=False)
+    history = checkpoint.get("history", [])
+    if not history or "kl_loss" not in history[0].get("train", {}):
+        raise AssertionError(
+            f"per-epoch history must record kl_loss when --kl-anchor-weight > 0; got {history[:1]}"
+        )
+    if float(history[0]["train"]["kl_loss"]) <= 0.0:
+        # KL with anchor==current model would be 0; we resumed-from-scratch
+        # against a *trained* anchor so the freshly-initialized model should
+        # diverge from it. A 0 here means the anchor isn't actually being
+        # consulted.
+        raise AssertionError(
+            f"kl_loss must be >0 when training a fresh model against a trained anchor; got {history[0]['train']['kl_loss']}"
+        )
 
 
 def assert_resume_continues_training(repo_root: Path, run_dir: Path, source_jsonl: Path) -> None:

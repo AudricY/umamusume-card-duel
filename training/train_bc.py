@@ -42,6 +42,12 @@ def main() -> None:
 
     config = ModelConfig(hidden_dim=args.hidden_dim, depth=args.depth, dropout=args.dropout)
     model = CandidatePolicyNet(config).to(device)
+    # Item 11/17 KL-anchor anti-forgetting: if --kl-anchor-checkpoint is set,
+    # load that checkpoint as a frozen anchor distribution and regularize the
+    # current policy toward it via a per-batch KL(anchor || target) penalty.
+    # The anchor is the prior promoted iteration so the loop can't drift to
+    # a state distribution the prior iteration never visited.
+    anchor_model = load_kl_anchor(args.kl_anchor_checkpoint, device) if args.kl_anchor_checkpoint else None
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = build_scheduler(optimizer, args, total_steps=max(1, args.epochs * max(1, len(train_loader))))
     use_amp = args.amp and device.type == "cuda"
@@ -65,6 +71,8 @@ def main() -> None:
             scaler=scaler,
             grad_accum=grad_accum,
             scheduler=scheduler,
+            anchor_model=anchor_model,
+            kl_anchor_weight=args.kl_anchor_weight,
         )
         val_metrics = evaluate(model, val_loader, value_weight=args.value_weight) if val_loader else {}
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
@@ -109,6 +117,8 @@ def main() -> None:
             "lr_schedule": args.lr_schedule,
             "lr_warmup_steps": args.lr_warmup_steps,
             "resume_from": str(args.resume) if args.resume else None,
+            "kl_anchor_checkpoint": str(args.kl_anchor_checkpoint) if args.kl_anchor_checkpoint else None,
+            "kl_anchor_weight": float(args.kl_anchor_weight),
             "device": str(device),
             "history": history,
             "final_train": final_train,
@@ -134,6 +144,8 @@ def main() -> None:
             "lr_schedule": args.lr_schedule,
             "lr_warmup_steps": args.lr_warmup_steps,
             "resume_from": str(args.resume) if args.resume else None,
+            "kl_anchor_checkpoint": str(args.kl_anchor_checkpoint) if args.kl_anchor_checkpoint else None,
+            "kl_anchor_weight": float(args.kl_anchor_weight),
         },
         "onnx_roundtrip_smoke": onnx_smoke,
         "metrics": {"train": final_train, "val": final_val, "diagnostics": diagnostics},
@@ -241,9 +253,11 @@ def run_epoch(
     scaler=None,
     grad_accum: int = 1,
     scheduler=None,
+    anchor_model: CandidatePolicyNet | None = None,
+    kl_anchor_weight: float = 0.0,
 ) -> dict[str, float]:
     model.train()
-    totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "count": 0.0}
+    totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "count": 0.0, "kl_loss": 0.0}
     optimizer.zero_grad(set_to_none=True)
     use_amp = scaler is not None
     accum_step = 0
@@ -255,7 +269,12 @@ def run_epoch(
             weights = normalized_weights(batch["sample_weights"])
             policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
             value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
-            loss = policy_loss + value_loss * value_weight
+            kl_loss = torch.zeros((), device=logits.device)
+            if anchor_model is not None and kl_anchor_weight > 0.0:
+                with torch.no_grad():
+                    anchor_logits, _ = anchor_model(batch["state_features"], batch["action_features"], batch["action_mask"])
+                kl_loss = masked_kl_divergence(anchor_logits, logits, batch["action_mask"])
+            loss = policy_loss + value_loss * value_weight + kl_loss * kl_anchor_weight
         scaled = loss / max(1, grad_accum)
         if use_amp:
             scaler.scale(scaled).backward()
@@ -276,7 +295,7 @@ def run_epoch(
             if scheduler is not None:
                 scheduler.step()
             accum_step = 0
-        accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"])
+        accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"], kl_loss=kl_loss)
     return finish_metrics(totals)
 
 
@@ -399,6 +418,7 @@ def accumulate(
     value_loss: torch.Tensor,
     logits: torch.Tensor,
     targets: torch.Tensor,
+    kl_loss: torch.Tensor | None = None,
 ) -> None:
     count = float(targets.shape[0])
     totals["loss"] += float(loss.item()) * count
@@ -406,17 +426,59 @@ def accumulate(
     totals["value_loss"] += float(value_loss.item()) * count
     totals["accuracy"] += float((logits.argmax(dim=1) == targets).float().sum().item())
     totals["count"] += count
+    if kl_loss is not None and "kl_loss" in totals:
+        totals["kl_loss"] += float(kl_loss.item()) * count
 
 
 def finish_metrics(totals: dict[str, float]) -> dict[str, float]:
     count = max(1.0, totals["count"])
-    return {
+    out = {
         "loss": totals["loss"] / count,
         "policy_loss": totals["policy_loss"] / count,
         "value_loss": totals["value_loss"] / count,
         "accuracy": totals["accuracy"] / count,
         "samples": totals["count"],
     }
+    if "kl_loss" in totals:
+        out["kl_loss"] = totals["kl_loss"] / count
+    return out
+
+
+def masked_kl_divergence(anchor_logits: torch.Tensor, target_logits: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
+    """Mean KL(anchor || target) over a batch of mask-aware action distributions.
+
+    Item 11/17 KL anchor: penalizes the *current* policy for diverging from the
+    *anchor* (prior promoted iteration). Mask sentinel logits would otherwise
+    contribute non-finite KL terms, so masked positions are forced to large
+    negative finite logits before the softmax. Forward-KL form means low-prob
+    anchor actions are penalized only mildly when the target also assigns them
+    low probability — desired behavior.
+    """
+
+    mask = action_mask.bool()
+    sentinel = torch.full_like(anchor_logits, -1.0e9)
+    masked_anchor = torch.where(mask, anchor_logits, sentinel)
+    masked_target = torch.where(mask, target_logits, sentinel)
+    anchor_log_p = nn.functional.log_softmax(masked_anchor, dim=-1)
+    target_log_p = nn.functional.log_softmax(masked_target, dim=-1)
+    anchor_p = torch.where(mask, anchor_log_p.exp(), torch.zeros_like(anchor_log_p))
+    diff = (anchor_log_p - target_log_p).clamp(min=-50.0, max=50.0)
+    per_action = anchor_p * diff
+    per_action = torch.where(mask, per_action, torch.zeros_like(per_action))
+    per_row = per_action.sum(dim=-1)
+    return per_row.mean()
+
+
+def load_kl_anchor(checkpoint_path: str, device: torch.device) -> CandidatePolicyNet:
+    """Load a frozen anchor policy from a checkpoint. Eval mode, no_grad use only."""
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    config = ModelConfig.from_dict(payload.get("model_config"))
+    anchor = CandidatePolicyNet(config).to(device)
+    anchor.load_state_dict(payload["model_state"])
+    anchor.eval()
+    for param in anchor.parameters():
+        param.requires_grad_(False)
+    return anchor
 
 
 def normalized_weights(weights: torch.Tensor) -> torch.Tensor:
@@ -533,6 +595,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-schedule", choices=["none", "cosine", "step"], default="cosine")
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
     parser.add_argument("--resume", default=None, help="Path to a checkpoint.pt to resume training state from.")
+    parser.add_argument("--kl-anchor-checkpoint", default=None,
+                        help="Frozen prior-iteration checkpoint to regularize toward (anti-forgetting).")
+    parser.add_argument("--kl-anchor-weight", type=float, default=0.0,
+                        help="Per-batch weight on KL(anchor || target). 0 disables. Try 0.05-0.5.")
     return parser.parse_args()
 
 
