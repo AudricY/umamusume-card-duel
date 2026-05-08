@@ -54,3 +54,64 @@ Scope: start at the top of `ai-performance-research-backlog.md`, define a concre
 2. Add explicit bad-policy strength tests.
 3. Run controlled low-margin weighting/mix experiments.
 4. Rebaseline baseline/search/rollout/planner on one corrected fixed-seed suite.
+
+## 2026-05-08 Backlog Pass v3
+
+### Item 0 — Throughput Probe (P0 spike)
+
+Built `backend/src/sim/throughputProbe.ts` (`npm run sim:throughput-probe`) that
+microbenchmarks `enumerateLegalAiActions`, `chooseHighestScoredAction`,
+`stateFingerprint`, and `structuredClone`-based `cloneGame`, then runs heuristic
+baseline games and planner-selection games end-to-end with per-game timings.
+
+20-game probe at production-default planner config
+(`--planner-top-k 4 --planner-max-sequences 64 --planner-max-depth 8 --rollout-steps 500`)
+on the user's box; manifest at
+`runs/throughput-probe/probe-default.json`:
+
+| Surface | Number |
+| --- | --- |
+| Baseline (`chooseHighestScoredAction`) decisions/sec | 5,446 |
+| Baseline decisions/game | 46.95 |
+| Planner decisions/sec (single-core) | 22.4 |
+| Planner decisions/game | 40.3 |
+| Avg planner decision ms | 44.6 |
+| Avg bundles per planner decision | 14.8 |
+| `enumerateLegalAiActions` µs/call (microbench) | 2.6 |
+| `chooseHighestScoredAction` µs/call (microbench) | 0.09 |
+| `stateFingerprint` µs/call | 8.0 |
+| `cloneGame` µs/call | 22.0 |
+
+DAgger projection at 500 side-balanced games × ~40 planner decisions / model-side =
+20,150 planner decisions per iteration:
+
+| Cores | Iteration wall (h) | Throughput (dec/s) |
+| --- | --- | --- |
+| 1× | 0.25 | 22.4 |
+| 8× | 0.031 | 179 |
+| 32× | 0.008 | 716 |
+
+**Verdict:** green-light item 14's budget targets at the *current* planner
+strength. Item 14's "≥200 planner decisions/sec at full worker count" is met at
+9 ideal-scaled cores, and "≤4h iteration wall-clock" has roughly 100× headroom
+on a single core and ~7,000× on 32 cores at this planner config.
+
+**Caveats to surface alongside the green light:**
+
+- The current planner only enumerates ~14.8 bundles/decision. Item 2's tuning
+  (deeper bundles, CRN-paired leaf scoring, ranker diversity) will multiply
+  per-decision cost. Budget headroom of ~100× single-core means we can absorb
+  a 25-50× planner cost increase before approaching the 4h gate at 8 cores.
+- `cloneGame` (`structuredClone`) is the dominant per-call cost (22 µs). A
+  large fraction of planner work is `cloneGame + advanceModeledTurnStep` for
+  bundle expansion, so any structural-hash / persistent-data-structure
+  optimization disproportionately compounds with item 2's planner depth.
+- `stateFingerprint` cost (8 µs) is small in absolute terms but it is called
+  twice per modeled step (before/after) for stall and bundle-deduplication
+  checks. If item 1's N-step cycle detection raises the call count, this can
+  become measurable.
+
+No escalation triggered. Items 11-14 can be scheduled against the current
+budget. Item 6 (parallel generation) is still required to hit the
+"≥200 planner decisions/sec at full worker count" target without relying on
+ideal scaling.
