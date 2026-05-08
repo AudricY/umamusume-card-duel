@@ -378,3 +378,179 @@ auxiliary (item 7) should reduce this iteration noise.
 8. **Item 14** (compute budget tracking + distillation criterion).
 9. **Items 15 / 16** (exploration temperature, action-coverage
    histograms; decision-diff CLI, replay viewer, attribution dump).
+
+## 2026-05-08 v4.1 Sequence — Phases A/B/C/D Land
+
+### Phase A — Items 7 + 18 (parallel)
+
+**Item 7 (calibrated value head).** `training/calibrate_value.py` loads
+a checkpoint, runs the value head over a held-out JSONL dataset, and
+reports calibration vs. a logistic point-margin baseline. ECE (15-bin),
+Brier, reliability-by-turn over `{1-3, 4-6, 7-9, 10+}` buckets, plus
+max-bucket-ECE. The point-margin baseline fits `k` in
+`P(win) = sigmoid(k * (own − opp))` via L-BFGS on a deterministic 50%
+slice of labeled rows so the reported metrics are evaluated on a
+separate slice from the fit.
+
+Tiebreaker-grade gate: bootstrap percentile CI (1000 resamples) on the
+per-row Brier lift `pm_brier − value_brier`; lower 2.5% > 0 means
+Wilson-significant lift. The spec asked for a "Wilson-style" interval
+but closed-form Wilson does not apply to Brier deltas, so the bootstrap
+is the closest valid analogue and the JSON output documents the
+substitution. GAE-grade additions emitted but non-blocking: monotone-
+non-decreasing flag + Pearson correlation across populated bins; drift
+envelope across N>=2 checkpoints; value/point-margin variance with an
+unbounded flag.
+
+`training/calibrate_smoke.py` generates a tiny rule-bot dataset, trains
+a 4-epoch model, runs calibration, and asserts plumbing-level shape
+(JSON keys, status enum, ECE/Brier in [0,1], CI not inverted).
+Wired as `npm run test:calibrate-value`.
+
+**Item 18 (F1 plumbing prep).** `serve_onnx` `/predict` returns
+`actionLogProbs`, `actionProbs`, `selectedLogProb`, and
+`behaviorPolicy: {kind, temperature}` alongside the existing
+`logits`/`value`/`selectedIndex`. The masked log-softmax uses a `-1e9`
+sentinel for masked positions so JSON.parse stays safe and
+`exp(masked_lp) ≈ 0`. Behavior policy under greedy serving is the
+softmax distribution; selection is argmax of that distribution. At PPO
+iteration 0 the importance ratio is exactly 1; drift accumulates as
+PPO updates the target.
+
+`evaluateModelVsHeuristic.ts` captures behavior on every
+`chooseModelAction` call, including a degenerate single-action snapshot
+(`selectedLogProb=0`) on the early-return shortcut so PPO rows are never
+missing the field. `relabelDecisionTrace.ts` forwards `behaviorPolicy`
+into the relabeled training row when present upstream.
+
+`docs/f1-design.md` fixes F1 defaults: reward shaping (per-step Δpoints
+× 1/3 + terminal win × 1.0), one-game episode boundary, GAE λ=0.95
+γ=0.99, KL clip ε=0.2, entropy bonus 0.005, gradient clip 0.5,
+on-policy buffer of N games where `N × decisions_per_game ≈ 32K`
+(default N=800), HP sweep grid over `(lr, KL coef, entropy coef, GAE λ)`
+with 3 seeds per cell. Smoke acceptance: ≥10 PPO updates without KL
+blow-up (≤0.05 per update) or entropy collapse (≥30% of warm-start
+entropy).
+
+### Phase B — Item 12 (opponent snapshot pool with PFSP)
+
+`training/opponent_pool.py` adds a versioned pool with PoolEntry
+metadata (iteration, checkpoint path, Wilson lower at promotion, value
+mean drift, timestamp). Retention keeps the last 8 promoted entries
+plus every 4th historical, hard-capped at 24. PFSP weights are
+`max(0.05, 1 − p_i)` with uniform fallback. Cycling alarm trips on
+strict monotone decline of an opponent's last 3 win rates.
+
+`evaluateModelVsHeuristic.ts` accepts `--opponent-model-url`: the
+non-model side consults a second served checkpoint via `/predict`
+instead of advancing through the rule bot. Single-action shortcut and
+any fetch/parse error fall back silently to the rule bot.
+`evalGate.ts` and `node_bridge.run_evaluator/run_eval_gate` thread the
+flag.
+
+`dagger_orchestrator.py` snapshots promoted checkpoints into
+`<out>/pool/iter-NNN/checkpoint.pt`, persists the pool, and runs
+`--selection policy --opponent-model-url` against each pool member when
+`--pool-eval-games > 0`. Per-iteration manifest gains `pool_evals`,
+`pool_aggregate_wilson_lower`, `cycling_alarm`. Pool eval is non-
+blocking on the primary promote/reject — item 13's residual consumes
+the metrics in the next phase.
+
+### Phase C — Item 13 residual (per-matchup floor + halt-after-2)
+
+`compute_matchup_floor_violations` walks prior iteration records'
+`pool_evals`, takes the most-recent prior Wilson lower per opponent,
+and flags any current opponent whose Wilson lower dropped by more than
+`--per-matchup-drop-tolerance` (default 5pp). First-time matchups have
+no prior to compare against and never trigger.
+
+`decide_promotion` now consumes matchup violations: any non-empty list
+vetoes promotion citing the worst-dropping opponent. Halt-after-2:
+`OrchestratorState` tracks `consecutive_failures` / `halted` /
+`halt_reason`. Reaching 2 sets halted=True and the main loop exits
+cleanly before the next iteration; successful promotion clears the
+counter.
+
+### Phase D — Item 17 (KL-anchor anti-forgetting + pilot)
+
+**KL-anchor anti-forgetting.** `train_bc.py` accepts
+`--kl-anchor-checkpoint <path>` and `--kl-anchor-weight <float>`. The
+anchor is loaded as a frozen no-grad model; each batch computes a
+mask-aware KL(anchor || target) penalty added to `policy_loss +
+value_weight * value_loss`. Per-epoch `kl_loss` is recorded in history
+and the manifest's `training_kwargs` persist anchor path and weight.
+
+`dagger_orchestrator.py` automatically threads
+`--kl-anchor-checkpoint <prior promoted>` and
+`--kl-anchor-weight <w>` to each iteration's `train_bc.py` invocation
+when `--kl-anchor-weight > 0`. Per-iteration positional override via
+`--kl-anchor-weights "0.0,0.1,0.5"` so item 17's mandated off/low/high
+ablation runs inside one orchestrator invocation.
+
+**Pilot — recipe-bug fix verified.** Two-iteration pilot at
+`runs/item17-pilot/`:
+
+| Iter | Selection (trace) | Trace rows | Mixed rows | Trained policy WR | Wilson95 | KL weight | Decision |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | rollout-CRN×3, **rollout-steps 500** | 525 | 749 | 20.0% | [8.1, 42.0] | 0.0 (no parent) | promoted |
+| 1 | policy (iter-0) | 525 | 749 | 35.0% | [18.1, 56.7] | 0.1 | promoted |
+
+Pipeline at item-17-shaped config (rollout-steps=500, rollout-CRN
+samples=3, KL anchor on with weight ablation) ran end-to-end with zero
+fallbacks and zero selected no-ops. Iteration 1's training manifest
+records `kl_anchor_checkpoint=iter-000/checkpoint.pt` and
+`kl_anchor_weight=0.1` as expected. Trade-off recorded: at the tiny
+n=10 eval used here, Wilson half-width is ≈30pp so the iter-on-iter
++5pp uplift is not significant on its own; the pilot validates only
+the plumbing.
+
+**Full item-17 sweep — reproducible command.** Wall-clock estimate
+~6h on the user's box (single core). Run as:
+
+```bash
+training/.venv/bin/python training/dagger_orchestrator.py \
+  --out-dir runs/item17-2026-05-08 \
+  --iterations 3 \
+  --games 250 \
+  --max-steps 500 \
+  --teacher rollout \
+  --rollout-steps 500 \
+  --rollout-crn-samples 3 \
+  --replay-games 100 \
+  --epochs 30 \
+  --batch-size 32 \
+  --hidden-dim 64 \
+  --depth 2 \
+  --eval-games 250 \
+  --kl-anchor-weight 0.1 \
+  --kl-anchor-weights "0.0,0.1,0.5" \
+  --pool-eval-games 20
+```
+
+`--eval-games 250` × 2 sides = 500 side-balanced eval games per
+iteration. KL ablation runs the off/low/high sweep across the three
+iterations. Pool eval at 20 games per opponent populates item 13's
+per-matchup floor inputs. Pre-registered escalation: trained policy
+Wilson lower ≤45% across all 3 iterations *and* iter-on-iter monotone
+improvement <2pp graduates the v4 reframe ("F1 is the path through the
+cap") from working hypothesis to finding. The progress entry below
+this line will be appended once the sweep runs.
+
+### Phase D status
+
+- KL anchor + weight ablation plumbing validated on the pilot.
+- Recipe-bug fix (rollout-steps=200 → 500) is now the orchestrator's
+  configured default for the documented sweep.
+- Full sweep itself is queued as a multi-hour run; not executed in
+  this session.
+- Once the sweep completes, append the iteration table and an explicit
+  finding statement (escalation tripped or not) to this file. Until
+  then, item 17 acceptance is *prerequisites met*, not *finding
+  recorded*.
+
+### Phase E — F1 PPO smoke
+
+Blocked on item 17's sweep producing a warm-start checkpoint. Defaults
+fixed in `docs/f1-design.md`. Implementation
+(`training/ppo_orchestrator.py`, stochastic serving mode,
+`training/f1_hp_sweep.py`) tracked under F1 in the active backlog.
