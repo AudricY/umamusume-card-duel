@@ -6,11 +6,23 @@ import { tmpdir } from "node:os";
 
 const runA = runOutcomeExport("a");
 const runB = runOutcomeExport("b");
+const reverseOrder = runOutcomeExport("reverse", ["--candidate-order", "reverse"]);
+const shuffledOrder = runOutcomeExport("shuffle", ["--candidate-order", "shuffle"]);
 
 assert.deepEqual(
   compactRows(runA.rows),
   compactRows(runB.rows),
   "same outcome export seed should reproduce selected labels and oracle statistics",
+);
+assert.deepEqual(
+  selectedLabels(runA.rows),
+  selectedLabels(reverseOrder.rows),
+  "reversing oracle candidate order should not change selected labels",
+);
+assert.deepEqual(
+  selectedLabels(runA.rows),
+  selectedLabels(shuffledOrder.rows),
+  "shuffling oracle candidate order should not change selected labels",
 );
 assert.ok(existsSync(runA.manifestPath), "outcome export should write a sibling manifest");
 assert.equal(runA.manifest.sourceTaxonomy.trajectorySource, "ai-policy-baseline-visited");
@@ -29,7 +41,7 @@ console.log(JSON.stringify({
   manifest: runA.manifestPath,
 }, null, 2));
 
-function runOutcomeExport(label: string) {
+function runOutcomeExport(label: string, extraArgs: string[] = []) {
   const dir = mkdtempSync(join(tmpdir(), `uma-outcome-${label}-`));
   const out = join(dir, "examples.jsonl");
   execFileSync("tsx", [
@@ -42,6 +54,7 @@ function runOutcomeExport(label: string) {
     "--max-examples", "4",
     "--max-actions", "4",
     "--samples", "2",
+    ...extraArgs,
   ], { cwd: process.cwd(), stdio: "pipe" });
   const manifestPath = join(dir, "examples.manifest.json");
   return {
@@ -49,6 +62,16 @@ function runOutcomeExport(label: string) {
     manifestPath,
     manifest: JSON.parse(readFileSync(manifestPath, "utf8")),
   };
+}
+
+function selectedLabels(rows: any[]) {
+  return rows.map((row) => ({
+    seed: row.seed,
+    step: row.step,
+    sideId: row.sideId,
+    selectedActionId: row.selectedActionId,
+    selectedVsRunnerUpMargin: row.oracle.selectedVsRunnerUpMargin,
+  }));
 }
 
 function readJsonl(path: string): any[] {

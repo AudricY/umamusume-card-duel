@@ -30,6 +30,7 @@ type Args = {
   samples: number;
   tieThreshold: number;
   ranker: CandidateRankerMode;
+  candidateOrder: "normal" | "reverse" | "shuffle";
 };
 
 type ScoredAction = {
@@ -114,7 +115,8 @@ function buildOutcomeExample(
   step: number,
 ): TrainingExample | null {
   const baseline = chooseHighestScoredAction(legalActions);
-  const actionPool = rankLegalActions(legalActions, {
+  const candidateActions = orderCandidateActions(legalActions, `${seed}:${step}:candidate-order`);
+  const actionPool = rankLegalActions(candidateActions, {
     topK: args.maxActions,
     mode: args.ranker,
     baseline,
@@ -230,12 +232,30 @@ function parseArgs(argv: string[]): Args {
     samples: Number(get("--samples", "1")),
     tieThreshold: Number(get("--tie-threshold", "0.02")),
     ranker: parseRanker(get("--ranker", "heuristic")),
+    candidateOrder: parseCandidateOrder(get("--candidate-order", "normal")),
   };
 }
 
 function parseRanker(raw: string): CandidateRankerMode {
   if (raw === "phase-diverse" || raw === "epsilon") return raw;
   return "heuristic";
+}
+
+function parseCandidateOrder(raw: string): Args["candidateOrder"] {
+  if (raw === "reverse" || raw === "shuffle") return raw;
+  return "normal";
+}
+
+function orderCandidateActions(actions: LegalAiAction[], seed: string): LegalAiAction[] {
+  if (args.candidateOrder === "reverse") return [...actions].reverse();
+  if (args.candidateOrder !== "shuffle") return actions;
+  const rng = createSeededRng(seed, "outcome-candidate-order");
+  const shuffled = [...actions];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(rng.next() * (index + 1));
+    [shuffled[index], shuffled[swap]] = [shuffled[swap]!, shuffled[index]!];
+  }
+  return shuffled;
 }
 
 function mean(values: number[]): number {
