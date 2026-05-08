@@ -39,7 +39,7 @@ import { getUmamusumeAbility } from "../../../frontend/src/game/engine/flow/abil
 import { getAbilityMoveEnergyTypes } from "../../../frontend/src/game/engine/flow/energy";
 import { drawCards } from "../../../frontend/src/game/engine/flow/turn";
 import type { PlayChoices } from "../../../frontend/src/game/engine/core/playTypes";
-import type { CoinFlipResult, EnergyType, GameState, SideId, SideState, UmamusumeInstance } from "../../../shared/src/types";
+import type { CoinFlipResult, EnergyCost, EnergyType, GameState, SideId, SideState, UmamusumeInstance } from "../../../shared/src/types";
 import { stateFingerprint } from "./stateFingerprint";
 import { rankLegalActions, type CandidateRankerMode } from "./candidateRanker";
 import { withGitMetadata } from "./manifest";
@@ -787,15 +787,26 @@ export function getForcedAttackCoinResults(state: GameState, rng: Rng): CoinFlip
   if (state.currentSide !== "player" && state.currentSide !== "opponent") return undefined;
   if (state.opponentTurnStep !== "attack") return undefined;
   const side = state.sides[state.currentSide];
-  if (!side.active || !canAttack(state, side)) return undefined;
-  const attack = getPrimaryAttack(getUmamusumeCard(side.active));
-  const flipCount = attack.knockOutActiveIfAllCoinHeads ?? ((attack.coinBonus || attack.drawOnHeads || attack.discardRandomOpponentHandOnHeads) ? 1 : 0);
+  if (!side.active || side.active.specialConditions.includes("paralysed")) return undefined;
+  if (side.active.attackBlockedUntilOwnTurn === state.turnsTakenBySide[side.id]) return undefined;
+  const flipCount = Math.max(0, ...getUmamusumeCard(side.active).attacks
+    .filter((attack) => hasEnoughEnergyForAttack(side.active!, attack.cost))
+    .map((attack) => attack.knockOutActiveIfAllCoinHeads ?? ((attack.coinBonus || attack.drawOnHeads || attack.discardRandomOpponentHandOnHeads) ? 1 : 0)));
   if (flipCount <= 0) return undefined;
   const results = Array.from({ length: flipCount }, (_, index): CoinFlipResult => {
     if (index < (side.guaranteedCoinFlipHeads ?? 0)) return "heads";
     return rng.next() >= 0.5 ? "heads" : "tails";
   });
   return results.length === 1 ? results[0] : results;
+}
+
+function hasEnoughEnergyForAttack(umamusume: UmamusumeInstance, cost: EnergyCost): boolean {
+  const totalAttached = Object.values(umamusume.energies).reduce((sum, value) => sum + value, 0);
+  const typedRequired = Object.entries(cost)
+    .filter(([type]) => type !== "colorless")
+    .reduce((sum, [type, amount]) => sum + Math.max(0, (amount ?? 0) - umamusume.energies[type as keyof typeof umamusume.energies]), 0);
+  const totalRequired = Object.values(cost).reduce((sum, amount) => sum + (amount ?? 0), 0);
+  return typedRequired === 0 && totalAttached >= totalRequired;
 }
 
 function refreshContinuousEffects(state: GameState): void {

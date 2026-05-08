@@ -335,11 +335,11 @@ export function aiResolveCombatDecision(
     selected.decision.attackTargetUid,
     selected.decision.healTargetUid,
     forcedAttackCoinResult,
-    undefined,
-    0,
-    undefined,
-    undefined,
-    undefined,
+    selected.decision.evolutionDeckCardIndex,
+    selected.decision.attackIndex,
+    selected.decision.discardHandIndex,
+    selected.decision.randomDiscardIndex,
+    selected.decision.switchTargetUid,
     selected.decision.useShuffleSelfIntoDeck,
   );
   return { resolved: true, usedAttack: true, didRetreat: false };
@@ -375,7 +375,7 @@ export function aiUseOneAbility(
       markAbilityUsed,
     })) return true;
     if (ability.coinFlipDrawOrActiveDamageCounter) {
-      if (turnGoal === "deny_opponent_lethal" || turnGoal === "secure_lethal_now") continue;
+      if (turnGoal === "deny_opponent_lethal" || turnGoal === "secure_lethal_now" || turnGoal === "protect_loaded_active" || turnGoal === "convert_point_lead") continue;
       if (aiUseCoinFlipDrawAbility(state, side, abilityUmamusume, random, deps, state.aiDifficulty)) return true;
     }
     if (ability.shuffleRandomDiscardIntoDeck) {

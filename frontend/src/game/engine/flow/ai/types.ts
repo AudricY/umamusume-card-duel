@@ -53,6 +53,10 @@ export type AiTurnGoal =
   | "set_up_two_turn_lethal"
   | "deny_opponent_lethal"
   | "stabilize_board"
+  | "protect_loaded_active"
+  | "build_backup_attacker"
+  | "dig_for_evolution"
+  | "convert_point_lead"
   | "maximize_progress";
 
 export type MidLevelDecision = {

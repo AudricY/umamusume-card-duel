@@ -1,5 +1,6 @@
 import type { GameState, SideState } from "../../../../../../shared/src/types";
 import { getCard, getPrimaryAttack, getUmamusumeCard } from "../../core/catalog";
+import { attachedEnergyCount, getAllUmamusume } from "../../core/umamusume";
 import { areToolEffectsDisabled, canImmediateOpponentKoConservative, predictAttackDamage } from "./combatUtils";
 import type { AiTurnGoal } from "./types";
 import { canAttack } from "../eligibility";
@@ -13,7 +14,11 @@ export function chooseAiTurnGoal(
   if (!side.active) return "maximize_progress";
   if (canSecureImmediateLethal(state, side)) return "secure_lethal_now";
   if (canSetUpTwoTurnLethal(state, side)) return "set_up_two_turn_lethal";
+  if (shouldProtectLoadedActive(state, side)) return "protect_loaded_active";
   if (canImmediateOpponentKoConservative(state, side.id)) return "deny_opponent_lethal";
+  if (shouldConvertPointLead(state, side)) return "convert_point_lead";
+  if (shouldDigForEvolution(side)) return "dig_for_evolution";
+  if (shouldBuildBackupAttacker(state, side)) return "build_backup_attacker";
   if (hadRecentNoAttack(state, side.title)) return "maximize_progress";
 
   const hasBench = side.bench.length > 0;
@@ -31,7 +36,11 @@ export function explainAiTurnGoal(state: GameState, side: SideState): string[] {
   if (!side.active) return ["no_active"];
   if (canSecureImmediateLethal(state, side)) return ["immediate_lethal"];
   if (canSetUpTwoTurnLethal(state, side)) return ["two_turn_setup_window"];
+  if (shouldProtectLoadedActive(state, side)) return ["loaded_active_under_ko_threat"];
   if (canImmediateOpponentKoConservative(state, side.id)) return ["ko_threat_conservative"];
+  if (shouldConvertPointLead(state, side)) return ["point_lead_convert_to_pressure"];
+  if (shouldDigForEvolution(side)) return ["evolution_available_for_board"];
+  if (shouldBuildBackupAttacker(state, side)) return ["bench_attacker_needs_energy"];
   if (hasConsecutiveNoAttackTurns(state, side.title, 2)) return ["no_attack_recovery_mode"];
   const hasBench = side.bench.length > 0;
   const hasBasicInHand = side.hand.some((cardId) => {
@@ -40,6 +49,58 @@ export function explainAiTurnGoal(state: GameState, side: SideState): string[] {
   });
   if (!hasBench && !hasBasicInHand) return ["no_bench_no_basic_in_hand"];
   return ["default_progress"];
+}
+
+function shouldProtectLoadedActive(state: GameState, side: SideState): boolean {
+  const active = side.active;
+  if (!active || side.bench.length === 0) return false;
+  if (!canImmediateOpponentKoConservative(state, side.id)) return false;
+  const activeCard = getUmamusumeCard(active);
+  const loaded = active.stage >= 1 || active.maxHp >= 100 || attachedEnergyCount(active) >= 2;
+  if (!loaded) return false;
+  const activeAttack = getPrimaryAttack(activeCard);
+  if (hasEnoughEnergy(active, activeAttack.cost)) return true;
+  return side.bench.some((bench) => {
+    const attack = getPrimaryAttack(getUmamusumeCard(bench));
+    return hasEnoughEnergy(bench, attack.cost) || attachedEnergyCount(bench) + 1 >= getTotalAttackCost(attack.cost);
+  });
+}
+
+function shouldConvertPointLead(state: GameState, side: SideState): boolean {
+  if (!side.active) return false;
+  const opponent = state.sides[side.id === "player" ? "opponent" : "player"];
+  const lead = side.points - opponent.points;
+  if (side.points < 2 || lead <= 0) return false;
+  if (canImmediateOpponentKoConservative(state, side.id)) return false;
+  if (canAttack(state, side)) return true;
+  return side.bench.some((bench) => hasEnoughEnergy(bench, getPrimaryAttack(getUmamusumeCard(bench)).cost));
+}
+
+function shouldDigForEvolution(side: SideState): boolean {
+  const board = getAllUmamusume(side);
+  if (board.length === 0) return false;
+  return board.some((target) => {
+    if (target.stage >= 2) return false;
+    const nextStage = target.stage + 1;
+    return [...side.hand, ...side.deck].some((cardId) => {
+      const card = getCard(cardId);
+      return card.kind === "umamusume" && card.stage === nextStage && card.evolvesFrom === target.species;
+    });
+  });
+}
+
+function shouldBuildBackupAttacker(state: GameState, side: SideState): boolean {
+  const active = side.active;
+  if (!active || side.bench.length === 0) return false;
+  const activeAttack = getPrimaryAttack(getUmamusumeCard(active));
+  if (!hasEnoughEnergy(active, activeAttack.cost) && !canAttack(state, side)) return false;
+  return side.bench.some((bench) => {
+    const attack = getPrimaryAttack(getUmamusumeCard(bench));
+    if (hasEnoughEnergy(bench, attack.cost)) return false;
+    const attached = attachedEnergyCount(bench);
+    const totalCost = getTotalAttackCost(attack.cost);
+    return totalCost > 0 && attached + 1 >= totalCost;
+  });
 }
 
 function canSetUpTwoTurnLethal(state: GameState, side: SideState): boolean {
@@ -74,6 +135,10 @@ function canSetUpTwoTurnLethal(state: GameState, side: SideState): boolean {
   // Heuristic: if a single extra attachment likely flips the KO race and we're not dead immediately, pursue setup.
   if (neededToKo <= 30 && damageNow >= 20 && !canImmediateOpponentKoConservative(state, side.id)) return true;
   return false;
+}
+
+function getTotalAttackCost(cost: ReturnType<typeof getPrimaryAttack>["cost"]): number {
+  return Object.values(cost).reduce((sum, amount) => sum + (amount ?? 0), 0);
 }
 
 function canSecureImmediateLethal(state: GameState, side: SideState): boolean {

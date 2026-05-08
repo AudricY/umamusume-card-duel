@@ -204,6 +204,33 @@ function scoreTurnGoalAttachPreference(
     if (target.maxHp >= 90) score += 10;
     return score;
   }
+  if (turnGoal === "protect_loaded_active") {
+    let score = isActive ? 10 : 18;
+    if (!beforeCanAttack && afterCanAttack) score += isActive ? 92 : 70;
+    if (!isActive && target.maxHp >= 90) score += 18;
+    if (isActive && beforeCanAttack) score -= 16;
+    return score;
+  }
+  if (turnGoal === "build_backup_attacker") {
+    let score = isActive ? -34 : 40;
+    if (!beforeCanAttack && afterCanAttack) score += isActive ? 20 : 118;
+    if (!isActive && target.stage >= 1) score += 18;
+    if (!isActive && target.maxHp >= 90) score += 12;
+    return score;
+  }
+  if (turnGoal === "dig_for_evolution") {
+    let score = 0;
+    if (target.stage <= 1) score += isActive ? 22 : 28;
+    if (!beforeCanAttack && afterCanAttack) score += isActive ? 40 : 50;
+    if (target.stage >= 1) score += 12;
+    return score;
+  }
+  if (turnGoal === "convert_point_lead") {
+    let score = isActive ? 44 : 4;
+    if (!beforeCanAttack && afterCanAttack) score += isActive ? 100 : 44;
+    if (beforeCanAttack && isActive) score += 20;
+    return score;
+  }
   if (turnGoal === "secure_lethal_now") {
     let score = isActive ? 26 : -8;
     if (!beforeCanAttack && afterCanAttack && isActive) score += 84;

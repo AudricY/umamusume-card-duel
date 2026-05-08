@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { opponentDeckList, playerDeckList } from "../../../shared/src/gameData";
 import type { EnergyType, GameState, SideState, UmamusumeInstance } from "../../../shared/src/types";
 import { advanceOpponentTurnStep, createGame, getCard, playHandCard, playerAttack, playerEndTurn } from "../../../frontend/src/game/engine";
+import { scoreAiAttachTarget } from "../../../frontend/src/game/engine/flow/ai/attachUtils";
+import { getAiTrainerChoices, shouldAiPlayTrainer } from "../../../frontend/src/game/engine/flow/ai/trainerUtils";
+import { chooseAiTurnGoal } from "../../../frontend/src/game/engine/flow/ai/turnPlan";
 import { createUmamusume, resetUmamusumeIdCounter } from "../../../frontend/src/game/engine/flow/setup";
 
 type Scenario = {
@@ -31,6 +34,12 @@ const scenarios: Scenario[] = [
   { name: "Team Canopus attaches Energy to highest-value bench target", run: scenarioTeamCanopusBenchAttachTargeting },
   { name: "Carrot Jelly is used when it unlocks a retreat attack line", run: scenarioCarrotJellyEnablesRetreatLine },
   { name: "Tracen Gym disables Oguri tool bonus damage", run: scenarioTracenGymDisablesToolBonusDamage },
+  { name: "turn goal protects loaded active under KO threat", run: scenarioTurnGoalProtectLoadedActive },
+  { name: "turn goal digs for useful evolution", run: scenarioTurnGoalDigForEvolution },
+  { name: "turn goal builds backup attacker", run: scenarioTurnGoalBuildBackupAttacker },
+  { name: "turn goal converts a point lead", run: scenarioTurnGoalConvertPointLead },
+  { name: "backup-attacker goal shifts attach scoring to bench", run: scenarioBackupGoalAttachScoring },
+  { name: "dig-for-evolution goal searches a live evolution", run: scenarioDigGoalTrainerSearchChoice },
 ];
 
 scenarios.forEach(({ name, run }) => {
@@ -370,6 +379,80 @@ function scenarioTracenGymDisablesToolBonusDamage() {
   assert.equal(next.sides.opponent.active?.hp, 30, "Tracen Gym should suppress Oguri's +30 tool damage bonus");
 }
 
+function scenarioTurnGoalProtectLoadedActive() {
+  const state = makeCombatState();
+  const opponent = state.sides.opponent;
+  const player = state.sides.player;
+  opponent.active = withEnergy(createUma("riceShowerStage2"), { darkness: 2 });
+  opponent.active.hp = 60;
+  opponent.bench = [withEnergy(createUma("manhattanCafeBasic"), { darkness: 1 })];
+  player.active = withEnergy(createUma("riceShowerStage2"), { darkness: 2 });
+  player.active.hp = 130;
+
+  assert.equal(chooseAiTurnGoal(state, opponent), "protect_loaded_active", "loaded active under immediate KO threat should be protected");
+}
+
+function scenarioTurnGoalDigForEvolution() {
+  const state = makeCombatState();
+  const opponent = state.sides.opponent;
+  const player = state.sides.player;
+  opponent.active = createUma("tamamoCrossBasic");
+  opponent.deck = ["tamamoCrossStage1"];
+  player.active = createUma("riceShowerStage2");
+  player.active.hp = 130;
+
+  assert.equal(chooseAiTurnGoal(state, opponent), "dig_for_evolution", "live evolution in deck should switch to evolution-dig goal");
+}
+
+function scenarioTurnGoalBuildBackupAttacker() {
+  const state = makeCombatState();
+  const opponent = state.sides.opponent;
+  const player = state.sides.player;
+  opponent.active = withEnergy(createUma("riceShowerStage2"), { darkness: 2 });
+  opponent.bench = [createUma("riceShowerBasic")];
+  player.active = createUma("riceShowerStage2");
+  player.active.hp = 130;
+
+  assert.equal(chooseAiTurnGoal(state, opponent), "build_backup_attacker", "charged active should start building an attach-away backup attacker");
+}
+
+function scenarioTurnGoalConvertPointLead() {
+  const state = makeCombatState();
+  const opponent = state.sides.opponent;
+  const player = state.sides.player;
+  opponent.points = 2;
+  opponent.active = withEnergy(createUma("riceShowerStage2"), { darkness: 2 });
+  player.active = createUma("riceShowerStage2");
+  player.active.hp = 130;
+
+  assert.equal(chooseAiTurnGoal(state, opponent), "convert_point_lead", "point lead with active pressure should convert into pressure goal");
+}
+
+function scenarioBackupGoalAttachScoring() {
+  const state = makeCombatState();
+  const opponent = state.sides.opponent;
+  opponent.energyZone = ["darkness"];
+  opponent.active = withEnergy(createUma("riceShowerStage2"), { darkness: 2 });
+  const backup = createUma("riceShowerBasic");
+  opponent.bench = [backup];
+
+  const activeScore = scoreAiAttachTarget(state, opponent, opponent.active, "build_backup_attacker");
+  const backupScore = scoreAiAttachTarget(state, opponent, backup, "build_backup_attacker");
+  assert.ok(backupScore > activeScore, `backup attach score should beat already-charged active: backup=${backupScore}, active=${activeScore}`);
+}
+
+function scenarioDigGoalTrainerSearchChoice() {
+  const state = makeCombatState();
+  const opponent = state.sides.opponent;
+  opponent.active = createUma("tamamoCrossBasic");
+  opponent.hand = ["3starMakeDebutScout", "leftoverCarrot"];
+  opponent.deck = ["riceShowerBasic", "tamamoCrossStage1"];
+  const scout = getCard("3starMakeDebutScout");
+  assert.ok(shouldAiPlayTrainer(state, opponent, scout, 0, "dig_for_evolution"), "evolution-dig goal should allow Umamusume search");
+  const choices = shouldTrainerCard(scout) ? getAiTrainerChoices(state, opponent, scout, 0, "dig_for_evolution") : {};
+  assert.equal(choices.deckCardIndex, 1, "evolution-dig search should choose the live evolution over a generic basic");
+}
+
 function makeCombatState(): GameState {
   resetUmamusumeIdCounter();
   const state = createGame(playerDeckList, opponentDeckList, "Opponent");
@@ -426,6 +509,10 @@ function withEnergy(umamusume: UmamusumeInstance, energies: Partial<Record<Energ
     umamusume.energies[energyType as EnergyType] = amount;
   });
   return umamusume;
+}
+
+function shouldTrainerCard(card: ReturnType<typeof getCard>): card is Extract<ReturnType<typeof getCard>, { kind: "trainer" }> {
+  return card.kind === "trainer";
 }
 
 function totalAttachedEnergy(umamusume: UmamusumeInstance): number {

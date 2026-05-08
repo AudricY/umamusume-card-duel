@@ -38,7 +38,7 @@ export function shouldAiPlayTrainer(state: GameState, side: SideState, card: Car
   }
   if (card.trainerType === "tool") return getToolTargets(side).length > 0;
   if (card.effect.gustOpponent) return getYayoiAkikawaValue(state, side) > 0;
-  if (card.effect.activeAttackDamageBonus) return getAoiKiryuinBonusValue(state, side) > 0;
+  if (card.effect.activeAttackDamageBonus) return turnGoal === "convert_point_lead" || getAoiKiryuinBonusValue(state, side) > 0;
   if (benchFragile && underThreat && (card.effect.activeAttackDamageBonus || card.effect.gustOpponent)) return false;
   if (card.effect.discardRandomOpponentActiveEnergy) return getOpponentActiveEnergyCount(state, side) > 0;
   if (card.effect.attachEnergyFromZoneToBench) return side.bench.length > 0;
@@ -55,17 +55,27 @@ export function shouldAiPlayTrainer(state: GameState, side: SideState, card: Car
       if (!canImmediateOpponentKoConservative(state, side.id)) return false;
       return isRetreatLikelyBeneficial(state, side);
     }
+    if (turnGoal === "protect_loaded_active") {
+      if (!canImmediateOpponentKoConservative(state, side.id)) return false;
+      return isRetreatLikelyBeneficial(state, side);
+    }
     return isRetreatLikelyBeneficial(state, side);
   }
   if (card.effect.heal && !hasDamagedHealingTarget(side, card)) return Boolean(card.effect.draw && side.hand.length < MAX_HAND);
   if (card.effect.draw && side.hand.length >= MAX_HAND) return false;
+  if (card.effect.draw && (turnGoal === "dig_for_evolution" || turnGoal === "build_backup_attacker")) return true;
   if (card.effect.searchUmamusume || card.effect.searchEvolutionUmamusume || card.effect.searchRandomBasicUmamusume) {
     if (side.hand.length >= MAX_HAND) return false;
     if (turnGoal === "stabilize_board" && card.effect.searchUmamusume) return true;
+    if (turnGoal === "dig_for_evolution" && (card.effect.searchEvolutionUmamusume || card.effect.searchUmamusume)) return true;
+    if (turnGoal === "build_backup_attacker" && (card.effect.searchUmamusume || card.effect.searchRandomBasicUmamusume)) return true;
     if (card.effect.discardOtherCard) {
       if (turnGoal === "deny_opponent_lethal" && side.hand.length <= 2) return false;
       const discardIndex = chooseAiDiscardHandIndex(state, side, handIndex);
-      const searchIndex = chooseAiSearchDeckIndex(state, side, false, turnGoal === "stabilize_board");
+      const searchIndex = chooseAiSearchDeckIndex(state, side, {
+        preferBasics: turnGoal === "stabilize_board" || turnGoal === "build_backup_attacker",
+        preferEvolutionTargets: turnGoal === "dig_for_evolution",
+      });
       if (discardIndex === undefined || searchIndex === undefined) return false;
       const discardedCardId = side.hand[discardIndex];
       const searchedCardId = side.deck[searchIndex];
@@ -207,11 +217,14 @@ export function getAiTrainerChoices(
     if (discardIndex !== undefined) choices.discardHandIndex = discardIndex;
   }
   if (card.effect.searchUmamusume) {
-    const deckCardIndex = chooseAiSearchDeckIndex(state, side, false, turnGoal === "stabilize_board");
+    const deckCardIndex = chooseAiSearchDeckIndex(state, side, {
+      preferBasics: turnGoal === "stabilize_board" || turnGoal === "build_backup_attacker",
+      preferEvolutionTargets: turnGoal === "dig_for_evolution",
+    });
     if (deckCardIndex !== undefined) choices.deckCardIndex = deckCardIndex;
   }
   if (card.effect.searchEvolutionUmamusume) {
-    const deckCardIndex = chooseAiSearchDeckIndex(state, side, true);
+    const deckCardIndex = chooseAiSearchDeckIndex(state, side, { evolutionOnly: true, preferEvolutionTargets: true });
     if (deckCardIndex !== undefined) choices.deckCardIndex = deckCardIndex;
   }
   if (card.trainerType === "tool") {
@@ -313,18 +326,22 @@ function chooseAiDiscardHandIndex(state: GameState, side: SideState, excludingHa
 function chooseAiSearchDeckIndex(
   state: GameState,
   side: SideState,
-  evolutionOnly = false,
-  preferBasics = false,
+  options: {
+    evolutionOnly?: boolean;
+    preferBasics?: boolean;
+    preferEvolutionTargets?: boolean;
+  } = {},
 ): number | undefined {
-  const options = side.deck
+  const { evolutionOnly = false, preferBasics = false, preferEvolutionTargets = false } = options;
+  const deckOptions = side.deck
     .map((cardId, deckCardIndex) => ({ cardId, deckCardIndex }))
     .filter(({ cardId }) => {
       const card = getCard(cardId);
       return card.kind === "umamusume" && (!evolutionOnly || card.stage > 0);
     });
-  if (options.length === 0) return undefined;
+  if (deckOptions.length === 0) return undefined;
   if (preferBasics) {
-    const basicOptions = options.filter(({ cardId }) => {
+    const basicOptions = deckOptions.filter(({ cardId }) => {
       const card = getCard(cardId);
       return card.kind === "umamusume" && card.stage === 0;
     });
@@ -333,8 +350,21 @@ function chooseAiSearchDeckIndex(
       return bestBasic?.deckCardIndex;
     }
   }
-  const sorted = [...options].sort((left, right) => scoreCardFutureValue(state, side, right.cardId) - scoreCardFutureValue(state, side, left.cardId));
+  if (preferEvolutionTargets) {
+    const evolutionOptions = deckOptions.filter(({ cardId }) => isUsefulEvolutionSearchHit(side, cardId));
+    if (evolutionOptions.length > 0) {
+      const bestEvolution = [...evolutionOptions].sort((left, right) => scoreCardFutureValue(state, side, right.cardId) - scoreCardFutureValue(state, side, left.cardId))[0];
+      return bestEvolution?.deckCardIndex;
+    }
+  }
+  const sorted = [...deckOptions].sort((left, right) => scoreCardFutureValue(state, side, right.cardId) - scoreCardFutureValue(state, side, left.cardId));
   return sorted[0]?.deckCardIndex;
+}
+
+function isUsefulEvolutionSearchHit(side: SideState, cardId: string): boolean {
+  const card = getCard(cardId);
+  if (card.kind !== "umamusume" || card.stage <= 0) return false;
+  return getAllUmamusume(side).some((target) => target.species === card.evolvesFrom && target.stage === card.stage - 1);
 }
 
 function scoreCardFutureValue(state: GameState, side: SideState, cardId: string): number {
