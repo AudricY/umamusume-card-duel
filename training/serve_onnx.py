@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import onnxruntime as ort
 
-from uma_ai.features import ACTION_DIM, STATE_DIM, legal_actions_to_features, observation_to_features
+from uma_ai.features import ACTION_DIM, STATE_DIM, card_vocab_metadata, legal_actions_to_features, observation_to_features
 
 
 class PolicyServer(ThreadingHTTPServer):
@@ -23,6 +23,22 @@ class PolicyServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         preload_cuda_libraries(provider)
         self.session = ort.InferenceSession(model_path, providers=resolve_providers(provider))
+        self.runtime_card_vocab = card_vocab_metadata()
+        self.expected_card_vocab = load_meta_card_vocab(model_path)
+        if self.expected_card_vocab is not None and self.runtime_card_vocab.get("hash") != "missing":
+            if self.expected_card_vocab.get("hash") != self.runtime_card_vocab.get("hash"):
+                raise RuntimeError(
+                    f"Card vocab hash mismatch at serve time: model={self.expected_card_vocab.get('hash')}"
+                    f" runtime={self.runtime_card_vocab.get('hash')}"
+                )
+
+
+def load_meta_card_vocab(model_path: str) -> dict[str, Any] | None:
+    sidecar = Path(model_path).with_suffix(Path(model_path).suffix + ".meta.json")
+    if not sidecar.exists():
+        return None
+    payload = json.loads(sidecar.read_text(encoding="utf8"))
+    return payload.get("card_vocab")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -111,6 +127,7 @@ def main() -> None:
         "port": args.port,
         "model": model_path,
         "providers": server.session.get_providers(),
+        "card_vocab": server.runtime_card_vocab,
     }))
     server.serve_forever()
 

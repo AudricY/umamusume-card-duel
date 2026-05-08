@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from uma_ai.dataset import JsonlPolicyDataset, collate_policy_batch
-from uma_ai.features import ACTION_DIM, ACTION_FEATURE_SCHEMA_VERSION, STATE_DIM, STATE_FEATURE_SCHEMA_VERSION
+from uma_ai.features import ACTION_DIM, ACTION_FEATURE_SCHEMA_VERSION, STATE_DIM, STATE_FEATURE_SCHEMA_VERSION, card_vocab_metadata
 from uma_ai.model import CandidatePolicyNet, ModelConfig
 
 
@@ -262,12 +263,13 @@ def weighted_mean(losses: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     return (losses * weights).sum() / weights.sum().clamp_min(1.0e-6)
 
 
-def feature_schema_metadata() -> dict[str, int]:
+def feature_schema_metadata() -> dict[str, Any]:
     return {
         "state_dim": STATE_DIM,
         "action_dim": ACTION_DIM,
         "state_feature_schema_version": STATE_FEATURE_SCHEMA_VERSION,
         "action_feature_schema_version": ACTION_FEATURE_SCHEMA_VERSION,
+        "card_vocab": card_vocab_metadata(),
     }
 
 

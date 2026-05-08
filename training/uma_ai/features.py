@@ -9,7 +9,7 @@ import numpy as np
 
 STATE_DIM = 96
 ACTION_DIM = 48
-STATE_FEATURE_SCHEMA_VERSION = 1
+STATE_FEATURE_SCHEMA_VERSION = 2
 ACTION_FEATURE_SCHEMA_VERSION = 2
 
 PHASES = [
@@ -351,6 +351,38 @@ def _get_card(card_id: str) -> dict[str, Any] | None:
     return None
 
 
+@lru_cache(maxsize=1)
+def _card_vocab() -> dict[str, Any]:
+    path = Path(__file__).resolve().parents[2] / "shared" / "src" / "cardVocab.json"
+    if not path.exists():
+        return {"schemaVersion": 0, "vocabSize": 0, "indexById": {}, "hash": "missing"}
+    return json.loads(path.read_text(encoding="utf8"))
+
+
+def card_vocab_metadata() -> dict[str, Any]:
+    vocab = _card_vocab()
+    return {
+        "schemaVersion": vocab.get("schemaVersion", 0),
+        "vocabSize": vocab.get("vocabSize", 0),
+        "hash": vocab.get("hash", "missing"),
+    }
+
+
+def card_vocab_index(card_id: str) -> int:
+    if not card_id:
+        return 0
+    vocab = _card_vocab()
+    indices = vocab.get("indexById", {})
+    if card_id in indices:
+        return int(indices[card_id])
+    for suffix in ("FullArtGold", "FullArt", "UncommonPlus", "Ex"):
+        if card_id.endswith(suffix):
+            base_id = card_id[: -len(suffix)]
+            if base_id in indices:
+                return int(indices[base_id])
+    return int(vocab.get("unknownIndex", 0))
+
+
 def _hash_average(items: list[Any]) -> float:
     if not items:
         return 0.0
@@ -358,8 +390,21 @@ def _hash_average(items: list[Any]) -> float:
 
 
 def _hash_to_unit(text: str) -> float:
+    """Deterministic [0, 1] mapping for a card id.
+
+    Schema version 2: backed by the canonical ``shared/src/cardVocab.json``
+    vocabulary so a card id's float position is stable across runs and tied
+    to the recorded vocab hash. Falls back to the legacy FNV hash only when
+    the vocab file is missing — mainly to keep the unit smoke usable in
+    environments that ran ``npm run sim:build-card-vocab`` once.
+    """
+
     if not text:
         return 0.0
+    vocab = _card_vocab()
+    size = int(vocab.get("vocabSize", 0))
+    if size > 0:
+        return float(card_vocab_index(text)) / float(max(1, size - 1))
     value = 2166136261
     for char in text:
         value ^= ord(char)

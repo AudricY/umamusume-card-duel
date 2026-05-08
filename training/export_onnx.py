@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import torch
 
-from uma_ai.features import ACTION_DIM, STATE_DIM
+from uma_ai.features import ACTION_DIM, STATE_DIM, card_vocab_metadata
 from uma_ai.model import CandidatePolicyNet, ModelConfig
 
 
@@ -18,6 +19,16 @@ def main() -> None:
             f"Checkpoint feature dimensions {config.state_dim}/{config.action_dim} "
             f"do not match current {STATE_DIM}/{ACTION_DIM}"
         )
+    expected_vocab = card_vocab_metadata()
+    checkpoint_schema = checkpoint.get("feature_schema") or {}
+    checkpoint_vocab = checkpoint_schema.get("card_vocab")
+    if checkpoint_vocab is not None and expected_vocab.get("hash") != "missing":
+        if checkpoint_vocab.get("hash") != expected_vocab.get("hash"):
+            raise ValueError(
+                f"Card vocab hash mismatch: checkpoint={checkpoint_vocab.get('hash')} "
+                f"runtime={expected_vocab.get('hash')}; rebuild vocab or retrain."
+            )
+
     model = CandidatePolicyNet(config)
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -42,7 +53,21 @@ def main() -> None:
         },
         opset_version=args.opset,
     )
-    print(f"Exported {out}")
+    sidecar = out.with_suffix(out.suffix + ".meta.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "state_dim": STATE_DIM,
+                "action_dim": ACTION_DIM,
+                "card_vocab": expected_vocab,
+                "checkpoint_vocab": checkpoint_vocab,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf8",
+    )
+    print(f"Exported {out} (vocab hash={expected_vocab.get('hash')})")
 
 
 def parse_args() -> argparse.Namespace:

@@ -15,7 +15,8 @@
     "sim:evaluate-model": "tsx src/sim/evaluateModelVsHeuristic.ts",
     "sim:eval-gate": "tsx src/sim/evalGate.ts",
     "sim:throughput-probe": "tsx src/sim/throughputProbe.ts",
-    "sim:rebaseline": "tsx src/sim/rebaseline.ts"
+    "sim:rebaseline": "tsx src/sim/rebaseline.ts",
+    "sim:build-card-vocab": "tsx src/sim/buildCardVocab.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

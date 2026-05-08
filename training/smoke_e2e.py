@@ -12,7 +12,7 @@ import numpy as np
 import onnxruntime as ort
 
 from uma_ai.dataset import load_policy_samples
-from uma_ai.features import legal_actions_to_features, observation_to_features
+from uma_ai.features import card_vocab_metadata, legal_actions_to_features, observation_to_features
 from uma_ai.node_bridge import export_training_examples
 
 
@@ -44,6 +44,7 @@ def main() -> None:
     subprocess.run(train, cwd=repo_root, check=True)
     manifest = json.loads((model_dir / "manifest.json").read_text(encoding="utf8"))
     assert_grouped_split(manifest)
+    assert_card_vocab_recorded(manifest)
     subprocess.run([
         sys.executable,
         str(repo_root / "training" / "export_onnx.py"),
@@ -83,6 +84,8 @@ def main() -> None:
         except subprocess.TimeoutExpired:
             server.kill()
 
+    assert_export_rejects_vocab_mismatch(repo_root, model_dir, run_dir)
+
     print(json.dumps({
         "status": "PASS",
         "examples": str(examples_path),
@@ -92,6 +95,42 @@ def main() -> None:
         "servedSelectedIndex": served_prediction["selectedIndex"][0],
         "servedSelectedActionId": served_prediction.get("selectedActionId", [None])[0],
     }, indent=2))
+
+
+def assert_export_rejects_vocab_mismatch(repo_root: Path, model_dir: Path, run_dir: Path) -> None:
+    import torch
+
+    checkpoint_path = model_dir / "checkpoint.pt"
+    tampered_path = run_dir / "tampered.pt"
+    raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    schema = dict(raw.get("feature_schema", {}))
+    vocab_meta = dict(schema.get("card_vocab", {}))
+    vocab_meta["hash"] = "tampered-hash-deadbeef"
+    schema["card_vocab"] = vocab_meta
+    raw["feature_schema"] = schema
+    torch.save(raw, tampered_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "training" / "export_onnx.py"),
+            "--checkpoint",
+            str(tampered_path),
+            "--out",
+            str(run_dir / "tampered.onnx"),
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        raise AssertionError(
+            f"export_onnx must reject mismatched card vocab hash, got returncode 0 stdout={result.stdout!r}"
+        )
+    if "Card vocab hash mismatch" not in result.stderr:
+        raise AssertionError(
+            f"Expected 'Card vocab hash mismatch' in stderr; got {result.stderr!r}"
+        )
 
 
 def assert_grouped_split(manifest: dict) -> None:
@@ -105,6 +144,20 @@ def assert_grouped_split(manifest: dict) -> None:
     leaked = train_groups.intersection(val_groups)
     if leaked:
         raise AssertionError(f"Train/val group leakage: {sorted(leaked)}")
+
+
+def assert_card_vocab_recorded(manifest: dict) -> None:
+    schema = manifest.get("feature_schema", {})
+    vocab = schema.get("card_vocab")
+    if not vocab:
+        raise AssertionError(f"Expected card_vocab metadata in manifest feature_schema, got {schema}")
+    runtime = card_vocab_metadata()
+    if vocab.get("hash") != runtime.get("hash"):
+        raise AssertionError(
+            f"Manifest vocab hash {vocab.get('hash')} != runtime {runtime.get('hash')}"
+        )
+    if vocab.get("vocabSize", 0) <= 0:
+        raise AssertionError(f"Card vocab has unexpected size {vocab.get('vocabSize')}")
 
 
 def run_onnx_prediction(model_path: Path, example: dict) -> dict[str, int]:
