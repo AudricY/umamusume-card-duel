@@ -20,7 +20,7 @@ Scope: start at the top of `ai-performance-research-backlog.md`, define a concre
 | 5. DAgger trace export | Model evaluator now accepts `--decision-trace-out` and writes public model-side decision JSONL rows with legal actions, selected action, heuristic baseline, selected rank, fallback flag, and final game result. | `backend/src/sim/evaluateModelVsHeuristic.ts`; trace smoke |
 | 7. Legal attacks / combat choices | Combat decisions now carry `attackIndex`; combat candidate generation iterates every payable attack on the active card and preserves attack index through modeled execution. Existing attack subchoices now include explicit discard, evolve-from-deck, random-discard, switch, heal, target, retreat, and self-shuffle payloads where applicable. | `frontend/src/game/engine/flow/ai/combatPlanner.ts`; export smoke found all combat attack actions include `attackIndex`; action contract passes |
 | 8. Feature schema compatibility | Python now fails clearly on action feature length mismatch instead of silently padding/truncating old rows. Checkpoints and manifests record feature schema metadata; ONNX export/server validate expected feature dimensions. TS exports now expose action feature schema/version constants for exporter manifests. | `frontend/src/game/engine/ai-policy/actions.ts`; `training/uma_ai/features.py`; `training/export_onnx.py`; `training/serve_onnx.py` |
-| 19. Stronger training smoke tests | `test:train` now includes fingerprint contract fixtures and deterministic outcome-export schema/provenance checks. Python e2e asserts grouped split and exercises stricter ONNX export/server dimension path. | `backend/package.json`; `backend/src/tests/outcomeExportSmoke.ts`; `training/smoke_e2e.py` |
+| 19. Stronger training smoke tests | `test:train` now includes fingerprint contract fixtures, deterministic outcome-export schema/provenance checks, fake-model evaluator coverage, and eval-gate failure coverage. Python e2e asserts grouped split and exercises stricter ONNX export/server dimension path. | `backend/package.json`; `backend/src/tests/outcomeExportSmoke.ts`; `backend/src/tests/evalGateSmoke.ts`; `training/smoke_e2e.py` |
 
 ### Backlog Item Plan / Acceptance Ledger
 
@@ -44,11 +44,11 @@ Scope: start at the top of `ai-performance-research-backlog.md`, define a concre
 | 16 | Centralize and test state fingerprint. | All no-op/stall/search paths use one helper; mutation fixtures pass. | Implemented for evaluator/headless/export/action-contract paths. |
 | 17 | Add pass/fail evaluation gate. | Gate reports WR, Wilson CI, side split, points, terminal reasons, fallbacks/no-ops and fails thresholds. | Partially implemented: gate reports all except an explicit separate no-op count beyond fallback/stall accounting. |
 | 18 | Write manifests beside exports, training runs, and evals. | Every JSONL/checkpoint/eval has reproducible sibling metadata. | Mostly implemented: dataset/training manifests exist; base evaluator and eval gate can write manifests via `--manifest-out`; README documents the layout. Remaining gap is enforcing manifest presence for every ad hoc eval command. |
-| 19 | Expand training/eval smoke coverage. | `test:train` covers export/outcome/fake-model/schema/fingerprint regressions. | Partially implemented: fingerprint, outcome determinism/provenance, grouped split, and schema/dimension checks. Fake-model/eval-gate failure tests remain. |
+| 19 | Expand training/eval smoke coverage. | `test:train` covers export/outcome/fake-model/schema/fingerprint regressions. | Partially implemented: fingerprint, outcome determinism/provenance, fake-model policy eval, eval-gate failure, grouped split, and schema/dimension checks. DAgger trace shape and explicit bad-policy strength tests remain. |
 
 ### Immediate Next Work
 
 1. Add candidate-order randomization and feature ablation switches.
 2. Extend trace rows with optional rollout/search teacher alternatives when policy/value selection is used.
-3. Add eval-gate failure/fake-model smoke coverage.
+3. Add DAgger trace shape smoke coverage.
 4. Implement the turn-bundle planner with trace telemetry enabled.
