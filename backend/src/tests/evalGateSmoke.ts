@@ -214,6 +214,34 @@ try {
       assert.equal(row.legalActions.length, 1, "single-action snapshots imply legalActions.length == 1");
     }
   });
+  // Item 12: --opponent-model-url smoke. Spin up a *second* fake server on
+  // a distinct port and verify evaluateModelVsHeuristic completes with
+  // the opponent-side served by that URL. The row structure must match
+  // the existing summary shape so downstream consumers don't break.
+  const opponentServer = createServer(handlePredict);
+  await new Promise<void>((resolve) => opponentServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const opponentAddress = opponentServer.address();
+    assert.ok(opponentAddress && typeof opponentAddress === "object", "opponent fake server should bind");
+    const opponentUrl = `http://127.0.0.1:${(opponentAddress as { port: number }).port}`;
+    assert.notEqual(opponentUrl, modelUrl, "opponent fake server should be on a distinct port");
+    const poolRun = await execFileAsync("tsx", [
+      "src/sim/evaluateModelVsHeuristic.ts",
+      "--selection", "policy",
+      "--model-url", modelUrl,
+      "--opponent-model-url", opponentUrl,
+      "--games", "1",
+      "--model-side", "player",
+      "--max-steps", "120",
+    ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 8 });
+    const poolPayload = JSON.parse(poolRun.stdout);
+    assert.equal(poolPayload.summary.games, 1, "opponent-url eval should run one game");
+    assert.ok(typeof poolPayload.summary.modelWinRate === "number", "summary should retain modelWinRate field");
+    assert.ok(typeof poolPayload.summary.heuristicFallbacks === "number", "summary should retain heuristicFallbacks field");
+    assert.ok(poolPayload.summary.byModelSide?.player, "summary should retain byModelSide.player block");
+  } finally {
+    opponentServer.close();
+  }
 } finally {
   server.close();
 }

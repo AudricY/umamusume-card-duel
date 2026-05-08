@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from opponent_pool import OpponentPool, PoolEntry
 from uma_ai.node_bridge import (
     export_training_examples,
     mix_sources,
@@ -99,13 +100,16 @@ def main() -> None:
     )
 
     rule_bot_replay = ensure_rule_bot_replay(repo_root, out_dir, args, base_config)
+    pool_path = out_dir / "opponent-pool.json"
+    pool = OpponentPool.from_json(pool_path)
 
     last_iter = max((entry["iteration"] for entry in state.iterations), default=-1)
     for iteration in range(last_iter + 1, args.iterations):
         cfg = IterationConfig(**{**base_config.__dict__, "iteration": iteration})
-        record = run_iteration(repo_root, out_dir, cfg, state, rule_bot_replay, args)
+        record = run_iteration(repo_root, out_dir, cfg, state, rule_bot_replay, pool, args)
         state.iterations.append(record)
         save_state(out_dir / "orchestrator-state.json", state)
+        pool.to_json(pool_path)
 
     summary = {
         "iterations": state.iterations,
@@ -143,6 +147,7 @@ def run_iteration(
     cfg: IterationConfig,
     state: OrchestratorState,
     rule_bot_replay: Path,
+    pool: OpponentPool,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     iter_dir = root_dir / f"iter-{cfg.iteration:03d}"
@@ -273,6 +278,52 @@ def run_iteration(
     if decision["promote"]:
         state.promoted_checkpoint = train_dir / "checkpoint.pt"
         state.promoted_wilson_lower = wilson_lower
+
+    # Item 12: pool matchup eval. Runs *after* the rule-bot gate so the
+    # primary promote/reject decision is preserved (item 13 will wire the
+    # per-matchup gate failure modes on top of these recorded metrics).
+    pool_eval_results: list[dict[str, Any]] = []
+    pool_aggregate_wilson_lower: float | None = None
+    cycling_alarm_iterations: list[int] = []
+    if (
+        not args.skip_policy_gate
+        and args.pool_eval_games > 0
+        and len(pool.entries) > 0
+        and (train_dir / "checkpoint.pt").exists()
+    ):
+        for opponent_entry in list(pool.entries):
+            try:
+                pool_eval_results.append(
+                    run_pool_matchup_eval(
+                        repo_root,
+                        iter_dir,
+                        train_dir / "checkpoint.pt",
+                        opponent_entry,
+                        cfg=cfg,
+                        args=args,
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - logged for telemetry only
+                print(f"[orchestrator] pool matchup vs iter-{opponent_entry.iteration} failed: {exc}")
+                pool_eval_results.append({
+                    "opponent_iteration": opponent_entry.iteration,
+                    "wilson_lower": 0.0,
+                    "win_rate": 0.0,
+                    "n_games": 0,
+                    "error": str(exc),
+                })
+        if pool_eval_results:
+            valid = [row for row in pool_eval_results if row.get("n_games", 0) > 0]
+            total_n = sum(row["n_games"] for row in valid)
+            total_wins = sum(row["win_rate"] * row["n_games"] for row in valid)
+            if total_n > 0:
+                pool_aggregate_wilson_lower = wilson_lower_bound(int(round(total_wins)), total_n)
+        # Update per-opponent win-rate history persisted on the pool's
+        # per-orchestrator state. We track history inline in iteration
+        # records; cycling_alarm consumes the rebuilt history each call.
+        history = build_per_opponent_history(state, pool_eval_results, current_iteration=cfg.iteration)
+        cycling_alarm_iterations = OpponentPool.cycling_alarm(history)
+
     record = {
         "iteration": cfg.iteration,
         "selection": selection,
@@ -287,7 +338,28 @@ def run_iteration(
         "decision_reason": decision["reason"],
         "gate_returncode": gate_returncode,
         "rule_bot_replay_rows": count_lines(rule_bot_replay),
+        "pool_evals": pool_eval_results,
+        "pool_aggregate_wilson_lower": pool_aggregate_wilson_lower,
+        "cycling_alarm": cycling_alarm_iterations,
     }
+    # Snapshot the promoted checkpoint into the pool, then apply
+    # retention. Snapshotting *after* the iteration's pool eval avoids
+    # self-play contamination of the per-opponent metrics.
+    if decision["promote"]:
+        snapshot_path = root_dir / "pool" / f"iter-{cfg.iteration:03d}" / "checkpoint.pt"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(train_dir / "checkpoint.pt", snapshot_path)
+        meta_src = (train_dir / "checkpoint.pt").with_suffix(".pt.meta.json")
+        if meta_src.exists():
+            shutil.copy2(meta_src, snapshot_path.with_suffix(".pt.meta.json"))
+        pool.add(PoolEntry(
+            iteration=cfg.iteration,
+            checkpoint_path=str(snapshot_path),
+            wilson_lower_at_promotion=wilson_lower,
+            value_mean_drift_from_prior=0.0,
+        ))
+        pool.retain()
+
     (iter_dir / "iteration-manifest.json").write_text(json.dumps({
         "iteration": cfg.iteration,
         "config": cfg.__dict__,
@@ -298,6 +370,103 @@ def run_iteration(
     }, indent=2) + "\n", encoding="utf8")
     print(f"[orchestrator] iteration {cfg.iteration} {'promoted' if decision['promote'] else 'rejected'} ({decision['reason']})")
     return record
+
+
+def build_per_opponent_history(
+    state: OrchestratorState,
+    current_pool_eval: list[dict[str, Any]],
+    *,
+    current_iteration: int,
+) -> dict[int, list[float]]:
+    """Reconstruct each opponent's win-rate history across iterations.
+
+    Pulls prior iteration records' ``pool_evals`` blocks plus the current
+    iteration's freshly-computed list and returns a per-opponent ordered
+    history suitable for ``OpponentPool.cycling_alarm``.
+    """
+
+    history: dict[int, list[float]] = {}
+    for record in state.iterations:
+        for row in record.get("pool_evals", []) or []:
+            opp = int(row.get("opponent_iteration", -1))
+            if opp < 0:
+                continue
+            history.setdefault(opp, []).append(float(row.get("win_rate", 0.0)))
+    for row in current_pool_eval:
+        opp = int(row.get("opponent_iteration", -1))
+        if opp < 0:
+            continue
+        history.setdefault(opp, []).append(float(row.get("win_rate", 0.0)))
+    return history
+
+
+def wilson_lower_bound(successes: int, total: int, *, z: float = 1.96) -> float:
+    if total <= 0:
+        return 0.0
+    phat = successes / total
+    denom = 1.0 + (z * z) / total
+    center = (phat + (z * z) / (2 * total)) / denom
+    half = z * math.sqrt((phat * (1 - phat) + (z * z) / (4 * total)) / total) / denom
+    return max(0.0, center - half)
+
+
+def run_pool_matchup_eval(
+    repo_root: Path,
+    iter_dir: Path,
+    current_checkpoint: Path,
+    opponent_entry: PoolEntry,
+    *,
+    cfg: IterationConfig,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Stand up two serve_onnx instances and run a small policy-vs-policy eval.
+
+    Two distinct ports are required because each ``serve_onnx_context``
+    binds its own ephemeral port from the OS pool. The current iteration's
+    checkpoint serves on the model URL; the pool member serves on the
+    opponent URL. Decision is greedy on each side via ``selectedIndex[0]``.
+    """
+
+    matchup_dir = iter_dir / "pool" / f"vs-iter-{opponent_entry.iteration:03d}"
+    matchup_dir.mkdir(parents=True, exist_ok=True)
+    current_onnx = matchup_dir / "current.onnx"
+    opponent_onnx = matchup_dir / "opponent.onnx"
+    export_checkpoint_to_onnx(repo_root, current_checkpoint, current_onnx)
+    export_checkpoint_to_onnx(repo_root, Path(opponent_entry.checkpoint_path), opponent_onnx)
+    manifest_out = matchup_dir / "matchup.manifest.json"
+
+    games = max(1, int(args.pool_eval_games))
+    seed_start = (args.pool_eval_seed_start
+                  + cfg.iteration * 10_000
+                  + opponent_entry.iteration)
+
+    with serve_onnx_context(repo_root, current_onnx, args) as current_url:
+        with serve_onnx_context(repo_root, opponent_onnx, args) as opponent_url:
+            run_evaluator(
+                repo_root,
+                selection="policy",
+                games=games,
+                seed_start=seed_start,
+                model_side="both",
+                max_steps=args.max_steps,
+                rollout_steps=cfg.rollout_steps,
+                rollout_crn_samples=cfg.rollout_crn_samples,
+                model_url=current_url,
+                opponent_model_url=opponent_url,
+                manifest_out=manifest_out,
+            )
+
+    payload = json.loads(manifest_out.read_text(encoding="utf8"))
+    summary = payload.get("summary", {})
+    n_games = int(summary.get("games", 0))
+    win_rate = float(summary.get("modelWinRate", 0.0))
+    wins = int(round(win_rate * n_games)) if n_games > 0 else 0
+    return {
+        "opponent_iteration": opponent_entry.iteration,
+        "wilson_lower": wilson_lower_bound(wins, n_games),
+        "win_rate": win_rate,
+        "n_games": n_games,
+    }
 
 
 def decide_promotion(state: OrchestratorState, gate_returncode: int, wilson_lower: float, args: argparse.Namespace, *, eval_n: int) -> dict[str, Any]:
@@ -596,6 +765,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trace-seed-start", type=int, default=14000)
     parser.add_argument("--skip-policy-gate", action="store_true",
                         help="Use selection=baseline for the gate to avoid the ONNX server bring-up. Useful for smoke runs.")
+    parser.add_argument("--pool-eval-games", type=int, default=20,
+                        help="Games per pool member during the per-opponent eval phase. Set to 0 to skip pool matchups (escape hatch for smokes).")
+    parser.add_argument("--pool-eval-seed-start", type=int, default=20000,
+                        help="Seed offset for pool matchup evals; per-opponent seeds are derived deterministically from iteration and opponent index.")
     parser.add_argument("--resume-state", default=None)
     return parser.parse_args()
 

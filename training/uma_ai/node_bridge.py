@@ -55,6 +55,7 @@ def run_evaluator(
     rollout_crn_samples: int = 1,
     planner_crn_samples: int = 3,
     model_url: str | None = None,
+    opponent_model_url: str | None = None,
     manifest_out: str | Path | None = None,
     extra: Iterable[str] = (),
 ) -> None:
@@ -89,6 +90,8 @@ def run_evaluator(
         cmd += ["--trace-teacher", trace_teacher]
     if model_url is not None:
         cmd += ["--model-url", model_url]
+    if opponent_model_url is not None:
+        cmd += ["--opponent-model-url", opponent_model_url]
     if manifest_out is not None:
         cmd += ["--manifest-out", str(manifest_out)]
     cmd.extend(extra)
@@ -163,6 +166,7 @@ def run_eval_gate(
     require_zero_no_ops: bool = True,
     rollout_crn_samples: int = 1,
     planner_crn_samples: int = 3,
+    opponent_model_url: str | None = None,
     extra: Iterable[str] = (),
 ) -> int:
     repo_root = Path(repo_root)
@@ -193,6 +197,8 @@ def run_eval_gate(
     ]
     if not require_zero_no_ops:
         cmd.append("--allow-no-ops")
+    if opponent_model_url is not None:
+        cmd += ["--opponent-model-url", opponent_model_url]
     cmd.extend(extra)
     completed = subprocess.run(cmd, cwd=repo_root, env=_backend_env())
     return int(completed.returncode)

@@ -153,6 +153,7 @@ function makePlannerArgs(args: ProbeArgs): EvaluateModelArgs {
     plannerLeafAggregate: "mean",
     plannerFirstActionAggregate: "max",
     rolloutCrnSamples: 1,
+    opponentModelUrl: null,
   };
 }
 

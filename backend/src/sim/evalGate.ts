@@ -166,6 +166,7 @@ function parseArgs(argv: string[]): Args {
     plannerFirstActionAggregate: parsePlannerFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
     rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
     traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
+    opponentModelUrl: get("--opponent-model-url", "") || null,
     minGames: Number(get("--min-games", "500")),
     minWinRate: Number(get("--min-win-rate", "0")),
     minCiLower: Number(get("--min-ci-lower", "0")),

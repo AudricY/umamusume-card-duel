@@ -15,6 +15,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from opponent_pool import OpponentPool  # noqa: E402  (path bootstrap)
+
 
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
@@ -50,6 +55,12 @@ def main() -> None:
             "--eval-games",
             "1",
             "--skip-policy-gate",
+            # Item 12 escape hatch: pool matchups need two simultaneous
+            # serve_onnx instances, which would dominate the smoke wall
+            # clock. The unit-style smoke in opponent_pool_smoke.py
+            # exercises the data-structure invariants directly.
+            "--pool-eval-games",
+            "0",
         ]
         subprocess.run(cmd, cwd=repo_root, check=True)
         state = json.loads((work_dir / "orchestrator-state.json").read_text(encoding="utf8"))
@@ -64,6 +75,16 @@ def main() -> None:
                     raise AssertionError(f"Missing {required} under {iter_dir}")
             if int(iteration["mixed_rows"]) <= 0:
                 raise AssertionError(f"Iteration {iteration['iteration']} produced no mixed rows")
+            for required_field in ("pool_evals", "pool_aggregate_wilson_lower", "cycling_alarm"):
+                if required_field not in iteration:
+                    raise AssertionError(
+                        f"Iteration {iteration['iteration']} missing {required_field}: {iteration}"
+                    )
+            if iteration["pool_evals"]:
+                # --pool-eval-games 0 should skip pool matchups cleanly.
+                raise AssertionError(
+                    f"--pool-eval-games 0 should produce no pool eval rows, got {iteration['pool_evals']}"
+                )
         if seen != {0, 1, 2}:
             raise AssertionError(f"Iteration ids unexpected: {sorted(seen)}")
         promoted_count = sum(1 for it in state["iterations"] if it.get("promoted"))
@@ -73,7 +94,47 @@ def main() -> None:
         # gate->promote path is exercised.
         if promoted_count < 1:
             raise AssertionError(f"Expected at least one promoted iteration, got {state}")
-        print(json.dumps({"status": "PASS", "work_dir": str(work_dir), "promoted_count": promoted_count}, indent=2))
+
+        # Item 12: opponent-pool persistence + per-iteration snapshot.
+        pool_path = work_dir / "opponent-pool.json"
+        if not pool_path.exists():
+            raise AssertionError(f"Missing opponent-pool.json under {work_dir}")
+        pool = OpponentPool.from_json(pool_path)
+        # Each promoted iteration snapshots one entry. Iteration 2 must
+        # have at least 1 promoted entry behind it; iteration 3, at
+        # least 2. We assert the floor since the rule-bot gate is
+        # noisy at this scale and may promote all three.
+        promoted_iters = [int(it["iteration"]) for it in state["iterations"] if it.get("promoted")]
+        expected_pool_size = len(promoted_iters)
+        if len(pool.entries) != expected_pool_size:
+            raise AssertionError(
+                f"Pool size {len(pool.entries)} != promoted-iteration count {expected_pool_size}"
+            )
+        if expected_pool_size >= 2:
+            # When 2 or more iterations promote, the pool must reflect that.
+            assert len(pool.entries) >= 2, f"expected >=2 pool entries, got {len(pool.entries)}"
+        for entry in pool.entries:
+            if not Path(entry.checkpoint_path).exists():
+                raise AssertionError(f"Pool entry checkpoint missing on disk: {entry}")
+
+        # Item 12: cycling alarm unit-style assertion on a planted
+        # rock-paper-scissors regression. Independent of the smoke run
+        # so it doesn't depend on the noisy pipeline.
+        planted_history = {
+            4: [0.4, 0.5, 0.5, 0.45],  # not strictly declining (tie at 0.5,0.5)
+            7: [0.7, 0.6, 0.5, 0.4],   # strict decline on last 3 → must trip
+        }
+        flagged = OpponentPool.cycling_alarm(planted_history)
+        if flagged != [7]:
+            raise AssertionError(
+                f"planted RPS regression should flag opponent 7 only, got {flagged}"
+            )
+        print(json.dumps({
+            "status": "PASS",
+            "work_dir": str(work_dir),
+            "promoted_count": promoted_count,
+            "pool_size": len(pool.entries),
+        }, indent=2))
     finally:
         # Keep work_dir for inspection on failure; clean only on success.
         if "PASS" in str(sys.exc_info()[1] or ""):

@@ -69,6 +69,11 @@ export type EvaluateModelArgs = {
   plannerTopK: number;
   plannerMaxSequences: number;
   plannerMaxDepth: number;
+  // Item 12: when set, the non-model side consults a second served
+  // checkpoint instead of advancing through the rule bot. Used by the
+  // orchestrator for pool matchup eval. Falls back silently to the rule
+  // bot on any error so eval-time robustness is preserved.
+  opponentModelUrl: string | null;
 };
 
 type GameResult = {
@@ -247,9 +252,30 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
         state = next;
       }
     } else {
-      state = sideId === "player"
-        ? advancePlayerAiTurnStep(state, forcedCoinResults, rng.next)
-        : advanceOpponentTurnStep(state, forcedCoinResults, rng.next);
+      // Item 12: if a pool-member URL is configured, the non-model side
+      // delegates to that served checkpoint. On any error or single-action
+      // shortcut we fall back to the rule-bot advance so the evaluator
+      // never crashes mid-game.
+      let advanced = false;
+      if (args.opponentModelUrl) {
+        try {
+          const opponentDecision = await chooseOpponentModelAction(args.opponentModelUrl, state, sideId);
+          if (opponentDecision) {
+            const next = advanceModeledTurnStep(state, sideId, opponentDecision.action, forcedCoinResults, rng);
+            if (stateHash(next) !== beforeHash) {
+              state = next;
+              advanced = true;
+            }
+          }
+        } catch {
+          advanced = false;
+        }
+      }
+      if (!advanced) {
+        state = sideId === "player"
+          ? advancePlayerAiTurnStep(state, forcedCoinResults, rng.next)
+          : advanceOpponentTurnStep(state, forcedCoinResults, rng.next);
+      }
     }
     const afterHash = stateHash(state);
     if (afterHash === beforeHash) {
@@ -320,6 +346,46 @@ function chooseTraceTeacher(
   };
   if (decision.selectedOriginalRank !== undefined) teacher.selectedOriginalRank = decision.selectedOriginalRank;
   return teacher;
+}
+
+async function chooseOpponentModelAction(
+  opponentModelUrl: string,
+  state: GameState,
+  sideId: SideId,
+): Promise<{ action: LegalAiAction; selectedIndex: number } | null> {
+  // Mirrors chooseModelAction's transport but is failure-tolerant: any
+  // malformed response yields null so the caller can fall back to the
+  // rule bot. The opponent side only needs an action; behavior-policy
+  // snapshots are deliberately not threaded through (these games do not
+  // produce decision traces for the non-model side).
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  if (legalActions.length <= 1) return null;
+  let response: Response;
+  try {
+    response = await fetch(`${opponentModelUrl.replace(/\/$/, "")}/predict`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        observation: buildPublicObservation(state, sideId),
+        legalActions,
+      }),
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+  let payload: { selectedIndex?: number[] };
+  try {
+    payload = await response.json() as { selectedIndex?: number[] };
+  } catch {
+    return null;
+  }
+  const rawIndex = Number(payload.selectedIndex?.[0] ?? NaN);
+  if (!Number.isFinite(rawIndex)) return null;
+  const selectedIndex = Math.max(0, Math.min(legalActions.length - 1, rawIndex));
+  const action = legalActions[selectedIndex];
+  if (!action) return null;
+  return { action, selectedIndex };
 }
 
 async function chooseModelAction(modelUrl: string, state: GameState, sideId: SideId): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number; behavior?: BehaviorPolicySnapshot }> {
@@ -1081,6 +1147,7 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     plannerLeafAggregate: parseAggregate(get("--planner-leaf-aggregate", "mean")),
     plannerFirstActionAggregate: parseFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
     rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
+    opponentModelUrl: get("--opponent-model-url", "") || null,
   };
 }
 
