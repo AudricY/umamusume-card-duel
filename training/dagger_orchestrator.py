@@ -70,6 +70,13 @@ class OrchestratorState:
     promoted_checkpoint: Path | None = None
     promoted_wilson_lower: float | None = None
     iterations: list[dict[str, Any]] = field(default_factory=list)
+    # Item 13 residual: halt the orchestrator after 2 consecutive
+    # rejections to surface the regression to the operator instead of
+    # grinding through more iterations against a broken target. Cleared
+    # on any successful promotion.
+    consecutive_failures: int = 0
+    halted: bool = False
+    halt_reason: str | None = None
 
 
 def main() -> None:
@@ -105,6 +112,9 @@ def main() -> None:
 
     last_iter = max((entry["iteration"] for entry in state.iterations), default=-1)
     for iteration in range(last_iter + 1, args.iterations):
+        if state.halted:
+            print(f"[orchestrator] halted before iteration {iteration}: {state.halt_reason}")
+            break
         cfg = IterationConfig(**{**base_config.__dict__, "iteration": iteration})
         record = run_iteration(repo_root, out_dir, cfg, state, rule_bot_replay, pool, args)
         state.iterations.append(record)
@@ -115,6 +125,8 @@ def main() -> None:
         "iterations": state.iterations,
         "promoted_checkpoint": str(state.promoted_checkpoint) if state.promoted_checkpoint else None,
         "promoted_wilson_lower": state.promoted_wilson_lower,
+        "halted": state.halted,
+        "halt_reason": state.halt_reason,
     }
     print(json.dumps(summary, indent=2))
 
@@ -274,14 +286,14 @@ def run_iteration(
     summary = gate_payload.get("summary", {})
     wilson_lower = float(summary.get("wilson95", {}).get("lower", 0.0))
 
-    decision = decide_promotion(state, gate_returncode, wilson_lower, args, eval_n=int(summary.get("games", cfg.eval_min_games * 2)))
-    if decision["promote"]:
-        state.promoted_checkpoint = train_dir / "checkpoint.pt"
-        state.promoted_wilson_lower = wilson_lower
+    eval_n = int(summary.get("games", cfg.eval_min_games * 2))
 
-    # Item 12: pool matchup eval. Runs *after* the rule-bot gate so the
-    # primary promote/reject decision is preserved (item 13 will wire the
-    # per-matchup gate failure modes on top of these recorded metrics).
+    # Item 12: pool matchup eval. Runs *before* the promotion decision
+    # so item 13's per-matchup floor violations can join the gate's failure
+    # set. Promotion is rejected if any opponent's Wilson lower bound drops
+    # by more than --per-matchup-drop-tolerance vs the prior iteration on
+    # that opponent. Aggregate gate alone is preserved when the pool is
+    # empty or pool eval is skipped.
     pool_eval_results: list[dict[str, Any]] = []
     pool_aggregate_wilson_lower: float | None = None
     cycling_alarm_iterations: list[int] = []
@@ -324,6 +336,39 @@ def run_iteration(
         history = build_per_opponent_history(state, pool_eval_results, current_iteration=cfg.iteration)
         cycling_alarm_iterations = OpponentPool.cycling_alarm(history)
 
+    # Item 13 residual: per-matchup floor violations. Compute *before*
+    # the promotion decision so they participate in promote/reject. A
+    # matchup violates the floor if its current Wilson lower drops by more
+    # than --per-matchup-drop-tolerance vs the most recent prior recorded
+    # Wilson lower against the same opponent. First-time matchups (no
+    # prior history) cannot trigger a drop.
+    matchup_violations = compute_matchup_floor_violations(
+        state,
+        pool_eval_results,
+        tolerance=args.per_matchup_drop_tolerance,
+    )
+
+    decision = decide_promotion(
+        state,
+        gate_returncode,
+        wilson_lower,
+        args,
+        eval_n=eval_n,
+        matchup_violations=matchup_violations,
+    )
+    if decision["promote"]:
+        state.promoted_checkpoint = train_dir / "checkpoint.pt"
+        state.promoted_wilson_lower = wilson_lower
+        state.consecutive_failures = 0
+    else:
+        state.consecutive_failures += 1
+        if state.consecutive_failures >= 2:
+            state.halted = True
+            state.halt_reason = (
+                f"halt-after-2: 2 consecutive rejections; last reason "
+                f"'{decision['reason']}'"
+            )
+
     record = {
         "iteration": cfg.iteration,
         "selection": selection,
@@ -341,6 +386,10 @@ def run_iteration(
         "pool_evals": pool_eval_results,
         "pool_aggregate_wilson_lower": pool_aggregate_wilson_lower,
         "cycling_alarm": cycling_alarm_iterations,
+        "matchup_floor_violations": matchup_violations,
+        "consecutive_failures": state.consecutive_failures,
+        "halted": state.halted,
+        "halt_reason": state.halt_reason,
     }
     # Snapshot the promoted checkpoint into the pool, then apply
     # retention. Snapshotting *after* the iteration's pool eval avoids
@@ -469,7 +518,15 @@ def run_pool_matchup_eval(
     }
 
 
-def decide_promotion(state: OrchestratorState, gate_returncode: int, wilson_lower: float, args: argparse.Namespace, *, eval_n: int) -> dict[str, Any]:
+def decide_promotion(
+    state: OrchestratorState,
+    gate_returncode: int,
+    wilson_lower: float,
+    args: argparse.Namespace,
+    *,
+    eval_n: int,
+    matchup_violations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Promote/reject with a confidence-band tolerance instead of arithmetic ε.
 
     Backlog item 13 (v4.1): "≥0pp at n≥150, or if the gate runs at n<150,
@@ -477,6 +534,12 @@ def decide_promotion(state: OrchestratorState, gate_returncode: int, wilson_lowe
     used in v4 chronically rejected within-noise iterations at small n —
     Wilson half-width at n=50 is ≈12pp, which dwarfs any genuine iter-on-
     iter improvement at this scale.
+
+    Item 13 residual adds the per-matchup floor: any opponent whose Wilson
+    lower bound dropped by more than --per-matchup-drop-tolerance fails the
+    gate as a *separate* failure mode. The aggregate Wilson lower can pass
+    while a single matchup is collapsing — that's exactly the regression
+    pattern the per-matchup floor exists to catch.
     """
 
     if gate_returncode != 0:
@@ -488,10 +551,62 @@ def decide_promotion(state: OrchestratorState, gate_returncode: int, wilson_lowe
             "promote": False,
             "reason": f"wilson_lower {wilson_lower:.4f} + tolerance {tolerance:.4f} < floor {floor:.4f} (n={eval_n})",
         }
+    if matchup_violations:
+        worst = max(matchup_violations, key=lambda v: v["drop"])
+        return {
+            "promote": False,
+            "reason": (
+                f"per-matchup floor: opponent iter-{worst['opponent_iteration']} "
+                f"dropped {worst['drop']:.4f} (>{args.per_matchup_drop_tolerance:.4f}) "
+                f"vs prior wilson_lower"
+            ),
+        }
     return {
         "promote": True,
         "reason": f"wilson_lower {wilson_lower:.4f} + tolerance {tolerance:.4f} >= floor {floor:.4f} (n={eval_n})",
     }
+
+
+def compute_matchup_floor_violations(
+    state: OrchestratorState,
+    current_pool_eval: list[dict[str, Any]],
+    *,
+    tolerance: float,
+) -> list[dict[str, Any]]:
+    """Return per-matchup floor violations for the current iteration.
+
+    A violation is recorded when the opponent's current Wilson lower bound
+    falls below the most-recent prior Wilson lower against the same
+    opponent by more than `tolerance` (default 0.05 = 5pp). First-time
+    matchups never trigger because there is no prior to compare against.
+    """
+
+    prior_by_opp: dict[int, float] = {}
+    for record in state.iterations:
+        for row in record.get("pool_evals", []) or []:
+            opp = int(row.get("opponent_iteration", -1))
+            if opp < 0 or row.get("n_games", 0) <= 0:
+                continue
+            prior_by_opp[opp] = float(row.get("wilson_lower", 0.0))
+    violations: list[dict[str, Any]] = []
+    for row in current_pool_eval:
+        opp = int(row.get("opponent_iteration", -1))
+        if opp < 0 or row.get("n_games", 0) <= 0:
+            continue
+        prior = prior_by_opp.get(opp)
+        if prior is None:
+            continue
+        current = float(row.get("wilson_lower", 0.0))
+        drop = prior - current
+        if drop > tolerance:
+            violations.append({
+                "opponent_iteration": opp,
+                "prior_wilson_lower": prior,
+                "current_wilson_lower": current,
+                "drop": drop,
+                "tolerance": tolerance,
+            })
+    return violations
 
 
 def wilson_band_tolerance(n: int, *, p: float = 0.5, z: float = 1.96) -> float:
@@ -723,6 +838,9 @@ def save_state(path: Path, state: OrchestratorState) -> None:
                 "promoted_checkpoint": str(state.promoted_checkpoint) if state.promoted_checkpoint else None,
                 "promoted_wilson_lower": state.promoted_wilson_lower,
                 "iterations": state.iterations,
+                "consecutive_failures": state.consecutive_failures,
+                "halted": state.halted,
+                "halt_reason": state.halt_reason,
             },
             indent=2,
         )
@@ -737,6 +855,9 @@ def load_state(path: Path) -> OrchestratorState:
         promoted_checkpoint=Path(payload["promoted_checkpoint"]) if payload.get("promoted_checkpoint") else None,
         promoted_wilson_lower=payload.get("promoted_wilson_lower"),
         iterations=payload.get("iterations", []),
+        consecutive_failures=int(payload.get("consecutive_failures", 0)),
+        halted=bool(payload.get("halted", False)),
+        halt_reason=payload.get("halt_reason"),
     )
 
 
@@ -767,6 +888,8 @@ def parse_args() -> argparse.Namespace:
                         help="Use selection=baseline for the gate to avoid the ONNX server bring-up. Useful for smoke runs.")
     parser.add_argument("--pool-eval-games", type=int, default=20,
                         help="Games per pool member during the per-opponent eval phase. Set to 0 to skip pool matchups (escape hatch for smokes).")
+    parser.add_argument("--per-matchup-drop-tolerance", type=float, default=0.05,
+                        help="Max allowed Wilson lower drop per opponent vs prior recorded eval (item 13).")
     parser.add_argument("--pool-eval-seed-start", type=int, default=20000,
                         help="Seed offset for pool matchup evals; per-opponent seeds are derived deterministically from iteration and opponent index.")
     parser.add_argument("--resume-state", default=None)

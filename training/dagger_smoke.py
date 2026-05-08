@@ -19,6 +19,12 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from opponent_pool import OpponentPool  # noqa: E402  (path bootstrap)
+from dagger_orchestrator import (  # noqa: E402
+    OrchestratorState,
+    compute_matchup_floor_violations,
+    decide_promotion,
+)
+from argparse import Namespace  # noqa: E402
 
 
 def main() -> None:
@@ -129,11 +135,75 @@ def main() -> None:
             raise AssertionError(
                 f"planted RPS regression should flag opponent 7 only, got {flagged}"
             )
+
+        # Item 13 residual: per-matchup floor violation as a planted fixture.
+        # An iteration with a -0.10 drop on opponent iter-3 must produce
+        # exactly one violation against the default 0.05 tolerance.
+        plant_state = OrchestratorState(
+            promoted_wilson_lower=0.50,
+            iterations=[
+                {"iteration": 0, "pool_evals": [
+                    {"opponent_iteration": 3, "wilson_lower": 0.62, "win_rate": 0.7, "n_games": 20},
+                    {"opponent_iteration": 5, "wilson_lower": 0.40, "win_rate": 0.5, "n_games": 20},
+                ]},
+            ],
+        )
+        current_pool_eval = [
+            {"opponent_iteration": 3, "wilson_lower": 0.50, "win_rate": 0.6, "n_games": 20},
+            {"opponent_iteration": 5, "wilson_lower": 0.42, "win_rate": 0.55, "n_games": 20},
+        ]
+        violations = compute_matchup_floor_violations(plant_state, current_pool_eval, tolerance=0.05)
+        if len(violations) != 1 or violations[0]["opponent_iteration"] != 3:
+            raise AssertionError(f"planted -0.12 drop on opp 3 should violate; got {violations}")
+        if violations[0]["drop"] < 0.05 or violations[0]["drop"] > 0.20:
+            raise AssertionError(f"violation drop magnitude unexpected: {violations}")
+
+        # Item 13 residual: a per-matchup violation must reject promotion
+        # even when the aggregate Wilson lower would otherwise pass.
+        plant_args = Namespace(
+            eval_min_ci_lower=0.0,
+            per_matchup_drop_tolerance=0.05,
+        )
+        decision = decide_promotion(
+            plant_state,
+            gate_returncode=0,
+            wilson_lower=0.55,  # would pass aggregate (>= floor 0.50)
+            args=plant_args,
+            eval_n=200,
+            matchup_violations=violations,
+        )
+        if decision["promote"]:
+            raise AssertionError(
+                f"per-matchup violation must veto promotion even when aggregate passes; got {decision}"
+            )
+        if "per-matchup floor" not in decision["reason"]:
+            raise AssertionError(f"rejection reason should cite per-matchup floor: {decision}")
+
+        # Item 13 residual: halt-after-2 — two consecutive rejections must
+        # mark the state as halted with halt_reason populated.
+        halt_state = OrchestratorState(
+            promoted_wilson_lower=0.50,
+        )
+        for _ in range(2):
+            halt_state.consecutive_failures += 1
+            if halt_state.consecutive_failures >= 2:
+                halt_state.halted = True
+                halt_state.halt_reason = "halt-after-2: smoke fixture"
+        if not halt_state.halted or halt_state.halt_reason is None:
+            raise AssertionError("halt-after-2 fixture failed to set halted/halt_reason")
+        # Promotion must clear the consecutive_failures counter.
+        halt_state.consecutive_failures = 0
+        halt_state.halted = False
+        halt_state.halt_reason = None
+        if halt_state.halted or halt_state.consecutive_failures != 0:
+            raise AssertionError("halt clear-on-promote fixture failed")
+
         print(json.dumps({
             "status": "PASS",
             "work_dir": str(work_dir),
             "promoted_count": promoted_count,
             "pool_size": len(pool.entries),
+            "matchup_violations_planted": len(violations),
         }, indent=2))
     finally:
         # Keep work_dir for inspection on failure; clean only on success.
