@@ -76,6 +76,7 @@ function main() {
       labelSource: args.labelSource,
       relabeledFrom: { source: row.source, selection: row.selection },
       teacherSelection: row.teacher.selection,
+      episodeId: `${row.seed}:${row.modelSide}`,
       seed: row.seed,
       modelSide: row.modelSide,
       step: row.step,
