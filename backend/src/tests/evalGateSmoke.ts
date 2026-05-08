@@ -178,6 +178,41 @@ try {
     assert.ok(row.result?.winner === "player" || row.result?.winner === "opponent" || row.result?.winner === null, "trace rows should include final result");
     assert.equal(row.teacher?.selection, "rollout", "trace rows should include requested teacher labels");
     assert.ok(typeof row.teacher?.selectedActionId === "string", "trace teacher should include selected action ID");
+    // Item 18 negative test: rollout selection does not consult the model
+    // server, so behaviorPolicy must be absent on these trace rows.
+    assert.equal(row.behaviorPolicy, undefined, "rollout-source trace must not carry behaviorPolicy");
+  });
+
+  // Item 18 positive test: policy-source traces *must* carry behaviorPolicy
+  // so PPO can recover importance-sampling ratios on warm-start rollouts.
+  const policyTraceOut = join(traceDir, "policy-trace.jsonl");
+  await execFileAsync("tsx", [
+    "src/sim/evaluateModelVsHeuristic.ts",
+    "--selection", "policy",
+    "--model-url", modelUrl,
+    "--games", "1",
+    "--model-side", "player",
+    "--max-steps", "120",
+    "--decision-trace-out", policyTraceOut,
+  ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 8 });
+  const policyTraceRows = readJsonl(policyTraceOut);
+  assert.ok(policyTraceRows.length > 0, "policy decision trace should produce rows");
+  policyTraceRows.forEach((row) => {
+    assert.ok(row.behaviorPolicy, `policy-source trace row must carry behaviorPolicy: ${JSON.stringify(row).slice(0, 120)}...`);
+    assert.ok(["fake-uniform", "single-action"].includes(row.behaviorPolicy.kind), `unexpected kind ${row.behaviorPolicy.kind}`);
+    assert.ok(Array.isArray(row.behaviorPolicy.actionLogProbs), "behaviorPolicy.actionLogProbs must be an array");
+    if (row.behaviorPolicy.kind === "fake-uniform") {
+      assert.equal(row.behaviorPolicy.actionLogProbs.length, row.legalActions.length, "actionLogProbs must align to legalActions");
+      assert.ok(typeof row.behaviorPolicy.selectedLogProb === "number", "behaviorPolicy.selectedLogProb must be a number");
+      const expectedLogP = Math.log(1 / row.legalActions.length);
+      assert.ok(
+        Math.abs(row.behaviorPolicy.selectedLogProb - expectedLogP) < 1e-6,
+        `selectedLogProb ${row.behaviorPolicy.selectedLogProb} should be log(1/n) ${expectedLogP}`,
+      );
+    } else {
+      assert.equal(row.behaviorPolicy.selectedLogProb, 0, "single-action selectedLogProb must be 0");
+      assert.equal(row.legalActions.length, 1, "single-action snapshots imply legalActions.length == 1");
+    }
   });
 } finally {
   server.close();
@@ -201,7 +236,21 @@ function handlePredict(request: IncomingMessage, response: ServerResponse): void
     const payload = JSON.parse(body);
     const legalActions = payload.legalActions ?? [];
     const passIndex = legalActions.findIndex((action: { kind?: string }) => action.kind === "pass" || action.kind === "endTurn");
-    sendJson(response, 200, { selectedIndex: [Math.max(0, passIndex)] });
+    const selected = Math.max(0, passIndex);
+    // Item 18: emit a fake but well-shaped behavior-policy distribution so the
+    // evaluator's persistence path is exercised under tests. Uniform over
+    // legal actions, log-prob = log(1/n).
+    const n = Math.max(1, legalActions.length);
+    const uniformLogP = Math.log(1 / n);
+    const actionLogProbs = legalActions.map(() => uniformLogP);
+    const actionProbs = legalActions.map(() => 1 / n);
+    sendJson(response, 200, {
+      selectedIndex: [selected],
+      actionLogProbs: [actionLogProbs],
+      actionProbs: [actionProbs],
+      selectedLogProb: [uniformLogP],
+      behaviorPolicy: { kind: "fake-uniform", temperature: 1 },
+    });
   });
 }
 

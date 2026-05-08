@@ -55,6 +55,37 @@ relabeled.forEach((row) => {
 });
 assertHiddenInfoSafe(relabeled);
 
+// Item 18: the relabeler must forward behaviorPolicy when present on the
+// upstream trace row. baseline-source rows have no behaviorPolicy, so plant
+// one onto every trace row, re-relabel, and assert each output row carries it.
+const plantedTracePath = join(root, "trace.with-behavior.jsonl");
+const plantedRelabeledPath = join(root, "relabeled.with-behavior.jsonl");
+const plantedTrace = traceRows.map((row) => ({
+  ...row,
+  behaviorPolicy: {
+    kind: "planted-uniform",
+    temperature: 1,
+    actionLogProbs: row.legalActions.map(() => Math.log(1 / row.legalActions.length)),
+    actionProbs: row.legalActions.map(() => 1 / row.legalActions.length),
+    selectedLogProb: Math.log(1 / row.legalActions.length),
+  },
+}));
+writeFileSync(plantedTracePath, plantedTrace.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+await execFileAsync("tsx", [
+  "src/sim/dagger/relabelDecisionTrace.ts",
+  "--in", plantedTracePath,
+  "--out", plantedRelabeledPath,
+  "--source", "model-visited-rollout-relabeled",
+  "--label-source", "rollout-teacher",
+], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 16 });
+const relabeledWithBehavior = readJsonl(plantedRelabeledPath);
+assert.ok(relabeledWithBehavior.length > 0, "behavior-planted relabel must keep rows");
+relabeledWithBehavior.forEach((row) => {
+  assert.ok(row.behaviorPolicy, "relabeler must forward behaviorPolicy when present upstream");
+  assert.equal(row.behaviorPolicy.kind, "planted-uniform");
+  assert.equal(row.behaviorPolicy.actionLogProbs.length, row.legalActions.length);
+});
+
 await execFileAsync("tsx", [
   "src/sim/exportTrainingExamples.ts",
   "--out", ruleBotOut,

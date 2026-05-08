@@ -2,6 +2,14 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { withGitMetadata } from "../manifest";
 
+type BehaviorPolicySnapshot = {
+  kind: string;
+  temperature: number;
+  actionLogProbs: number[];
+  actionProbs?: number[];
+  selectedLogProb: number | null;
+};
+
 type DecisionTraceRow = {
   schemaVersion: 1;
   source: "model-visited";
@@ -18,6 +26,7 @@ type DecisionTraceRow = {
   heuristicSelectedActionId: string;
   heuristicSelectedActionIndex: number;
   fallback: boolean;
+  behaviorPolicy?: BehaviorPolicySnapshot;
   teacher?: {
     selection: "rollout" | "search" | "planner";
     selectedActionId: string;
@@ -70,7 +79,7 @@ function main() {
     }
     teacherByName[row.teacher.selection] = (teacherByName[row.teacher.selection] ?? 0) + 1;
     const result = row.result ?? { winner: null, modelWon: false, points: { player: 0, opponent: 0 }, terminalReason: "unknown" };
-    const trainingRow = {
+    const trainingRow: Record<string, unknown> = {
       schemaVersion: 1,
       source: args.source,
       labelSource: args.labelSource,
@@ -93,6 +102,11 @@ function main() {
       modelFallback: row.fallback,
       result: { winner: result.winner, points: result.points, terminalReason: result.terminalReason },
     };
+    // Item 18: forward the behavior-policy snapshot from the trace row into
+    // the relabeled training row so PPO can recover importance ratios on
+    // the warm-start data. Only present when the underlying selection was
+    // policy/value (i.e. the model server was consulted at decision time).
+    if (row.behaviorPolicy) trainingRow.behaviorPolicy = row.behaviorPolicy;
     out.push(JSON.stringify(trainingRow));
     kept += 1;
   }

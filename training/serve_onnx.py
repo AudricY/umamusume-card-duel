@@ -58,11 +58,31 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
             arrays, action_ids = request_to_arrays(payload)
             logits, value = self.server.session.run(None, arrays)
+            mask = arrays["action_mask"]
+            # Behavior policy = softmax(logits | mask). Selection is greedy
+            # (argmax), but PPO importance ratios use the softmax distribution
+            # because that is what the *trained* policy represents and what
+            # PPO will compare against. At PPO iteration 0 behavior == target,
+            # so the ratio is exactly 1; drift accumulates as PPO updates the
+            # target. The masked log-softmax sentinel (-1e9 for masked legs)
+            # keeps exp() finite at the consumer.
+            log_probs = masked_log_softmax(logits, mask)
+            action_probs = masked_softmax(logits, mask)
             selected = logits.argmax(axis=1).astype(int)
+            selected_log_probs = [
+                float(log_probs[row, idx]) for row, idx in enumerate(selected.tolist())
+            ]
             response: dict[str, Any] = {
                 "logits": logits.tolist(),
                 "value": value.tolist(),
                 "selectedIndex": selected.tolist(),
+                "actionLogProbs": log_probs.tolist(),
+                "actionProbs": action_probs.tolist(),
+                "selectedLogProb": selected_log_probs,
+                "behaviorPolicy": {
+                    "kind": "greedy",
+                    "temperature": 0.0,
+                },
             }
             if action_ids is not None:
                 response["selectedActionId"] = [action_ids[row][index] for row, index in enumerate(selected.tolist())]
@@ -84,6 +104,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+
+def masked_log_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Numerically-stable log-softmax over masked logits.
+
+    Masked positions get -inf log-prob (so e^logp = 0). Item 18: F1's
+    importance-sampling ratio is exp(target_logp - behavior_logp); masked
+    actions must contribute zero probability to keep the ratio finite.
+    """
+    masked = np.where(mask, logits.astype(np.float64), -np.inf)
+    max_per_row = np.max(masked, axis=1, keepdims=True)
+    max_per_row = np.where(np.isfinite(max_per_row), max_per_row, 0.0)
+    shifted = masked - max_per_row
+    exp_shifted = np.where(mask, np.exp(shifted), 0.0)
+    log_sum_exp = np.log(np.sum(exp_shifted, axis=1, keepdims=True) + 1e-30)
+    log_probs = shifted - log_sum_exp
+    # JSON cannot represent -inf; clamp masked positions to a large negative
+    # finite sentinel that is still safe in any downstream exp() (exp(-1e9) ≈ 0).
+    log_probs = np.where(mask, log_probs, -1.0e9)
+    return log_probs.astype(np.float32)
+
+
+def masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Mask-aware softmax that zeroes masked positions exactly."""
+    log_probs = masked_log_softmax(logits, mask)
+    probs = np.exp(log_probs.astype(np.float64))
+    probs = np.where(mask, probs, 0.0)
+    return probs.astype(np.float32)
 
 
 def request_to_arrays(payload: dict[str, Any]) -> tuple[dict[str, np.ndarray], list[list[str]] | None]:

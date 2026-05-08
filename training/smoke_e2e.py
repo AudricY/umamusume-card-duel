@@ -77,6 +77,44 @@ def main() -> None:
         selected = int(served_prediction["selectedIndex"][0])
         if selected < 0 or selected >= len(sample.example["legalActions"]):
             raise AssertionError(f"Server selected invalid index {selected}")
+        # Item 18: behavior-policy logging is in the serving path so the
+        # warm-start checkpoint's PPO rollouts can recover importance ratios
+        # without a serve-side change. /predict must return per-action
+        # log-probs and the chosen-action log-prob.
+        legal_count = len(sample.example["legalActions"])
+        action_log_probs = served_prediction.get("actionLogProbs")
+        if not action_log_probs or len(action_log_probs[0]) < legal_count:
+            raise AssertionError(
+                f"actionLogProbs missing or wrong length: {action_log_probs}"
+            )
+        selected_log_prob = served_prediction.get("selectedLogProb")
+        if not selected_log_prob:
+            raise AssertionError("selectedLogProb missing from /predict response")
+        # The behavior distribution is softmax(logits), regardless of the
+        # greedy/argmax selection rule. Chosen-action log-prob therefore lies
+        # in (-inf, 0] and is the maximum over legal positions because the
+        # selection is the argmax. Both invariants are checked here.
+        chosen_lp = float(selected_log_prob[0])
+        if chosen_lp > 1e-6:
+            raise AssertionError(f"selectedLogProb must be <=0; got {chosen_lp}")
+        max_legal_lp = max(action_log_probs[0][:legal_count])
+        if chosen_lp < max_legal_lp - 1e-3:
+            raise AssertionError(
+                f"selectedLogProb {chosen_lp} should be argmax legal log-prob {max_legal_lp}"
+            )
+        # Sum of legal-action probs must be ~1.0; masked positions must
+        # contribute zero.
+        action_probs = served_prediction.get("actionProbs")
+        if not action_probs:
+            raise AssertionError("actionProbs missing from /predict response")
+        legal_prob_sum = sum(action_probs[0][:legal_count])
+        if not (0.999 <= legal_prob_sum <= 1.001):
+            raise AssertionError(
+                f"Sum of legal-action probs must be ~1.0; got {legal_prob_sum}"
+            )
+        behavior = served_prediction.get("behaviorPolicy")
+        if not behavior or behavior.get("kind") != "greedy":
+            raise AssertionError(f"behaviorPolicy.kind must be greedy; got {behavior}")
     finally:
         server.terminate()
         try:

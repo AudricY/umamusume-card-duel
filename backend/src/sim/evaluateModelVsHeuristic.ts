@@ -88,6 +88,14 @@ type GameResult = {
   decisionTraces: DecisionTraceRow[];
 };
 
+type BehaviorPolicySnapshot = {
+  kind: string;
+  temperature: number;
+  actionLogProbs: number[];
+  actionProbs?: number[];
+  selectedLogProb: number | null;
+};
+
 type DecisionTraceRow = {
   schemaVersion: 1;
   source: "model-visited";
@@ -104,6 +112,12 @@ type DecisionTraceRow = {
   heuristicSelectedActionId: string;
   heuristicSelectedActionIndex: number;
   fallback: boolean;
+  // Item 18: behavior-policy snapshot at decision time so PPO can
+  // recompute importance-sampling ratios on the warm-start rollouts. Only
+  // populated when the selection actually consults the model server (policy
+  // / value); rule/heuristic/rollout/planner selections leave this field
+  // off because there is no parametric behavior policy to log.
+  behaviorPolicy?: BehaviorPolicySnapshot;
   teacher?: {
     selection: "rollout" | "search" | "planner";
     selectedActionId: string;
@@ -218,6 +232,8 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
         };
         if (decision.selectedOriginalRank !== undefined) trace.selectedOriginalRank = decision.selectedOriginalRank;
         if (teacher) trace.teacher = teacher;
+        const behavior = (decision as { behavior?: BehaviorPolicySnapshot }).behavior;
+        if (behavior) trace.behaviorPolicy = behavior;
         decisionTraces.push(trace);
       }
       if (fallback) {
@@ -306,9 +322,22 @@ function chooseTraceTeacher(
   return teacher;
 }
 
-async function chooseModelAction(modelUrl: string, state: GameState, sideId: SideId): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number }> {
+async function chooseModelAction(modelUrl: string, state: GameState, sideId: SideId): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number; behavior?: BehaviorPolicySnapshot }> {
   const legalActions = enumerateLegalAiActions(state, sideId);
-  if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
+  if (legalActions.length <= 1) {
+    // Single-action shortcut still emits a degenerate behavior snapshot so
+    // PPO importance ratios are well-defined for every policy-source row,
+    // not only the multi-candidate ones. log P(forced action) = 0.
+    const action = legalActions[0] ?? chooseHighestScoredAction(legalActions);
+    const behavior: BehaviorPolicySnapshot = {
+      kind: "single-action",
+      temperature: 0,
+      actionLogProbs: legalActions.length === 1 ? [0] : [],
+      actionProbs: legalActions.length === 1 ? [1] : [],
+      selectedLogProb: legalActions.length === 1 ? 0 : null,
+    };
+    return { action, selectedIndex: 0, behavior };
+  }
   const response = await fetch(`${modelUrl.replace(/\/$/, "")}/predict`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -318,9 +347,36 @@ async function chooseModelAction(modelUrl: string, state: GameState, sideId: Sid
     }),
   });
   if (!response.ok) throw new Error(`Model server returned ${response.status}: ${await response.text()}`);
-  const payload = await response.json() as { selectedIndex?: number[] };
+  const payload = await response.json() as {
+    selectedIndex?: number[];
+    actionLogProbs?: number[][];
+    actionProbs?: number[][];
+    selectedLogProb?: number[];
+    behaviorPolicy?: { kind?: string; temperature?: number };
+  };
   const selectedIndex = Math.max(0, Math.min(legalActions.length - 1, Number(payload.selectedIndex?.[0] ?? 0)));
-  return { action: legalActions[selectedIndex] ?? legalActions[0]!, selectedIndex };
+  // Item 18: capture behavior-policy log-probabilities so PPO can recover
+  // importance-sampling ratios from the warm-start rollouts. The serving
+  // policy is greedy, so under the warm-start checkpoint the chosen-action
+  // log-prob collapses to 0 (probability 1). Once a stochastic serving mode
+  // lands the same plumbing carries the non-trivial distribution through.
+  let behavior: BehaviorPolicySnapshot | undefined;
+  if (payload.actionLogProbs?.[0]) {
+    const snapshot: BehaviorPolicySnapshot = {
+      kind: payload.behaviorPolicy?.kind ?? "greedy",
+      temperature: typeof payload.behaviorPolicy?.temperature === "number" ? payload.behaviorPolicy.temperature : 0,
+      actionLogProbs: payload.actionLogProbs[0].slice(0, legalActions.length),
+      selectedLogProb: typeof payload.selectedLogProb?.[0] === "number" ? payload.selectedLogProb[0] : null,
+    };
+    if (payload.actionProbs?.[0]) snapshot.actionProbs = payload.actionProbs[0].slice(0, legalActions.length);
+    behavior = snapshot;
+  }
+  const result: { action: LegalAiAction; selectedIndex: number; behavior?: BehaviorPolicySnapshot } = {
+    action: legalActions[selectedIndex] ?? legalActions[0]!,
+    selectedIndex,
+  };
+  if (behavior) result.behavior = behavior;
+  return result;
 }
 
 function chooseBaselineAction(state: GameState, sideId: SideId): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
