@@ -52,6 +52,10 @@ def main() -> None:
 
     final_train = evaluate(model, train_loader, value_weight=args.value_weight)
     final_val = evaluate(model, val_loader, value_weight=args.value_weight) if val_loader else {}
+    diagnostics = {
+        "train": evaluate_grouped(model, dataset, train_indices, value_weight=args.value_weight, batch_size=args.batch_size),
+        "val": evaluate_grouped(model, dataset, val_indices, value_weight=args.value_weight, batch_size=args.batch_size) if val_indices else {},
+    }
     checkpoint = {
         "model_state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
         "model_config": config.to_dict(),
@@ -70,6 +74,7 @@ def main() -> None:
             "history": history,
             "final_train": final_train,
             "final_val": final_val,
+            "diagnostics": diagnostics,
         },
     }
     torch.save(checkpoint, out_dir / "checkpoint.pt")
@@ -81,7 +86,7 @@ def main() -> None:
         "data": str(args.data),
         "samples": len(dataset),
         "split": split_metadata,
-        "metrics": {"train": final_train, "val": final_val},
+        "metrics": {"train": final_train, "val": final_val, "diagnostics": diagnostics},
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
     print(json.dumps({"status": "PASS", "out_dir": str(out_dir), **manifest}, indent=2))
@@ -131,6 +136,67 @@ def evaluate(
         loss = policy_loss + value_loss * value_weight
         accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"])
     return finish_metrics(totals)
+
+
+@torch.no_grad()
+def evaluate_grouped(
+    model: CandidatePolicyNet,
+    dataset: JsonlPolicyDataset,
+    indices: list[int],
+    *,
+    value_weight: float,
+    batch_size: int,
+) -> dict[str, dict[str, dict[str, float]]]:
+    if not indices:
+        return {}
+    groups: dict[str, dict[str, list[int]]] = {
+        "phase": {},
+        "action_kind": {},
+        "source": {},
+        "margin_bucket": {},
+    }
+    for index in indices:
+        sample = dataset.samples[index]
+        add_group(groups["phase"], str(sample.example.get("phase", "unknown")), index)
+        add_group(groups["action_kind"], selected_action_kind(sample), index)
+        add_group(groups["source"], str(sample.example.get("source") or sample.example.get("policy", "unknown")), index)
+        add_group(groups["margin_bucket"], margin_bucket(sample), index)
+
+    return {
+        category: {
+            name: evaluate(
+                model,
+                DataLoader(Subset(dataset, group_indices), batch_size=batch_size, shuffle=False, collate_fn=collate_policy_batch),
+                value_weight=value_weight,
+            )
+            for name, group_indices in sorted(category_groups.items())
+        }
+        for category, category_groups in groups.items()
+    }
+
+
+def add_group(groups: dict[str, list[int]], name: str, index: int) -> None:
+    groups.setdefault(name, []).append(index)
+
+
+def selected_action_kind(sample) -> str:
+    actions = sample.example.get("legalActions", [])
+    target = sample.target_index
+    if target < 0 or target >= len(actions):
+        return "unknown"
+    return str(actions[target].get("kind", "unknown"))
+
+
+def margin_bucket(sample) -> str:
+    margin = sample.example.get("oracle", {}).get("selectedVsRunnerUpMargin")
+    if margin is None:
+        return "unknown"
+    value = float(margin)
+    if value < 0.02:
+        return "<0.02"
+    if value < 0.1:
+        return "0.02-0.1"
+    return ">=0.1"
 
 
 def accumulate(
