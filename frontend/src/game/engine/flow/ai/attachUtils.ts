@@ -94,6 +94,35 @@ export function estimateAttackDamageOutput(
   return Math.max(...targets.map((target) => predictAttackDamage(attacker, target, attackingSide.activeAttackDamageBonus, ownInPlayCount, allInPlayCount, state.turnNumber, areToolEffectsDisabled(state))));
 }
 
+export function scoreAiAttachTarget(
+  state: GameState,
+  side: SideState,
+  target: UmamusumeInstance,
+  turnGoal: AiTurnGoal = "maximize_progress",
+): number {
+  const nextEnergyType = side.energyZone[0];
+  if (!nextEnergyType) return Number.NEGATIVE_INFINITY;
+  const deckStyle = state.aiDeckStyleBySide[side.id] ?? "balanced";
+  const candidates = side.energyAttachmentsThisTurn >= 1 ? (side.active ? [side.active] : []) : getAllUmamusume(side);
+  const futureDemand = buildFutureEnergyDemand(side);
+  const usefulCapByUid = new Map<number, number>();
+  for (const umamusume of candidates) {
+    usefulCapByUid.set(umamusume.uid, getUsefulEnergyCap(state, side, umamusume, nextEnergyType, deckStyle));
+  }
+  const hasUnderchargedAlternative = candidates.some((umamusume) => attachedEnergyCount(umamusume) < (usefulCapByUid.get(umamusume.uid) ?? 1));
+  return scoreAttachTarget(
+    state,
+    side,
+    target,
+    nextEnergyType,
+    deckStyle,
+    futureDemand,
+    usefulCapByUid.get(target.uid) ?? 1,
+    hasUnderchargedAlternative,
+    turnGoal,
+  );
+}
+
 function shouldAttachForDamageScaling(umamusume: UmamusumeInstance, nextEnergyType: keyof UmamusumeInstance["energies"]): boolean {
   const card = getUmamusumeCard(umamusume);
   const attack = getPrimaryAttack(card);

@@ -9,6 +9,9 @@ import { getPlayableAction, getRainbowUncapEvolutionHandOptions, getRainbowUncap
 import { canUseStadium } from "../flow/trainers";
 import { buildCombatCandidates } from "../flow/ai/combatPlanner";
 import type { AiCombatDecision } from "../flow/ai/types";
+import { scoreAiAttachTarget } from "../flow/ai/attachUtils";
+import { chooseAiTurnGoal } from "../flow/ai/turnPlan";
+import { scoreEvolutionTarget, shouldAiPlayTrainer } from "../flow/ai/trainerUtils";
 import { getAbilityMoveEnergyTypes, hasEnoughEnergy } from "../flow/energy";
 import { getAiPhase } from "./phase";
 import type { AiPhase, LegalAiAction } from "./types";
@@ -124,6 +127,7 @@ function enumerateBenchActions(state: GameState, side: SideState): LegalAiAction
 }
 
 function enumerateTrainerActions(state: GameState, side: SideState, phase: Extract<AiPhase, "trainerBefore" | "trainerAfter">): LegalAiAction[] {
+  const turnGoal = chooseAiTurnGoal(state, side);
   return side.hand.flatMap((cardId, handIndex) => {
     const card = getCard(cardId);
     if (card.kind !== "trainer") return [];
@@ -136,6 +140,7 @@ function enumerateTrainerActions(state: GameState, side: SideState, phase: Extra
     if (card.effect.extraEnergyAttach || card.effect.attachEnergyFromZoneToBench) score += 36;
     if (card.effect.heal) score += 16;
     if (card.trainerType === "tool" && getToolTargets(side).length > 0) score += 20;
+    score += shouldAiPlayTrainer(state, side, card, handIndex, turnGoal) ? 28 : -90;
     return enumerateTrainerChoices(state, side, card, handIndex).map((choices) => {
       const target = choices.umamusumeTargetUid !== undefined
         ? getAllUmamusume(side).find((umamusume) => umamusume.uid === choices.umamusumeTargetUid)
@@ -166,14 +171,13 @@ function enumerateEvolutionActions(state: GameState, side: SideState): LegalAiAc
     if (card.kind !== "umamusume" || card.stage <= 0) return [];
     const target = findEvolutionTarget(state, side, card);
     if (!target) return [];
-    const hpGain = Math.max(0, card.hp - target.maxHp);
     return [{
       id: `evolve:${handIndex}:${cardId}:${target.uid}`,
       phase: "evolve" as const,
       kind: "evolve",
       payload: { handIndex, targetUid: target.uid },
       features: features({
-        score: 50 + hpGain + card.stage * 18 + attachedEnergyCount(target) * 8,
+        score: scoreEvolutionTarget(state, side, target, card),
         phase: "evolve",
         kind: "evolve",
         sourceCardId: cardId,
@@ -186,6 +190,7 @@ function enumerateEvolutionActions(state: GameState, side: SideState): LegalAiAc
 
 function enumerateAttachActions(state: GameState, side: SideState): LegalAiAction[] {
   if (!canAttachEnergy(state, side)) return [];
+  const turnGoal = chooseAiTurnGoal(state, side);
   return getAllUmamusume(side).flatMap((target, slot) => {
     if (!canAttachEnergyToUmamusume(state, side, target)) return [];
     return [{
@@ -194,7 +199,7 @@ function enumerateAttachActions(state: GameState, side: SideState): LegalAiActio
       kind: "attachEnergy",
       payload: { targetUid: target.uid },
       features: features({
-        score: 30 + scoreUmamusume(target) * 0.1 + (target.uid === side.active?.uid ? 18 : 0),
+        score: scoreAiAttachTarget(state, side, target, turnGoal),
         phase: "attach",
         kind: "attachEnergy",
         target,
