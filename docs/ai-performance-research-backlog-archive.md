@@ -1,6 +1,6 @@
 # AI Performance Research Backlog Archive
 
-Last refined: 2026-05-08.
+Last refined: 2026-05-08 (v4 — evidence-driven pass after the first real DAgger run).
 
 This file keeps the useful discarded signal from the original `ai-performance-research-backlog.md` and `ai-performance-research-backlog-v2.md` after consolidation into `docs/ai-performance-research-backlog.md`.
 
@@ -62,6 +62,22 @@ A second refinement round added structural fixes flagged by dependency, failure-
 - **F1 (PPO) work list expanded** with reward shaping, episode boundary, behavior-policy logging, mask handling, buffer sizing, GAE/KL/entropy controls, league sampling, HP sweep methodology. Smoke raised to ≥10 updates.
 
 Reviewers' raw reports are preserved in conversation history.
+
+## Evidence-Driven Pass (2026-05-08, v4)
+
+The v4 refinement is anchored to fresh empirical data from the first real DAgger orchestrator run rather than to a fresh adversarial review. Five structural shifts:
+
+- **End-goal framing flipped.** v3 framed Option A (DAgger) as the endpoint with F1/F2 as gated follow-ups. v4 reframes Option A as the warm-start for F1, on the grounds that the supervised cap is well below the rule bot at our data scale.
+- **Imitation cap revised down.** v3 stated "55-65% imitation ceiling". The first real DAgger sweep produced 34% (iter 0) and 28% (iter 1, rolled back). v4 records the "55-65%" claim as empirically too optimistic at the current data scale and declines to lower acceptance bars on its strength.
+- **Item 2 escalations exhausted.** v3 pre-registered "rollout-augmented planner with deeper CRN" and "planner + value-head tiebreaker" as plan-B fallbacks. The first half landed (rollout-CRN at Wilson lower 58.3%, above 55% but short of 65%). The second half is blocked on item 7. v4 adds an explicit decision rule: if the planner stays below 55% and rollout below 65% after items 7 and 9, the loop ships rollout-CRN as the teacher and F1 becomes the path through the cap, not the planner.
+- **Item 7 promoted from P1-Optional to de-facto P0.** Required for both item 2's value-head tiebreaker fallback and F1's advantage estimator. With both downstream lanes now load-bearing, item 7 is the next critical-path work after the orchestrator's first sweep.
+- **Item 12 promoted from P2 to next-after-7 critical-path.** The orchestrator's per-iteration gate is structurally incomplete without the snapshot pool: per-opponent Wilson floors, cycling detection, and item 13's pinned thresholds all depend on item 12. The orchestrator currently checks aggregate Wilson lower only; item 12 closes that gap.
+- **Item 6 priority dropped.** The v3 throughput probe (item 0) measured ~100× single-core headroom against item 14's 4h iteration target, so worker-thread sharding is no longer urgent for the first DAgger sweep.
+- **F1 gating rephrased.** v3 said "PPO is only worth the stability tax once DAgger has produced a policy that meaningfully beats the rule bot." v4 says: F1 begins as soon as item 7 lands, with the orchestrator's promoted DAgger checkpoint as the warm-start. F1's "wait for DAgger to clear the gate" gating is no longer informative because DAgger empirically does not clear the gate at our current scale.
+
+Status fields (`✓ done`, `~ partial`, `· pending`, `↑/↓` priority change vs v3) added to every active item so the next refinement can diff against v4 cleanly.
+
+The named-status convention is durable; the priority-change arrows are diff-against-v3 only and should be removed at v5.
 
 ## Historical Results Policy
 
