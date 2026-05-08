@@ -11,6 +11,12 @@ from torch.utils.data import Dataset
 
 from .features import ACTION_DIM, STATE_DIM, legal_actions_to_features, observation_to_features
 
+ROW_SCHEMA_VERSION = 1
+
+
+class RowSchemaError(ValueError):
+    """Raised when a JSONL row's schemaVersion is missing or incompatible."""
+
 
 @dataclass(frozen=True)
 class PolicySample:
@@ -23,10 +29,10 @@ class PolicySample:
 
 
 class JsonlPolicyDataset(Dataset[PolicySample]):
-    def __init__(self, path: str | Path, *, min_actions: int = 2, ablations: set[str] | None = None) -> None:
+    def __init__(self, path: str | Path, *, min_actions: int = 2, ablations: set[str] | None = None, strict_schema_version: bool = True) -> None:
         self.path = Path(path)
         self.ablations = ablations or set()
-        self.samples = list(load_policy_samples(self.path, min_actions=min_actions, ablations=self.ablations))
+        self.samples = list(load_policy_samples(self.path, min_actions=min_actions, ablations=self.ablations, strict_schema_version=strict_schema_version))
         if not self.samples:
             raise ValueError(f"No usable policy samples found in {self.path}")
 
@@ -37,12 +43,22 @@ class JsonlPolicyDataset(Dataset[PolicySample]):
         return self.samples[index]
 
 
-def load_policy_samples(path: str | Path, *, min_actions: int = 2, ablations: set[str] | None = None) -> Iterable[PolicySample]:
+def load_policy_samples(path: str | Path, *, min_actions: int = 2, ablations: set[str] | None = None, strict_schema_version: bool = True) -> Iterable[PolicySample]:
     with Path(path).open("r", encoding="utf8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
             example = json.loads(line)
+            if strict_schema_version:
+                version = example.get("schemaVersion")
+                if version is None:
+                    raise RowSchemaError(
+                        f"Missing schemaVersion at {path}:{line_number}; expected {ROW_SCHEMA_VERSION}"
+                    )
+                if int(version) != ROW_SCHEMA_VERSION:
+                    raise RowSchemaError(
+                        f"Incompatible schemaVersion at {path}:{line_number}: got {version}, expected {ROW_SCHEMA_VERSION}"
+                    )
             actions = example.get("legalActions", [])
             target_index = int(example.get("selectedActionIndex", -1))
             if len(actions) < min_actions or target_index < 0 or target_index >= len(actions):

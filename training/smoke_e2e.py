@@ -85,6 +85,7 @@ def main() -> None:
             server.kill()
 
     assert_export_rejects_vocab_mismatch(repo_root, model_dir, run_dir)
+    assert_dataset_rejects_bad_schema(repo_root, run_dir, examples_path)
 
     print(json.dumps({
         "status": "PASS",
@@ -95,6 +96,46 @@ def main() -> None:
         "servedSelectedIndex": served_prediction["selectedIndex"][0],
         "servedSelectedActionId": served_prediction.get("selectedActionId", [None])[0],
     }, indent=2))
+
+
+def assert_dataset_rejects_bad_schema(repo_root: Path, run_dir: Path, source_jsonl: Path) -> None:
+    from uma_ai.dataset import JsonlPolicyDataset, RowSchemaError
+
+    rows = source_jsonl.read_text(encoding="utf8").strip().splitlines()
+    if not rows:
+        raise AssertionError(f"Source JSONL {source_jsonl} unexpectedly empty")
+
+    missing = run_dir / "missing_schema.jsonl"
+    bumped = run_dir / "bumped_schema.jsonl"
+    missing_lines = []
+    bumped_lines = []
+    for raw in rows:
+        payload = json.loads(raw)
+        no_version = {key: value for key, value in payload.items() if key != "schemaVersion"}
+        missing_lines.append(json.dumps(no_version))
+        bumped_payload = dict(payload)
+        bumped_payload["schemaVersion"] = 99
+        bumped_lines.append(json.dumps(bumped_payload))
+    missing.write_text("\n".join(missing_lines) + "\n", encoding="utf8")
+    bumped.write_text("\n".join(bumped_lines) + "\n", encoding="utf8")
+
+    try:
+        JsonlPolicyDataset(missing)
+    except RowSchemaError as exc:
+        if "Missing schemaVersion" not in str(exc):
+            raise AssertionError(f"Unexpected RowSchemaError: {exc}")
+    else:
+        raise AssertionError("Dataset must reject rows with no schemaVersion")
+
+    try:
+        JsonlPolicyDataset(bumped)
+    except RowSchemaError as exc:
+        if "Incompatible schemaVersion" not in str(exc):
+            raise AssertionError(f"Unexpected RowSchemaError: {exc}")
+    else:
+        raise AssertionError("Dataset must reject rows with bumped schemaVersion")
+
+    JsonlPolicyDataset(missing, strict_schema_version=False)
 
 
 def assert_export_rejects_vocab_mismatch(repo_root: Path, model_dir: Path, run_dir: Path) -> None:
