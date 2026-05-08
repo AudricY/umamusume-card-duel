@@ -57,6 +57,7 @@ try {
     "--max-steps", "100",
     "--rollout-steps", "30",
     "--decision-trace-out", traceOut,
+    "--trace-teacher", "rollout",
   ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 8 });
   assert.ok(existsSync(traceOut), "decision trace file should be written");
   const traceRows = readJsonl(traceOut);
@@ -67,6 +68,8 @@ try {
     assert.equal(row.source, "model-visited");
     assert.equal(row.observation.opponent.handCardIds, undefined, "trace observation must not leak opponent hand IDs");
     assert.ok(row.result?.winner === "player" || row.result?.winner === "opponent" || row.result?.winner === null, "trace rows should include final result");
+    assert.equal(row.teacher?.selection, "rollout", "trace rows should include requested teacher labels");
+    assert.ok(typeof row.teacher?.selectedActionId === "string", "trace teacher should include selected action ID");
   });
 } finally {
   server.close();

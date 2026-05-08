@@ -59,6 +59,7 @@ export type EvaluateModelArgs = {
   ranker: CandidateRankerMode;
   decisionTraceOut: string | null;
   manifestOut: string | null;
+  traceTeacher: "none" | "rollout" | "search" | "planner";
   plannerTopK: number;
   plannerMaxSequences: number;
   plannerMaxDepth: number;
@@ -95,6 +96,12 @@ type DecisionTraceRow = {
   heuristicSelectedActionId: string;
   heuristicSelectedActionIndex: number;
   fallback: boolean;
+  teacher?: {
+    selection: "rollout" | "search" | "planner";
+    selectedActionId: string;
+    selectedActionIndex: number;
+    selectedOriginalRank?: number;
+  };
   result: {
     winner: SideId | null;
     modelWon: boolean;
@@ -171,6 +178,7 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
       const next = advanceModeledTurnStep(state, sideId, decision.action, forcedCoinResults, rng);
       const fallback = stateHash(next) === beforeHash;
       if (args.decisionTraceOut) {
+        const teacher = chooseTraceTeacher(args, state, sideId, `${seed}:${modelSide}:${step}:trace-teacher`);
         const trace: DecisionTraceRow = {
           schemaVersion: 1,
           source: "model-visited",
@@ -189,6 +197,7 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
           result: null,
         };
         if (decision.selectedOriginalRank !== undefined) trace.selectedOriginalRank = decision.selectedOriginalRank;
+        if (teacher) trace.teacher = teacher;
         decisionTraces.push(trace);
       }
       if (fallback) {
@@ -234,6 +243,27 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
     };
   });
   return result;
+}
+
+function chooseTraceTeacher(
+  args: EvaluateModelArgs,
+  state: GameState,
+  sideId: SideId,
+  seed: string,
+): DecisionTraceRow["teacher"] | undefined {
+  if (args.traceTeacher === "none") return undefined;
+  const decision = args.traceTeacher === "rollout"
+    ? chooseRolloutAction(args, state, sideId, createSeededRng(seed, "trace-teacher-rollout"))
+    : args.traceTeacher === "search"
+      ? chooseSearchAction(args, state, sideId, seed)
+      : choosePlannerAction(args, state, sideId, seed);
+  const teacher: DecisionTraceRow["teacher"] = {
+    selection: args.traceTeacher,
+    selectedActionId: decision.action.id,
+    selectedActionIndex: decision.selectedIndex,
+  };
+  if (decision.selectedOriginalRank !== undefined) teacher.selectedOriginalRank = decision.selectedOriginalRank;
+  return teacher;
 }
 
 async function chooseModelAction(modelUrl: string, state: GameState, sideId: SideId): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number }> {
@@ -859,6 +889,7 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     ranker: parseRanker(get("--ranker", "heuristic")),
     decisionTraceOut: get("--decision-trace-out", ""),
     manifestOut: get("--manifest-out", ""),
+    traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
     plannerTopK: Number(get("--planner-top-k", get("--search-top-k", "4"))),
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
@@ -873,6 +904,11 @@ function parseSelection(raw: string): EvaluateModelArgs["selection"] {
 function parseRanker(raw: string): CandidateRankerMode {
   if (raw === "phase-diverse" || raw === "epsilon") return raw;
   return "heuristic";
+}
+
+function parseTraceTeacher(raw: string): EvaluateModelArgs["traceTeacher"] {
+  if (raw === "rollout" || raw === "search" || raw === "planner") return raw;
+  return "none";
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

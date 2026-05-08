@@ -132,6 +132,7 @@ function parseArgs(argv: string[]): Args {
     plannerTopK: Number(get("--planner-top-k", get("--search-top-k", "4"))),
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
+    traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
     minGames: Number(get("--min-games", "500")),
     minWinRate: Number(get("--min-win-rate", "0")),
     minCiLower: Number(get("--min-ci-lower", "0")),
@@ -148,6 +149,11 @@ function parseSelection(raw: string): EvaluateModelArgs["selection"] {
 function parseRanker(raw: string): CandidateRankerMode {
   if (raw === "phase-diverse" || raw === "epsilon") return raw;
   return "heuristic";
+}
+
+function parseTraceTeacher(raw: string): EvaluateModelArgs["traceTeacher"] {
+  if (raw === "rollout" || raw === "search" || raw === "planner") return raw;
+  return "none";
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
