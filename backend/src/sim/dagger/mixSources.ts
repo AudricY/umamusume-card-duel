@@ -26,10 +26,22 @@ function main() {
   const rng = createSeededRng(args.seed, "mix-sources");
   const requestedTotal = args.totalRows ?? args.components.reduce((sum, c) => sum + c.rows.length, 0);
 
-  const componentTargets = args.components.map((c) => ({
-    component: c,
-    target: Math.min(c.rows.length, Math.round((c.weight / totalWeight) * requestedTotal)),
-  }));
+  const componentTargets = args.components.map((c) => {
+    const fairShare = (c.weight / totalWeight) * requestedTotal;
+    let target = Math.min(c.rows.length, Math.round(fairShare));
+    // A component with positive weight and at least one available row must
+    // contribute at least one row; otherwise the manifest's requestedRatio
+    // silently lies. v4.1 review #3.
+    if (c.weight > 0 && c.rows.length > 0 && target === 0) target = 1;
+    return { component: c, target };
+  });
+
+  args.components.forEach((c, index) => {
+    const sampled = componentTargets[index]!.target;
+    if (c.weight > 0 && c.rows.length > 0 && sampled === 0) {
+      throw new Error(`mix component ${c.path} (weight ${c.weight}) sampled 0 rows from ${c.rows.length} available — bug`);
+    }
+  });
 
   const sampled = componentTargets.flatMap(({ component, target }) => {
     const indices = Array.from({ length: component.rows.length }, (_, i) => i);

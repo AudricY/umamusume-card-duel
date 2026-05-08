@@ -25,13 +25,15 @@ left as follow-up wiring.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import math
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from uma_ai.node_bridge import (
     export_training_examples,
@@ -267,7 +269,7 @@ def run_iteration(
     summary = gate_payload.get("summary", {})
     wilson_lower = float(summary.get("wilson95", {}).get("lower", 0.0))
 
-    decision = decide_promotion(state, gate_returncode, wilson_lower, args)
+    decision = decide_promotion(state, gate_returncode, wilson_lower, args, eval_n=int(summary.get("games", cfg.eval_min_games * 2)))
     if decision["promote"]:
         state.promoted_checkpoint = train_dir / "checkpoint.pt"
         state.promoted_wilson_lower = wilson_lower
@@ -298,13 +300,43 @@ def run_iteration(
     return record
 
 
-def decide_promotion(state: OrchestratorState, gate_returncode: int, wilson_lower: float, args: argparse.Namespace) -> dict[str, Any]:
+def decide_promotion(state: OrchestratorState, gate_returncode: int, wilson_lower: float, args: argparse.Namespace, *, eval_n: int) -> dict[str, Any]:
+    """Promote/reject with a confidence-band tolerance instead of arithmetic ε.
+
+    Backlog item 13 (v4.1): "≥0pp at n≥150, or if the gate runs at n<150,
+    by ≥half the Wilson half-width at the configured n." The 1e-9 tolerance
+    used in v4 chronically rejected within-noise iterations at small n —
+    Wilson half-width at n=50 is ≈12pp, which dwarfs any genuine iter-on-
+    iter improvement at this scale.
+    """
+
     if gate_returncode != 0:
         return {"promote": False, "reason": f"gate exited {gate_returncode}"}
     floor = state.promoted_wilson_lower if state.promoted_wilson_lower is not None else args.eval_min_ci_lower
-    if wilson_lower + 1e-9 < floor:
-        return {"promote": False, "reason": f"wilson_lower {wilson_lower:.4f} < floor {floor:.4f}"}
-    return {"promote": True, "reason": f"wilson_lower {wilson_lower:.4f} >= floor {floor:.4f}"}
+    tolerance = wilson_band_tolerance(eval_n) if eval_n < 150 else 0.0
+    if wilson_lower + tolerance < floor:
+        return {
+            "promote": False,
+            "reason": f"wilson_lower {wilson_lower:.4f} + tolerance {tolerance:.4f} < floor {floor:.4f} (n={eval_n})",
+        }
+    return {
+        "promote": True,
+        "reason": f"wilson_lower {wilson_lower:.4f} + tolerance {tolerance:.4f} >= floor {floor:.4f} (n={eval_n})",
+    }
+
+
+def wilson_band_tolerance(n: int, *, p: float = 0.5, z: float = 1.96) -> float:
+    """Half of the Wilson half-width at p=0.5 for a sample size n.
+
+    p=0.5 produces the worst-case interval width, so the tolerance does not
+    grow narrower mid-iteration if the model's actual win rate drifts.
+    """
+
+    if n <= 0:
+        return 0.5
+    denom = 1.0 + (z * z) / n
+    half_width = z * math.sqrt((p * (1 - p) + (z * z) / (4 * n)) / n) / denom
+    return half_width / 2.0
 
 
 def run_evaluator_with_model(
@@ -319,16 +351,8 @@ def run_evaluator_with_model(
     args: argparse.Namespace,
 ) -> None:
     onnx_path = iter_dir / "policy.onnx"
-    subprocess.run([
-        sys.executable,
-        str(repo_root / "training" / "export_onnx.py"),
-        "--checkpoint",
-        str(checkpoint),
-        "--out",
-        str(onnx_path),
-    ], cwd=repo_root, check=True)
-    server_proc, model_url = start_serve_onnx(repo_root, onnx_path, args)
-    try:
+    export_checkpoint_to_onnx(repo_root, checkpoint, onnx_path)
+    with serve_onnx_context(repo_root, onnx_path, args) as model_url:
         run_evaluator(
             repo_root,
             selection="policy",
@@ -343,8 +367,6 @@ def run_evaluator_with_model(
             model_url=model_url,
             manifest_out=manifest_out,
         )
-    finally:
-        stop_serve_onnx(server_proc)
 
 
 def run_policy_gate_with_serve(
@@ -358,16 +380,8 @@ def run_policy_gate_with_serve(
     args: argparse.Namespace,
 ) -> int:
     onnx_path = iter_dir / "policy.gate.onnx"
-    subprocess.run([
-        sys.executable,
-        str(repo_root / "training" / "export_onnx.py"),
-        "--checkpoint",
-        str(checkpoint),
-        "--out",
-        str(onnx_path),
-    ], cwd=repo_root, check=True)
-    server_proc, model_url = start_serve_onnx(repo_root, onnx_path, args)
-    try:
+    export_checkpoint_to_onnx(repo_root, checkpoint, onnx_path)
+    with serve_onnx_context(repo_root, onnx_path, args) as model_url:
         return run_eval_gate(
             repo_root,
             selection="policy",
@@ -380,11 +394,59 @@ def run_policy_gate_with_serve(
             rollout_crn_samples=cfg.rollout_crn_samples,
             extra=["--model-url", model_url],
         )
-    finally:
-        stop_serve_onnx(server_proc)
 
 
-def start_serve_onnx(repo_root: Path, onnx_path: Path, args: argparse.Namespace):
+def export_checkpoint_to_onnx(repo_root: Path, checkpoint: Path, onnx_path: Path) -> None:
+    """Wrap export_onnx with a CalledProcessError-aware error message.
+
+    Reviewer 2 #8: a vocab-hash divergence currently surfaces as a bare
+    CalledProcessError. Catch it here and print a helpful guide so an
+    operator who regenerated the vocab mid-sweep doesn't have to pattern-
+    match on a stack trace.
+    """
+
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "training" / "export_onnx.py"),
+                "--checkpoint",
+                str(checkpoint),
+                "--out",
+                str(onnx_path),
+            ],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
+        if "Card vocab hash mismatch" in stderr:
+            raise RuntimeError(
+                f"Card vocab hash diverged between checkpoint {checkpoint} and the "
+                f"runtime cardVocab.json. Either retrain from a fresh checkpoint "
+                f"under the current vocab, or restore the vocab to the hash recorded "
+                f"in the checkpoint's feature_schema.card_vocab.\n\n"
+                f"Underlying export_onnx stderr:\n{stderr}"
+            ) from exc
+        raise
+
+
+@contextlib.contextmanager
+def serve_onnx_context(repo_root: Path, onnx_path: Path, args: argparse.Namespace) -> Iterator[str]:
+    """Spin up serve_onnx, yield the model URL, always tear it down.
+
+    Notes:
+    - stdout/stderr → DEVNULL. v4 review caught a real bug: PIPE without a
+      drainer eventually fills the kernel pipe buffer (~64KB on Linux) and
+      blocks the server's writes. At item 17 scale that hangs the eval gate.
+    - Outer try/finally guarantees the process is reaped even if the health
+      poll, the subsequent run_evaluator, or a Ctrl-C interrupts. v4 had
+      try/finally only around the inner run_evaluator call, leaving a
+      window where a Popen could leak a port.
+    """
+
     import socket
     import time
     import urllib.request
@@ -404,9 +466,56 @@ def start_serve_onnx(repo_root: Path, onnx_path: Path, args: argparse.Namespace)
             "cpu",
         ],
         cwd=repo_root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + 30
+        health_url = f"http://127.0.0.1:{port}/health"
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(health_url, timeout=2).read()
+                yield f"http://127.0.0.1:{port}"
+                return
+            except Exception:
+                time.sleep(0.3)
+        raise TimeoutError(f"serve_onnx did not become healthy on port {port}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def start_serve_onnx(repo_root: Path, onnx_path: Path, args: argparse.Namespace):
+    """Legacy entry point retained for backwards compat; prefer serve_onnx_context."""
+
+    import socket
+    import time
+    import urllib.request
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(repo_root / "training" / "serve_onnx.py"),
+            "--model",
+            str(onnx_path),
+            "--port",
+            str(port),
+            "--provider",
+            "cpu",
+        ],
+        cwd=repo_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     deadline = time.time() + 30
     health_url = f"http://127.0.0.1:{port}/health"
@@ -417,6 +526,10 @@ def start_serve_onnx(repo_root: Path, onnx_path: Path, args: argparse.Namespace)
         except Exception:
             time.sleep(0.3)
     proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
     raise TimeoutError(f"serve_onnx did not become healthy on port {port}")
 
 
