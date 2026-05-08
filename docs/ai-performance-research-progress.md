@@ -243,23 +243,107 @@ and remains.
   every eval row + summary; gate enforces zero of the former unless
   explicitly allowed.
 
+### Plan B Option 2 — Rollout CRN
+
+Implemented as `chooseRolloutAction(args, state, sideId, seed, fallbackRng)`
+with `--rollout-crn-samples N` (default 1; 3 for the gate). Each candidate
+is scored against K shared CRN seeds and the mean reward selects.
+
+100-game side-balanced gate at `--rollout-steps 500 --rollout-crn-samples 3`
+on the same fixed seed range as the rebaseline; manifest at
+`runs/rebaseline-2026-05-08-rollout-crn/`:
+
+| Method | n | WR | Wilson95 | Player | Opp |
+| --- | --- | --- | --- | --- | --- |
+| rollout (1 sample, prior) | 100 | 66.0% | [56.3, 74.5] | 56.0% | 76.0% |
+| rollout (CRN samples=3) | 100 | 68.0% | [58.3, 76.3] | 68.0% | 68.0% |
+
+CRN lifted rollout +2pp / +2pp Wilson lower bound and collapsed the
+side imbalance (player/opp 56/76 → 68/68). Wilson lower bound 58.3% —
+**3.3pp above the 55% escalation floor**, 6.7pp short of the 65% target.
+Rollout-CRN is now the selected DAgger teacher.
+
+### Item 8 — Training Scale-Readiness (partial)
+
+`training/train_bc.py` now supports:
+
+- `--amp` (autocast + GradScaler) gated on CUDA availability.
+- `--grad-accum N` (default 1) accumulates gradients before stepping.
+- `--lr-schedule {none,cosine,step}` with `--lr-warmup-steps`.
+- `--resume <checkpoint.pt>` reloads model_state, optimizer_state,
+  scheduler_state, scaler_state, RNG state, and history; manifest
+  records `resume_from`.
+- ONNX-roundtrip smoke automatically after every training run, with
+  ≤1e-3 logit/value tolerance, asserting promoted checkpoints are
+  guaranteed deployable.
+
+`training/smoke_e2e.py` extends the contract: train K epochs → save →
+resume from that checkpoint and complete K more epochs; assert the
+resumed manifest records `resume_from` and passes the roundtrip smoke.
+
+Sharded JSONL.gz iterable loading and TensorBoard/wandb logging are
+the remaining non-blocking pieces.
+
+### Item 11 — DAgger Iteration Orchestrator
+
+`training/dagger_orchestrator.py` chains the existing tools into a
+multi-iteration loop:
+
+- Iteration 0 has no parent and uses `--selection <teacher>` for trace
+  generation. Subsequent iterations export the promoted parent
+  checkpoint to ONNX, spin up `serve_onnx` on a free port, and run
+  `--selection policy` with the model.
+- Per iteration: `evaluateModelVsHeuristic --decision-trace-out
+  --trace-teacher <teacher>` → `relabelDecisionTrace` → `mixSources`
+  with weighted rule-bot replay → `train_bc --resume <parent>` → eval
+  gate. Default replay weight 0.4, relabeled weight 0.6.
+- **Promotion rule:** gate must pass AND `wilson_lower` must not
+  regress the previous promoted iteration's lower bound. Otherwise
+  rolled back to the prior promoted checkpoint.
+- **Per-iteration manifest:** parent checkpoint path, source row
+  counts, mix ratios, train manifest snapshot, eval result, decision
+  reason.
+- Resumable: `orchestrator-state.json` snapshots promoted checkpoint
+  + Wilson lower + iteration history; `--resume-state` continues from
+  any prior iteration.
+- Replay buffer is the rule-bot rehearsal slice, refreshed only on
+  `--refresh-rule-bot`. Staleness eviction and KL-anchor anti-
+  forgetting are deferred follow-ups.
+
+`training/dagger_smoke.py` exercises the chain end-to-end at tiny
+configs (1 game per iteration, 2 epochs, baseline-as-gate). Passing
+asserts: 3 iteration manifests, mixed-row counts > 0 for every
+iteration, at least one promoted iteration, and the orchestrator
+records the rollback path when the eval-gate Wilson lower regresses.
+Wired as `npm run test:dagger-orchestrator`.
+
+`backend/src/sim/dagger/relabelDecisionTrace.ts` now emits
+`episodeId = "${seed}:${modelSide}"` so the trainer's episode-grouped
+split can split mixed-source JSONLs without falling back to row-level
+splits.
+
 ### Open / Pending After This Pass
 
-1. **Item 2 plan B execution.** Surface and discuss with user (see
-   recommendation above) before grinding more ranking levers.
+1. **Real-config first iteration.** Smoke proved the chain runs end-
+   to-end at tiny configs. A meaningful first iteration (≥50 games,
+   rollout-CRN teacher at samples=3, 20+ epochs, 64-hidden 2-depth)
+   takes ~10 minutes single-core and is the next concrete experiment.
 2. **Item 5b (set encoders, recent-action history, embedding model
-   surgery).** Non-blocking; deferred until after the first DAgger
-   round runs end-to-end.
-3. **Item 6 (parallel generation).** Throughput is currently fast
-   enough that a single core can produce a DAgger iteration in 0.25h
-   at 500 games. Worker-thread sharding + deterministic concat are
-   prerequisites for item 14's "≥200 dec/s at full workers" target;
-   not blocking the first iteration.
-4. **Item 7 (calibrated value head).** Recommended for plan B and for
-   the F1 PPO pipeline; not blocking item 11.
-5. **Item 8 (training scale-readiness: AMP, sharded loader, resume,
-   logging).** Non-blocking for the first iteration but blocking for
-   the orchestrator.
-6. **Item 11+ (orchestrator, opponent pool, per-iteration gate, compute
-   budget, exploration, debug tooling).** Unblocked for items 0/1/4/5a/10
-   but blocked on item 2's teacher decision.
+   surgery).** Non-blocking; deferred.
+3. **Item 6 (parallel generation, deterministic concat, deck-pool
+   sampling).** Single-core throughput is already inside the budget.
+   Worker-thread sharding remains for the "≥200 dec/s at full workers"
+   target.
+4. **Item 7 (calibrated value head).** Recommended for plan B and the
+   F1 PPO pipeline.
+5. **Item 8 sharded loader + TB/wandb logging.** Optional; current
+   AMP/resume/cosine/ONNX-roundtrip subset unblocks the orchestrator.
+6. **Item 12 (opponent snapshot pool with PFSP).** Required for the
+   loop promotion gate. Orchestrator currently treats every iteration
+   as a single "rule bot" matchup.
+7. **Item 13's pinned thresholds** (5pp per-matchup floor, halt-after-
+   2 trigger). The orchestrator decides on aggregate Wilson lower
+   only; the per-matchup tracking lives in item 12.
+8. **Item 14** (compute budget tracking + distillation criterion).
+9. **Items 15 / 16** (exploration temperature, action-coverage
+   histograms; decision-diff CLI, replay viewer, attribution dump).
