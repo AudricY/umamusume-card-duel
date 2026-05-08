@@ -115,3 +115,151 @@ No escalation triggered. Items 11-14 can be scheduled against the current
 budget. Item 6 (parallel generation) is still required to hit the
 "≥200 planner decisions/sec at full worker count" target without relying on
 ideal scaling.
+
+### Item 1 — Corrected Rebaseline Suite (50-game side-balanced)
+
+`backend/src/sim/rebaseline.ts` (`npm run sim:rebaseline`) runs the same
+fixed seed range (8000-8049 × {player, opponent} = 100 games per method)
+through every method and writes per-method manifests +
+`rebaseline.json` + `rebaseline.md`. Each method also went through the
+new `--cycle-window 8` N-step cycle stall detection from item 1.
+
+Production-default planner config; results at
+`runs/rebaseline-2026-05-08/`:
+
+| Method | n | WR | Wilson95 | Player | Opp | Fallbacks | NoOps | Passes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| rule-mirror | 100 | 58.0% | [48.2, 67.2] | 50.0% | 66.0% | 0 | 0 | 0 |
+| baseline | 100 | 48.0% | [38.5, 57.7] | 40.0% | 56.0% | 0 | 0 | 3,090 |
+| inverted-baseline | 100 | 0.0% | [0.0, 3.7] | 0.0% | 0.0% | 0 | 0 | 1,926 |
+| rollout | 100 | 66.0% | [56.3, 74.5] | 56.0% | 76.0% | 0 | 0 | 3,138 |
+| search (d2/top8) | 100 | 60.0% | [50.2, 69.1] | 54.0% | 66.0% | 0 | 0 | 3,096 |
+| planner (no CRN) | 100 | 44.0% | [34.7, 53.8] | 40.0% | 48.0% | 0 | 0 | 3,408 |
+| planner (CRN) | 100 | 51.0% | [41.3, 60.6] | 44.0% | 58.0% | 0 | 0 | 3,282 |
+
+Side imbalance is real and consistent across methods — every learned/search
+method underperforms as player and overperforms as opponent (rule-mirror
+self-play 50% vs 66%). This suggests a setup-order or first-mover bias
+rather than method-specific weakness.
+
+Zero fallbacks and zero selected no-ops across all rows. Inverted-baseline
+hits exactly 0/100 (Wilson upper bound 3.7%) — the planted bad-policy gate
+is exercised by real data, not just a fixture.
+
+### Item 2 — Planner CRN: Escalation Triggered
+
+`runs/rebaseline-2026-05-08-planner-crn/planner.json`:
+
+CRN with 3 shared seeds + first-action max aggregation moved planner from
+44.0% / Wilson lower 34.7% to 51.0% / Wilson lower 41.3% (+7pp, +6.6pp
+lower bound) at the same configuration. Real signal but **still below the
+55% Wilson lower bound escalation floor** that item 2 pre-registered.
+
+**Per the pre-registered plan B in item 2**: when planner stalls below the
+55% Wilson lower bound, fall back to "planner + value-head tiebreaker
+(gated on item 7) or rollout-augmented planner with deeper CRN". Item 7
+is not implemented. The pragmatic options surfaced for the user:
+
+1. **Promote rollout selector as the DAgger teacher.** Its Wilson lower
+   bound is 56.3% — already above the 55% floor — and the point estimate
+   66% is the strongest measured teacher. The 65% bar in item 2 is missed
+   by ~9pp on the lower bound, but rollout cleanly beats the rule bot at
+   p<0.05. DAgger can iterate on rollout-relabeled traces while item 2's
+   ceiling work continues in parallel.
+2. **Strengthen rollout via multi-sample CRN.** Rollout currently scores
+   each candidate with one rollout. Adding K=3-5 CRN samples would tighten
+   the Wilson interval and likely lift the lower bound.
+3. **Compose planner + rollout** (the pre-registered "rollout-augmented
+   planner with deeper CRN"): planner picks a small candidate set, rollout
+   evaluates each with shared seeds. Effectively a deeper search at the
+   first-action level.
+4. **Implement item 7 (calibrated value head)** to enable the "planner +
+   value-head tiebreaker" composition. This is the longer path but is
+   pre-registered in item 2's plan B.
+
+**Recommendation:** option 1 + start option 4. Rollout teacher is already
+above the 55% gate, so DAgger can begin iterating immediately while
+options 2, 3, and 4 land in parallel. Bumping rollout from 66% point
+estimate toward the original 65% Wilson-lower-bound target needs more
+samples (option 2) or hybridization (option 3).
+
+### Item 4 — DAgger Trace-To-Training Recipe
+
+Implemented as the data spine, separated from the orchestrator (item 11):
+
+- `npm run sim:evaluate-model -- --decision-trace-out ... --trace-teacher
+  rollout|search|planner` exports public model-side decision traces.
+- `backend/src/sim/dagger/relabelDecisionTrace.ts` retargets each row to
+  the teacher's chosen action and aborts on opponent.handCardIds /
+  opponent.hand / opponent.deck leaks, with a planted-leak fixture in
+  the smoke.
+- `backend/src/sim/dagger/mixSources.ts` deterministically samples N
+  weighted source JSONLs into one mixed JSONL, tagging every row with
+  its source. Defaults pin the 40/30/20/10 split mentioned in the
+  backlog.
+- `backend/src/tests/daggerRoundSmoke.ts` wires baseline → trace →
+  rollout-teacher relabel → rule-bot mix → schema asserts + leak
+  fixture, run via `npm run test:train`.
+
+The "DAgger checkpoint trained on model-visited rows beats rule-bot-only
+training" half of the acceptance still gates on item 2 — currently the
+recipe runs end-to-end but the teacher (rollout) is below the 65% Wilson
+lower bound bar for promotion.
+
+### Item 5a — Card Vocab + Hash Fail-Fast
+
+Built the canonical card vocabulary as the blocking 5a subset (vocab,
+fail-fast, manifest). Embedding-table model surgery (5b) is non-blocking
+and remains.
+
+- `npm run sim:build-card-vocab` generates `shared/src/cardVocab.json`:
+  107 entries (1 reserved unknown + 106 cards), deterministic suffix
+  ordering for FullArtGold/FullArt/UncommonPlus/Ex variants, sha256-prefix
+  hash `e3a35716156494d6` recorded in the file.
+- Python `_hash_to_unit(cardId)` now resolves through the vocab so the
+  state-feature float position is deterministic and tied to the recorded
+  hash. Bumped state schema version 1 → 2.
+- Training manifests, ONNX export sidecar, and `serve_onnx` all record
+  card_vocab metadata. `export_onnx` and `serve_onnx` refuse to run on
+  hash divergence; smoke fixtures plant a tampered checkpoint to lock
+  the contract.
+- `JsonlPolicyDataset` now enforces row-level `schemaVersion == 1` and
+  raises `RowSchemaError` on missing or bumped versions. Smoke plants
+  both failure modes (item 10).
+
+### Item 1 / 10 — Eval Gate Hardening
+
+- `--max-ci-lower`, `--allow-no-ops`, `--require-zero-no-ops`,
+  `--expect-fail`, `--require-manifest`, and N-step `--cycle-window`
+  flags landed.
+- Planted bad-policy regression: `--selection inverted-baseline`
+  (`chooseLowestScoredAction`) hits 0/100 on the corrected suite,
+  cleanly tripping the Wilson lower bound floor at the configured 50%
+  in the smoke. Asserted both as a hard gate failure and (with
+  `--expect-fail`) as a structured PASS.
+- `--require-manifest` without `--manifest-out` now exits 2 with a
+  structured `EvalGateError` JSON on stderr.
+- `selectedNoOps` and `selectedExplicitPasses` reported separately on
+  every eval row + summary; gate enforces zero of the former unless
+  explicitly allowed.
+
+### Open / Pending After This Pass
+
+1. **Item 2 plan B execution.** Surface and discuss with user (see
+   recommendation above) before grinding more ranking levers.
+2. **Item 5b (set encoders, recent-action history, embedding model
+   surgery).** Non-blocking; deferred until after the first DAgger
+   round runs end-to-end.
+3. **Item 6 (parallel generation).** Throughput is currently fast
+   enough that a single core can produce a DAgger iteration in 0.25h
+   at 500 games. Worker-thread sharding + deterministic concat are
+   prerequisites for item 14's "≥200 dec/s at full workers" target;
+   not blocking the first iteration.
+4. **Item 7 (calibrated value head).** Recommended for plan B and for
+   the F1 PPO pipeline; not blocking item 11.
+5. **Item 8 (training scale-readiness: AMP, sharded loader, resume,
+   logging).** Non-blocking for the first iteration but blocking for
+   the orchestrator.
+6. **Item 11+ (orchestrator, opponent pool, per-iteration gate, compute
+   budget, exploration, debug tooling).** Unblocked for items 0/1/4/5a/10
+   but blocked on item 2's teacher decision.
