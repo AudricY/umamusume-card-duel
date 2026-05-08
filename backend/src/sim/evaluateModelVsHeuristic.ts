@@ -51,7 +51,7 @@ export type EvaluateModelArgs = {
   maxSteps: number;
   modelSide: SideId | "both";
   details: boolean;
-  selection: "policy" | "value" | "rollout" | "search" | "planner";
+  selection: "policy" | "baseline" | "value" | "rollout" | "search" | "planner";
   rolloutSteps: number;
   searchDepth: number;
   searchTopK: number;
@@ -157,6 +157,8 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
       const heuristicSelectedActionIndex = Math.max(0, legalActions.findIndex((action) => action.id === heuristic.id));
       const decision = args.selection === "value"
         ? await chooseValueAction(args.modelUrl, state, sideId, rng)
+        : args.selection === "baseline"
+          ? chooseBaselineAction(state, sideId)
         : args.selection === "rollout"
           ? chooseRolloutAction(args, state, sideId, rng)
         : args.selection === "search"
@@ -249,6 +251,13 @@ async function chooseModelAction(modelUrl: string, state: GameState, sideId: Sid
   const payload = await response.json() as { selectedIndex?: number[] };
   const selectedIndex = Math.max(0, Math.min(legalActions.length - 1, Number(payload.selectedIndex?.[0] ?? 0)));
   return { action: legalActions[selectedIndex] ?? legalActions[0]!, selectedIndex };
+}
+
+function chooseBaselineAction(state: GameState, sideId: SideId): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  const selected = chooseHighestScoredAction(legalActions);
+  const selectedIndex = Math.max(0, legalActions.findIndex((action) => action.id === selected.id));
+  return rankedDecision(legalActions, selectedIndex);
 }
 
 async function chooseValueAction(modelUrl: string, state: GameState, sideId: SideId, rng: Rng): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number }> {
@@ -857,7 +866,7 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
 }
 
 function parseSelection(raw: string): EvaluateModelArgs["selection"] {
-  if (raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
+  if (raw === "baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
   return "policy";
 }
 

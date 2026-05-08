@@ -141,7 +141,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 function parseSelection(raw: string): EvaluateModelArgs["selection"] {
-  if (raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
+  if (raw === "baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
   return "policy";
 }
 
