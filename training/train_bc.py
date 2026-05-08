@@ -25,6 +25,7 @@ def main() -> None:
     ablations = set(args.ablate)
     dataset = JsonlPolicyDataset(args.data, min_actions=2, ablations=ablations)
     train_indices, val_indices, split_metadata = split_dataset(dataset, args.seed, args.split_by)
+    dataset_summary = summarize_dataset(dataset)
     train_loader = DataLoader(
         Subset(dataset, train_indices),
         batch_size=args.batch_size,
@@ -67,6 +68,7 @@ def main() -> None:
             "train_samples": len(train_indices),
             "val_samples": len(val_indices),
             "split": split_metadata,
+            "dataset_summary": dataset_summary,
             "feature_ablations": sorted(ablations),
             "epochs": args.epochs,
             "batch_size": args.batch_size,
@@ -88,6 +90,7 @@ def main() -> None:
         "data": str(args.data),
         "samples": len(dataset),
         "split": split_metadata,
+        "dataset_summary": dataset_summary,
         "feature_ablations": sorted(ablations),
         "metrics": {"train": final_train, "val": final_val, "diagnostics": diagnostics},
     }
@@ -176,6 +179,27 @@ def evaluate_grouped(
         }
         for category, category_groups in groups.items()
     }
+
+
+def summarize_dataset(dataset: JsonlPolicyDataset) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {
+        "source": {},
+        "policy": {},
+        "phase": {},
+        "selected_action_kind": {},
+        "margin_bucket": {},
+    }
+    for sample in dataset.samples:
+        increment(counts["source"], str(sample.example.get("source") or "unknown"))
+        increment(counts["policy"], str(sample.example.get("policy", "unknown")))
+        increment(counts["phase"], str(sample.example.get("phase", "unknown")))
+        increment(counts["selected_action_kind"], selected_action_kind(sample))
+        increment(counts["margin_bucket"], margin_bucket(sample))
+    return counts
+
+
+def increment(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
 
 
 def add_group(groups: dict[str, list[int]], name: str, index: int) -> None:
