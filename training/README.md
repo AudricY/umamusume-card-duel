@@ -32,3 +32,25 @@ training/.venv/bin/python training/serve_onnx.py --model training/runs/dev/model
 ```
 
 Use `--device cuda` for GPU training, or `--device auto` to use CUDA when available and CPU otherwise. Use `--provider cuda` on the ONNX server when `onnxruntime-gpu` is installed.
+
+## Artifact Layout
+
+Exports and evaluations should be kept under `training/runs/<experiment>/`:
+
+```text
+training/runs/<experiment>/
+  examples.jsonl
+  examples.manifest.json
+  outcome.jsonl
+  outcome.manifest.json
+  trace.jsonl
+  eval.manifest.json
+  model/
+    checkpoint.pt
+    manifest.json
+    policy.onnx
+```
+
+The TypeScript exporters write sibling `*.manifest.json` files with command args, git SHA/dirty flag, seed/source taxonomy, phase/action-kind counts, feature schema dimensions, and terminal or margin summaries. `sim:evaluate-model` and `sim:eval-gate` can write eval artifacts with `--manifest-out`.
+
+`train_bc.py` writes `model/manifest.json` and stores the same metadata in `checkpoint.pt`, including split mode, train/validation groups, feature schema, final metrics, and diagnostics by phase, selected action kind, source, and oracle margin bucket.
