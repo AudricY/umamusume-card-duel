@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -43,6 +46,28 @@ try {
     assert.ok(payload.failures.some((failure: string) => failure.includes("minGames")), "eval gate should explain minGames failure");
   }
   assert.equal(failed, true, "eval gate command should exit nonzero on threshold miss");
+
+  const traceDir = mkdtempSync(join(tmpdir(), "uma-trace-smoke-"));
+  const traceOut = join(traceDir, "trace.jsonl");
+  await execFileAsync("tsx", [
+    "src/sim/evaluateModelVsHeuristic.ts",
+    "--selection", "rollout",
+    "--games", "1",
+    "--model-side", "both",
+    "--max-steps", "100",
+    "--rollout-steps", "30",
+    "--decision-trace-out", traceOut,
+  ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 8 });
+  assert.ok(existsSync(traceOut), "decision trace file should be written");
+  const traceRows = readJsonl(traceOut);
+  assert.ok(traceRows.length > 0, "decision trace should contain model-visited decisions");
+  assert.ok(new Set(traceRows.map((row) => row.modelSide)).has("player"), "trace should include player-side model decisions");
+  assert.ok(new Set(traceRows.map((row) => row.modelSide)).has("opponent"), "trace should include opponent-side model decisions");
+  traceRows.forEach((row) => {
+    assert.equal(row.source, "model-visited");
+    assert.equal(row.observation.opponent.handCardIds, undefined, "trace observation must not leak opponent hand IDs");
+    assert.ok(row.result?.winner === "player" || row.result?.winner === "opponent" || row.result?.winner === null, "trace rows should include final result");
+  });
 } finally {
   server.close();
 }
@@ -73,4 +98,12 @@ function sendJson(response: ServerResponse, status: number, payload: unknown): v
   const body = JSON.stringify(payload);
   response.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
   response.end(body);
+}
+
+function readJsonl(path: string): any[] {
+  return readFileSync(path, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
