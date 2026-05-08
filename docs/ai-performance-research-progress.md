@@ -322,12 +322,43 @@ Wired as `npm run test:dagger-orchestrator`.
 split can split mixed-source JSONLs without falling back to row-level
 splits.
 
+### Real-Config 2-Iteration DAgger Run
+
+`runs/dagger-real-2026-05-08/`. Configs: 25 games trace + 25 games eval
+per iteration (50 side-balanced), rollout-CRN samples=3 teacher,
+`--rollout-steps 200`, replay buffer 30 rule-bot games, 12 epochs
+batch=32 hidden=64 depth=2, `--lr-warmup-steps 16` cosine.
+
+| Iteration | Selection (trace) | Trace rows | Mixed rows | Trained policy WR | Wilson95 | Decision |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | rollout (CRN×3) | 2,375 | 3,555 | 34.0% | [22.4, 47.8] | promoted (floor 0%) |
+| 1 | policy (iter-0 model) | 2,536 | 3,651 | 28.0% | [17.5, 41.7] | rejected (lower 17.5% < floor 22.4%) |
+
+**Pipeline ran end-to-end:** 2 iterations, ONNX export, `serve_onnx` on
+a free port, policy gate against rule bot, promote/reject decision,
+auto-rollback on regression. Zero fallbacks and zero selected no-ops.
+
+**SL ceiling reproduced.** Trained policy at 34% / 28% sits well below
+the rollout teacher's 68% (Wilson lower 58.3%) and below the rule-bot
+mirror baseline 58%. This matches the archived imitation cap from
+`docs/ai-training-findings.md` (corrected trained policies 34-40%).
+The orchestrator's promote/reject machinery works; the underlying
+imitation gap is the same one the unified backlog already pre-
+registered. RL self-play (item 11+ → F1 PPO) remains the path through
+the cap.
+
+**Hypothesis on the iter-1 regression:** with only 12 epochs and
+~2.4k trace rows, the model under-fits the relabeled distribution, so
+training again on a slightly different model-visited mix produces a
+slightly different — and noisier — local optimum. Larger epochs/data,
+KL-anchor anti-forgetting (item 11 follow-up), or a value-head
+auxiliary (item 7) should reduce this iteration noise.
+
 ### Open / Pending After This Pass
 
-1. **Real-config first iteration.** Smoke proved the chain runs end-
-   to-end at tiny configs. A meaningful first iteration (≥50 games,
-   rollout-CRN teacher at samples=3, 20+ epochs, 64-hidden 2-depth)
-   takes ~10 minutes single-core and is the next concrete experiment.
+1. **Larger DAgger configs** (50+ games, 30+ epochs, 5b embeddings or
+   wider model) to see whether trained policy can approach the
+   teacher ceiling at all under the corrected suite.
 2. **Item 5b (set encoders, recent-action history, embedding model
    surgery).** Non-blocking; deferred.
 3. **Item 6 (parallel generation, deterministic concat, deck-pool
