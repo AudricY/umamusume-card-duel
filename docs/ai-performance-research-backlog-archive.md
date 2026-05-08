@@ -26,11 +26,42 @@ This file keeps the useful discarded signal from the original `ai-performance-re
 
 ## Deferred Until Gated
 
-- **Self-play / RL:** Not active until the planner or another teacher reliably beats the rule bot. Self-play on a weak teacher is likely to amplify noise.
-- **Transformer encoder destination architecture:** Not active until card/entity tokens, cross-attention baselines, scale-ready training, and 100K+ useful rows exist.
-- **Multi-GPU / DDP:** Not active until single-GPU training is a measured bottleneck.
+- **Self-play / RL:** Now the explicit end goal. Critical-path and gated follow-up items (Options A/B/C) live in the unified backlog rather than being deferred.
+- **Transformer encoder destination architecture:** Not active until card/entity tokens, cross-attention baselines, scale-ready training, and 100K+ useful rows exist. Tracked as B2 "behind the gate" in the unified backlog.
+- **Multi-GPU / DDP:** Not active until single-GPU training is a measured bottleneck for the RL orchestrator.
 - **Masked card/action pretraining:** Not active unless labeled-data scaling stalls after generation parallelism and matchup sampling.
-- **Larger supervised runs on current labels:** Explicit non-goal. Current labels and teachers do not justify expecting an 80% trained policy.
+- **Larger supervised runs on current labels:** Explicit non-goal. SL is bounded by teacher quality (~55-65% imitation cap); RL self-play is the mechanism for clearing it.
+
+## Refactored Into Behind-The-Gate (2026-05-08, RL endpoint pass)
+
+After the RL-endpoint refinement, three former active items moved below the SL→RL handoff gate. They are SL polish that the RL loop either subsumes or makes obsolete.
+
+- **Margin/phase/action-kind training mixes (former item 7):** Subsumed by RL advantage-weighted updates; phase distribution is learned from reward. Resume only if DAgger plateaus and ablation shows margin signal is the bottleneck.
+- **Entity-aware architecture sweeps (former item 11):** Cross-attention/asymmetric scaling/transformer. Optimization on top of feature migration; RL ships on competent MLP-over-tokens. Resume after a plateaued loop.
+- **Procedural/ability polish beyond planner needs (residual of former items 3 and 8):** RL self-play discovers ability/turn-goal heuristics from reward. Only scorers consumed by the planner remain in the active backlog.
+
+Items renumbered in the same pass: planner is now item 2 ("Bring the DAgger Teacher Above the Gate"), procedural scoring is item 9 (planner-consumer scope), value head is item 7 (framed as the RL critic), reproducibility guards are item 10. Items 11-14 cover the DAgger orchestrator, opponent pool, per-iteration eval gate, and compute/distillation.
+
+## Adversarial Pass (2026-05-08, v3)
+
+A second refinement round added structural fixes flagged by dependency, failure-mode, and per-item adversarial reviews:
+
+- **New item 0:** Throughput probe spike ahead of items 11-14, so item 14's budget targets and item 6's "near-linear" claim are grounded in measurement.
+- **Item 5 split:** 5a (vocab + embeddings + schema fail-fast) is the only blocking subset for item 11; 5b (set encoder + metadata + history + ablations) is non-blocking.
+- **Item 7 moved to "P1-Optional":** It is required for F1 (PPO advantages) and recommended as an aux head for DAgger, but does not block item 11. Stops the prior implication of single-thread sequencing.
+- **Item 4 / item 11 boundary redrawn:** item 4 owns the data recipe only; item 11 owns rollout/retrain. Stale "(item 13)" cross-reference fixed.
+- **Item 11 expanded:** explicit replay buffer policy (cap, staleness cutoff, mix schedule), KL-anchor anti-forgetting regularizer, reproducibility tiering (CPU-only byte-identical; GPU statistical-equivalence within tolerance) replacing the earlier unrealistic byte-identical bar.
+- **Item 12 expanded:** prioritized fictitious self-play sampling, retention policy (last 8 + every 4th historical, cap 24), KL drift reference pinned.
+- **Item 13 thresholds pinned:** ≤5pp per-matchup drop tolerance; cross-references to the loop promotion gate; halt-after-2 restated.
+- **Item 14 demands establishing throughput targets first** with concrete defaults (≥200 planner decisions/sec at full worker count, ≤4h iteration wall-clock); distillation margin pinned at 3pp.
+- **New items 15 and 16:** exploration/action-coverage during trace generation, and iteration-level debugging tooling (decision diff, replay viewer). Neither was previously in the backlog despite being known RL failure modes.
+- **Item 1 extended:** planted bad-policy regression specified; N-step cycle stall detection added.
+- **Item 2 escalation criterion:** if planner stalls below 55% Wilson lower bound after a 2-week budget, fall back to teacher composition (planner + value-head tiebreaker, or rollout-augmented planner with deeper CRN). Pre-registered, not improvised.
+- **Item 3 vs item 9 delineated:** item 3 scores choices *inside* a planner-enumerated action; item 9 scores the candidate ordering *feeding* the planner.
+- **Promotion standard tightened:** Wilson lower bound (not point estimate) is the comparison number; per-opponent floor pinned at 45%; "monotonic regression" precisely defined; best-response exploitation check elevated from one-line bullet to tracked time-series with its own halt threshold; plateau (graceful stop) defined separately from regression halt.
+- **F1 (PPO) work list expanded** with reward shaping, episode boundary, behavior-policy logging, mask handling, buffer sizing, GAE/KL/entropy controls, league sampling, HP sweep methodology. Smoke raised to ≥10 updates.
+
+Reviewers' raw reports are preserved in conversation history.
 
 ## Historical Results Policy
 
