@@ -42,6 +42,7 @@ import type { PlayChoices } from "../../../frontend/src/game/engine/core/playTyp
 import type { CoinFlipResult, EnergyType, GameState, SideId, SideState, UmamusumeInstance } from "../../../shared/src/types";
 import { stateFingerprint } from "./stateFingerprint";
 import { rankLegalActions, type CandidateRankerMode } from "./candidateRanker";
+import { withGitMetadata } from "./manifest";
 
 export type EvaluateModelArgs = {
   modelUrl: string;
@@ -57,6 +58,7 @@ export type EvaluateModelArgs = {
   searchSamples: number;
   ranker: CandidateRankerMode;
   decisionTraceOut: string | null;
+  manifestOut: string | null;
   plannerTopK: number;
   plannerMaxSequences: number;
   plannerMaxDepth: number;
@@ -120,7 +122,12 @@ async function main() {
     }
   }
   const summary = summarize(results);
-  console.log(JSON.stringify(args.details ? { summary, results } : { summary }, null, 2));
+  const output = args.details ? { args, summary, results } : { args, summary };
+  if (args.manifestOut) {
+    mkdirSync(dirname(args.manifestOut), { recursive: true });
+    writeFileSync(args.manifestOut, JSON.stringify(withGitMetadata(output), null, 2) + "\n", "utf8");
+  }
+  console.log(JSON.stringify(output, null, 2));
 }
 
 export async function runModelVsHeuristicGame(args: EvaluateModelArgs, seed: string, modelSide: SideId): Promise<GameResult> {
@@ -842,6 +849,7 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     searchSamples: Number(get("--search-samples", "1")),
     ranker: parseRanker(get("--ranker", "heuristic")),
     decisionTraceOut: get("--decision-trace-out", ""),
+    manifestOut: get("--manifest-out", ""),
     plannerTopK: Number(get("--planner-top-k", get("--search-top-k", "4"))),
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
