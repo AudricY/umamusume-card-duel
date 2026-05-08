@@ -21,6 +21,7 @@
     "setup:python-train:gpu": "python3 -m venv training/.venv && training/.venv/bin/pip install -r training/requirements-gpu.txt",
     "test:train": "npm --workspace backend run test:train",
     "test:python-train": "training/.venv/bin/python training/smoke_e2e.py",
+    "test:calibrate-value": "training/.venv/bin/python training/calibrate_smoke.py",
     "test:dagger-orchestrator": "training/.venv/bin/python training/dagger_smoke.py"
   },
   "devDependencies": {
