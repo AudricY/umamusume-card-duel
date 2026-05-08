@@ -93,6 +93,28 @@ try {
   assert.ok(typeof plantedPassPayload.summary.selectedNoOps === "number", "summary should report selectedNoOps count");
   assert.ok(typeof plantedPassPayload.summary.selectedExplicitPasses === "number", "summary should report selectedExplicitPasses count");
 
+  // --require-manifest with no --manifest-out must exit nonzero with a
+  // structured error JSON.
+  let manifestRejected = false;
+  try {
+    await execFileAsync("tsx", [
+      "src/sim/evalGate.ts",
+      "--selection", "baseline",
+      "--games", "1",
+      "--model-side", "player",
+      "--max-steps", "60",
+      "--min-games", "1",
+      "--require-manifest",
+    ], { cwd: process.cwd(), maxBuffer: 1024 * 1024 * 8 });
+  } catch (error) {
+    manifestRejected = true;
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "");
+    const payload = JSON.parse(stderr);
+    assert.equal(payload.error, "EvalGateError");
+    assert.equal(payload.code, "missing_manifest_path");
+  }
+  assert.equal(manifestRejected, true, "--require-manifest without --manifest-out must error");
+
   // N-step cycle detection smoke: run a tight cycle window and assert
   // the field shows up in terminal reasons (or cycleStalled key absent if
   // no cycle hit). The smoke just verifies the field plumbing.

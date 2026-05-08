@@ -12,14 +12,27 @@ type Args = EvaluateModelArgs & {
   maxCiLower: number | null;
   requireZeroFallbacks: boolean;
   requireZeroNoOps: boolean;
+  requireManifest: boolean;
   expectFail: boolean;
   manifestOut: string | null;
 };
+
+class EvalGateError extends Error {
+  constructor(public readonly errorCode: string, message: string) {
+    super(message);
+    this.name = "EvalGateError";
+  }
+}
 
 type GateResult = Awaited<ReturnType<typeof runModelVsHeuristicGame>>;
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.requireManifest && !args.manifestOut) {
+    const error = { error: "EvalGateError", code: "missing_manifest_path", message: "--require-manifest demands --manifest-out <path>" };
+    console.error(JSON.stringify(error));
+    process.exit(2);
+  }
   const sides: SideId[] = args.modelSide === "both" ? ["player", "opponent"] : [args.modelSide];
   const results: GateResult[] = [];
   for (const side of sides) {
@@ -157,6 +170,7 @@ function parseArgs(argv: string[]): Args {
     maxCiLower: argv.includes("--max-ci-lower") ? Number(get("--max-ci-lower", "1")) : null,
     requireZeroFallbacks: !argv.includes("--allow-fallbacks"),
     requireZeroNoOps: !argv.includes("--allow-no-ops"),
+    requireManifest: argv.includes("--require-manifest"),
     expectFail: argv.includes("--expect-fail"),
     manifestOut: get("--manifest-out", ""),
   };
