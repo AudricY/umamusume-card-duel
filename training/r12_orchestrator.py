@@ -86,6 +86,14 @@ def main() -> None:
     if state.promoted_checkpoint is None:
         raise SystemExit("must pass --init-checkpoint or --resume-state with a promoted_checkpoint set")
 
+    # R14: auto-infer hidden_dim/depth from the init checkpoint so an
+    # operator passing the orchestrator defaults (128/3) against a 64/2
+    # ckpt does not crash at the distill step with a state-dict shape
+    # mismatch — the silent-failure mode we hit on the first W6 extension
+    # attempt. CLI-supplied dims still win when they match the checkpoint;
+    # we only override when they would cause a load_state_dict failure.
+    args = _maybe_override_dims_from_checkpoint(args, state.promoted_checkpoint, events_path)
+
     last_iter = max((entry["iteration"] for entry in state.iterations), default=-1)
     for iteration in range(last_iter + 1, args.iterations):
         if state.halted:
@@ -452,6 +460,44 @@ def emit_event(events_path: Path, payload: dict[str, Any]) -> None:
     events_path.parent.mkdir(parents=True, exist_ok=True)
     with events_path.open("a", encoding="utf8") as fh:
         fh.write(json.dumps(payload) + "\n")
+
+
+def _maybe_override_dims_from_checkpoint(
+    args: argparse.Namespace,
+    init_checkpoint: Path,
+    events_path: Path,
+) -> argparse.Namespace:
+    """If the init checkpoint stores a model_config, override hidden_dim/
+    depth to match it. Prevents the W6-extension footgun where the
+    orchestrator defaults (128/3) were passed against a 64/2 checkpoint.
+    """
+    try:
+        import torch  # local import keeps the orchestrator usable without torch
+        payload = torch.load(init_checkpoint, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        emit_event(events_path, {
+            "stage": "r12-orchestrator", "event_type": "dim_inference_skipped",
+            "reason": f"could not load checkpoint: {exc}", "ts": time.time(),
+        })
+        return args
+    cfg = payload.get("model_config") or (payload.get("metadata", {}) or {}).get("model_config") or {}
+    ckpt_hidden = cfg.get("hidden_dim")
+    ckpt_depth = cfg.get("depth")
+    overrides: dict[str, Any] = {}
+    if isinstance(ckpt_hidden, int) and ckpt_hidden > 0 and ckpt_hidden != args.hidden_dim:
+        overrides["hidden_dim"] = (args.hidden_dim, ckpt_hidden)
+        args.hidden_dim = ckpt_hidden
+    if isinstance(ckpt_depth, int) and ckpt_depth > 0 and ckpt_depth != args.depth:
+        overrides["depth"] = (args.depth, ckpt_depth)
+        args.depth = ckpt_depth
+    if overrides:
+        emit_event(events_path, {
+            "stage": "r12-orchestrator", "event_type": "dim_inferred_from_checkpoint",
+            "checkpoint": str(init_checkpoint),
+            "overrides": {k: {"cli": v[0], "checkpoint": v[1]} for k, v in overrides.items()},
+            "ts": time.time(),
+        })
+    return args
 
 
 def _adapt_for_dagger_promote(state: R12State):
