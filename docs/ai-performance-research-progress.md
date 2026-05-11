@@ -663,8 +663,33 @@ fixed in `docs/f1-design.md`. Implementation
 - **Ratio mean: 0.99–1.00** across all 20 minibatches. The behavior policy ≈ target policy at every update; no learning happens because the importance-weighted advantage is ≈ 0 × advantage.
 - **Root cause: warm-start entropy is ~0.18 nats per decision.** Over ~10 legal actions per step that's `exp(0.18) ≈ 1.2` effective actions — the DAgger-trained policy is nearly deterministic. Stochastic Gumbel-max at T=1.0 over a near-degenerate distribution produces near-greedy trajectories. Behavior ≈ target ⇒ ratio ≈ 1 ⇒ surrogate gradient ≈ 0. PPO has nothing to push against.
 
-**Next step (Phase 3a — diagnose-with-aggressive-exploration):** crank temperature 1.0 → 2.0, entropy_coef 0.005 → 0.05, lr 3e-5 → 1e-4, ppo-epochs 1 → 4. If weight diffs grow 10×+ and KL per minibatch lands in [0.05, 0.2], the infrastructure works and we have a viable PPO config. If not, the problem is upstream (reward signal, GAE, advantage normalization).
+**Phase 3a (aggressive: T=2, lr=1e-4, entropy=0.05, ppo-epochs=4):** weights moved 10× more (max diff 0.003 per iter vs 0.0002), KL ranged into 0.04 per minibatch, entropy widened from 0.18 to 0.28. But gate WR: 34.5% → 30% → 32.5% — slight regression, halted at iter-2. The policy moves but doesn't find better argmax decisions.
 
-Artifacts: `runs/f1-2026-05-11-phase2/orchestrator-state.json`,
-per-iteration manifests, `events.jsonl`, `tb/iter-*/`. Live view at
-`http://127.0.0.1:5000/run/f1-2026-05-11-phase2`.
+**Phase 3b (extreme: T=2.5, lr=1e-3, entropy=0.1, clip=0.3):** weights moved another 10× (max diff 0.027 per iter). KL up to 0.054 per minibatch. Entropy widened to 0.37. Gate WR: 33.5% → 28.5% → 33% — bigger regression at iter-1, halted at iter-2.
+
+**Pattern across three PPO phases:**
+
+| Phase | Max weight diff/iter | Avg KL/minibatch | Best WR | Δ vs warm-start |
+| --- | --- | --- | --- | --- |
+| 2 (defaults) | 0.0002 | 0.011 | 37.5% | 0pp |
+| 3a (aggressive) | 0.003 | 0.017 | 34.5% | -3pp |
+| 3b (extreme) | 0.027 | 0.018 | 33.5% | -4pp |
+
+**Finding — F1 target unreachable at current compute scale.** The PPO infrastructure is sound: weight diffs scale monotonically with HP aggressiveness exactly as expected. But the gradient signal at 30–60 games/update is too noisy to find a *better-than-warm-start* policy. Phase 2 doesn't move the policy enough to learn; phases 3a/3b move it but into worse territory (walks off the SL local optimum without finding higher ground).
+
+The f1-design spec calls for **800 games/update** for production. We ran at 1/27th that. Going to 800 games × 500 max-steps would be ~20 hours wall-clock per PPO iteration on this machine — infeasible in an interactive session.
+
+**Recommended pivots before declaring F1 a wrong-tool conclusion:**
+
+1. **800-game/update overnight run** — the spec was specific about buffer size; honoring it is the cleanest test of "can F1 break this cap". Single iteration takes ~20h; a 3-iter run is a weekend. Practical if scheduled.
+2. **Self-play with opponent pool** — switch rollout opponent from rule-bot to a PFSP sample of prior promoted checkpoints. Item 12 infra exists; PPO orchestrator currently uses `--opponent-model-url` unset (rule-bot default). Could give richer reward signal than always-vs-rule-bot.
+3. **Improve the warm-start first** — DAgger at 30% WR may simply not be a strong enough starting point. Larger SL run (more games, more epochs) might land at 40% which gives PPO a meaningful gradient.
+4. **Reward shaping refinement** — Δpoints × 1/3 + ±1 terminal might miss strategic depth. Adding shaping for energy attachment, retreat decisions, etc. could expose more learnable signal.
+
+**Path of least regret:** option 2 (self-play). The infra is built (item 12), and a single self-play F1 run is comparable in wall-clock to phases 2/3a — it directly tests whether opponent diversity is the missing ingredient before paying for option 1's huge compute.
+
+Artifacts:
+- `runs/f1-2026-05-11-phase2/` (defaults, halted at iter-4)
+- `runs/f1-2026-05-11-phase3a-aggressive/` (T=2, halted at iter-2)
+- `runs/f1-2026-05-11-phase3b-extreme/` (T=2.5, halted at iter-2)
+- All have full `events.jsonl`, `tb/iter-*/`, per-iter manifests for forensics
