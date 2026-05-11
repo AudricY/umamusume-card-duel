@@ -6,13 +6,15 @@ Runs a single mini iteration of r12_orchestrator.py end-to-end:
   - 8 gate games × 8 simulations → gate.manifest.json
   - promotion decision recorded
 
-Asserts all expected artifacts exist and the expected event_types appear
-in events.jsonl. Strength is not enforced (a single iteration with 8 sims
-gives noisy WR by design).
+Accepts `--leaf {value-head,rollout}` to validate both leaf evaluators end
+to end. Asserts all expected artifacts exist and the expected event_types
+appear in events.jsonl. Strength is not enforced (a single iteration with
+8 sims gives noisy WR by design).
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -20,6 +22,11 @@ from pathlib import Path
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--leaf", default="value-head", choices=["value-head", "rollout"])
+    parser.add_argument("--out-dir", default=None)
+    cli_args = parser.parse_args()
+
     repo_root = Path(__file__).resolve().parents[1]
     init_ckpt = next((
         c for c in [
@@ -31,7 +38,8 @@ def main() -> None:
         print("[r12-orch-smoke] no init checkpoint found", file=sys.stderr)
         sys.exit(2)
 
-    out_dir = repo_root / "runs" / "R12-orch-smoke"
+    suffix = f"-{cli_args.leaf}" if cli_args.leaf != "value-head" else ""
+    out_dir = Path(cli_args.out_dir) if cli_args.out_dir else (repo_root / "runs" / f"R12-orch-smoke{suffix}")
     out_dir.mkdir(parents=True, exist_ok=True)
     # Clear stale events to make the assertions deterministic.
     events_path = out_dir / "events.jsonl"
@@ -54,6 +62,9 @@ def main() -> None:
         "--eval-min-ci-lower", "0.0",
         "--mcts-simulations", "8",
         "--mcts-c-puct", "1.5",
+        "--mcts-leaf", cli_args.leaf,
+        "--mcts-rollout-crn-samples", "2",
+        "--mcts-rollout-steps", "100",
         "--mcts-collapse-max-steps", "32",
         "--mcts-max-nodes", "256",
         "--dirichlet-alpha", "0.3",
