@@ -104,6 +104,7 @@ def main() -> None:
             scheduler=scheduler,
             anchor_model=anchor_model,
             kl_anchor_weight=args.kl_anchor_weight,
+            entropy_bonus=args.entropy_bonus,
         )
         val_metrics = evaluate(model, val_loader, value_weight=args.value_weight) if val_loader else {}
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
@@ -120,6 +121,7 @@ def main() -> None:
                 train_policy_loss=train_metrics.get("policy_loss"),
                 train_value_loss=train_metrics.get("value_loss"),
                 train_kl_loss=train_metrics.get("kl_loss"),
+                train_entropy=train_metrics.get("entropy"),
                 train_accuracy=train_metrics.get("accuracy"),
                 val_loss=val_metrics.get("loss"),
                 val_accuracy=val_metrics.get("accuracy"),
@@ -181,6 +183,7 @@ def main() -> None:
             "resume_from": str(args.resume) if args.resume else None,
             "kl_anchor_checkpoint": str(args.kl_anchor_checkpoint) if args.kl_anchor_checkpoint else None,
             "kl_anchor_weight": float(args.kl_anchor_weight),
+            "entropy_bonus": float(args.entropy_bonus),
             "device": str(device),
             "history": history,
             "final_train": final_train,
@@ -208,6 +211,7 @@ def main() -> None:
             "resume_from": str(args.resume) if args.resume else None,
             "kl_anchor_checkpoint": str(args.kl_anchor_checkpoint) if args.kl_anchor_checkpoint else None,
             "kl_anchor_weight": float(args.kl_anchor_weight),
+            "entropy_bonus": float(args.entropy_bonus),
         },
         "onnx_roundtrip_smoke": onnx_smoke,
         "metrics": {"train": final_train, "val": final_val, "diagnostics": diagnostics},
@@ -332,9 +336,10 @@ def run_epoch(
     scheduler=None,
     anchor_model: CandidatePolicyNet | None = None,
     kl_anchor_weight: float = 0.0,
+    entropy_bonus: float = 0.0,
 ) -> dict[str, float]:
     model.train()
-    totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "count": 0.0, "kl_loss": 0.0}
+    totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "count": 0.0, "kl_loss": 0.0, "entropy": 0.0}
     optimizer.zero_grad(set_to_none=True)
     use_amp = scaler is not None
     accum_step = 0
@@ -351,7 +356,11 @@ def run_epoch(
                 with torch.no_grad():
                     anchor_logits, _ = anchor_model(batch["state_features"], batch["action_features"], batch["action_mask"])
                 kl_loss = masked_kl_divergence(anchor_logits, logits, batch["action_mask"])
-            loss = policy_loss + value_loss * value_weight + kl_loss * kl_anchor_weight
+            # R3 entropy bonus: subtract β·H(π) so loss minimization
+            # pushes the policy toward higher entropy. The unused-tensor
+            # path keeps the metric column populated even when β=0.
+            policy_entropy = masked_policy_entropy(logits, batch["action_mask"])
+            loss = policy_loss + value_loss * value_weight + kl_loss * kl_anchor_weight - entropy_bonus * policy_entropy
         scaled = loss / max(1, grad_accum)
         if use_amp:
             scaler.scale(scaled).backward()
@@ -372,7 +381,7 @@ def run_epoch(
             if scheduler is not None:
                 scheduler.step()
             accum_step = 0
-        accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"], kl_loss=kl_loss)
+        accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"], kl_loss=kl_loss, entropy=policy_entropy)
     return finish_metrics(totals)
 
 
@@ -496,6 +505,7 @@ def accumulate(
     logits: torch.Tensor,
     targets: torch.Tensor,
     kl_loss: torch.Tensor | None = None,
+    entropy: torch.Tensor | None = None,
 ) -> None:
     count = float(targets.shape[0])
     totals["loss"] += float(loss.item()) * count
@@ -505,6 +515,8 @@ def accumulate(
     totals["count"] += count
     if kl_loss is not None and "kl_loss" in totals:
         totals["kl_loss"] += float(kl_loss.item()) * count
+    if entropy is not None and "entropy" in totals:
+        totals["entropy"] += float(entropy.item()) * count
 
 
 def finish_metrics(totals: dict[str, float]) -> dict[str, float]:
@@ -518,7 +530,29 @@ def finish_metrics(totals: dict[str, float]) -> dict[str, float]:
     }
     if "kl_loss" in totals:
         out["kl_loss"] = totals["kl_loss"] / count
+    if "entropy" in totals:
+        out["entropy"] = totals["entropy"] / count
     return out
+
+
+def masked_policy_entropy(logits: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
+    """Mean entropy H(π) over a batch of mask-aware action distributions.
+
+    R3 / entropy-regularized BC: subtracting β · H(π) from the BC loss
+    pushes the trained policy toward higher entropy so the resulting
+    warm-start is less peaked. Masked positions are forced to -1e9 so
+    they contribute zero probability and zero entropy mass.
+    """
+
+    mask = action_mask.bool()
+    sentinel = torch.full_like(logits, -1.0e9)
+    masked = torch.where(mask, logits, sentinel)
+    log_p = nn.functional.log_softmax(masked, dim=-1)
+    p = torch.where(mask, log_p.exp(), torch.zeros_like(log_p))
+    per_action = -p * log_p.clamp(min=-50.0)
+    per_action = torch.where(mask, per_action, torch.zeros_like(per_action))
+    per_row = per_action.sum(dim=-1)
+    return per_row.mean()
 
 
 def masked_kl_divergence(anchor_logits: torch.Tensor, target_logits: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
@@ -679,6 +713,8 @@ def parse_args() -> argparse.Namespace:
                         help="Iteration index recorded on emitted events when orchestrated; -1 for standalone runs.")
     parser.add_argument("--tb-log-dir", default=None,
                         help="Write per-epoch TensorBoard scalars under this directory. View with `tensorboard --logdir <parent>`.")
+    parser.add_argument("--entropy-bonus", type=float, default=0.0,
+                        help="R3: subtract β·H(π) from BC loss to push the warm-start toward higher entropy. 0 disables (default).")
     parser.add_argument("--kl-anchor-checkpoint", default=None,
                         help="Frozen prior-iteration checkpoint to regularize toward (anti-forgetting).")
     parser.add_argument("--kl-anchor-weight", type=float, default=0.0,
