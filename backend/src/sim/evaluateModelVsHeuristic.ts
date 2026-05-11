@@ -94,6 +94,21 @@ export type EvaluateModelArgs = {
   // orchestrator for pool matchup eval. Falls back silently to the rule
   // bot on any error so eval-time robustness is preserved.
   opponentModelUrl: string | null;
+  // R13.W4 MCTS strength ladder: the non-model side can also run MCTS
+  // with its own config so we can compare MCTS@K1 vs MCTS@K2 etc. Defaults
+  // to "rule" (the existing rule-bot path) unless --opponent-selection is
+  // set. When "mcts", the opponent uses opponentMcts* settings, falling
+  // back to the model's settings for any field not overridden. The
+  // opponent's /predict goes to opponentModelUrl if set, else modelUrl.
+  opponentSelection: "rule" | "policy" | "mcts";
+  opponentMctsSimulations: number;
+  opponentMctsCPuct: number;
+  opponentMctsLeaf: "value-head" | "rollout";
+  opponentMctsRolloutCrnSamples: number;
+  opponentMctsRolloutSteps: number;
+  opponentMctsCollapseMaxSteps: number;
+  opponentMctsMaxNodes: number;
+  opponentMctsPrior: "uniform" | "policy";
 };
 
 type GameResult = {
@@ -315,14 +330,24 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
         state = next;
       }
     } else {
-      // Item 12: if a pool-member URL is configured, the non-model side
-      // delegates to that served checkpoint. On any error or single-action
-      // shortcut we fall back to the rule-bot advance so the evaluator
-      // never crashes mid-game.
+      // Item 12 (orig) + R13.W4: the non-model side may delegate to a served
+      // checkpoint (one-step policy) or run its own MCTS for the ladder. On
+      // any error or single-action shortcut we fall back to the rule-bot
+      // advance so the evaluator never crashes mid-game.
       let advanced = false;
-      if (args.opponentModelUrl) {
+      if (args.opponentSelection === "mcts") {
+        const opponentDecision = await chooseOpponentMctsAction(args, state, sideId, `${seed}:${modelSide}:${step}:opp-mcts`);
+        if (opponentDecision) {
+          const next = advanceModeledTurnStep(state, sideId, opponentDecision.action, forcedCoinResults, rng);
+          if (stateHash(next) !== beforeHash) {
+            state = next;
+            advanced = true;
+          }
+        }
+      } else if (args.opponentSelection === "policy" || args.opponentModelUrl) {
         try {
-          const opponentDecision = await chooseOpponentModelAction(args.opponentModelUrl, state, sideId);
+          const url = args.opponentModelUrl ?? args.modelUrl;
+          const opponentDecision = await chooseOpponentModelAction(url, state, sideId);
           if (opponentDecision) {
             const next = advanceModeledTurnStep(state, sideId, opponentDecision.action, forcedCoinResults, rng);
             if (stateHash(next) !== beforeHash) {
@@ -549,24 +574,91 @@ async function chooseMctsAction(
   sideId: SideId,
   seed: string,
 ): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number }> {
+  return runMctsForSide(state, sideId, seed, args.modelUrl, {
+    simulations: args.mctsSimulations,
+    cPuct: args.mctsCPuct,
+    leaf: args.mctsLeaf,
+    rolloutCrnSamples: args.mctsRolloutCrnSamples,
+    rolloutSteps: args.mctsRolloutSteps,
+    prior: args.mctsPrior,
+    addRootDirichlet: args.mctsRootDirichlet,
+    dirichletAlpha: args.mctsDirichletAlpha,
+    dirichletEpsilon: args.mctsDirichletEpsilon,
+    collapseMaxSteps: args.mctsCollapseMaxSteps,
+    maxNodes: args.mctsMaxNodes,
+  });
+}
+
+async function chooseOpponentMctsAction(
+  args: EvaluateModelArgs,
+  state: GameState,
+  sideId: SideId,
+  seed: string,
+): Promise<{ action: LegalAiAction; selectedIndex: number } | null> {
+  // The opponent's /predict goes to opponentModelUrl when set; otherwise it
+  // shares the model's serve_onnx (typical for self-vs-self ladder runs).
+  // Wrapped in try/catch so the caller can fall back to the rule bot on
+  // any transport error, matching chooseOpponentModelAction's contract.
+  try {
+    const url = args.opponentModelUrl ?? args.modelUrl;
+    const decision = await runMctsForSide(state, sideId, seed, url, {
+      simulations: args.opponentMctsSimulations,
+      cPuct: args.opponentMctsCPuct,
+      leaf: args.opponentMctsLeaf,
+      rolloutCrnSamples: args.opponentMctsRolloutCrnSamples,
+      rolloutSteps: args.opponentMctsRolloutSteps,
+      prior: args.opponentMctsPrior,
+      addRootDirichlet: false,
+      dirichletAlpha: args.mctsDirichletAlpha,
+      dirichletEpsilon: args.mctsDirichletEpsilon,
+      collapseMaxSteps: args.opponentMctsCollapseMaxSteps,
+      maxNodes: args.opponentMctsMaxNodes,
+    });
+    return { action: decision.action, selectedIndex: decision.selectedIndex };
+  } catch {
+    return null;
+  }
+}
+
+type RunMctsForSideOverrides = {
+  simulations: number;
+  cPuct: number;
+  leaf: "value-head" | "rollout";
+  rolloutCrnSamples: number;
+  rolloutSteps: number;
+  prior: "uniform" | "policy";
+  addRootDirichlet: boolean;
+  dirichletAlpha: number;
+  dirichletEpsilon: number;
+  collapseMaxSteps: number;
+  maxNodes: number;
+};
+
+async function runMctsForSide(
+  state: GameState,
+  sideId: SideId,
+  seed: string,
+  modelUrl: string,
+  overrides: RunMctsForSideOverrides,
+): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number }> {
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) {
     return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
   }
   const config: MctsConfig = defaultMctsConfig({
-    simulations: Math.max(1, args.mctsSimulations),
-    cPuct: args.mctsCPuct,
-    leaf: args.mctsLeaf,
-    rolloutCrnSamples: Math.max(1, args.mctsRolloutCrnSamples),
-    rolloutSteps: Math.max(1, args.mctsRolloutSteps),
-    prior: args.mctsPrior,
-    addRootDirichlet: args.mctsRootDirichlet,
-    dirichletAlpha: args.mctsDirichletAlpha,
-    dirichletEpsilon: args.mctsDirichletEpsilon,
-    collapseMaxSteps: Math.max(1, args.mctsCollapseMaxSteps),
-    maxNodes: Math.max(64, args.mctsMaxNodes),
+    simulations: Math.max(1, overrides.simulations),
+    cPuct: overrides.cPuct,
+    leaf: overrides.leaf,
+    rolloutCrnSamples: Math.max(1, overrides.rolloutCrnSamples),
+    rolloutSteps: Math.max(1, overrides.rolloutSteps),
+    prior: overrides.prior,
+    addRootDirichlet: overrides.addRootDirichlet,
+    dirichletAlpha: overrides.dirichletAlpha,
+    dirichletEpsilon: overrides.dirichletEpsilon,
+    collapseMaxSteps: Math.max(1, overrides.collapseMaxSteps),
+    maxNodes: Math.max(64, overrides.maxNodes),
   });
-  const result = await runMcts(state, sideId, config, args.modelUrl, seed);
+  const result = await runMcts(state, sideId, config, modelUrl, seed);
   const selectedIndex = Math.min(Math.max(0, result.selectedIndex), legalActions.length - 1);
   return rankedDecision(legalActions, selectedIndex);
 }
@@ -1251,7 +1343,21 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     mctsDirichletAlpha: Number(get("--mcts-dirichlet-alpha", "0.3")),
     mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
     progressOut: get("--progress-out", "") || null,
+    opponentSelection: parseOpponentSelection(get("--opponent-selection", "rule")),
+    opponentMctsSimulations: Number(get("--opponent-mcts-simulations", get("--mcts-simulations", "100"))),
+    opponentMctsCPuct: Number(get("--opponent-mcts-c-puct", get("--mcts-c-puct", "1.5"))),
+    opponentMctsLeaf: parseMctsLeaf(get("--opponent-mcts-leaf", get("--mcts-leaf", "value-head"))),
+    opponentMctsRolloutCrnSamples: Number(get("--opponent-mcts-rollout-crn-samples", get("--mcts-rollout-crn-samples", "3"))),
+    opponentMctsRolloutSteps: Number(get("--opponent-mcts-rollout-steps", get("--mcts-rollout-steps", "200"))),
+    opponentMctsCollapseMaxSteps: Number(get("--opponent-mcts-collapse-max-steps", get("--mcts-collapse-max-steps", "64"))),
+    opponentMctsMaxNodes: Number(get("--opponent-mcts-max-nodes", get("--mcts-max-nodes", "5000"))),
+    opponentMctsPrior: parseMctsPrior(get("--opponent-mcts-prior", get("--mcts-prior", "uniform"))),
   };
+}
+
+function parseOpponentSelection(raw: string): EvaluateModelArgs["opponentSelection"] {
+  if (raw === "policy" || raw === "mcts") return raw;
+  return "rule";
 }
 
 function parseMctsPrior(raw: string): "uniform" | "policy" {

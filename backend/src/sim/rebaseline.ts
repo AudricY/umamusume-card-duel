@@ -126,6 +126,15 @@ async function runMethodAsModel(args: RebaselineArgs, method: MethodKey) {
     mctsDirichletAlpha: 0.3,
     mctsDirichletEpsilon: 0.25,
     progressOut: null,
+    opponentSelection: "rule",
+    opponentMctsSimulations: 100,
+    opponentMctsCPuct: 1.5,
+    opponentMctsLeaf: "value-head",
+    opponentMctsRolloutCrnSamples: 3,
+    opponentMctsRolloutSteps: 200,
+    opponentMctsCollapseMaxSteps: 64,
+    opponentMctsMaxNodes: 5000,
+    opponentMctsPrior: "uniform",
   };
   const sides: SideId[] = ["player", "opponent"];
   const results = [];

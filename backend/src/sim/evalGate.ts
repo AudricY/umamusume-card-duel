@@ -328,6 +328,15 @@ function parseArgs(argv: string[]): Args {
     mctsDirichletAlpha: Number(get("--mcts-dirichlet-alpha", "0.3")),
     mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
     progressOut: get("--progress-out", "") || null,
+    opponentSelection: parseOpponentSelection(get("--opponent-selection", "rule")),
+    opponentMctsSimulations: Number(get("--opponent-mcts-simulations", get("--mcts-simulations", "100"))),
+    opponentMctsCPuct: Number(get("--opponent-mcts-c-puct", get("--mcts-c-puct", "1.5"))),
+    opponentMctsLeaf: parseMctsLeaf(get("--opponent-mcts-leaf", get("--mcts-leaf", "value-head"))),
+    opponentMctsRolloutCrnSamples: Number(get("--opponent-mcts-rollout-crn-samples", get("--mcts-rollout-crn-samples", "3"))),
+    opponentMctsRolloutSteps: Number(get("--opponent-mcts-rollout-steps", get("--mcts-rollout-steps", "200"))),
+    opponentMctsCollapseMaxSteps: Number(get("--opponent-mcts-collapse-max-steps", get("--mcts-collapse-max-steps", "64"))),
+    opponentMctsMaxNodes: Number(get("--opponent-mcts-max-nodes", get("--mcts-max-nodes", "5000"))),
+    opponentMctsPrior: parseMctsPrior(get("--opponent-mcts-prior", get("--mcts-prior", "uniform"))),
     minGames: Number(get("--min-games", "500")),
     minWinRate: Number(get("--min-win-rate", "0")),
     minCiLower: Number(get("--min-ci-lower", "0")),
@@ -350,6 +359,11 @@ function parseSelection(raw: string): EvaluateModelArgs["selection"] {
 function parseMctsLeaf(raw: string): "value-head" | "rollout" {
   if (raw === "value-head" || raw === "rollout") return raw;
   throw new Error(`--mcts-leaf must be value-head or rollout, got ${raw}`);
+}
+
+function parseOpponentSelection(raw: string): EvaluateModelArgs["opponentSelection"] {
+  if (raw === "policy" || raw === "mcts") return raw;
+  return "rule";
 }
 
 function parseMctsPrior(raw: string): "uniform" | "policy" {
