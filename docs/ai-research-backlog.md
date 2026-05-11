@@ -415,6 +415,21 @@ In parallel: game-level parallelism (~4× speedup), latency dials (K=1 / adaptiv
 
 Iter-1 promoted as the new strongest model. Per-side: player 0.667 / opponent 0.65 — **R-WILD side gap is closed** (was historically ~16pp opp-favored, briefly 9pp player-favored in R12, now within 2pp). Zero heuristic fallbacks → MCTS execution is clean. Iter-1 checkpoint: `runs/R13-W6-phase-d/iter-1/checkpoint.pt`.
 
+### R13.W8 result — value-head-only Phase D does NOT compound (2026-05-11)
+
+Tried 5 iterations of `r12_orchestrator` from W6 iter-1 with `--mcts-leaf value-head` for selfplay (instead of rollout). Killed at iter-3 mid-gate after the trend was clear:
+
+| | Wilson lower | WR |
+| --- | --- | --- |
+| W6 iter-1 baseline (start) | 0.452 | 0.55 |
+| W8 iter-0 | 0.404 | 0.49 |
+| W8 iter-1 | 0.340 | 0.43 |
+| W8 iter-2 | 0.380 | 0.47 |
+
+Every iteration was below the starting baseline. Conclusion: **cheap-leaf selfplay targets are too noisy for distillation to compound** — the visit-count targets from value-head-leaf selfplay are noisier than rollout-CRN-K=3 targets, and distillation regresses strength rather than improving it. Production iteration *requires* rollout-leaf selfplay even if gate-time inference is value-head leaf.
+
+Practical implication: W6's "use rollout-leaf for selfplay, value-head-leaf for inference" decomposition is load-bearing — both halves matter. Don't try to cheap-out the training loop.
+
 ### R14 sprint — refinement (2026-05-11)
 
 See `docs/r14-sprint-plan.md`. After R13's two production configs landed, the next sprint splits between shipping (W5 UI finish + Pareto-tuned latency) and one final honest RL attempt (MCTS-trajectory off-policy PPO). Also includes the engine determinism fix that closes R-WILD — a subagent investigation pinpointed `withRng` losing `activeRng` across `await` boundaries; AsyncLocalStorage is the ~10-LOC fix.
