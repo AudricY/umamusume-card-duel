@@ -637,3 +637,34 @@ Blocked on item 17's sweep producing a warm-start checkpoint. Defaults
 fixed in `docs/f1-design.md`. Implementation
 (`training/ppo_orchestrator.py`, stochastic serving mode,
 `training/f1_hp_sweep.py`) tracked under F1 in the active backlog.
+
+### Phase F — F1 PPO first production run (2026-05-11)
+
+**Target declared:** F1 promoted checkpoint with Wilson lower ≥ 0.40 (10pp daylight past the DAgger 0.31 ceiling).
+
+**Phase 1** (verification): 2 iters × 5 games × 200 max-steps × 20-game eval. Plumbing passed — checkpoint weights changed between iters, all events fired, iter-1 point-WR 42.5% (Wilson [0.285, 0.578] at n=40). Encouraging but uninformative at small n.
+
+**Phase 2** (production scale): 5 iters × 30 games × 500 max-steps × 100-game eval × f1-design defaults (lr=3e-5, entropy=0.005, λ=0.95, clip=0.2, T=1.0). Result: target NOT met.
+
+| Iter | Wilson lower | Win rate (n=200) | Wilson95 | Decision |
+| --- | --- | --- | --- | --- |
+| 0 | 0.2920 | 35.5% | [0.292, 0.423] | promoted (warm-start) |
+| 1 | 0.2361 | 29.5% | [0.236, 0.362] | rejected |
+| 2 | 0.3109 | 37.5% | [0.311, 0.444] | promoted |
+| 3 | 0.2407 | 30.0% | [0.241, 0.367] | rejected |
+| 4 | 0.2315 | 29.0% | [0.232, 0.356] | rejected → halt-after-2 |
+
+**Max Wilson lower 0.3109 — identical to the DAgger ceiling from item 17.** PPO did not break through.
+
+**Diagnosis from observability:**
+
+- **PPO updates were tiny.** Max checkpoint weight diff between iterations: 0.000238. (DAgger sweep had diffs of order 0.05 between iterations.) The policy is barely moving.
+- **KL per minibatch: 0.001–0.02** — well below the 0.2 clip ceiling. Not blocked by the clip; the gradient signal is just small.
+- **Ratio mean: 0.99–1.00** across all 20 minibatches. The behavior policy ≈ target policy at every update; no learning happens because the importance-weighted advantage is ≈ 0 × advantage.
+- **Root cause: warm-start entropy is ~0.18 nats per decision.** Over ~10 legal actions per step that's `exp(0.18) ≈ 1.2` effective actions — the DAgger-trained policy is nearly deterministic. Stochastic Gumbel-max at T=1.0 over a near-degenerate distribution produces near-greedy trajectories. Behavior ≈ target ⇒ ratio ≈ 1 ⇒ surrogate gradient ≈ 0. PPO has nothing to push against.
+
+**Next step (Phase 3a — diagnose-with-aggressive-exploration):** crank temperature 1.0 → 2.0, entropy_coef 0.005 → 0.05, lr 3e-5 → 1e-4, ppo-epochs 1 → 4. If weight diffs grow 10×+ and KL per minibatch lands in [0.05, 0.2], the infrastructure works and we have a viable PPO config. If not, the problem is upstream (reward signal, GAE, advantage normalization).
+
+Artifacts: `runs/f1-2026-05-11-phase2/orchestrator-state.json`,
+per-iteration manifests, `events.jsonl`, `tb/iter-*/`. Live view at
+`http://127.0.0.1:5000/run/f1-2026-05-11-phase2`.
