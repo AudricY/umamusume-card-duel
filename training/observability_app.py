@@ -22,6 +22,8 @@ STAGES = [
     "trace-gen", "relabel", "mix", "train", "gate", "pool-eval", "decision",
     # R12 mini-AlphaZero stages.
     "selfplay", "distill", "mcts-gate", "mcts-spike", "r12-orchestrator",
+    # R14 stages.
+    "r14-crossover",
 ]
 STALL_S = 300.0  # 5 min
 
