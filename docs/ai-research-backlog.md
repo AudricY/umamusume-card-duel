@@ -392,12 +392,25 @@ Same R4 ckpt, same policy prior, same 100 sims — only the leaf evaluator chang
 - The "distilled policy without search" path is not achieved by definition — rollout-CRN at leaves IS search. A distilled policy reusing the value head would inherit the same noise floor R4 hit.
 - Phase D distillation is now optional: it would compound iter-on-iter and produce a stronger prior, but is not required to meet the criterion.
 
-### Recommended next steps (post-R12 GO)
+### Recommended next steps (post-R12 GO) → R13 sprint
 
-1. Final headline gate at n=400 (or even n=800) for a tight Wilson interval at the same rollout-leaf settings.
-2. Game-level parallelism (4 worker processes per serve_onnx) to cut wall-clock ~4×; required for any multi-iteration Phase D run.
-3. Phase D real iterations (2-4 iters × rollout-leaf selfplay + distill) — tests whether distillation compounds beyond the search ceiling.
-4. UI integration: wire `--selection mcts --mcts-leaf rollout` into the in-game AI.
+See `docs/r13-sprint-plan.md` for the detailed plan. Headline shift:
+
+**Phase D as originally written (visit-count → policy distillation) is no longer the obvious next step.** The R12 diagnostic shows the value head is the bottleneck; a distilled policy would inherit that noise floor. Instead, the next sprint asks a sharper question:
+
+> Is the value head fixable, or is rollout-CRN search permanently the production path?
+
+The cheap falsifiable answer: retrain JUST the value head on rollout-mean outcomes (not game-z), freeze trunk + policy, gate at `--mcts-leaf value-head`. ~4 hours of compute. If Wilson lower ≥ 0.40 with the new value head, distillation is unlocked. Otherwise, search-at-inference is the permanent answer.
+
+In parallel: game-level parallelism (~4× speedup), latency dials (K=1 / adaptive sims / batched /predict) to push p95 decision time under 3 s, UI integration, and an MCTS-vs-MCTS strength ladder so we stop relying solely on a saturating rule-bot.
+
+### Tasks deleted as obsolete (2026-05-11 post-R12)
+
+R7 (multi-teacher BC blend), R8 (DPO), R9 (Q-learning head), R10 (full-scale DAgger) were all queued only as fallbacks IF R12 failed. R12 didn't fail. Tasks #29-32 removed from the active backlog. The hypotheses they tested (label-quality fixes for the imitation cap) are also obsolete: R12 proved the cap is downstream of the *value-head leaf noise*, not the *training labels*.
+
+R2 (multi-temperature gate matrix) is repurposed as a deployment-tuning task, not a research diagnostic.
+
+R-WILD's side-imbalance portion is largely resolved by R12 (gap inverted: player 58%, opponent 67%). Simulator determinism + rule-bot mistake catalog remain as low-urgency follow-ups.
 
 ## Open / wild
 
