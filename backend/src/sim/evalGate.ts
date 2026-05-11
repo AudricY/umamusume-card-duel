@@ -1,7 +1,7 @@
 import { runModelVsHeuristicGame, type EvaluateModelArgs } from "./evaluateModelVsHeuristic";
 import type { SideId } from "../../../shared/src/types";
 import type { CandidateRankerMode } from "./candidateRanker";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { withGitMetadata } from "./manifest";
 
@@ -35,9 +35,48 @@ async function main() {
   }
   const sides: SideId[] = args.modelSide === "both" ? ["player", "opponent"] : [args.modelSide];
   const results: GateResult[] = [];
+  if (args.progressOut) {
+    mkdirSync(dirname(args.progressOut), { recursive: true });
+    writeFileSync(args.progressOut, "", "utf8");
+  }
+  const runStartedAt = Date.now();
+  const totalGames = args.games * sides.length;
+  let gamesCompleted = 0;
+  let modelWinsSoFar = 0;
   for (const side of sides) {
     for (let index = 0; index < args.games; index += 1) {
-      results.push(await runModelVsHeuristicGame(args, String(args.seedStart + index), side));
+      const gameStart = Date.now();
+      const result = await runModelVsHeuristicGame(args, String(args.seedStart + index), side);
+      results.push(result);
+      gamesCompleted += 1;
+      if (result.modelWon) modelWinsSoFar += 1;
+      const elapsedSec = (Date.now() - runStartedAt) / 1000;
+      const gameSec = (Date.now() - gameStart) / 1000;
+      const runningWr = modelWinsSoFar / gamesCompleted;
+      const etaSec = (elapsedSec / gamesCompleted) * (totalGames - gamesCompleted);
+      if (args.progressOut) {
+        appendFileSync(args.progressOut, JSON.stringify({
+          event: "game_completed",
+          gameIndex: gamesCompleted,
+          totalGames,
+          seed: String(args.seedStart + index),
+          modelSide: side,
+          winner: result.winner,
+          modelWon: result.modelWon,
+          turnNumber: result.turnNumber,
+          modelActions: result.modelActions,
+          heuristicFallbacks: result.heuristicFallbacks,
+          terminalReason: result.terminalReason,
+          gameElapsedSec: gameSec,
+          totalElapsedSec: elapsedSec,
+          etaSec,
+          runningWinRate: runningWr,
+          ts: Date.now() / 1000,
+        }) + "\n", "utf8");
+      }
+      process.stderr.write(
+        `[gate ${gamesCompleted}/${totalGames}] side=${side} winner=${result.winner ?? "none"} wr=${runningWr.toFixed(3)} game=${gameSec.toFixed(1)}s eta=${(etaSec / 60).toFixed(1)}min\n`,
+      );
     }
   }
 
@@ -176,6 +215,7 @@ function parseArgs(argv: string[]): Args {
     mctsRootDirichlet: argv.includes("--mcts-root-dirichlet"),
     mctsDirichletAlpha: Number(get("--mcts-dirichlet-alpha", "0.3")),
     mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
+    progressOut: get("--progress-out", "") || null,
     minGames: Number(get("--min-games", "500")),
     minWinRate: Number(get("--min-win-rate", "0")),
     minCiLower: Number(get("--min-ci-lower", "0")),

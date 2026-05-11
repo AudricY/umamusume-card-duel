@@ -163,6 +163,7 @@ function makePlannerArgs(args: ProbeArgs): EvaluateModelArgs {
     mctsRootDirichlet: false,
     mctsDirichletAlpha: 0.3,
     mctsDirichletEpsilon: 0.25,
+    progressOut: null,
   };
 }
 

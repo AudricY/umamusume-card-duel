@@ -64,6 +64,12 @@ export type EvaluateModelArgs = {
   mctsRootDirichlet: boolean;
   mctsDirichletAlpha: number;
   mctsDirichletEpsilon: number;
+  // Optional JSONL progress stream. When set, the per-game loop writes one
+  // line per completed game (game index, side, winner, wall-clock elapsed)
+  // so `tail -f` is meaningful while a 200-game gate runs. The TS process
+  // also mirrors a short text heartbeat to stderr so dropping `--progress-out`
+  // still surfaces liveness without buffer-starving stderr consumers.
+  progressOut: string | null;
   cycleWindow: number;
   cycleMinVisits: number;
   plannerCrnSamples: number;
@@ -157,14 +163,55 @@ async function main() {
     mkdirSync(dirname(args.decisionTraceOut), { recursive: true });
     writeFileSync(args.decisionTraceOut, "", "utf8");
   }
+  if (args.progressOut) {
+    mkdirSync(dirname(args.progressOut), { recursive: true });
+    writeFileSync(args.progressOut, "", "utf8");
+  }
+  const runStartedAt = Date.now();
+  const totalGames = args.games * sides.length;
+  let gamesCompleted = 0;
+  let modelWinsSoFar = 0;
   for (const modelSide of sides) {
     for (let index = 0; index < args.games; index += 1) {
       const seed = String(args.seedStart + index);
+      const gameStart = Date.now();
       const result = await runModelVsHeuristicGame(args, seed, modelSide);
       if (args.decisionTraceOut && result.decisionTraces.length) {
         appendFileSync(args.decisionTraceOut, result.decisionTraces.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
       }
       results.push(result);
+      gamesCompleted += 1;
+      if (result.modelWon) modelWinsSoFar += 1;
+      const elapsedSec = (Date.now() - runStartedAt) / 1000;
+      const gameSec = (Date.now() - gameStart) / 1000;
+      const runningWr = modelWinsSoFar / gamesCompleted;
+      const etaSec = gamesCompleted > 0 ? (elapsedSec / gamesCompleted) * (totalGames - gamesCompleted) : 0;
+      if (args.progressOut) {
+        const row = {
+          event: "game_completed",
+          gameIndex: gamesCompleted,
+          totalGames,
+          seed,
+          modelSide,
+          winner: result.winner,
+          modelWon: result.modelWon,
+          turnNumber: result.turnNumber,
+          modelActions: result.modelActions,
+          heuristicFallbacks: result.heuristicFallbacks,
+          terminalReason: result.terminalReason,
+          gameElapsedSec: gameSec,
+          totalElapsedSec: elapsedSec,
+          etaSec,
+          runningWinRate: runningWr,
+          ts: Date.now() / 1000,
+        };
+        appendFileSync(args.progressOut, JSON.stringify(row) + "\n", "utf8");
+      }
+      // stderr heartbeat: short, line-buffered, safe to drop. Useful when
+      // the caller did not pass --progress-out.
+      process.stderr.write(
+        `[eval ${gamesCompleted}/${totalGames}] side=${modelSide} winner=${result.winner ?? "none"} wr=${runningWr.toFixed(3)} game=${gameSec.toFixed(1)}s eta=${(etaSec / 60).toFixed(1)}min\n`,
+      );
     }
   }
   const summary = summarize(results);
@@ -1197,6 +1244,7 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     mctsRootDirichlet: argv.includes("--mcts-root-dirichlet"),
     mctsDirichletAlpha: Number(get("--mcts-dirichlet-alpha", "0.3")),
     mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
+    progressOut: get("--progress-out", "") || null,
   };
 }
 

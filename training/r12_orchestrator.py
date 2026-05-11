@@ -320,6 +320,7 @@ def run_gate(
                 "--mcts-max-nodes", str(args.mcts_max_nodes),
                 "--min-ci-lower", str(args.eval_min_ci_lower),
                 "--min-games", str(args.eval_games),
+                "--progress-out", str(iter_dir / "gate-progress.jsonl"),
             ],
             cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=False,
         )

@@ -95,6 +95,7 @@ def main() -> None:
             raise RuntimeError(f"serve_onnx never reported healthy on :{port}")
 
         manifest_path = out_dir / "gate.manifest.json"
+        progress_path = out_dir / "progress.jsonl"
         gate_log = out_dir / "gate.log"
         gate_started = time.time()
         with gate_log.open("w") as logf:
@@ -108,6 +109,7 @@ def main() -> None:
                     "--model-side", args.model_side,
                     "--model-url", f"http://127.0.0.1:{port}",
                     "--manifest-out", str(manifest_path),
+                    "--progress-out", str(progress_path),
                     "--mcts-simulations", str(args.mcts_simulations),
                     "--mcts-c-puct", str(args.mcts_c_puct),
                     "--mcts-leaf", args.mcts_leaf,

@@ -123,6 +123,7 @@ async function runMethodAsModel(args: RebaselineArgs, method: MethodKey) {
     mctsRootDirichlet: false,
     mctsDirichletAlpha: 0.3,
     mctsDirichletEpsilon: 0.25,
+    progressOut: null,
   };
   const sides: SideId[] = ["player", "opponent"];
   const results = [];
