@@ -18,7 +18,11 @@ from typing import Any
 
 from flask import Flask, abort, jsonify, render_template_string
 
-STAGES = ["trace-gen", "relabel", "mix", "train", "gate", "pool-eval", "decision"]
+STAGES = [
+    "trace-gen", "relabel", "mix", "train", "gate", "pool-eval", "decision",
+    # R12 mini-AlphaZero stages.
+    "selfplay", "distill", "mcts-gate", "mcts-spike", "r12-orchestrator",
+]
 STALL_S = 300.0  # 5 min
 
 
