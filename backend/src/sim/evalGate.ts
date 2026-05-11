@@ -167,6 +167,11 @@ function parseArgs(argv: string[]): Args {
     rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
     traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
     opponentModelUrl: get("--opponent-model-url", "") || null,
+    mctsSimulations: Number(get("--mcts-simulations", "100")),
+    mctsCPuct: Number(get("--mcts-c-puct", "1.5")),
+    mctsLeaf: parseMctsLeaf(get("--mcts-leaf", "value-head")),
+    mctsCollapseMaxSteps: Number(get("--mcts-collapse-max-steps", "64")),
+    mctsMaxNodes: Number(get("--mcts-max-nodes", "5000")),
     minGames: Number(get("--min-games", "500")),
     minWinRate: Number(get("--min-win-rate", "0")),
     minCiLower: Number(get("--min-ci-lower", "0")),
@@ -180,8 +185,15 @@ function parseArgs(argv: string[]): Args {
 }
 
 function parseSelection(raw: string): EvaluateModelArgs["selection"] {
-  if (raw === "baseline" || raw === "inverted-baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
+  if (raw === "baseline" || raw === "inverted-baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner" || raw === "mcts") return raw;
   return "policy";
+}
+
+function parseMctsLeaf(raw: string): "value-head" {
+  if (raw !== "value-head") {
+    throw new Error(`--mcts-leaf must be "value-head" for now, got ${raw}`);
+  }
+  return "value-head";
 }
 
 function parseRanker(raw: string): CandidateRankerMode {

@@ -154,6 +154,11 @@ function makePlannerArgs(args: ProbeArgs): EvaluateModelArgs {
     plannerFirstActionAggregate: "max",
     rolloutCrnSamples: 1,
     opponentModelUrl: null,
+    mctsSimulations: 100,
+    mctsCPuct: 1.5,
+    mctsLeaf: "value-head",
+    mctsCollapseMaxSteps: 64,
+    mctsMaxNodes: 5000,
   };
 }
 

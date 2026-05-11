@@ -43,6 +43,7 @@ import type { CoinFlipResult, EnergyCost, EnergyType, GameState, SideId, SideSta
 import { stateFingerprint } from "./stateFingerprint";
 import { rankLegalActions, type CandidateRankerMode } from "./candidateRanker";
 import { withGitMetadata } from "./manifest";
+import { runMcts, defaultMctsConfig, type MctsConfig } from "./mcts";
 
 export type EvaluateModelArgs = {
   modelUrl: string;
@@ -51,7 +52,14 @@ export type EvaluateModelArgs = {
   maxSteps: number;
   modelSide: SideId | "both";
   details: boolean;
-  selection: "policy" | "baseline" | "inverted-baseline" | "value" | "rollout" | "search" | "planner";
+  selection: "policy" | "baseline" | "inverted-baseline" | "value" | "rollout" | "search" | "planner" | "mcts";
+  // R12 day-1: MCTS knobs surface up to the gate via these args. Defaults
+  // come from `defaultMctsConfig()`; CLI flags override per run.
+  mctsSimulations: number;
+  mctsCPuct: number;
+  mctsLeaf: "value-head";
+  mctsCollapseMaxSteps: number;
+  mctsMaxNodes: number;
   cycleWindow: number;
   cycleMinVisits: number;
   plannerCrnSamples: number;
@@ -211,6 +219,8 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
           ? chooseSearchAction(args, state, sideId, `${seed}:${modelSide}:${step}`)
         : args.selection === "planner"
           ? choosePlannerAction(args, state, sideId, `${seed}:${modelSide}:${step}`)
+        : args.selection === "mcts"
+          ? await chooseMctsAction(args, state, sideId, `${seed}:${modelSide}:${step}:mcts`)
         : await chooseModelAction(args.modelUrl, state, sideId);
       modelActions += 1;
       if (decision.selectedOriginalRank !== undefined) selectedCandidateRanks.push(decision.selectedOriginalRank);
@@ -478,6 +488,28 @@ async function chooseValueAction(modelUrl: string, state: GameState, sideId: Sid
     }
   }
   return { action: legalActions[bestIndex]!, selectedIndex: bestIndex };
+}
+
+async function chooseMctsAction(
+  args: EvaluateModelArgs,
+  state: GameState,
+  sideId: SideId,
+  seed: string,
+): Promise<{ action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number }> {
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  if (legalActions.length <= 1) {
+    return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
+  }
+  const config: MctsConfig = defaultMctsConfig({
+    simulations: Math.max(1, args.mctsSimulations),
+    cPuct: args.mctsCPuct,
+    leaf: args.mctsLeaf,
+    collapseMaxSteps: Math.max(1, args.mctsCollapseMaxSteps),
+    maxNodes: Math.max(64, args.mctsMaxNodes),
+  });
+  const result = await runMcts(state, sideId, config, args.modelUrl, seed);
+  const selectedIndex = Math.min(Math.max(0, result.selectedIndex), legalActions.length - 1);
+  return rankedDecision(legalActions, selectedIndex);
 }
 
 async function predictStateValue(modelUrl: string, state: GameState, sideId: SideId): Promise<number> {
@@ -1148,7 +1180,22 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     plannerFirstActionAggregate: parseFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
     rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
     opponentModelUrl: get("--opponent-model-url", "") || null,
+    mctsSimulations: Number(get("--mcts-simulations", "100")),
+    mctsCPuct: Number(get("--mcts-c-puct", "1.5")),
+    mctsLeaf: parseMctsLeaf(get("--mcts-leaf", "value-head")),
+    mctsCollapseMaxSteps: Number(get("--mcts-collapse-max-steps", "64")),
+    mctsMaxNodes: Number(get("--mcts-max-nodes", "5000")),
   };
+}
+
+function parseMctsLeaf(raw: string): "value-head" {
+  // Day-1 only supports value-head leaves; the type union is kept narrow so
+  // later phases (rollout-CRN at leaves) can extend it without rewriting
+  // callers.
+  if (raw !== "value-head") {
+    throw new Error(`--mcts-leaf must be "value-head" for now, got ${raw}`);
+  }
+  return "value-head";
 }
 
 function parseAggregate(raw: string): "mean" | "max" | "median" {
@@ -1162,7 +1209,7 @@ function parseFirstActionAggregate(raw: string): "max" | "mean" {
 }
 
 function parseSelection(raw: string): EvaluateModelArgs["selection"] {
-  if (raw === "baseline" || raw === "inverted-baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner") return raw;
+  if (raw === "baseline" || raw === "inverted-baseline" || raw === "value" || raw === "rollout" || raw === "search" || raw === "planner" || raw === "mcts") return raw;
   return "policy";
 }
 
