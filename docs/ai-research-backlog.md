@@ -444,6 +444,18 @@ R14 workstreams:
 
 Dropped: larger model, more entropy-BC variants, n=400 headline gate (cosmetic), temperature-ramp-only PPO (R3 already settled peakedness-alone).
 
+### R14 progress checkpoint (2026-05-11)
+
+After the sprint re-refinement promoted I (W6 extension + crossover telemetry) to top and demoted D to fallback:
+
+- **B DONE.** AsyncLocalStorage installed via `installRngStorageProvider` + side-effect `backend/.../rngAsyncStore.ts`. The frontend keeps its sync-module fallback so the browser bundle stays clean of `node:async_hooks`. `training/r14_determinism_smoke.py` now passes bit-exact 12/12 between --workers 1 and --workers 4 at value-head MCTS, n=12, seeds 141414+. Pre-fix: divergent. R-WILD #34 closed.
+- **I.1 DONE.** `training/r14_value_crossover_probe.py` measures (val_mse, pearson_r) between a checkpoint's value head and the rollout-CRN K=3 means in `rootValue`. crossed = (val_mse <= 1.10 × W3-floor) AND (pearson_r >= 0.7). Wired into `r12_orchestrator.run_iteration` between distill and gate, against the **previous** iter's selfplay (held-out). Baseline at W6 iter-1 vs its own iter-1 selfplay (in-distribution): val_mse 0.659, pearson 0.535, ratio 1.158, crossed=false — explains the W8 regression (cheap-leaf selfplay distillation failed because the value head hadn't caught up).
+- **I.2 IN FLIGHT.** Resumed W6 phase-d for iter-2/3/4. First attempt crashed at the distill step (orchestrator default --hidden-dim 128 vs iter-1's 64/2 ckpt); restarted with correct dims AND added auto-inference of hidden_dim/depth from the init checkpoint to prevent recurrence. Currently ~halfway through iter-2 selfplay (1036/2138 rows at 5 min in).
+- **E PARTIAL.** `/ai/decide` now applies the chosen action server-side and returns `nextState`. Frontend swaps state on success, falls back to `advanceOpponentTurnStep` on timeout/error/engine-fallback. `aiBackend` toggle in MainMenuScreen + `localStorage` key `umamusume-card-duel-ai-backend`. End-to-end smoke `training/r14_ai_decide_e2e_smoke.py` ready, run deferred until W6 frees up serve_onnx.
+- **G CODE READY.** `serve_onnx.py --ort-threads` flag, default `1` preserves R13.W1 legacy single-threaded pinning. `training/r14_ort_throughput_smoke.py` validates `auto` mode >=1.5x faster + bit-exact engine state. Deferred.
+- **F CODE READY.** `training/r14_adaptive_ratio_sweep.py` (ratios {0, 1.5, 2.0, 3.0, 5.0} at value-head leaf). Deferred.
+- **A CODE READY.** `training/r14_ood_gate.py` (Gate 1 fresh seeds + Gate 2 MCTS-vs-R4). Deferred.
+
 ### R13 PPO probe on iter-1 — still doesn't move (2026-05-11)
 
 Three iterations of `ppo_orchestrator` from the W6 iter-1 checkpoint (20 games/update, 30-game gate per iter, `--selection policy` for both collection and gate):
