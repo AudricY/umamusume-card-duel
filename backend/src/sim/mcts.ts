@@ -49,6 +49,15 @@ export type MctsConfig = {
   // before treating the leaf as the next model-decision state. Same idea
   // as `advanceHeuristicUntilModelTurnOrTerminal` in evaluateModelVsHeuristic.
   collapseMaxSteps: number;
+  // R13.W2 adaptive halting: stop the simulation loop early once the root's
+  // top action dominates the runner-up. Threshold is the ratio
+  // (maxVisits / (secondMaxVisits + 1)). Once it exceeds `adaptiveRatio`
+  // AND at least `adaptiveMinSims` sims have run, the remaining budget is
+  // skipped. Disabled when adaptiveRatio <= 0 (the default). The "+1" in
+  // the denominator avoids division-by-zero when the runner-up has 0
+  // visits (which would otherwise force an early halt after sim 1).
+  adaptiveRatio: number;
+  adaptiveMinSims: number;
 };
 
 export type MctsDiagnostics = {
@@ -66,6 +75,10 @@ export type MctsDiagnostics = {
   // observability stack.
   rootPriorEntropy: number;
   rootPriorArgmax: number;
+  // R13.W2 adaptive halting: how many sims actually ran, and whether
+  // the loop was cut short by the (maxVisits / secondMax) ratio rule.
+  simulationsRun: number;
+  haltedEarly: boolean;
 };
 
 export type MctsResult = {
@@ -104,6 +117,8 @@ export function defaultMctsConfig(overrides?: Partial<MctsConfig>): MctsConfig {
     dirichletEpsilon: 0.25,
     maxNodes: 5000,
     collapseMaxSteps: 64,
+    adaptiveRatio: 0,
+    adaptiveMinSims: 20,
     ...overrides,
   };
 }
@@ -136,6 +151,8 @@ export async function runMcts(
     visitedHashes: 0,
     rootPriorEntropy: 0,
     rootPriorArgmax: 0,
+    simulationsRun: 0,
+    haltedEarly: false,
   };
 
   if (root.terminalValue !== null) {
@@ -249,6 +266,29 @@ export async function runMcts(
       const i = step.actionIndex;
       step.node.visits[i] = (step.node.visits[i] ?? 0) + 1;
       step.node.wsum[i] = (step.node.wsum[i] ?? 0) + leafValueScalar;
+    }
+
+    diagnostics.simulationsRun = sim + 1;
+
+    // Adaptive halt: once the top action's visit count dominates the
+    // runner-up by the configured ratio AND a minimum number of sims
+    // have run (so the early-noise phase doesn't trip the rule),
+    // remaining budget is skipped. Cheap O(legalActions) check.
+    if (config.adaptiveRatio > 0 && diagnostics.simulationsRun >= config.adaptiveMinSims && root.visits.length >= 2) {
+      let topVisits = 0;
+      let secondVisits = 0;
+      for (const v of root.visits) {
+        if (v > topVisits) {
+          secondVisits = topVisits;
+          topVisits = v;
+        } else if (v > secondVisits) {
+          secondVisits = v;
+        }
+      }
+      if (topVisits / (secondVisits + 1) >= config.adaptiveRatio) {
+        diagnostics.haltedEarly = true;
+        break;
+      }
     }
   }
 

@@ -53,6 +53,8 @@ type SelfPlayArgs = {
   mctsRootDirichlet: boolean;
   mctsDirichletAlpha: number;
   mctsDirichletEpsilon: number;
+  mctsAdaptiveRatio: number;
+  mctsAdaptiveMinSims: number;
   temperatureMoves: number;
   temperatureValue: number;
   outPath: string;
@@ -303,6 +305,8 @@ async function runSelfPlayGameWithRng(args: SelfPlayArgs, seed: string, rng: Rng
       dirichletEpsilon: args.mctsDirichletEpsilon,
       collapseMaxSteps: Math.max(1, args.mctsCollapseMaxSteps),
       maxNodes: Math.max(64, args.mctsMaxNodes),
+      adaptiveRatio: Math.max(0, args.mctsAdaptiveRatio),
+      adaptiveMinSims: Math.max(1, args.mctsAdaptiveMinSims),
     });
     const mctsResult = await runMcts(state, sideId, mctsConfig, args.modelUrl, `${seed}:${sideId}:${step}:mcts`);
     const totalVisits = mctsResult.visits.reduce((sum, n) => sum + n, 0);
@@ -465,6 +469,8 @@ function parseArgs(argv: string[]): SelfPlayArgs {
     mctsRootDirichlet: !argv.includes("--no-root-dirichlet"),
     mctsDirichletAlpha: Number(get("--mcts-dirichlet-alpha", "0.3")),
     mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
+    mctsAdaptiveRatio: Number(get("--mcts-adaptive-ratio", "0")),
+    mctsAdaptiveMinSims: Number(get("--mcts-adaptive-min-sims", "20")),
     temperatureMoves: Number(get("--temperature-moves", "6")),
     temperatureValue: Number(get("--temperature-value", "1.0")),
     outPath: get("--out", "runs/R12-selfplay/selfplay.jsonl"),

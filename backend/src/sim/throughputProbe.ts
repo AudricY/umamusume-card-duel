@@ -175,6 +175,10 @@ function makePlannerArgs(args: ProbeArgs): EvaluateModelArgs {
     opponentMctsCollapseMaxSteps: 64,
     opponentMctsMaxNodes: 5000,
     opponentMctsPrior: "uniform",
+    mctsAdaptiveRatio: 0,
+    mctsAdaptiveMinSims: 20,
+    opponentMctsAdaptiveRatio: 0,
+    opponentMctsAdaptiveMinSims: 20,
   };
 }
 

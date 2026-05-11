@@ -66,6 +66,12 @@ export type EvaluateModelArgs = {
   mctsRootDirichlet: boolean;
   mctsDirichletAlpha: number;
   mctsDirichletEpsilon: number;
+  // R13.W2 adaptive halting (model side). 0 disables. Typical: 3.0 with
+  // adaptiveMinSims around 20–30. Latency drops most on forced/near-forced
+  // root decisions which are common (R12 found 62% of root decisions are
+  // 1-action; another large fraction has a runaway top action by sim 30).
+  mctsAdaptiveRatio: number;
+  mctsAdaptiveMinSims: number;
   // Optional JSONL progress stream. When set, the per-game loop writes one
   // line per completed game (game index, side, winner, wall-clock elapsed)
   // so `tail -f` is meaningful while a 200-game gate runs. The TS process
@@ -109,6 +115,8 @@ export type EvaluateModelArgs = {
   opponentMctsCollapseMaxSteps: number;
   opponentMctsMaxNodes: number;
   opponentMctsPrior: "uniform" | "policy";
+  opponentMctsAdaptiveRatio: number;
+  opponentMctsAdaptiveMinSims: number;
 };
 
 type GameResult = {
@@ -586,6 +594,8 @@ async function chooseMctsAction(
     dirichletEpsilon: args.mctsDirichletEpsilon,
     collapseMaxSteps: args.mctsCollapseMaxSteps,
     maxNodes: args.mctsMaxNodes,
+    adaptiveRatio: args.mctsAdaptiveRatio,
+    adaptiveMinSims: args.mctsAdaptiveMinSims,
   });
 }
 
@@ -613,6 +623,8 @@ async function chooseOpponentMctsAction(
       dirichletEpsilon: args.mctsDirichletEpsilon,
       collapseMaxSteps: args.opponentMctsCollapseMaxSteps,
       maxNodes: args.opponentMctsMaxNodes,
+      adaptiveRatio: args.opponentMctsAdaptiveRatio,
+      adaptiveMinSims: args.opponentMctsAdaptiveMinSims,
     });
     return { action: decision.action, selectedIndex: decision.selectedIndex };
   } catch {
@@ -632,6 +644,8 @@ type RunMctsForSideOverrides = {
   dirichletEpsilon: number;
   collapseMaxSteps: number;
   maxNodes: number;
+  adaptiveRatio: number;
+  adaptiveMinSims: number;
 };
 
 async function runMctsForSide(
@@ -657,6 +671,8 @@ async function runMctsForSide(
     dirichletEpsilon: overrides.dirichletEpsilon,
     collapseMaxSteps: Math.max(1, overrides.collapseMaxSteps),
     maxNodes: Math.max(64, overrides.maxNodes),
+    adaptiveRatio: Math.max(0, overrides.adaptiveRatio),
+    adaptiveMinSims: Math.max(1, overrides.adaptiveMinSims),
   });
   const result = await runMcts(state, sideId, config, modelUrl, seed);
   const selectedIndex = Math.min(Math.max(0, result.selectedIndex), legalActions.length - 1);
@@ -1342,6 +1358,8 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     mctsRootDirichlet: argv.includes("--mcts-root-dirichlet"),
     mctsDirichletAlpha: Number(get("--mcts-dirichlet-alpha", "0.3")),
     mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
+    mctsAdaptiveRatio: Number(get("--mcts-adaptive-ratio", "0")),
+    mctsAdaptiveMinSims: Number(get("--mcts-adaptive-min-sims", "20")),
     progressOut: get("--progress-out", "") || null,
     opponentSelection: parseOpponentSelection(get("--opponent-selection", "rule")),
     opponentMctsSimulations: Number(get("--opponent-mcts-simulations", get("--mcts-simulations", "100"))),
@@ -1352,6 +1370,8 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     opponentMctsCollapseMaxSteps: Number(get("--opponent-mcts-collapse-max-steps", get("--mcts-collapse-max-steps", "64"))),
     opponentMctsMaxNodes: Number(get("--opponent-mcts-max-nodes", get("--mcts-max-nodes", "5000"))),
     opponentMctsPrior: parseMctsPrior(get("--opponent-mcts-prior", get("--mcts-prior", "uniform"))),
+    opponentMctsAdaptiveRatio: Number(get("--opponent-mcts-adaptive-ratio", get("--mcts-adaptive-ratio", "0"))),
+    opponentMctsAdaptiveMinSims: Number(get("--opponent-mcts-adaptive-min-sims", get("--mcts-adaptive-min-sims", "20"))),
   };
 }
 
