@@ -275,6 +275,44 @@ To break it, we need labels or training signal that isn't just "imitate the teac
 - **Margin-weighted training** — weight samples by `selectedVsRunnerUpMargin`; high-margin rows are the teacher's confident decisions and likely the high-leverage ones.
 - **Reward shape refinement** — Δpoints + ±1 win/loss may miss strategic value. F1 could find direction with richer reward.
 
+### Diagnostic: forced-move dominance
+
+Inspection of iter-002 relabeled rows (n=2883):
+
+| Legal action set size | Row count | Fraction |
+| --- | --- | --- |
+| 1 (forced) | 1776 | **61.6%** |
+| 2 (binary) | 544 | 18.9% |
+| 3 | 321 | 11.1% |
+| 4–10 | 200 | 6.9% |
+| 10+ | ~42 | 1.5% |
+
+JsonlPolicyDataset's `min_actions=2` correctly excludes forced rows from training. But the gate-eval games include them — every game has ~62% of its "decisions" forced, meaning the strategic difference between two policies plays out over ~38% of state transitions, mostly binary choices.
+
+This is the **lever density problem**. A 4% WR gap between policies has to be earned on the ~15 meaningful decisions per game (out of ~40 total). Those few decisions are exactly where teacher labels are most likely noisy (because they're high-leverage). The cap is concentrated in the highest-leverage 1/3 of decisions per game.
+
+### Removing rule-bot replay mix (R-cleanlabels)
+
+Trained BC on JUST `iter-002/relabeled.jsonl` (no rule-bot replay mix-in):
+
+| Variant | Training data | Train accuracy | Gate WR |
+| --- | --- | --- | --- |
+| DAgger iter-2 (mix=70% rollout-relabeled + 30% rule-bot-replay) | mixed | 0.85 | 37.5% |
+| R-cleanlabels (rollout-relabeled only) | clean | 0.92 | **33.0%** |
+
+Removing the rule-bot replay actually *hurts* (-4.5pp). The replay buffer acts as regularization / state coverage; without it the model overfits the smaller relabeled set. **The mix is doing useful work**, not adding noise.
+
+### Pause — single-axis interventions exhausted
+
+Tier 1 (R1–R4) plus stretch experiments R5 (self-play), R6 (capacity), R-cleanlabels all converge on: the 0.31 gate cap is robust to every single-axis intervention. Remaining promising bets require either multi-axis combinations or fundamentally different approaches:
+
+1. **Multi-teacher BC (R7)** — relabel iter-2 trace with planner + search teachers, train on the union. Tests whether label diversity at high-leverage decisions matters. (Compute estimate: planner relabel is slow, maybe 30 min wall-clock.)
+2. **DPO (R8)** — train on (selected, runner-up) preference pairs from outcome export. Different objective entirely; doesn't fit argmax labels. (Code effort: ~3 hours for a new trainer.)
+3. **MCTS-augmented self-play (R12)** — skip the warm-start + RL split. Game is small enough. (Code effort: ~1 week.)
+4. **State-feature audit** — what's missing in features that would let the model tell apart high-leverage decisions? (Diagnostic, not a fix.)
+
+User-facing summary of where we are: the infra works, the cap is structural, and breaking it requires a directional decision about how much code to invest. None of (1)–(4) is going to take less than half a day; (3) is multi-day.
+
 ## Open / wild
 
 - **Side-imbalance verification.** Gate manifests record player/opponent splits inconsistently across phases. Worth a one-off script to extract the side-WR delta and check whether the model is offensively weak or defensively weak.
