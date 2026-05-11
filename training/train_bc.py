@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Subset
 
 from events import EventWriter
 from uma_ai.dataset import JsonlPolicyDataset, collate_policy_batch
+from uma_ai.selfplay_dataset import MctsSelfPlayDataset, collate_mcts_selfplay_batch
 from uma_ai.features import ACTION_DIM, ACTION_FEATURE_SCHEMA_VERSION, STATE_DIM, STATE_FEATURE_SCHEMA_VERSION, card_vocab_metadata
 from uma_ai.model import CandidatePolicyNet, ModelConfig
 
@@ -25,20 +26,26 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ablations = set(args.ablate)
-    dataset = JsonlPolicyDataset(args.data, min_actions=2, ablations=ablations)
+    if args.data_mode == "mcts-distill":
+        # R12 phase C: soft policy target from MCTS visit distribution.
+        dataset = MctsSelfPlayDataset(args.data, min_actions=2, ablations=ablations)
+        collate_fn = collate_mcts_selfplay_batch
+    else:
+        dataset = JsonlPolicyDataset(args.data, min_actions=2, ablations=ablations)
+        collate_fn = collate_policy_batch
     train_indices, val_indices, split_metadata = split_dataset(dataset, args.seed, args.split_by)
     dataset_summary = summarize_dataset(dataset)
     train_loader = DataLoader(
         Subset(dataset, train_indices),
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=collate_policy_batch,
+        collate_fn=collate_fn,
     )
     val_loader = DataLoader(
         Subset(dataset, val_indices),
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=collate_policy_batch,
+        collate_fn=collate_fn,
     ) if val_indices else None
 
     config = ModelConfig(hidden_dim=args.hidden_dim, depth=args.depth, dropout=args.dropout)
@@ -105,6 +112,7 @@ def main() -> None:
             anchor_model=anchor_model,
             kl_anchor_weight=args.kl_anchor_weight,
             entropy_bonus=args.entropy_bonus,
+            policy_weight=args.policy_weight,
         )
         val_metrics = evaluate(model, val_loader, value_weight=args.value_weight) if val_loader else {}
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
@@ -337,6 +345,7 @@ def run_epoch(
     anchor_model: CandidatePolicyNet | None = None,
     kl_anchor_weight: float = 0.0,
     entropy_bonus: float = 0.0,
+    policy_weight: float = 1.0,
 ) -> dict[str, float]:
     model.train()
     totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "count": 0.0, "kl_loss": 0.0, "entropy": 0.0}
@@ -349,7 +358,17 @@ def run_epoch(
         with autocast_ctx:
             logits, values = model(batch["state_features"], batch["action_features"], batch["action_mask"])
             weights = normalized_weights(batch["sample_weights"])
-            policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
+            policy_targets = batch.get("policy_targets")
+            if policy_targets is not None:
+                # R12 phase C: soft cross-entropy on the masked log-softmax.
+                # Masked positions have action_mask=False and logits forced to
+                # -1e9 by `masked_log_softmax`, so they contribute zero to the
+                # sum even if policy_targets[i] happens to be > 0.
+                log_probs = masked_log_softmax_logits(logits, batch["action_mask"])
+                per_row = -(policy_targets * log_probs).sum(dim=1)
+                policy_loss = weighted_mean(per_row, weights)
+            else:
+                policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
             value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
             kl_loss = torch.zeros((), device=logits.device)
             if anchor_model is not None and kl_anchor_weight > 0.0:
@@ -360,7 +379,7 @@ def run_epoch(
             # pushes the policy toward higher entropy. The unused-tensor
             # path keeps the metric column populated even when β=0.
             policy_entropy = masked_policy_entropy(logits, batch["action_mask"])
-            loss = policy_loss + value_loss * value_weight + kl_loss * kl_anchor_weight - entropy_bonus * policy_entropy
+            loss = policy_loss * policy_weight + value_loss * value_weight + kl_loss * kl_anchor_weight - entropy_bonus * policy_entropy
         scaled = loss / max(1, grad_accum)
         if use_amp:
             scaler.scale(scaled).backward()
@@ -408,7 +427,13 @@ def evaluate(
         batch = move_batch(batch, model)
         logits, values = model(batch["state_features"], batch["action_features"], batch["action_mask"])
         weights = normalized_weights(batch["sample_weights"])
-        policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
+        policy_targets = batch.get("policy_targets")
+        if policy_targets is not None:
+            log_probs = masked_log_softmax_logits(logits, batch["action_mask"])
+            per_row = -(policy_targets * log_probs).sum(dim=1)
+            policy_loss = weighted_mean(per_row, weights)
+        else:
+            policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
         value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
         loss = policy_loss + value_loss * value_weight
         accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"])
@@ -533,6 +558,21 @@ def finish_metrics(totals: dict[str, float]) -> dict[str, float]:
     if "entropy" in totals:
         out["entropy"] = totals["entropy"] / count
     return out
+
+
+def masked_log_softmax_logits(logits: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
+    """Per-action log-softmax with masked positions forced to a large negative.
+
+    R12 phase C reuses this for the soft-cross-entropy distillation loss:
+    `-Σ_a π_target(a) · log_softmax(logits, mask)(a)`. Masked positions get
+    log p = -1e9 so `π_target * log_p` is ~0 there even if `π_target[a] = 0`
+    (which it should be — the dataset adapter zero-pads).
+    """
+
+    mask = action_mask.bool()
+    sentinel = torch.full_like(logits, -1.0e9)
+    masked = torch.where(mask, logits, sentinel)
+    return nn.functional.log_softmax(masked, dim=-1)
 
 
 def masked_policy_entropy(logits: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
@@ -719,6 +759,12 @@ def parse_args() -> argparse.Namespace:
                         help="Frozen prior-iteration checkpoint to regularize toward (anti-forgetting).")
     parser.add_argument("--kl-anchor-weight", type=float, default=0.0,
                         help="Per-batch weight on KL(anchor || target). 0 disables. Try 0.05-0.5.")
+    parser.add_argument("--data-mode", choices=["bc", "mcts-distill"], default="bc",
+                        help="bc: read teacher-labeled rows (hard target index, CE loss). "
+                             "mcts-distill: read mcts-selfplay rows (soft visit-distribution target, "
+                             "soft cross-entropy loss). R12 phase C.")
+    parser.add_argument("--policy-weight", type=float, default=1.0,
+                        help="Weight on the policy loss (distill mode uses soft CE).")
     return parser.parse_args()
 
 
