@@ -341,6 +341,31 @@ All sprint phases are coded and smoke-validated. Day-1 spike at 100 games × 100
 
 Decision: Day-1 spike is the gate on whether to launch a Phase D multi-iteration run. If GO, run 4 iterations × (200 games / 100 sims) per the plan; on the trained Phase-D output, run final 400-game gate at `--mcts-simulations 200` for the headline ≥0.40 Wilson-lower target.
 
+### Day-1 spike: uniform-prior result (NO_GO, but signal-positive)
+
+Spike stopped at n=178 (full schedule was 200; halted early after the trajectory committed to NO_GO).
+
+| Metric | R4 value-head (1-ply) | Day-1 MCTS uniform | Δ |
+| --- | --- | --- | --- |
+| WR | 0.345 | **0.4045** | +6pp |
+| Wilson lower | 0.30 | **0.335** | +3pp |
+| Heuristic fallbacks | 0 | 0 | — |
+| Player WR | ~0.27 | 0.36 | +9pp |
+| Opponent WR | ~0.43 | 0.462 | +3pp |
+
+**Interpretation.** MCTS with uniform prior + R4 value-head leaf is **better than the value-head alone** at the same checkpoint — search adds 6pp WR. But it does not clear the ≥0.40 Wilson-lower bar. The side gap (10pp player vs opponent) persists and is the largest single sink: if both sides hit the opponent-side WR (~46%), we'd land at Wilson lower ~0.39 — almost at the bar from uniform prior alone.
+
+**Day-1 verdict: NO_GO** on the hard criterion. **But** the structural intervention (MCTS over R4) does add positive value, so the next iteration of the spike is warranted instead of skipping straight to a fallback.
+
+### Phase A spike: policy-prior retry (in flight 2026-05-11)
+
+Hypothesis: the R4 policy is informative (97% argmax-match on relabeled teacher labels per R6). Replacing the uniform prior with the policy softmax should concentrate the 100-sim search budget on plausible actions, reduce wasted simulations on poor branches, and tighten the Wilson interval upward. Same checkpoint, same value-head leaf, same n=200, only the prior changes.
+
+Hard criterion for Phase A spike (same as Day-1): Wilson lower ≥ 0.40, WR ≥ 0.43, zero fallbacks. If GO, proceed to Phase D 4-iter run with policy prior + Dirichlet. If NO_GO, try (in order):
+1. Increase `--mcts-simulations` to 200 (cheap test of "more search").
+2. Swap to rollout-CRN leaf evaluator (test "value head is the bottleneck" hypothesis).
+3. Fall back to R7 (multi-teacher BC) or R10 (full DAgger sweep) per the existing fallback queue.
+
 ## Open / wild
 
 - **Side-imbalance verification.** Gate manifests record player/opponent splits inconsistently across phases. Worth a one-off script to extract the side-WR delta and check whether the model is offensively weak or defensively weak.
