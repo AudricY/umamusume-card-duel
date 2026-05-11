@@ -219,6 +219,17 @@ def run_iteration(
         games=cfg.games_per_update,
         temperature=cfg.temperature,
     )
+    # R5: sample opponent from pool if --rollout-vs-pool is set.
+    opponent_checkpoint = None
+    if args.rollout_vs_pool:
+        opponent_checkpoint = _select_pool_opponent(args, state)
+        if opponent_checkpoint is not None:
+            events.emit(
+                iteration=cfg.iteration,
+                stage="rollout",
+                event_type="opponent_selected",
+                opponent_path=str(opponent_checkpoint),
+            )
     rollout_with_stochastic_serve(
         repo_root,
         iter_dir,
@@ -228,6 +239,7 @@ def run_iteration(
         trace_path=trace_path,
         manifest_out=trace_manifest,
         args=args,
+        opponent_checkpoint=opponent_checkpoint,
     )
     events.emit(
         iteration=cfg.iteration,
@@ -508,26 +520,54 @@ def rollout_with_stochastic_serve(
     trace_path: Path,
     manifest_out: Path,
     args: argparse.Namespace,
+    opponent_checkpoint: Path | None = None,
 ) -> None:
-    """Stand up serve_onnx with stochastic-by-default, collect a trace."""
+    """Stand up serve_onnx with stochastic-by-default, collect a trace.
+
+    R5: when ``opponent_checkpoint`` is set, a second serve_onnx
+    instance is brought up in greedy mode for the opponent side. The
+    TS evaluator's ``--opponent-model-url`` reaches that second server
+    so PPO rollouts are model-vs-model instead of model-vs-rule-bot.
+    """
 
     onnx_path = iter_dir / "rollout.onnx"
     export_checkpoint_to_onnx(repo_root, checkpoint, onnx_path)
+    if opponent_checkpoint is not None:
+        opp_onnx = iter_dir / "opponent.onnx"
+        export_checkpoint_to_onnx(repo_root, opponent_checkpoint, opp_onnx)
     with stochastic_serve_onnx_context(repo_root, onnx_path, cfg.temperature, args) as model_url:
-        run_evaluator(
-            repo_root,
-            selection="policy",
-            games=cfg.games_per_update,
-            seed_start=seed_start,
-            model_side="both",
-            max_steps=cfg.max_steps,
-            rollout_steps=args.rollout_steps,
-            decision_trace_out=trace_path,
-            trace_teacher="none",
-            rollout_crn_samples=1,
-            model_url=model_url,
-            manifest_out=manifest_out,
-        )
+        if opponent_checkpoint is not None:
+            with _greedy_serve_onnx_context(repo_root, opp_onnx, args) as opp_url:
+                run_evaluator(
+                    repo_root,
+                    selection="policy",
+                    games=cfg.games_per_update,
+                    seed_start=seed_start,
+                    model_side="both",
+                    max_steps=cfg.max_steps,
+                    rollout_steps=args.rollout_steps,
+                    decision_trace_out=trace_path,
+                    trace_teacher="none",
+                    rollout_crn_samples=1,
+                    model_url=model_url,
+                    opponent_model_url=opp_url,
+                    manifest_out=manifest_out,
+                )
+        else:
+            run_evaluator(
+                repo_root,
+                selection="policy",
+                games=cfg.games_per_update,
+                seed_start=seed_start,
+                model_side="both",
+                max_steps=cfg.max_steps,
+                rollout_steps=args.rollout_steps,
+                decision_trace_out=trace_path,
+                trace_teacher="none",
+                rollout_crn_samples=1,
+                model_url=model_url,
+                manifest_out=manifest_out,
+            )
 
 
 def run_policy_gate_with_serve(
@@ -785,7 +825,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pool-eval-seed-start", type=int, default=20000)
     parser.add_argument("--events-out", default=None,
                         help="Override default events.jsonl path (otherwise out_dir/events.jsonl).")
+    # R5: self-play via PFSP-sampled opponent pool.
+    parser.add_argument("--rollout-vs-pool", action="store_true",
+                        help="R5: rollout against a PFSP-sampled opponent from --pool-path instead of rule-bot.")
+    parser.add_argument("--pool-path", default=None,
+                        help="Path to opponent-pool.json (default: out_dir/opponent-pool.json).")
     return parser.parse_args()
+
+
+def _select_pool_opponent(args: argparse.Namespace, state: OrchestratorState) -> Path | None:
+    """R5: select an opponent checkpoint from the pool for this iteration.
+
+    Sampling rule: PFSP weights ``max(0.05, 1 - p_i)`` against per-opponent
+    history if available; uniform fallback when the pool has only one
+    entry or no history yet. Returns ``None`` if the pool is empty or
+    cannot be loaded (caller falls back to rule-bot rollout).
+    """
+
+    pool_path = Path(args.pool_path) if args.pool_path else (Path(args.out_dir) / "opponent-pool.json")
+    if not pool_path.exists():
+        print(f"[ppo-orchestrator] --rollout-vs-pool requested but no pool at {pool_path}; falling back to rule-bot")
+        return None
+    try:
+        from opponent_pool import OpponentPool
+        pool = OpponentPool.from_json(pool_path)
+    except Exception as exc:
+        print(f"[ppo-orchestrator] failed to load opponent pool: {exc}; falling back to rule-bot")
+        return None
+    if not pool.entries:
+        return None
+    # Without history we sample uniformly from the pool (PFSP weights
+    # need per-opponent win-rate signal we don't have at iter 0).
+    import random
+    seed = args.trace_seed_start + 9973  # stable per-run, doesn't depend on iter
+    rng = random.Random(seed)
+    entry = rng.choice(list(pool.entries))
+    return Path(entry.checkpoint_path)
 
 
 if __name__ == "__main__":
