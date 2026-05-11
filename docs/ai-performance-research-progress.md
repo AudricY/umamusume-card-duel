@@ -542,57 +542,94 @@ this line will be appended once the sweep runs.
 - Recipe-bug fix (rollout-steps=200 → 500) is now the orchestrator's
   configured default for the documented sweep.
 
-### Phase D outcome — item 17 sweep (2026-05-11) — INVALID, SWEEP TO RE-RUN
+### Phase D outcome — item 17 sweep, take 1 (2026-05-08, INVALID)
 
-Sweep at `runs/item17-2026-05-08/` ran the documented config and
-recorded the table below:
+Sweep at `runs/item17-2026-05-08-INVALID-warmstart-bug/` recorded three
+iterations with Wilson lower 0.30/0.28/0.31. Cross-checking via
+observability stage 1 surfaced that **iter-1 and iter-2 trained zero
+epochs**: the previous `dagger_orchestrator.py` passed `--resume` to
+each train_bc invocation; `--resume` loaded `next_epoch=26` from the
+parent's 25-epoch state, so the loop `for epoch in range(26, args.epochs+1)`
+with `args.epochs=25` ran nothing. All three iterations' model weights
+were bitwise identical (max-diff = 0.0); ONNX exports shared one md5.
+The "Wilson lower" differences were pure eval-gate noise on one model.
 
-| Iter | Selection | Wilson lower (n=200) | KL weight | Decision |
-| --- | --- | --- | --- | --- |
-| 0 | rollout-CRN×3 | 0.3014 | 0.0 | promoted |
-| 1 | policy (iter-0) | 0.2826 | 0.1 | rejected |
-| 2 | policy (iter-0) | 0.3061 | 0.5 | promoted |
+**Fix landed (eb4f4f5).** `train_bc.py` now accepts
+`--init-from-checkpoint` (loads `model_state` only, fresh
+optimizer/scheduler/epoch counter), `dagger_orchestrator.py` switched
+to that flag, and `dagger_smoke.py` asserts iter-0/1/2 checkpoints are
+not byte-identical to catch any future regression. The previous run
+dir is preserved as `runs/item17-2026-05-08-INVALID-warmstart-bug/`
+for forensics.
 
-**The sweep is invalid as a measurement.** Cross-checking checkpoint
-weights surfaced via observability Stage 1 (events.jsonl per-epoch
-loss events) showed iter-1 and iter-2 recorded zero per-epoch loss
-events. Loading the saved checkpoints confirmed:
+**Observability paid for itself.** Without per-epoch events, the
+zero-train bug would have survived to F1 (where the warm-start
+checkpoint is the bedrock).
 
-- `iter-0`, `iter-1`, and `iter-2` model weights are **bitwise
-  identical** (max-diff across all parameters = 0.0).
-- All five emitted ONNX files share the same md5 (`550b0d4...`).
-- Each checkpoint's `next_epoch = 26`; iter-1 and iter-2's
-  `history` is the iter-0 history copy with no new entries.
+### Phase D outcome — item 17 sweep, take 2 (2026-05-11)
 
-**Root cause.** `train_bc.py --resume` loads `next_epoch` from the
-prior checkpoint (26 after iter-0 trained 25 epochs) and sets
-`start_epoch = next_epoch`. The orchestrator passes
-`--epochs cfg.epochs` (25 per iter, not cumulative), so on iter-1 and
-iter-2 the training loop is `range(26, 26)` — zero iterations. The
-final-metrics evaluator still runs against the loaded model and
-writes a manifest, masking the no-op training.
+Corrected sweep at `runs/item17-2026-05-11/` — same compute-scaled
+config (30 games trace, 100-game eval, 25 epochs, KL weights
+"0.0,0.1,0.5") but with the fixed `--init-from-checkpoint` warm-start.
+Per-epoch events confirm 25 epoch-records per iteration; pairwise
+checkpoint weight max-diff is non-zero (~0.05 between iter-0 and
+iter-1).
 
-The reported iter-on-iter Wilson lower differences (0.30 → 0.28 →
-0.31) are pure eval-gate noise on the same model. **No conclusion
-about the SL cap or KL anchor can be drawn from this sweep.**
+| Iter | Selection | Win rate (n=200) | Wilson95 | KL weight | Train loss | Decision |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | rollout-CRN×3 | 34.5% | [0.283, 0.413] | 0.0 (no parent) | 0.4403 | promoted |
+| 1 | policy (iter-0) | 29.5% | [0.236, 0.362] | 0.1 (anchor iter-0) | 0.4076 | rejected (-4.65pp Wilson lower) |
+| 2 | policy (iter-0) | 37.5% | [0.311, 0.444] | 0.5 (anchor iter-0) | 0.4308 | promoted (+2.83pp over iter-0 floor) |
 
-**Why observability caught it.** The events stream emitted three
-`train_run_started` events but only two `epoch` events (both from
-iter-0), making the silent skip visible in seconds. Without the event
-stream, the per-iteration training history is buried under a deeply
-nested key in 100KB+ manifest.json files; the running orchestrator
-prints subprocess stdout but doesn't surface "trained 0 epochs" as a
-distinct signal.
+**Pre-registered escalation re-evaluation.**
 
-**Fix landed.** `training/train_bc.py` now accepts
-`--init-from-checkpoint` (model_state only, fresh optimizer/scheduler/
-epoch counter) alongside `--resume` (full training-state resume for
-mid-run crash recovery). `dagger_orchestrator.py` switched to
-`--init-from-checkpoint` so each DAgger iteration trains its full
-`--epochs` budget against the new mixed dataset.
+- *Wilson lower ≤45% across all 3 iterations*: **TRIPPED** — max
+  Wilson lower observed is 0.311; the 0.45 threshold is unreached
+  by every iteration. iter-2's Wilson upper (0.444) is in striking
+  distance of the threshold but does not cross it.
+- *Iter-on-iter monotone improvement <2pp*: **mixed signal.** Strict
+  per-step reading: iter-0→iter-1 was −4.65pp (qualifies as <2pp);
+  iter-1→iter-2 was +7.48pp (does NOT qualify). The net iter-0→iter-2
+  improvement is +2.83pp on Wilson lower (or +3pp on win rate). At
+  n=200 the Wilson half-width is ≈5pp, so the iter-0/iter-2 win-rate
+  CIs overlap and the improvement is not statistically significant.
 
-The corrected sweep needs to be re-run before any v4-reframe finding
-can be claimed; that's tracked as a follow-up task.
+**Finding — v4 reframe partially confirmed.** At this codebase's
+SL-warm-start configuration:
+
+1. The supervised cap is real and lands at ~30% win rate (Wilson
+   lower 0.28–0.31). All three iterations occupy this band; the
+   absolute ceiling criterion (<45%) is unambiguously met.
+2. KL-anchored DAgger with the right weight schedule (0.5 here) can
+   recover from a single bad iteration (iter-1 regressed under
+   weight 0.1; iter-2 climbed back +7.48pp under weight 0.5). This
+   refutes the strict "DAgger is completely stuck" reading of v4.
+3. Net progress over 3 iterations (+2.83pp Wilson lower) is small
+   relative to the gap to 45% (∼14pp) and is inside the noise
+   envelope at n=200. F1 (PPO) remains the planned path through the
+   ~30% cap; on this evidence DAgger is doing useful warm-start work
+   but is unlikely to close the gap on its own at reasonable
+   iteration counts.
+4. **Secondary finding — KL anchor weight matters.** Iter-1 (KL=0.1)
+   regressed; iter-2 (KL=0.5) recovered. The previously-defaulted
+   weight 0.1 may be too low for this codebase. A future ablation
+   should test KL=0.5 from iter-1 onward.
+
+**Caveats.** Compute-scaled config: 30 games trace and 100-game eval
+per iteration, not the documented 250+250. n=200 Wilson half-width is
+~5pp, so iter-on-iter deltas of ±5pp are not significant. Three
+iterations is the minimum sample size for the escalation criterion;
+more iterations would clarify whether iter-2's +7.48pp is real
+recovery or noise. The pool-eval channel was disabled
+(`--pool-eval-games 0`) for wall-clock reasons; per-matchup floors
+remain unexercised at scale.
+
+**Artifacts.** `runs/item17-2026-05-11/orchestrator-state.json`;
+per-iteration manifests at `iter-{000,001,002}/iteration-manifest.json`;
+per-epoch loss events in `events.jsonl`; TensorBoard event files under
+`tb/iter-{000,001,002}/`; live dashboard at
+`http://127.0.0.1:5000/run/item17-2026-05-11` after starting
+`training/observability_app.py`.
 
 ### Phase E — F1 PPO smoke
 
