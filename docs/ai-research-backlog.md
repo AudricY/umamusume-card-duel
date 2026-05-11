@@ -247,11 +247,25 @@ PPO from R3-b020 (entropy 0.39 + calibrated value + accuracy 89%) at aggressive 
 
 Max 0.3014 — same as every other PPO sweep. **Combining peakedness fix + calibration fix + aggressive HPs doesn't break the cap.**
 
+### R5 (PFSP self-play) — opponent distribution changed, gate cap held
+
+PPO from DAgger iter-2 warm-start, rollouts vs the item17 opponent pool (DAgger iter-002 sampled uniformly). 3 iters × 800 games × aggressive HPs:
+
+| Iter | Wilson lower | GAE mean_return | GAE mean_advantage |
+| --- | --- | --- | --- |
+| 0 (warm-start eval) | 0.2873 | -0.11 | -0.07 |
+| 1 | 0.2500 | -0.14 | -0.04 |
+| 2 | 0.3109 (matched DAgger iter-2 exactly) | -0.14 | -0.04 |
+
+Self-play DID materially change the reward distribution: mean_return moved from -0.20 (vs rule-bot rollouts in phase H) to -0.14 (more even games against a same-strength opponent). Mean_advantage less negative too. **But gate WR (vs rule-bot, the unchanged evaluator) still locks at 0.3109.**
+
+The opponent change perturbs the trained policy's locality but doesn't help against the *eval* distribution. The policy learns to do something different against itself, but that something different doesn't generalize to rule-bot.
+
 ### Imitation-cap statement
 
-After 7 PPO sweeps + 4 BC variants + 1 capacity bump:
+After 8 PPO sweeps + 4 BC variants + 1 capacity bump + 1 self-play:
 
-> **No combination of warm-start adjustment + PPO HP tuning broke the Wilson-lower 0.31 ceiling vs rule-bot.** Better imitation, larger models, calibrated values, higher entropy, longer training, bigger PPO buffers — every well-behaved variant lands at WR ≈ 33–38%, Wilson lower 0.27–0.32. The 0.31 cap is the imitation cap: SL on a 58.5%-WR teacher whose 41% disagreement rows are noisy at decision-critical states.
+> **No combination of warm-start adjustment + PPO HP tuning + opponent distribution broke the Wilson-lower 0.31 ceiling vs rule-bot.** Better imitation, larger models, calibrated values, higher entropy, longer training, bigger PPO buffers, self-play opponents — every well-behaved variant lands at WR ≈ 33–38%, Wilson lower 0.27–0.32. The 0.31 cap is the imitation cap: SL on a 58.5%-WR teacher whose 41% disagreement rows are noisy at decision-critical states, and PPO can't escape its local optimum without a different training signal.
 
 To break it, we need labels or training signal that isn't just "imitate the teacher harder":
 
