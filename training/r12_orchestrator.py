@@ -256,6 +256,7 @@ def run_selfplay(
                 "--mcts-leaf", args.mcts_leaf,
                 "--mcts-rollout-crn-samples", str(args.mcts_rollout_crn_samples),
                 "--mcts-rollout-steps", str(args.mcts_rollout_steps),
+                "--workers", str(args.workers),
                 "--out", str(out_path),
                 "--manifest-out", str(manifest_out),
             ],
@@ -330,6 +331,7 @@ def run_gate(
                 "--min-ci-lower", str(args.eval_min_ci_lower),
                 "--min-games", str(args.eval_games),
                 "--progress-out", str(iter_dir / "gate-progress.jsonl"),
+                "--workers", str(args.workers),
             ],
             cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=False,
         )
@@ -444,6 +446,11 @@ def parse_args() -> argparse.Namespace:
     # minimal Namespace fields so DAgger's helper doesn't crash on .get.
     p.add_argument("--device", default="cpu")
     p.add_argument("--amp", action="store_true")
+    # R13.W1 parallelism — the orchestrator's selfplay + gate stages
+    # accept a --workers count that is forwarded to the underlying
+    # `sim:mcts-selfplay` and `sim:eval-gate` runners.
+    p.add_argument("--workers", type=int, default=1,
+                   help="Number of parallel worker processes for selfplay and gate stages.")
     return p.parse_args()
 
 
