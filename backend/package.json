@@ -14,6 +14,7 @@
     "sim:export-outcome-training": "tsx src/sim/exportOutcomeTrainingExamples.ts",
     "sim:evaluate-model": "tsx src/sim/evaluateModelVsHeuristic.ts",
     "sim:eval-gate": "tsx src/sim/evalGate.ts",
+    "sim:mcts-selfplay": "tsx src/sim/mctsSelfPlay.ts",
     "sim:throughput-probe": "tsx src/sim/throughputProbe.ts",
     "sim:rebaseline": "tsx src/sim/rebaseline.ts",
     "sim:build-card-vocab": "tsx src/sim/buildCardVocab.ts"

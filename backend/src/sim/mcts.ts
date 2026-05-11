@@ -25,11 +25,19 @@ import type { GameState, SideId } from "../../../shared/src/types";
 import { advanceModeledTurnStep, getForcedAttackCoinResults, stateHash } from "./evaluateModelVsHeuristic";
 
 export type MctsLeaf = "value-head";
+export type MctsPrior = "uniform" | "policy";
 
 export type MctsConfig = {
   simulations: number;
   cPuct: number;
   leaf: MctsLeaf;
+  prior: MctsPrior;
+  // Phase A: at the root only, mix in Dirichlet noise (α applied uniformly,
+  // ε weight on the noise) to encourage exploration. Off by default; the
+  // self-play data generation phase enables it via the CLI flag.
+  addRootDirichlet: boolean;
+  dirichletAlpha: number;
+  dirichletEpsilon: number;
   maxNodes: number;
   // Cap on how far we will collapse rule-bot turns after the model's move
   // before treating the leaf as the next model-decision state. Same idea
@@ -41,10 +49,17 @@ export type MctsDiagnostics = {
   rootValue: number;
   rootVisitDistribution: number[];
   rootMeanQ: number[];
+  rootPriors: number[];
   expansions: number;
   leafEvaluations: number;
   terminalLeafs: number;
   visitedHashes: number;
+  // Phase A diagnostics: entropy of the (pre-Dirichlet) policy prior at
+  // the root, and whether the visit-count argmax agrees with the prior's
+  // argmax. Both are policy-vs-search signals that surface to the
+  // observability stack.
+  rootPriorEntropy: number;
+  rootPriorArgmax: number;
 };
 
 export type MctsResult = {
@@ -64,6 +79,10 @@ type MctsNode = {
   // null = non-terminal interior node. number = value already determined
   // by terminal state, in modelSide frame, in [-1, 1].
   terminalValue: number | null;
+  // Phase A: when buildModelDecisionNode calls /predict to fetch the
+  // policy prior, it harvests `value[0]` from the same response and caches
+  // it here so backup doesn't need a second /predict round trip.
+  cachedLeafValue: number | null;
 };
 
 export function defaultMctsConfig(overrides?: Partial<MctsConfig>): MctsConfig {
@@ -71,6 +90,10 @@ export function defaultMctsConfig(overrides?: Partial<MctsConfig>): MctsConfig {
     simulations: 100,
     cPuct: 1.5,
     leaf: "value-head",
+    prior: "uniform",
+    addRootDirichlet: false,
+    dirichletAlpha: 0.3,
+    dirichletEpsilon: 0.25,
     maxNodes: 5000,
     collapseMaxSteps: 64,
     ...overrides,
@@ -98,16 +121,17 @@ export async function runMcts(
     rootValue: 0,
     rootVisitDistribution: [],
     rootMeanQ: [],
+    rootPriors: [],
     expansions: 1,
     leafEvaluations: 0,
     terminalLeafs: 0,
     visitedHashes: 0,
+    rootPriorEntropy: 0,
+    rootPriorArgmax: 0,
   };
 
   if (root.terminalValue !== null) {
     diagnostics.rootValue = root.terminalValue;
-    diagnostics.rootVisitDistribution = [];
-    diagnostics.rootMeanQ = [];
     return {
       selectedIndex: 0,
       visits: [],
@@ -115,11 +139,28 @@ export async function runMcts(
     };
   }
 
-  // Cache the root value via a single leaf eval so diagnostics can report
-  // what the network thinks before any search ran. This is "free" since
-  // the first simulation will descend through the same path.
-  diagnostics.rootValue = await leafValue(rootState, modelSide, modelUrl);
-  diagnostics.leafEvaluations += 1;
+  // Snapshot the policy prior *before* any Dirichlet noise — diagnostics
+  // (entropy, argmax) describe the network's belief, not the noisy
+  // exploration shim. The visit-vs-prior argmax-match downstream is
+  // therefore a clean network-vs-search agreement signal.
+  diagnostics.rootPriors = root.priors.slice();
+  diagnostics.rootPriorEntropy = entropy(diagnostics.rootPriors);
+  diagnostics.rootPriorArgmax = argmax(diagnostics.rootPriors);
+
+  if (config.addRootDirichlet && root.legalActions.length > 1) {
+    const noise = sampleDirichlet(root.legalActions.length, config.dirichletAlpha, rootRng.fork("dirichlet"));
+    const eps = config.dirichletEpsilon;
+    root.priors = root.priors.map((p, i) => (1 - eps) * p + eps * (noise[i] ?? 0));
+  }
+
+  // Cache the root value. With policy-prior mode we got it for free from
+  // `buildModelDecisionNode`; with uniform we do a one-off /predict.
+  if (root.cachedLeafValue !== null) {
+    diagnostics.rootValue = root.cachedLeafValue;
+  } else {
+    diagnostics.rootValue = await leafValue(rootState, modelSide, modelUrl);
+    diagnostics.leafEvaluations += 1;
+  }
 
   let totalNodes = 1;
 
@@ -182,6 +223,10 @@ export async function runMcts(
         if (newChild.terminalValue !== null) {
           leafValueScalar = newChild.terminalValue;
           diagnostics.terminalLeafs += 1;
+        } else if (newChild.cachedLeafValue !== null) {
+          // Policy-prior mode: value was harvested from the same /predict
+          // call that produced the priors; no extra fetch needed.
+          leafValueScalar = newChild.cachedLeafValue;
         } else {
           leafValueScalar = await leafValue(newChild.state, newChild.modelSide, modelUrl);
           diagnostics.leafEvaluations += 1;
@@ -259,6 +304,7 @@ async function buildModelDecisionNode(
       wsum: [],
       children: [],
       terminalValue: mctsTerminalValue(state, modelSide),
+      cachedLeafValue: mctsTerminalValue(state, modelSide),
     };
   }
 
@@ -278,6 +324,7 @@ async function buildModelDecisionNode(
         wsum: [],
         children: [],
         terminalValue: mctsTerminalValue(collapsedState, modelSide),
+        cachedLeafValue: mctsTerminalValue(collapsedState, modelSide),
       };
     }
   }
@@ -293,11 +340,21 @@ async function buildModelDecisionNode(
       wsum: [],
       children: [],
       terminalValue: 0,
+      cachedLeafValue: 0,
     };
   }
-  const uniform = 1 / legalActions.length;
-  const priors = legalActions.map(() => uniform);
-  void modelUrl; // unused in day-1 (uniform prior). Phase A will use it.
+
+  let priors: number[];
+  let cachedLeafValue: number | null = null;
+  if (config.prior === "policy") {
+    const { actionProbs, value } = await predictPolicyAndValue(modelUrl, collapsedState, modelSide, legalActions);
+    priors = legalActions.map((_, i) => Math.max(1e-8, actionProbs[i] ?? 0));
+    cachedLeafValue = value;
+  } else {
+    const uniform = 1 / legalActions.length;
+    priors = legalActions.map(() => uniform);
+  }
+
   return {
     state: collapsedState,
     modelSide,
@@ -307,6 +364,38 @@ async function buildModelDecisionNode(
     wsum: legalActions.map(() => 0),
     children: legalActions.map(() => null),
     terminalValue: null,
+    cachedLeafValue,
+  };
+}
+
+async function predictPolicyAndValue(
+  modelUrl: string,
+  state: GameState,
+  modelSide: SideId,
+  legalActions: LegalAiAction[],
+): Promise<{ actionProbs: number[]; value: number }> {
+  const response = await fetch(`${modelUrl.replace(/\/$/, "")}/predict`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      observation: buildPublicObservation(state, modelSide),
+      legalActions,
+      sampling: "greedy",
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`MCTS prior+value request failed: ${response.status} ${await response.text()}`);
+  }
+  const payload = await response.json() as { actionProbs?: number[][]; value?: number[] };
+  const probs = (payload.actionProbs?.[0] ?? []).slice(0, legalActions.length);
+  // Renormalize masked-by-legal slice in case the server returned the full
+  // action-vocabulary head; legal-only fragment should already sum to ~1
+  // because the server masks before softmax.
+  const sum = probs.reduce((s, p) => s + (Number.isFinite(p) ? Math.max(0, p) : 0), 0);
+  const normalized = sum > 0 ? probs.map((p) => Math.max(0, p) / sum) : legalActions.map(() => 1 / legalActions.length);
+  return {
+    actionProbs: normalized,
+    value: Number(payload.value?.[0] ?? 0),
   };
 }
 
@@ -346,6 +435,61 @@ function collapseUntilModelOrTerminal(
     if (stateHash(current) === before) break;
   }
   return current;
+}
+
+function entropy(probs: number[]): number {
+  let h = 0;
+  for (const p of probs) {
+    if (p > 0) h -= p * Math.log(p);
+  }
+  return h;
+}
+
+function argmax(values: number[]): number {
+  let best = 0;
+  let bestVal = -Infinity;
+  for (let i = 0; i < values.length; i += 1) {
+    const v = values[i] ?? -Infinity;
+    if (v > bestVal) {
+      bestVal = v;
+      best = i;
+    }
+  }
+  return best;
+}
+
+function sampleDirichlet(n: number, alpha: number, rng: Rng): number[] {
+  // Sample n i.i.d. Gamma(α, 1) variates via Marsaglia–Tsang and normalize.
+  // Stays valid for α >= 0.1; with α=0.3 (plan default) the sampler is stable.
+  const samples = Array.from({ length: n }, () => sampleGamma(Math.max(0.05, alpha), rng));
+  const total = samples.reduce((sum, v) => sum + v, 0);
+  if (total <= 0) return samples.map(() => 1 / n);
+  return samples.map((v) => v / total);
+}
+
+function sampleGamma(alpha: number, rng: Rng): number {
+  // Marsaglia–Tsang for shape >= 1; boost-and-discard wrapper for shape < 1.
+  if (alpha < 1) {
+    const u = Math.max(1e-12, rng.next());
+    return sampleGamma(alpha + 1, rng) * Math.pow(u, 1 / alpha);
+  }
+  const d = alpha - 1 / 3;
+  const c = 1 / Math.sqrt(9 * d);
+  while (true) {
+    let x = 0;
+    let v = 0;
+    // Box–Muller on uniform pair → standard normal
+    do {
+      const u1 = Math.max(1e-12, rng.next());
+      const u2 = rng.next();
+      x = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+      v = 1 + c * x;
+    } while (v <= 0);
+    v = v * v * v;
+    const u = rng.next();
+    if (u < 1 - 0.0331 * x * x * x * x) return d * v;
+    if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+  }
 }
 
 async function leafValue(state: GameState, modelSide: SideId, modelUrl: string): Promise<number> {

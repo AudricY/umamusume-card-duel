@@ -60,6 +60,10 @@ export type EvaluateModelArgs = {
   mctsLeaf: "value-head";
   mctsCollapseMaxSteps: number;
   mctsMaxNodes: number;
+  mctsPrior: "uniform" | "policy";
+  mctsRootDirichlet: boolean;
+  mctsDirichletAlpha: number;
+  mctsDirichletEpsilon: number;
   cycleWindow: number;
   cycleMinVisits: number;
   plannerCrnSamples: number;
@@ -504,6 +508,10 @@ async function chooseMctsAction(
     simulations: Math.max(1, args.mctsSimulations),
     cPuct: args.mctsCPuct,
     leaf: args.mctsLeaf,
+    prior: args.mctsPrior,
+    addRootDirichlet: args.mctsRootDirichlet,
+    dirichletAlpha: args.mctsDirichletAlpha,
+    dirichletEpsilon: args.mctsDirichletEpsilon,
     collapseMaxSteps: Math.max(1, args.mctsCollapseMaxSteps),
     maxNodes: Math.max(64, args.mctsMaxNodes),
   });
@@ -1185,7 +1193,16 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     mctsLeaf: parseMctsLeaf(get("--mcts-leaf", "value-head")),
     mctsCollapseMaxSteps: Number(get("--mcts-collapse-max-steps", "64")),
     mctsMaxNodes: Number(get("--mcts-max-nodes", "5000")),
+    mctsPrior: parseMctsPrior(get("--mcts-prior", "uniform")),
+    mctsRootDirichlet: argv.includes("--mcts-root-dirichlet"),
+    mctsDirichletAlpha: Number(get("--mcts-dirichlet-alpha", "0.3")),
+    mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
   };
+}
+
+function parseMctsPrior(raw: string): "uniform" | "policy" {
+  if (raw === "uniform" || raw === "policy") return raw;
+  throw new Error(`--mcts-prior must be uniform or policy, got ${raw}`);
 }
 
 function parseMctsLeaf(raw: string): "value-head" {

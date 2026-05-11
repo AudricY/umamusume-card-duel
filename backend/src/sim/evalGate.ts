@@ -172,6 +172,10 @@ function parseArgs(argv: string[]): Args {
     mctsLeaf: parseMctsLeaf(get("--mcts-leaf", "value-head")),
     mctsCollapseMaxSteps: Number(get("--mcts-collapse-max-steps", "64")),
     mctsMaxNodes: Number(get("--mcts-max-nodes", "5000")),
+    mctsPrior: parseMctsPrior(get("--mcts-prior", "uniform")),
+    mctsRootDirichlet: argv.includes("--mcts-root-dirichlet"),
+    mctsDirichletAlpha: Number(get("--mcts-dirichlet-alpha", "0.3")),
+    mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
     minGames: Number(get("--min-games", "500")),
     minWinRate: Number(get("--min-win-rate", "0")),
     minCiLower: Number(get("--min-ci-lower", "0")),
@@ -194,6 +198,11 @@ function parseMctsLeaf(raw: string): "value-head" {
     throw new Error(`--mcts-leaf must be "value-head" for now, got ${raw}`);
   }
   return "value-head";
+}
+
+function parseMctsPrior(raw: string): "uniform" | "policy" {
+  if (raw === "uniform" || raw === "policy") return raw;
+  throw new Error(`--mcts-prior must be uniform or policy, got ${raw}`);
 }
 
 function parseRanker(raw: string): CandidateRankerMode {
