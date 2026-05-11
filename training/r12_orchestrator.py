@@ -249,6 +249,13 @@ def run_selfplay(
                 "--mcts-dirichlet-epsilon", str(args.dirichlet_epsilon),
                 "--temperature-moves", str(args.temperature_moves),
                 "--temperature-value", str(args.temperature_value),
+                # selfplay generates the training distribution; the leaf
+                # evaluator should match the gate's so the targets the
+                # network learns to imitate are scored the same way the
+                # eval gate scores them.
+                "--mcts-leaf", args.mcts_leaf,
+                "--mcts-rollout-crn-samples", str(args.mcts_rollout_crn_samples),
+                "--mcts-rollout-steps", str(args.mcts_rollout_steps),
                 "--out", str(out_path),
                 "--manifest-out", str(manifest_out),
             ],
@@ -314,7 +321,9 @@ def run_gate(
                 "--manifest-out", str(manifest_out),
                 "--mcts-simulations", str(args.mcts_simulations),
                 "--mcts-c-puct", str(args.mcts_c_puct),
-                "--mcts-leaf", "value-head",
+                "--mcts-leaf", args.mcts_leaf,
+                "--mcts-rollout-crn-samples", str(args.mcts_rollout_crn_samples),
+                "--mcts-rollout-steps", str(args.mcts_rollout_steps),
                 "--mcts-prior", "policy",
                 "--mcts-collapse-max-steps", str(args.mcts_collapse_max_steps),
                 "--mcts-max-nodes", str(args.mcts_max_nodes),
@@ -414,6 +423,9 @@ def parse_args() -> argparse.Namespace:
                    help="Promotion floor. Distinct from the final-gate target — iterations promote on RELATIVE improvement above the current promoted floor.")
     p.add_argument("--mcts-simulations", type=int, default=100)
     p.add_argument("--mcts-c-puct", type=float, default=1.5)
+    p.add_argument("--mcts-leaf", default="value-head", choices=["value-head", "rollout"])
+    p.add_argument("--mcts-rollout-crn-samples", type=int, default=3)
+    p.add_argument("--mcts-rollout-steps", type=int, default=200)
     p.add_argument("--mcts-collapse-max-steps", type=int, default=64)
     p.add_argument("--mcts-max-nodes", type=int, default=5000)
     p.add_argument("--dirichlet-alpha", type=float, default=0.3)

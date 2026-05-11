@@ -43,6 +43,9 @@ type SelfPlayArgs = {
   maxSteps: number;
   mctsSimulations: number;
   mctsCPuct: number;
+  mctsLeaf: "value-head" | "rollout";
+  mctsRolloutCrnSamples: number;
+  mctsRolloutSteps: number;
   mctsCollapseMaxSteps: number;
   mctsMaxNodes: number;
   mctsPrior: "uniform" | "policy";
@@ -158,7 +161,9 @@ async function runSelfPlayGameWithRng(args: SelfPlayArgs, seed: string, rng: Rng
     const mctsConfig: MctsConfig = defaultMctsConfig({
       simulations: Math.max(1, args.mctsSimulations),
       cPuct: args.mctsCPuct,
-      leaf: "value-head",
+      leaf: args.mctsLeaf,
+      rolloutCrnSamples: Math.max(1, args.mctsRolloutCrnSamples),
+      rolloutSteps: Math.max(1, args.mctsRolloutSteps),
       prior: args.mctsPrior,
       addRootDirichlet: args.mctsRootDirichlet,
       dirichletAlpha: args.mctsDirichletAlpha,
@@ -306,6 +311,9 @@ function parseArgs(argv: string[]): SelfPlayArgs {
     maxSteps: Number(get("--max-steps", "500")),
     mctsSimulations: Number(get("--mcts-simulations", "100")),
     mctsCPuct: Number(get("--mcts-c-puct", "1.5")),
+    mctsLeaf: (get("--mcts-leaf", "value-head") === "rollout" ? "rollout" : "value-head"),
+    mctsRolloutCrnSamples: Number(get("--mcts-rollout-crn-samples", "3")),
+    mctsRolloutSteps: Number(get("--mcts-rollout-steps", "200")),
     mctsCollapseMaxSteps: Number(get("--mcts-collapse-max-steps", "64")),
     mctsMaxNodes: Number(get("--mcts-max-nodes", "5000")),
     mctsPrior: get("--mcts-prior", "policy") === "uniform" ? "uniform" : "policy",
