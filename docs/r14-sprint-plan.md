@@ -52,7 +52,13 @@ The W6 → W8 → W6-extension thread is now the highest-information compute spe
 **Status change:** W6's compounding loop is the cheaper, lower-risk path forward. PPO with V-trace was R14's headline RL probe but after W6 confirmed compounding and W8 told us when cheap-selfplay becomes viable, the EV ranking flipped. Run D *only if* I plateaus AND the post-crossover retry W8 still regresses. Then we know iteration alone won't unlock cheap inference and a structural RL change is warranted.
 
 - **Same design:** plumb MCTS visit-distribution as `behavior_logprobs`, train raw policy with V-trace clipping (c̄=1.0, ρ̄=1.0).
-- **Cost when run:** ~300 LOC + ~1 day compute. Defer the code work until I's exit criterion is hit.
+- **Cost when run:** ~340 LOC + ~1 day compute (refined by R14 D-survey 2026-05-11). Breakdown:
+  - 60 LOC to `train_ppo.py`: extend `TrajectoryRow` with `visit_distribution`, swap the PPO ratio formula for V-trace clipping (ρ̄ + c̄ args), keep the existing log-ratio clamp.
+  - 120 LOC for a new MCTS trajectory parser (analog of `parse_trace_to_trajectories` in `ppo_orchestrator`) that consumes `mctsSelfPlay.ts` rows: groups by `(seed, sideId)`, computes per-step Δpoints, uses `valueTarget` as terminal bootstrap, emits `behavior_logp = log(visitDistribution[selected])` with ε=1e-4 floor.
+  - 80 LOC for a separate `r14_mcts_ppo_orchestrator.py` (don't mutate the policy-PPO loop — D is a fallback, copy-paste minimizes blast radius if it fails).
+  - 40 LOC for V-trace bootstrap glue (per-step Δpoints + terminal outcome → V_s trace).
+  - 40 LOC smoke (2 iters × 3 games, assert ratio_mean ≠ 1.0, no NaN, weights change).
+- **Risk register additions:** (i) visit distribution near-zero on rare actions → ε=1e-4 floor and importance-ratio halt at >10; (ii) value-head staleness biases V_s upward → only run from W6-iter-1+ checkpoints; (iii) ratio_mean still clustering at 1.0 after iter-1 → RL is genuinely closed (same diagnosis loop as F1/R3/R5).
 - **If I succeeds and cheap-selfplay works:** D is **redundant** and skipped entirely. The product win (fast inference) is achieved by the W6 → cheap-selfplay ladder, not by PPO.
 
 ### E — W5 UI integration finish (~1 day)
