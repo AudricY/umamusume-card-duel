@@ -1,14 +1,24 @@
 # R14 Sprint Plan — Ship the Cheap Config, Honestly Off-Policy RL
 
-Created 2026-05-11 after R13 closed with two deployable configs (iter-1 + rollout-leaf MCTS at Wilson lower 0.573, iter-1 + value-head-leaf MCTS at Wilson lower 0.452) and a clearly-blocked raw-policy PPO probe (Wilson 0.24–0.30 with importance ratios stuck at ~1.0). See `docs/r13-sprint-plan.md` for the prior sprint and `docs/ai-research-backlog.md` for the R13 result section.
+Created 2026-05-11. **Refined 2026-05-11 after W8 negative result + subagent re-prioritization.** R13 closed with two deployable configs (iter-1 + rollout-leaf MCTS at Wilson lower 0.573, iter-1 + value-head-leaf MCTS at Wilson lower 0.452) and a clearly-blocked raw-policy PPO probe. W8 then showed value-head-leaf Phase D regresses iter-on-iter from W6 iter-1 — *not a permanent failure*, but a premature switch before the value head has caught up to the rollout estimator. See `docs/r13-sprint-plan.md` for the prior sprint and `docs/ai-research-backlog.md` for result sections.
 
-## North star
+## North star (refined)
 
-**Make the cheap-inference config user-playable, prove it isn't over-fit to its own selfplay distribution, and run the only PPO variant we never honestly tried (MCTS-trajectory off-policy).**
+**Extend the only loop that demonstrably compounds (W6 rollout-leaf Phase D), instrument it with crossover telemetry so we know when cheap-selfplay becomes viable, and finish UI integration. Demote the PPO probe to a fallback.**
 
-R13 produced strong gate numbers but nothing ships yet — the UI hook is plumbed but the runtime path is unfinished. R14 is split between deployment (W5 finish + latency tuning) and one last serious RL probe (MCTS-trajectory PPO) before declaring search-at-inference the permanent answer.
+The W6 → W8 → W6-extension thread is now the highest-information compute spend. Each W6 iter is ~20 min, gives +3pp Wilson on the strongest config, and produces a value head closer to rollout-mean — at some crossover the cheap-selfplay loop becomes viable as a free consequence (no separate W3-style retrain needed).
 
-## Workstreams
+## Workstreams (priority order)
+
+### I — Extend W6 rollout-leaf Phase D + crossover telemetry (TOP PRIORITY, ~4 hours)
+
+**Why:** W6 already showed +3.4pp iter-on-iter Wilson improvement. The compounding curve hasn't plateaued. W8's negative result told us *when* cheap selfplay becomes viable — when the value head's predictions track rollout-CRN-K=3 means closely enough. Extending W6 has two payoffs: (1) directly stronger rollout-leaf gate numbers, and (2) a value head that eventually unlocks cheap-selfplay-on-the-fly.
+
+- **I.1 New script `training/r13_value_crossover_probe.py` (~80 LOC).** Loads a checkpoint + a held-out rollout-leaf selfplay corpus (rows have `rootValue`), runs one forward pass, emits `{n, mse, rmse, pearson_r, mse_floor, ratio, crossed}` JSON. Threshold logic: `crossed = (mse ≤ 1.10 × mse_floor) AND (pearson_r ≥ 0.7)`, where `mse_floor` is the W3 retrain's `val_loss` final. Anchors against the W3 manifest. Uses `ValueTargetDataset` + `collate_mcts_selfplay_batch` from existing code.
+- **I.2 Run W6 extension.** `r12_orchestrator.py` from W6 iter-1's checkpoint, 3 more iters (iter-2/3/4), rollout-leaf MCTS, 60 selfplay × 100 sims K=3, 120-game gate. After each iter's distill step, automatically run the crossover probe against the *previous* iter's selfplay corpus and write `iterations[i].crossover` into orchestrator-state.
+- **I.3 Retry W8-style cheap-selfplay** ONE iter after two consecutive `crossed=true` events. Falsifies that the crossover is real and that cheap-selfplay can compound past it.
+- **Exit criteria:** strongest config Wilson lower ≥ 0.60 OR per-iter Wilson delta <+1pp (plateau). MSE curve recorded for postmortem.
+- **Cost:** ~80 LOC + 80 min compute for 4 iters + 30 min for probe code + 20 min retry. Highest information density on the sprint.
 
 ### A — Out-of-distribution gate for iter-1 (compute only, 30 min)
 
@@ -37,16 +47,13 @@ R13 produced strong gate numbers but nothing ships yet — the UI hook is plumbe
 - **If continues:** allow iter-3, iter-4, iter-5 to land. Track per-iter Wilson + per-side WR.
 - **Cost:** zero, just an inspection gate.
 
-### D — MCTS-trajectory PPO, the honest off-policy run (~3 days code + 1 day compute)
+### D — MCTS-trajectory PPO (DEMOTED to fallback after I plateaus)
 
-**Why:** every prior PPO sweep was effectively on-policy because collection = target policy → ratios ≈ 1.0 → no signal. The only PPO variant we never ran is: collect under MCTS-augmented behavior (rollout-leaf or value-head-leaf), log MCTS visit-distribution as `behavior_logprobs`, train the raw policy with importance ratios π_raw/π_mcts. This is the AlphaGo Zero pattern except with PPO instead of supervised distillation.
+**Status change:** W6's compounding loop is the cheaper, lower-risk path forward. PPO with V-trace was R14's headline RL probe but after W6 confirmed compounding and W8 told us when cheap-selfplay becomes viable, the EV ranking flipped. Run D *only if* I plateaus AND the post-crossover retry W8 still regresses. Then we know iteration alone won't unlock cheap inference and a structural RL change is warranted.
 
-- **Sub-tasks:**
-  - **D.1** Plumb collection-side behavior-logprob logging from MCTS visit distribution into the existing trace format (the F1 trace already has a `behaviorPolicy` field; needs an `mcts` kind).
-  - **D.2** `ppo_orchestrator.py` adds `--collection-selection mcts` and `--mcts-leaf {value-head, rollout}` to the trace stage. Sampling at collection time = visit-distribution sampling, not policy softmax.
-  - **D.3** Train with V-trace clipping (c̄=1.0, ρ̄=1.0) on the off-policy ratios. Add a guard for very small denominators in π_mcts(a|s).
-- **Exit criterion:** Wilson lower at raw-policy gate ≥ 0.40 after 3 iters. Falsifies the "PPO plumbing is broken" hypothesis cleanly — if this still doesn't move with a genuinely off-policy signal, the permanent answer is search-at-inference and RL is closed for this codebase.
-- **Cost:** ~300 LOC + ~3 days compute for 3 iters at value-head-leaf collection (cheaper than rollout-leaf).
+- **Same design:** plumb MCTS visit-distribution as `behavior_logprobs`, train raw policy with V-trace clipping (c̄=1.0, ρ̄=1.0).
+- **Cost when run:** ~300 LOC + ~1 day compute. Defer the code work until I's exit criterion is hit.
+- **If I succeeds and cheap-selfplay works:** D is **redundant** and skipped entirely. The product win (fast inference) is achieved by the W6 → cheap-selfplay ladder, not by PPO.
 
 ### E — W5 UI integration finish (~1 day)
 
@@ -85,15 +92,15 @@ R13 produced strong gate numbers but nothing ships yet — the UI hook is plumbe
 - **Exit criterion:** ≥2× selfplay wall-clock improvement at 4 workers vs G alone. If <1.3×, ship without it.
 - **Cost:** ~250 LOC + ~half day. Only schedule if G yields <2× throughput.
 
-## Sequencing
+## Sequencing (refined)
 
-- **Day 1:** A (OOD gate) + B (determinism fix) in parallel. Both are short. Once B lands, do G (unpin ORT) and rerun parallel smoke.
-- **Day 2:** W8 iter-2 inspection (C); start E (UI integration). F (adaptive ratio sweep) opportunistic.
-- **Day 3:** D.1 + D.2 (MCTS-trajectory PPO plumbing).
-- **Day 4:** D.3 + first 3-iter run; finish E. If G alone hasn't given ≥2× throughput, consider H.
-- **Day 5:** D analysis; F sweep if not done; sprint write-up.
+- **Day 1 morning:** I.1 (crossover probe ~80 LOC) + B (AsyncLocalStorage fix). Both short, independent.
+- **Day 1 afternoon:** kick off I.2 (W6 extension iter-2/3/4) unattended. ~80 min compute. While it runs: A (OOD gate, 30 min), F (adaptive ratio, 20 min), G (unpin ORT after B lands).
+- **Day 2 morning:** read I results. Either iterate more (Wilson still climbing) or evaluate crossover (MSE delta <10%). If crossed: I.3 retry W8-style. If not crossed but climbing: continue iterating.
+- **Day 2 afternoon onward:** E (UI integration finish).
+- **Day 3-4:** D (PPO with V-trace) — only if I plateaus AND I.3 still regresses. Otherwise: closeout + writeup.
 
-Total: 5 days, ~1 day of compute, ~3 days of code (excluding H which is conditional).
+Total: 2–3 days if I succeeds, 5 days if D becomes necessary. The hybrid: while I.2 burns compute unattended, write D's plumbing in parallel so it's ready if needed.
 
 ## What we explicitly DROP
 
