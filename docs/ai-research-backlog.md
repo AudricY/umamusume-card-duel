@@ -313,6 +313,19 @@ Tier 1 (R1–R4) plus stretch experiments R5 (self-play), R6 (capacity), R-clean
 
 User-facing summary of where we are: the infra works, the cap is structural, and breaking it requires a directional decision about how much code to invest. None of (1)–(4) is going to take less than half a day; (3) is multi-day.
 
+## Decision (2026-05-11): commit to R12, fallbacks ready
+
+After Tier-1 + stretch experiments + strategist + auditor analysis, the chosen path is **R12 (mini-AlphaZero)**. Reasoning recorded in detail in the chat thread; key points:
+
+1. **R6 is the dispositive evidence.** Better imitation makes play worse. Every variant that fits the rollout-CRN labels harder (R4, R3-b020, R6) drops gate WR below the warm-start. The cap isn't "fit labels harder" — it's "the labels are noisy on high-leverage decisions."
+2. **R7 and R8 inherit the noise.** Both train on the same rollout-CRN argmax/preference data. Different averaging / objective; same target distribution.
+3. **R12 generates new labels via search.** Visit-count distributions from PUCT MCTS with N=100 sims integrate over the variance that single-rollout-CRN samples once. Label quality scales with compute (search depth) instead of being capped at teacher's single-sample noise floor.
+4. **Game structure favors MCTS.** 62% forced moves means search budget concentrates on the ~15 meaningful decisions per game. At our current simulator throughput, 100 sims × 15 real decisions × 200 games = 25–35 minute wall-clock per gate.
+
+**Sprint plan: see `docs/r12-sprint-plan.md`.** Day-1 spike has a hard go/no-go criterion (Wilson lower ≥ 0.40 at n=100). If NO-GO, write a postmortem and pivot to fallbacks (R7, R8, R9, R10) in the order ranked by tier.
+
+R7/R8/R9/R10 are kept on the backlog as fallbacks; their task descriptions are annotated to reflect their fallback status.
+
 ## Open / wild
 
 - **Side-imbalance verification.** Gate manifests record player/opponent splits inconsistently across phases. Worth a one-off script to extract the side-WR delta and check whether the model is offensively weak or defensively weak.
