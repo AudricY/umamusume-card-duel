@@ -357,14 +357,47 @@ Spike stopped at n=178 (full schedule was 200; halted early after the trajectory
 
 **Day-1 verdict: NO_GO** on the hard criterion. **But** the structural intervention (MCTS over R4) does add positive value, so the next iteration of the spike is warranted instead of skipping straight to a fallback.
 
-### Phase A spike: policy-prior retry (in flight 2026-05-11)
+### Phase A spike: policy-prior retry (NO_GO, marginal improvement)
 
-Hypothesis: the R4 policy is informative (97% argmax-match on relabeled teacher labels per R6). Replacing the uniform prior with the policy softmax should concentrate the 100-sim search budget on plausible actions, reduce wasted simulations on poor branches, and tighten the Wilson interval upward. Same checkpoint, same value-head leaf, same n=200, only the prior changes.
+n=200, --mcts-prior policy + R4 value-head leaf, otherwise identical to day-1.
 
-Hard criterion for Phase A spike (same as Day-1): Wilson lower ≥ 0.40, WR ≥ 0.43, zero fallbacks. If GO, proceed to Phase D 4-iter run with policy prior + Dirichlet. If NO_GO, try (in order):
-1. Increase `--mcts-simulations` to 200 (cheap test of "more search").
-2. Swap to rollout-CRN leaf evaluator (test "value head is the bottleneck" hypothesis).
-3. Fall back to R7 (multi-teacher BC) or R10 (full DAgger sweep) per the existing fallback queue.
+| Metric | Phase A | Day-1 uniform | R4 baseline |
+| --- | --- | --- | --- |
+| WR | 0.4350 | 0.4045 | 0.345 |
+| Wilson lower | 0.368 | 0.335 | 0.30 |
+| Player WR | 0.36 | 0.36 | 0.27 |
+| Opponent WR | 0.51 | 0.46 | 0.43 |
+
+Policy prior gave +3pp Wilson lower over uniform — meaningful but not enough for GO. The diagnostic finding: **the prior is not the bottleneck**. Search budget reorganization helps modestly, but Wilson lower is still 3pp short of the 0.40 bar.
+
+### Rollout-leaf spike: GO (2026-05-11)
+
+Same R4 ckpt, same policy prior, same 100 sims — only the leaf evaluator changed from `value-head` to `rollout` (K=3 rule-bot playouts to terminal, side-relative ±1/0 backed up).
+
+| Metric | Rollout-leaf | Phase A | Day-1 uniform | R4 baseline |
+| --- | --- | --- | --- | --- |
+| WR | **0.625** | 0.435 | 0.405 | 0.345 |
+| Wilson lower | **0.556** | 0.368 | 0.335 | 0.30 |
+| Wilson upper | 0.689 | 0.504 | 0.478 | — |
+| Player WR | 0.58 | 0.36 | 0.36 | 0.27 |
+| Opponent WR | 0.67 | 0.51 | 0.46 | 0.43 |
+| Heuristic fallbacks | 0 | 0 | 0 | 0 |
+
+**R12 north star cleared by +15.6pp** (target 0.40 vs achieved 0.556) and **stretch criterion (0.50) also cleared**. Side gap inverted: player 58%, opponent 67%, both winning majority.
+
+**The dispositive diagnostic.** Search adds ~3pp over R4 (uniform-prior MCTS). Policy prior adds another ~3pp. Swapping the value-head leaf for rollout-CRN at leaves adds **+19pp**. The value head — even at R4's calibrated 0.084 Brier — was producing leaf evaluations too noisy for 100-sim MCTS to disambiguate the per-action means. Rollout-CRN K=3 averages directly over the same outcome distribution the value head approximates; the per-action means rank correctly.
+
+**Implications.**
+- The "trained policy + MCTS at inference" path of the R12 north star is achieved. Deploy is rollout-leaf MCTS over the R4 checkpoint.
+- The "distilled policy without search" path is not achieved by definition — rollout-CRN at leaves IS search. A distilled policy reusing the value head would inherit the same noise floor R4 hit.
+- Phase D distillation is now optional: it would compound iter-on-iter and produce a stronger prior, but is not required to meet the criterion.
+
+### Recommended next steps (post-R12 GO)
+
+1. Final headline gate at n=400 (or even n=800) for a tight Wilson interval at the same rollout-leaf settings.
+2. Game-level parallelism (4 worker processes per serve_onnx) to cut wall-clock ~4×; required for any multi-iteration Phase D run.
+3. Phase D real iterations (2-4 iters × rollout-leaf selfplay + distill) — tests whether distillation compounds beyond the search ceiling.
+4. UI integration: wire `--selection mcts --mcts-leaf rollout` into the in-game AI.
 
 ## Open / wild
 
