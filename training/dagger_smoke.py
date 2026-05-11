@@ -101,6 +101,53 @@ def main() -> None:
         if promoted_count < 1:
             raise AssertionError(f"Expected at least one promoted iteration, got {state}")
 
+        # Observability Stage 1: events.jsonl must exist with a complete
+        # per-iteration coverage so views downstream can reconstruct
+        # pipeline state without scanning manifest trees.
+        events_path = work_dir / "events.jsonl"
+        if not events_path.exists() or events_path.stat().st_size == 0:
+            raise AssertionError(f"Missing or empty events.jsonl under {work_dir}")
+        all_events = [json.loads(line) for line in events_path.read_text(encoding="utf8").splitlines() if line.strip()]
+        if not all_events:
+            raise AssertionError(f"events.jsonl had no parseable rows: {events_path}")
+        # Run-level boundaries.
+        run_started = [e for e in all_events if e["stage"] == "orchestrator" and e["event_type"] == "run_started"]
+        run_completed = [e for e in all_events if e["stage"] == "orchestrator" and e["event_type"] == "run_completed"]
+        if len(run_started) != 1 or len(run_completed) != 1:
+            raise AssertionError(f"run_started/run_completed events should each appear once, got {len(run_started)}/{len(run_completed)}")
+        # Required per-iteration stages (started+completed pairs).
+        required_pairs = ["trace-gen", "relabel", "mix", "train", "gate"]
+        for it in (0, 1, 2):
+            for stage in required_pairs:
+                started = [e for e in all_events if e["iteration"] == it and e["stage"] == stage and e["event_type"] == "started"]
+                completed = [e for e in all_events if e["iteration"] == it and e["stage"] == stage and e["event_type"] == "completed"]
+                if not started or not completed:
+                    raise AssertionError(f"iter {it} stage '{stage}' missing started/completed pair: started={len(started)} completed={len(completed)}")
+            decision = [e for e in all_events if e["iteration"] == it and e["stage"] == "decision"]
+            if not decision:
+                raise AssertionError(f"iter {it} missing decision event")
+            # Per-epoch loss events must appear for every iteration, not just
+            # iter-0. This is the regression guard for the DAgger warm-start
+            # zero-epoch bug uncovered by observability on item 17.
+            epoch_events = [e for e in all_events if e["iteration"] == it and e["stage"] == "train" and e["event_type"] == "epoch"]
+            if len(epoch_events) < 1:
+                raise AssertionError(
+                    f"iter {it} recorded no train epoch events — training likely skipped. "
+                    f"Check that --init-from-checkpoint (not --resume) is used for warm-start."
+                )
+
+        # Cross-check: iter-1 and iter-2 trained models must NOT be byte-identical to iter-0's.
+        # If they are, --init-from-checkpoint is silently no-opping again.
+        import hashlib
+        def _hash(path: Path) -> str:
+            return hashlib.md5(path.read_bytes()).hexdigest() if path.exists() else "MISSING"
+        ckpts = {it: _hash(work_dir / f"iter-{it:03d}" / "model" / "checkpoint.pt") for it in (0, 1, 2)}
+        if ckpts[0] == ckpts[1] == ckpts[2] != "MISSING":
+            raise AssertionError(
+                f"iter-0/1/2 checkpoints are byte-identical (md5={ckpts[0]}) — "
+                f"DAgger warm-start is not actually training. Bug regression."
+            )
+
         # Item 12: opponent-pool persistence + per-iteration snapshot.
         pool_path = work_dir / "opponent-pool.json"
         if not pool_path.exists():

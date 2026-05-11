@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
+from events import EventWriter
 from uma_ai.dataset import JsonlPolicyDataset, collate_policy_batch
 from uma_ai.features import ACTION_DIM, ACTION_FEATURE_SCHEMA_VERSION, STATE_DIM, STATE_FEATURE_SCHEMA_VERSION, card_vocab_metadata
 from uma_ai.model import CandidatePolicyNet, ModelConfig
@@ -56,11 +57,37 @@ def main() -> None:
     start_epoch = 1
     history: list[dict[str, Any]] = []
     resume_metadata: dict[str, Any] | None = None
+    if args.resume and args.init_from_checkpoint:
+        raise SystemExit("--resume and --init-from-checkpoint are mutually exclusive")
     if args.resume:
         resume_path = Path(args.resume)
         resume_metadata = load_resume(resume_path, model, optimizer, scheduler, scaler)
         start_epoch = int(resume_metadata.get("next_epoch", 1))
         history = list(resume_metadata.get("history", []))
+    elif args.init_from_checkpoint:
+        load_init_from_checkpoint(Path(args.init_from_checkpoint), model)
+
+    if start_epoch > args.epochs:
+        raise SystemExit(
+            f"--resume requested start_epoch={start_epoch} but --epochs={args.epochs} "
+            "leaves nothing to train. Increase --epochs (cumulative semantics) or "
+            "switch to --init-from-checkpoint to start a fresh training run from the "
+            "prior model weights."
+        )
+
+    events: EventWriter | None = EventWriter(args.events_out) if args.events_out else None
+    if events is not None:
+        events.emit(
+            iteration=args.events_iteration,
+            stage="train",
+            event_type="train_run_started",
+            data_path=str(args.data),
+            samples=len(dataset),
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            kl_anchor_weight=float(args.kl_anchor_weight),
+            kl_anchor_checkpoint=str(args.kl_anchor_checkpoint) if args.kl_anchor_checkpoint else None,
+        )
 
     for epoch in range(start_epoch, args.epochs + 1):
         train_metrics = run_epoch(
@@ -79,6 +106,20 @@ def main() -> None:
         history.append(record)
         if args.verbose:
             print(json.dumps(record))
+        if events is not None:
+            events.emit(
+                iteration=args.events_iteration,
+                stage="train",
+                event_type="epoch",
+                epoch=epoch,
+                train_loss=train_metrics.get("loss"),
+                train_policy_loss=train_metrics.get("policy_loss"),
+                train_value_loss=train_metrics.get("value_loss"),
+                train_kl_loss=train_metrics.get("kl_loss"),
+                train_accuracy=train_metrics.get("accuracy"),
+                val_loss=val_metrics.get("loss"),
+                val_accuracy=val_metrics.get("accuracy"),
+            )
 
     final_train = evaluate(model, train_loader, value_weight=args.value_weight)
     final_val = evaluate(model, val_loader, value_weight=args.value_weight) if val_loader else {}
@@ -189,6 +230,21 @@ def load_resume(
     if isinstance(rng_state.get("torch"), list):
         torch.set_rng_state(torch.tensor(rng_state["torch"], dtype=torch.uint8))
     return payload
+
+
+def load_init_from_checkpoint(path: Path, model: CandidatePolicyNet) -> None:
+    """Warm-start model weights only.
+
+    Unlike ``load_resume``, this does NOT restore optimizer/scheduler/
+    scaler/RNG/epoch counter. Each call starts a fresh training run
+    that happens to begin from these parameter values. This is the
+    correct primitive for DAgger-style outer loops where each
+    iteration is a new training run on a new dataset, warm-started
+    from the prior promoted checkpoint.
+    """
+
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    model.load_state_dict(payload["model_state"])
 
 
 def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out_dir: Path, device: torch.device) -> dict[str, Any]:
@@ -594,7 +650,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--lr-schedule", choices=["none", "cosine", "step"], default="cosine")
     parser.add_argument("--lr-warmup-steps", type=int, default=0)
-    parser.add_argument("--resume", default=None, help="Path to a checkpoint.pt to resume training state from.")
+    parser.add_argument("--resume", default=None, help="Path to a checkpoint.pt to resume FULL training state from (optimizer, scheduler, RNG, epoch counter). For mid-run crash recovery; not for DAgger warm-start.")
+    parser.add_argument("--init-from-checkpoint", default=None, help="Path to a checkpoint.pt to warm-start MODEL WEIGHTS only. Fresh optimizer/scheduler/epoch counter. This is the DAgger-iteration warm-start primitive.")
+    parser.add_argument("--events-out", default=None,
+                        help="Append per-epoch loss events to this JSONL stream (events.jsonl).")
+    parser.add_argument("--events-iteration", type=int, default=-1,
+                        help="Iteration index recorded on emitted events when orchestrated; -1 for standalone runs.")
     parser.add_argument("--kl-anchor-checkpoint", default=None,
                         help="Frozen prior-iteration checkpoint to regularize toward (anti-forgetting).")
     parser.add_argument("--kl-anchor-weight", type=float, default=0.0,

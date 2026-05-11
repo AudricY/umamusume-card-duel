@@ -541,12 +541,58 @@ this line will be appended once the sweep runs.
 - KL anchor + weight ablation plumbing validated on the pilot.
 - Recipe-bug fix (rollout-steps=200 → 500) is now the orchestrator's
   configured default for the documented sweep.
-- Full sweep itself is queued as a multi-hour run; not executed in
-  this session.
-- Once the sweep completes, append the iteration table and an explicit
-  finding statement (escalation tripped or not) to this file. Until
-  then, item 17 acceptance is *prerequisites met*, not *finding
-  recorded*.
+
+### Phase D outcome — item 17 sweep (2026-05-11) — INVALID, SWEEP TO RE-RUN
+
+Sweep at `runs/item17-2026-05-08/` ran the documented config and
+recorded the table below:
+
+| Iter | Selection | Wilson lower (n=200) | KL weight | Decision |
+| --- | --- | --- | --- | --- |
+| 0 | rollout-CRN×3 | 0.3014 | 0.0 | promoted |
+| 1 | policy (iter-0) | 0.2826 | 0.1 | rejected |
+| 2 | policy (iter-0) | 0.3061 | 0.5 | promoted |
+
+**The sweep is invalid as a measurement.** Cross-checking checkpoint
+weights surfaced via observability Stage 1 (events.jsonl per-epoch
+loss events) showed iter-1 and iter-2 recorded zero per-epoch loss
+events. Loading the saved checkpoints confirmed:
+
+- `iter-0`, `iter-1`, and `iter-2` model weights are **bitwise
+  identical** (max-diff across all parameters = 0.0).
+- All five emitted ONNX files share the same md5 (`550b0d4...`).
+- Each checkpoint's `next_epoch = 26`; iter-1 and iter-2's
+  `history` is the iter-0 history copy with no new entries.
+
+**Root cause.** `train_bc.py --resume` loads `next_epoch` from the
+prior checkpoint (26 after iter-0 trained 25 epochs) and sets
+`start_epoch = next_epoch`. The orchestrator passes
+`--epochs cfg.epochs` (25 per iter, not cumulative), so on iter-1 and
+iter-2 the training loop is `range(26, 26)` — zero iterations. The
+final-metrics evaluator still runs against the loaded model and
+writes a manifest, masking the no-op training.
+
+The reported iter-on-iter Wilson lower differences (0.30 → 0.28 →
+0.31) are pure eval-gate noise on the same model. **No conclusion
+about the SL cap or KL anchor can be drawn from this sweep.**
+
+**Why observability caught it.** The events stream emitted three
+`train_run_started` events but only two `epoch` events (both from
+iter-0), making the silent skip visible in seconds. Without the event
+stream, the per-iteration training history is buried under a deeply
+nested key in 100KB+ manifest.json files; the running orchestrator
+prints subprocess stdout but doesn't surface "trained 0 epochs" as a
+distinct signal.
+
+**Fix landed.** `training/train_bc.py` now accepts
+`--init-from-checkpoint` (model_state only, fresh optimizer/scheduler/
+epoch counter) alongside `--resume` (full training-state resume for
+mid-run crash recovery). `dagger_orchestrator.py` switched to
+`--init-from-checkpoint` so each DAgger iteration trains its full
+`--epochs` budget against the new mixed dataset.
+
+The corrected sweep needs to be re-run before any v4-reframe finding
+can be claimed; that's tracked as a follow-up task.
 
 ### Phase E — F1 PPO smoke
 

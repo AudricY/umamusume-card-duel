@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from events import EventWriter
 from opponent_pool import OpponentPool, PoolEntry
 from uma_ai.node_bridge import (
     export_training_examples,
@@ -89,6 +90,17 @@ def main() -> None:
     if args.resume_state:
         state = load_state(Path(args.resume_state))
 
+    events = EventWriter(out_dir)
+    events.emit_run(
+        stage="orchestrator",
+        event_type="run_started",
+        iterations=args.iterations,
+        games=args.games,
+        teacher=args.teacher,
+        epochs=args.epochs,
+        resumed_from_iter=max((e["iteration"] for e in state.iterations), default=-1),
+    )
+
     base_config = IterationConfig(
         iteration=0,
         games=args.games,
@@ -106,7 +118,7 @@ def main() -> None:
         depth=args.depth,
     )
 
-    rule_bot_replay = ensure_rule_bot_replay(repo_root, out_dir, args, base_config)
+    rule_bot_replay = ensure_rule_bot_replay(repo_root, out_dir, args, base_config, events)
     pool_path = out_dir / "opponent-pool.json"
     pool = OpponentPool.from_json(pool_path)
 
@@ -114,12 +126,21 @@ def main() -> None:
     for iteration in range(last_iter + 1, args.iterations):
         if state.halted:
             print(f"[orchestrator] halted before iteration {iteration}: {state.halt_reason}")
+            events.emit_run(stage="orchestrator", event_type="halted_before_iteration", iteration_skipped=iteration, halt_reason=state.halt_reason)
             break
         cfg = IterationConfig(**{**base_config.__dict__, "iteration": iteration})
-        record = run_iteration(repo_root, out_dir, cfg, state, rule_bot_replay, pool, args)
+        record = run_iteration(repo_root, out_dir, cfg, state, rule_bot_replay, pool, args, events)
         state.iterations.append(record)
         save_state(out_dir / "orchestrator-state.json", state)
         pool.to_json(pool_path)
+
+    events.emit_run(
+        stage="orchestrator",
+        event_type="run_completed",
+        promoted_iterations=[i["iteration"] for i in state.iterations if i.get("promoted")],
+        halted=state.halted,
+        halt_reason=state.halt_reason,
+    )
 
     summary = {
         "iterations": state.iterations,
@@ -131,7 +152,7 @@ def main() -> None:
     print(json.dumps(summary, indent=2))
 
 
-def ensure_rule_bot_replay(repo_root: Path, out_dir: Path, args: argparse.Namespace, cfg: IterationConfig) -> Path:
+def ensure_rule_bot_replay(repo_root: Path, out_dir: Path, args: argparse.Namespace, cfg: IterationConfig, events: EventWriter | None = None) -> Path:
     """Always-on rule-bot rehearsal slice.
 
     The rule-bot replay buffer grounds the loop against the original
@@ -141,8 +162,12 @@ def ensure_rule_bot_replay(repo_root: Path, out_dir: Path, args: argparse.Namesp
 
     replay = out_dir / "rule-bot-replay.jsonl"
     if replay.exists() and replay.stat().st_size > 0 and not args.refresh_rule_bot:
+        if events is not None:
+            events.emit_run(stage="rule-bot-replay", event_type="reused", path=str(replay), bytes=replay.stat().st_size)
         return replay
     print(f"[orchestrator] generating rule-bot replay ({args.replay_games} games)")
+    if events is not None:
+        events.emit_run(stage="rule-bot-replay", event_type="started", games=args.replay_games, seed_start=args.replay_seed_start)
     export_training_examples(
         repo_root,
         replay,
@@ -150,6 +175,8 @@ def ensure_rule_bot_replay(repo_root: Path, out_dir: Path, args: argparse.Namesp
         games=args.replay_games,
         max_steps=args.max_steps,
     )
+    if events is not None:
+        events.emit_run(stage="rule-bot-replay", event_type="completed", path=str(replay), rows=count_lines(replay))
     return replay
 
 
@@ -161,10 +188,22 @@ def run_iteration(
     rule_bot_replay: Path,
     pool: OpponentPool,
     args: argparse.Namespace,
+    events: EventWriter | None = None,
 ) -> dict[str, Any]:
     iter_dir = root_dir / f"iter-{cfg.iteration:03d}"
     iter_dir.mkdir(parents=True, exist_ok=True)
     print(f"[orchestrator] === iteration {cfg.iteration} ===")
+    if events is not None:
+        events.emit(
+            iteration=cfg.iteration,
+            stage="iteration",
+            event_type="started",
+            games=cfg.games,
+            epochs=cfg.epochs,
+            rollout_steps=cfg.rollout_steps,
+            rollout_crn_samples=cfg.rollout_crn_samples,
+            parent_promoted=str(state.promoted_checkpoint) if state.promoted_checkpoint else None,
+        )
 
     trace_path = iter_dir / "trace.jsonl"
     relabeled_path = iter_dir / "relabeled.jsonl"
@@ -180,6 +219,8 @@ def run_iteration(
 
     seed_start = args.trace_seed_start + cfg.iteration * cfg.games
     eval_seed_start = cfg.eval_seed_start + cfg.iteration * cfg.eval_min_games
+    if events is not None:
+        events.emit(iteration=cfg.iteration, stage="trace-gen", event_type="started", selection=selection, seed_start=seed_start)
     if state.promoted_checkpoint is None:
         run_evaluator(
             repo_root,
@@ -205,7 +246,11 @@ def run_iteration(
             manifest_out=trace_manifest,
             args=args,
         )
+    if events is not None:
+        events.emit(iteration=cfg.iteration, stage="trace-gen", event_type="completed", rows=count_lines(trace_path))
 
+    if events is not None:
+        events.emit(iteration=cfg.iteration, stage="relabel", event_type="started")
     relabel_decision_trace(
         repo_root,
         trace_path,
@@ -214,11 +259,15 @@ def run_iteration(
         label_source=f"{cfg.teacher}-teacher",
         manifest_out=relabel_manifest,
     )
+    if events is not None:
+        events.emit(iteration=cfg.iteration, stage="relabel", event_type="completed", rows=count_lines(relabeled_path))
 
     mix_components: list[tuple[str, float, str]] = [
         (str(relabeled_path), cfg.relabeled_weight, f"iter-{cfg.iteration}-relabeled"),
         (str(rule_bot_replay), cfg.rule_bot_replay_weight, "rule-bot-replay"),
     ]
+    if events is not None:
+        events.emit(iteration=cfg.iteration, stage="mix", event_type="started", components=[(c[2], c[1]) for c in mix_components])
     mix_sources(
         repo_root,
         out=mixed_path,
@@ -226,6 +275,8 @@ def run_iteration(
         components=mix_components,
         manifest_out=mix_manifest,
     )
+    if events is not None:
+        events.emit(iteration=cfg.iteration, stage="mix", event_type="completed", rows=count_lines(mixed_path))
 
     train_dir = iter_dir / "model"
     train_args = [
@@ -249,7 +300,12 @@ def run_iteration(
         "16",
     ]
     if state.promoted_checkpoint is not None:
-        train_args += ["--resume", str(state.promoted_checkpoint)]
+        # DAgger semantics: each iteration is a fresh training run with
+        # warm-started model weights, not a continuation of the prior
+        # iteration's training state. ``--init-from-checkpoint`` loads
+        # ``model_state`` only and keeps a fresh optimizer/scheduler/epoch
+        # counter so ``--epochs`` is the per-iteration epoch budget.
+        train_args += ["--init-from-checkpoint", str(state.promoted_checkpoint)]
     # Item 17: KL-anchor anti-forgetting against the prior promoted checkpoint.
     # Per-iteration weight ablation: --kl-anchor-weights iter0,iter1,iter2,...
     # is consumed positionally; missing positions default to --kl-anchor-weight.
@@ -262,8 +318,27 @@ def run_iteration(
                 "--kl-anchor-weight",
                 str(kl_weight),
             ]
+    if events is not None:
+        events.emit(iteration=cfg.iteration, stage="train", event_type="started", epochs=cfg.epochs, batch_size=cfg.batch_size, hidden_dim=cfg.hidden_dim, depth=cfg.depth)
+        # Pass events.jsonl + iteration id to train_bc so per-epoch loss
+        # events land on the same stream as the orchestrator's stage events.
+        train_args += ["--events-out", str(events.path), "--events-iteration", str(cfg.iteration)]
     subprocess.run(train_args, cwd=repo_root, check=True)
     train_manifest = json.loads((train_dir / "manifest.json").read_text(encoding="utf8"))
+    if events is not None:
+        final_train = train_manifest.get("metrics", {}).get("train", {})
+        final_val = train_manifest.get("metrics", {}).get("val", {})
+        events.emit(
+            iteration=cfg.iteration,
+            stage="train",
+            event_type="completed",
+            final_train_loss=final_train.get("loss"),
+            final_train_policy_loss=final_train.get("policy_loss"),
+            final_train_value_loss=final_train.get("value_loss"),
+            final_train_accuracy=final_train.get("accuracy"),
+            final_val_loss=final_val.get("loss"),
+            final_val_accuracy=final_val.get("accuracy"),
+        )
 
     # The orchestrator needs an ONNX-served model to evaluate strength
     # closed-loop. The full server bring-up is heavy; for the smoke we
@@ -271,6 +346,8 @@ def run_iteration(
     # --skip-policy-gate is set, which lets the loop exercise the
     # promote/reject path without standing up serve_onnx.
     eval_manifest_path = iter_dir / "gate.manifest.json"
+    if events is not None:
+        events.emit(iteration=cfg.iteration, stage="gate", event_type="started", mode="baseline" if args.skip_policy_gate else "policy", min_games=2 * cfg.eval_min_games)
     if args.skip_policy_gate:
         gate_returncode = run_eval_gate(
             repo_root,
@@ -299,6 +376,16 @@ def run_iteration(
     wilson_lower = float(summary.get("wilson95", {}).get("lower", 0.0))
 
     eval_n = int(summary.get("games", cfg.eval_min_games * 2))
+    if events is not None:
+        events.emit(
+            iteration=cfg.iteration,
+            stage="gate",
+            event_type="completed",
+            returncode=gate_returncode,
+            wilson_lower=wilson_lower,
+            win_rate=summary.get("modelWinRate"),
+            games=eval_n,
+        )
 
     # Item 12: pool matchup eval. Runs *before* the promotion decision
     # so item 13's per-matchup floor violations can join the gate's failure
@@ -315,18 +402,29 @@ def run_iteration(
         and len(pool.entries) > 0
         and (train_dir / "checkpoint.pt").exists()
     ):
+        if events is not None:
+            events.emit(iteration=cfg.iteration, stage="pool-eval", event_type="started", n_opponents=len(pool.entries), games_each=args.pool_eval_games)
         for opponent_entry in list(pool.entries):
             try:
-                pool_eval_results.append(
-                    run_pool_matchup_eval(
-                        repo_root,
-                        iter_dir,
-                        train_dir / "checkpoint.pt",
-                        opponent_entry,
-                        cfg=cfg,
-                        args=args,
-                    )
+                result = run_pool_matchup_eval(
+                    repo_root,
+                    iter_dir,
+                    train_dir / "checkpoint.pt",
+                    opponent_entry,
+                    cfg=cfg,
+                    args=args,
                 )
+                pool_eval_results.append(result)
+                if events is not None:
+                    events.emit(
+                        iteration=cfg.iteration,
+                        stage="pool-eval",
+                        event_type="matchup",
+                        opponent_iteration=result.get("opponent_iteration"),
+                        wilson_lower=result.get("wilson_lower"),
+                        win_rate=result.get("win_rate"),
+                        n_games=result.get("n_games"),
+                    )
             except Exception as exc:  # pragma: no cover - logged for telemetry only
                 print(f"[orchestrator] pool matchup vs iter-{opponent_entry.iteration} failed: {exc}")
                 pool_eval_results.append({
@@ -336,6 +434,8 @@ def run_iteration(
                     "n_games": 0,
                     "error": str(exc),
                 })
+                if events is not None:
+                    events.emit(iteration=cfg.iteration, stage="pool-eval", event_type="matchup_error", opponent_iteration=opponent_entry.iteration, error=str(exc))
         if pool_eval_results:
             valid = [row for row in pool_eval_results if row.get("n_games", 0) > 0]
             total_n = sum(row["n_games"] for row in valid)
@@ -380,6 +480,18 @@ def run_iteration(
                 f"halt-after-2: 2 consecutive rejections; last reason "
                 f"'{decision['reason']}'"
             )
+    if events is not None:
+        events.emit(
+            iteration=cfg.iteration,
+            stage="decision",
+            event_type="promoted" if decision["promote"] else "rejected",
+            wilson_lower=wilson_lower,
+            reason=decision["reason"],
+            consecutive_failures=state.consecutive_failures,
+            halted=state.halted,
+            matchup_violations=matchup_violations,
+            cycling_alarm=cycling_alarm_iterations,
+        )
 
     record = {
         "iteration": cfg.iteration,
@@ -430,6 +542,14 @@ def run_iteration(
         "train_manifest": train_manifest,
     }, indent=2) + "\n", encoding="utf8")
     print(f"[orchestrator] iteration {cfg.iteration} {'promoted' if decision['promote'] else 'rejected'} ({decision['reason']})")
+    if events is not None:
+        events.emit(
+            iteration=cfg.iteration,
+            stage="iteration",
+            event_type="completed",
+            promoted=decision["promote"],
+            wilson_lower=wilson_lower,
+        )
     return record
 
 
