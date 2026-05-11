@@ -415,6 +415,24 @@ In parallel: game-level parallelism (~4× speedup), latency dials (K=1 / adaptiv
 
 Iter-1 promoted as the new strongest model. Per-side: player 0.667 / opponent 0.65 — **R-WILD side gap is closed** (was historically ~16pp opp-favored, briefly 9pp player-favored in R12, now within 2pp). Zero heuristic fallbacks → MCTS execution is clean. Iter-1 checkpoint: `runs/R13-W6-phase-d/iter-1/checkpoint.pt`.
 
+### R13 PPO probe on iter-1 — still doesn't move (2026-05-11)
+
+Three iterations of `ppo_orchestrator` from the W6 iter-1 checkpoint (20 games/update, 30-game gate per iter, `--selection policy` for both collection and gate):
+
+| Iter | Wilson lower (policy gate) | mean_advantage |
+| --- | --- | --- |
+| 0 | 0.242 | -0.150 |
+| 1 | 0.301 | +0.049 |
+| 2 | 0.256 | -0.139 |
+
+Compare to iter-1 at value-head-leaf MCTS: Wilson 0.452. PPO at raw policy regressed strength. Diagnostics:
+
+- **Importance ratios ~1.0** across all minibatches → policy still close to argmax.
+- **Per-minibatch entropy ~0.27 nats** — higher than the original R3 BC (0.18) but the visit-count distillation didn't soften the policy enough for PPO to differentiate trajectories.
+- **mean_advantage still flips sign** between iterations — W3's value-head retrain helped MCTS-augmented decisions but doesn't carry to raw-policy GAE returns.
+
+Verdict: iter-1's strength is **coupled to MCTS at decision time**. PPO from the raw policy is still blocked by the same two issues that killed the original F1 attempts (peaked policy + return-vs-value mismatch). To unblock RL: (a) generate trajectories under MCTS instead of raw policy (expensive), or (b) restart from a much softer init (Dirichlet-warmed BC with high temperature). Both are R14+ work.
+
 ### R13 cheap-inference verdict — value-head-leaf at iter-1 clears GO (2026-05-11)
 
 Gate at the W6 iter-1 checkpoint with `--mcts-leaf value-head` (no rollouts), 100 sims, 100 games seeds 700000+:
