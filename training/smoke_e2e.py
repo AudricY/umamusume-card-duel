@@ -116,6 +116,61 @@ def main() -> None:
         behavior = served_prediction.get("behaviorPolicy")
         if not behavior or behavior.get("kind") != "greedy":
             raise AssertionError(f"behaviorPolicy.kind must be greedy; got {behavior}")
+
+        # F1/PPO: stochastic sampling mode with Gumbel-max. Same request
+        # body but with sampling=stochastic must return behaviorPolicy
+        # {kind: 'stochastic', temperature: T}. Same samplingSeed produces
+        # the same selection; legal-prob mass stays at 1.0. Across many
+        # different seeds at T=1 the selected index must take at least
+        # two distinct values when there are >= 2 legal actions, otherwise
+        # the sampler is not stochastic.
+        stoch_request_body = {
+            "observation": sample.example["observation"],
+            "legalActions": sample.example["legalActions"],
+            "sampling": "stochastic",
+            "temperature": 1.0,
+        }
+        stoch_a = post_json(
+            f"http://127.0.0.1:{port}/predict",
+            {**stoch_request_body, "samplingSeed": 42},
+        )
+        stoch_b = post_json(
+            f"http://127.0.0.1:{port}/predict",
+            {**stoch_request_body, "samplingSeed": 42},
+        )
+        if stoch_a["selectedIndex"] != stoch_b["selectedIndex"]:
+            raise AssertionError(
+                f"stochastic sampling with the same samplingSeed must be deterministic; "
+                f"got {stoch_a['selectedIndex']} vs {stoch_b['selectedIndex']}"
+            )
+        if (stoch_a.get("behaviorPolicy") or {}).get("kind") != "stochastic":
+            raise AssertionError(
+                f"behaviorPolicy.kind must be stochastic in stochastic mode; got {stoch_a.get('behaviorPolicy')}"
+            )
+        if abs(float((stoch_a["behaviorPolicy"]).get("temperature", -1)) - 1.0) > 1e-6:
+            raise AssertionError(
+                f"behaviorPolicy.temperature must be 1.0; got {stoch_a['behaviorPolicy']}"
+            )
+        stoch_legal_prob_sum = sum(stoch_a["actionProbs"][0][:legal_count])
+        if not (0.999 <= stoch_legal_prob_sum <= 1.001):
+            raise AssertionError(
+                f"stochastic actionProbs legal-sum must be ~1.0; got {stoch_legal_prob_sum}"
+            )
+        if legal_count >= 2:
+            seen = set()
+            for seed in range(1000, 1080):
+                s = post_json(
+                    f"http://127.0.0.1:{port}/predict",
+                    {**stoch_request_body, "samplingSeed": seed},
+                )
+                seen.add(int(s["selectedIndex"][0]))
+                if len(seen) >= 2:
+                    break
+            if len(seen) < 2:
+                raise AssertionError(
+                    f"stochastic sampling across 80 seeds must produce at least 2 distinct selections "
+                    f"with {legal_count} legal actions; got {seen}"
+                )
     finally:
         server.terminate()
         try:

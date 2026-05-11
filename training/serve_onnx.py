@@ -59,16 +59,37 @@ class Handler(BaseHTTPRequestHandler):
             arrays, action_ids = request_to_arrays(payload)
             logits, value = self.server.session.run(None, arrays)
             mask = arrays["action_mask"]
-            # Behavior policy = softmax(logits | mask). Selection is greedy
-            # (argmax), but PPO importance ratios use the softmax distribution
-            # because that is what the *trained* policy represents and what
-            # PPO will compare against. At PPO iteration 0 behavior == target,
-            # so the ratio is exactly 1; drift accumulates as PPO updates the
-            # target. The masked log-softmax sentinel (-1e9 for masked legs)
-            # keeps exp() finite at the consumer.
-            log_probs = masked_log_softmax(logits, mask)
-            action_probs = masked_softmax(logits, mask)
-            selected = logits.argmax(axis=1).astype(int)
+            # Per-request sampling mode. ``greedy`` is the DAgger gate
+            # default; ``stochastic`` is the F1/PPO collector mode that
+            # enables non-zero-entropy rollouts and finite importance ratios.
+            # ``actionLogProbs`` always reflects the distribution actually
+            # used to sample (post-temperature) so trace consumers can use
+            # it directly as ``behavior_logp`` for importance weights.
+            sampling = str(payload.get("sampling", "greedy")).lower()
+            if sampling not in {"greedy", "stochastic"}:
+                raise ValueError(f"unknown sampling mode: {sampling}")
+            temperature = float(payload.get("temperature", 0.0 if sampling == "greedy" else 1.0))
+            if sampling == "stochastic" and temperature <= 0.0:
+                # Stochastic with temp=0 collapses to argmax; treat as greedy
+                # to avoid divide-by-zero in the Gumbel softmax.
+                sampling = "greedy"
+                temperature = 0.0
+
+            if sampling == "greedy":
+                log_probs = masked_log_softmax(logits, mask)
+                action_probs = masked_softmax(logits, mask)
+                selected = logits.argmax(axis=1).astype(int)
+            else:
+                scaled_logits = logits.astype(np.float64) / temperature
+                log_probs = masked_log_softmax(scaled_logits.astype(np.float32), mask)
+                action_probs = masked_softmax(scaled_logits.astype(np.float32), mask)
+                sampling_seed = payload.get("samplingSeed")
+                rng = np.random.default_rng(sampling_seed if sampling_seed is not None else None)
+                # Gumbel-max: argmax(log p + Gumbel(0,1)) ~ Categorical(p).
+                # Masked positions already have log_p = -1e9, dominating any
+                # Gumbel noise so they are never selected.
+                gumbel = -np.log(-np.log(rng.uniform(low=1e-12, high=1.0, size=log_probs.shape)))
+                selected = (log_probs.astype(np.float64) + gumbel).argmax(axis=1).astype(int)
             selected_log_probs = [
                 float(log_probs[row, idx]) for row, idx in enumerate(selected.tolist())
             ]
@@ -80,8 +101,8 @@ class Handler(BaseHTTPRequestHandler):
                 "actionProbs": action_probs.tolist(),
                 "selectedLogProb": selected_log_probs,
                 "behaviorPolicy": {
-                    "kind": "greedy",
-                    "temperature": 0.0,
+                    "kind": sampling,
+                    "temperature": temperature,
                 },
             }
             if action_ids is not None:
