@@ -183,8 +183,11 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     # Save checkpoint in the same shape train_bc.py uses so serve_onnx/export_onnx work.
+    # export_onnx.py reads top-level `model_config`; keep it both there and
+    # nested in metadata so either consumer works.
     checkpoint = {
         "model_state": {k: v.cpu() for k, v in model.state_dict().items()},
+        "model_config": config.to_dict(),
         "metadata": {
             "model_config": config.to_dict(),
             "epochs": args.epochs,
