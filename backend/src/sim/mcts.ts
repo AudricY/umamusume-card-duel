@@ -24,7 +24,7 @@ import type { LegalAiAction } from "../../../frontend/src/game/engine/ai-policy/
 import type { GameState, SideId } from "../../../shared/src/types";
 import { advanceModeledTurnStep, getForcedAttackCoinResults, stateHash } from "./evaluateModelVsHeuristic";
 
-export type MctsLeaf = "value-head";
+export type MctsLeaf = "value-head" | "rollout";
 export type MctsPrior = "uniform" | "policy";
 
 export type MctsConfig = {
@@ -32,6 +32,12 @@ export type MctsConfig = {
   cPuct: number;
   leaf: MctsLeaf;
   prior: MctsPrior;
+  // For `leaf: "rollout"`: number of CRN rollouts averaged at each leaf and
+  // depth limit per rollout. The rollout-CRN-3 teacher we use elsewhere
+  // averages 3 shared seeds; we mirror that as a default. Higher counts buy
+  // less leaf variance at proportional latency cost.
+  rolloutCrnSamples: number;
+  rolloutSteps: number;
   // Phase A: at the root only, mix in Dirichlet noise (α applied uniformly,
   // ε weight on the noise) to encourage exploration. Off by default; the
   // self-play data generation phase enables it via the CLI flag.
@@ -91,6 +97,8 @@ export function defaultMctsConfig(overrides?: Partial<MctsConfig>): MctsConfig {
     cPuct: 1.5,
     leaf: "value-head",
     prior: "uniform",
+    rolloutCrnSamples: 3,
+    rolloutSteps: 200,
     addRootDirichlet: false,
     dirichletAlpha: 0.3,
     dirichletEpsilon: 0.25,
@@ -153,12 +161,13 @@ export async function runMcts(
     root.priors = root.priors.map((p, i) => (1 - eps) * p + eps * (noise[i] ?? 0));
   }
 
-  // Cache the root value. With policy-prior mode we got it for free from
-  // `buildModelDecisionNode`; with uniform we do a one-off /predict.
-  if (root.cachedLeafValue !== null) {
+  // Cache the root value. Only reuse the harvested value if we're using
+  // value-head leaves; in rollout mode the cached scalar is the policy's
+  // value estimate, not what we want to seed the diagnostic with.
+  if (config.leaf === "value-head" && root.cachedLeafValue !== null) {
     diagnostics.rootValue = root.cachedLeafValue;
   } else {
-    diagnostics.rootValue = await leafValue(rootState, modelSide, modelUrl);
+    diagnostics.rootValue = await leafValue(rootState, modelSide, modelUrl, config, rootRng.fork("root-leaf"));
     diagnostics.leafEvaluations += 1;
   }
 
@@ -207,7 +216,7 @@ export async function runMcts(
         // Memory cap reached — evaluate the leaf without storing a node.
         leafValueScalar = nextState.gameOver
           ? mctsTerminalValue(nextState, parent.modelSide)
-          : await leafValue(nextState, parent.modelSide, modelUrl);
+          : await leafValue(nextState, parent.modelSide, modelUrl, config, simRng.fork(`leaf:cap:a${actionIndex}`));
         diagnostics.leafEvaluations += nextState.gameOver ? 0 : 1;
         diagnostics.terminalLeafs += nextState.gameOver ? 1 : 0;
       } else {
@@ -223,12 +232,12 @@ export async function runMcts(
         if (newChild.terminalValue !== null) {
           leafValueScalar = newChild.terminalValue;
           diagnostics.terminalLeafs += 1;
-        } else if (newChild.cachedLeafValue !== null) {
+        } else if (config.leaf === "value-head" && newChild.cachedLeafValue !== null) {
           // Policy-prior mode: value was harvested from the same /predict
           // call that produced the priors; no extra fetch needed.
           leafValueScalar = newChild.cachedLeafValue;
         } else {
-          leafValueScalar = await leafValue(newChild.state, newChild.modelSide, modelUrl);
+          leafValueScalar = await leafValue(newChild.state, newChild.modelSide, modelUrl, config, simRng.fork(`leaf:expand:a${actionIndex}`));
           diagnostics.leafEvaluations += 1;
         }
       }
@@ -492,8 +501,21 @@ function sampleGamma(alpha: number, rng: Rng): number {
   }
 }
 
-async function leafValue(state: GameState, modelSide: SideId, modelUrl: string): Promise<number> {
+async function leafValue(
+  state: GameState,
+  modelSide: SideId,
+  modelUrl: string,
+  config: MctsConfig,
+  rng: Rng,
+): Promise<number> {
   if (state.gameOver) return mctsTerminalValue(state, modelSide);
+  if (config.leaf === "rollout") {
+    return rolloutLeafValue(state, modelSide, config, rng);
+  }
+  return valueHeadLeafValue(state, modelSide, modelUrl);
+}
+
+async function valueHeadLeafValue(state: GameState, modelSide: SideId, modelUrl: string): Promise<number> {
   const legalActions = enumerateLegalAiActions(state, modelSide);
   const response = await fetch(`${modelUrl.replace(/\/$/, "")}/predict`, {
     method: "POST",
@@ -509,4 +531,40 @@ async function leafValue(state: GameState, modelSide: SideId, modelUrl: string):
   }
   const payload = await response.json() as { value?: number[] };
   return Number(payload.value?.[0] ?? 0);
+}
+
+function rolloutLeafValue(
+  state: GameState,
+  modelSide: SideId,
+  config: MctsConfig,
+  rng: Rng,
+): number {
+  // K shared CRN seeds → run the rule-bot heuristic from the leaf state
+  // forward to game-over (or rollout-steps cap), score by side-relative
+  // ±1/0 terminal value. Mean across K samples. NO point-margin scaling,
+  // to stay consistent with the value-head leaf semantics.
+  const k = Math.max(1, config.rolloutCrnSamples);
+  let sum = 0;
+  let counted = 0;
+  for (let i = 0; i < k; i += 1) {
+    const sample = rolloutHeuristic(state, rng.fork(`rollout-crn-${i}`), config.rolloutSteps);
+    sum += mctsTerminalValue(sample, modelSide);
+    counted += 1;
+  }
+  return counted > 0 ? sum / counted : 0;
+}
+
+function rolloutHeuristic(state: GameState, rng: Rng, maxSteps: number): GameState {
+  let next = cloneGame(state);
+  for (let step = 0; step < maxSteps; step += 1) {
+    if (next.gameOver) break;
+    const before = stateHash(next);
+    const sideId: SideId = next.currentSide === "player" ? "player" : "opponent";
+    const forcedCoins = getForcedAttackCoinResults(next, rng);
+    next = sideId === "player"
+      ? advancePlayerAiTurnStep(next, forcedCoins, rng.next)
+      : advanceOpponentTurnStep(next, forcedCoins, rng.next);
+    if (stateHash(next) === before) break;
+  }
+  return next;
 }

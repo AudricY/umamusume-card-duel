@@ -157,6 +157,8 @@ function makePlannerArgs(args: ProbeArgs): EvaluateModelArgs {
     mctsSimulations: 100,
     mctsCPuct: 1.5,
     mctsLeaf: "value-head",
+    mctsRolloutCrnSamples: 3,
+    mctsRolloutSteps: 200,
     mctsCollapseMaxSteps: 64,
     mctsMaxNodes: 5000,
     mctsPrior: "uniform",

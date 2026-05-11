@@ -57,7 +57,9 @@ export type EvaluateModelArgs = {
   // come from `defaultMctsConfig()`; CLI flags override per run.
   mctsSimulations: number;
   mctsCPuct: number;
-  mctsLeaf: "value-head";
+  mctsLeaf: "value-head" | "rollout";
+  mctsRolloutCrnSamples: number;
+  mctsRolloutSteps: number;
   mctsCollapseMaxSteps: number;
   mctsMaxNodes: number;
   mctsPrior: "uniform" | "policy";
@@ -555,6 +557,8 @@ async function chooseMctsAction(
     simulations: Math.max(1, args.mctsSimulations),
     cPuct: args.mctsCPuct,
     leaf: args.mctsLeaf,
+    rolloutCrnSamples: Math.max(1, args.mctsRolloutCrnSamples),
+    rolloutSteps: Math.max(1, args.mctsRolloutSteps),
     prior: args.mctsPrior,
     addRootDirichlet: args.mctsRootDirichlet,
     dirichletAlpha: args.mctsDirichletAlpha,
@@ -1238,6 +1242,8 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     mctsSimulations: Number(get("--mcts-simulations", "100")),
     mctsCPuct: Number(get("--mcts-c-puct", "1.5")),
     mctsLeaf: parseMctsLeaf(get("--mcts-leaf", "value-head")),
+    mctsRolloutCrnSamples: Number(get("--mcts-rollout-crn-samples", "3")),
+    mctsRolloutSteps: Number(get("--mcts-rollout-steps", "200")),
     mctsCollapseMaxSteps: Number(get("--mcts-collapse-max-steps", "64")),
     mctsMaxNodes: Number(get("--mcts-max-nodes", "5000")),
     mctsPrior: parseMctsPrior(get("--mcts-prior", "uniform")),
@@ -1253,14 +1259,9 @@ function parseMctsPrior(raw: string): "uniform" | "policy" {
   throw new Error(`--mcts-prior must be uniform or policy, got ${raw}`);
 }
 
-function parseMctsLeaf(raw: string): "value-head" {
-  // Day-1 only supports value-head leaves; the type union is kept narrow so
-  // later phases (rollout-CRN at leaves) can extend it without rewriting
-  // callers.
-  if (raw !== "value-head") {
-    throw new Error(`--mcts-leaf must be "value-head" for now, got ${raw}`);
-  }
-  return "value-head";
+function parseMctsLeaf(raw: string): "value-head" | "rollout" {
+  if (raw === "value-head" || raw === "rollout") return raw;
+  throw new Error(`--mcts-leaf must be value-head or rollout, got ${raw}`);
 }
 
 function parseAggregate(raw: string): "mean" | "max" | "median" {
