@@ -18,8 +18,9 @@ import {
   advanceOpponentTurnStep,
   advancePlayerAiTurnStep,
 } from "../../../frontend/src/game/engine";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { fork, type ChildProcess } from "node:child_process";
 import { enumerateLegalAiActions, chooseHighestScoredAction } from "../../../frontend/src/game/engine/ai-policy/actions";
 import { buildPublicObservation } from "../../../frontend/src/game/engine/ai-policy/observation";
 import { createSeededRng, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
@@ -56,6 +57,18 @@ type SelfPlayArgs = {
   temperatureValue: number;
   outPath: string;
   manifestOut: string | null;
+  workers: number;
+  workerMode: boolean;
+};
+
+type GameSummary = {
+  seed: string;
+  winner: SideId | null;
+  points: Record<SideId, number>;
+  modelDecisions: number;
+  rowCount: number;
+  visitEntropySum: number;
+  terminalReason: GameRecord["terminalReason"];
 };
 
 type SelfPlayRow = {
@@ -94,25 +107,145 @@ type GameRecord = {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.workerMode) return runWorker(args);
   mkdirSync(dirname(args.outPath), { recursive: true });
   writeFileSync(args.outPath, "", "utf8");
 
-  const games: GameRecord[] = [];
-  for (let index = 0; index < args.games; index += 1) {
-    const seed = String(args.seedStart + index);
-    const record = await runSelfPlayGame(args, seed);
-    games.push(record);
-    if (record.rows.length) {
-      appendFileSync(args.outPath, record.rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+  const summaries: GameSummary[] = [];
+  if (args.workers > 1 && args.games > 0) {
+    const seeds: string[] = [];
+    for (let index = 0; index < args.games; index += 1) seeds.push(String(args.seedStart + index));
+    await runOrchestrator(args, seeds, summaries);
+  } else {
+    const runStartedAt = Date.now();
+    for (let index = 0; index < args.games; index += 1) {
+      const seed = String(args.seedStart + index);
+      const record = await runSelfPlayGame(args, seed);
+      if (record.rows.length) {
+        appendFileSync(args.outPath, record.rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+      }
+      summaries.push(gameRecordToSummary(seed, record));
+      const elapsedSec = (Date.now() - runStartedAt) / 1000;
+      process.stderr.write(
+        `[selfplay ${index + 1}/${args.games}] seed=${seed} winner=${record.winner ?? "none"} rows=${record.rows.length} elapsed=${elapsedSec.toFixed(1)}s\n`,
+      );
     }
   }
-  const summary = summarize(games);
+  const summary = summarizeFromSummaries(summaries);
   const output = { args, summary };
   if (args.manifestOut) {
     mkdirSync(dirname(args.manifestOut), { recursive: true });
     writeFileSync(args.manifestOut, JSON.stringify(withGitMetadata(output), null, 2) + "\n", "utf8");
   }
   console.log(JSON.stringify(output, null, 2));
+}
+
+function buildWorkerArgv(parentArgv: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < parentArgv.length; i += 1) {
+    if (parentArgv[i] === "--workers") { i += 1; continue; }
+    if (parentArgv[i] === "--out") { i += 1; continue; }
+    if (parentArgv[i] === "--manifest-out") { i += 1; continue; }
+    out.push(parentArgv[i]!);
+  }
+  out.push("--worker-mode");
+  return out;
+}
+
+function partitionSeeds(seeds: string[], workers: number): string[][] {
+  const sliceSize = Math.ceil(seeds.length / workers);
+  const out: string[][] = [];
+  for (let w = 0; w < workers; w += 1) {
+    const slice = seeds.slice(w * sliceSize, (w + 1) * sliceSize);
+    if (slice.length > 0) out.push(slice);
+  }
+  return out;
+}
+
+async function runOrchestrator(args: SelfPlayArgs, seeds: string[], summaries: GameSummary[]): Promise<void> {
+  const slices = partitionSeeds(seeds, args.workers);
+  const workerArgv = buildWorkerArgv(process.argv.slice(2));
+  const shardPaths: string[] = [];
+  const runStartedAt = Date.now();
+  let gamesCompleted = 0;
+  await Promise.all(slices.map((slice, workerId) => new Promise<void>((resolve, reject) => {
+    const shardPath = `${args.outPath}.w${workerId}`;
+    shardPaths.push(shardPath);
+    const workerArgvForChild = ["--out", shardPath, ...workerArgv];
+    const child: ChildProcess = fork(process.argv[1]!, workerArgvForChild, {
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
+    });
+    let workerReady = false;
+    let workerDone = false;
+    child.on("message", (msg: unknown) => {
+      const m = msg as { kind: string; summary?: GameSummary };
+      if (m.kind === "ready") {
+        workerReady = true;
+        child.send({ kind: "seeds", workerId, seeds: slice });
+      } else if (m.kind === "game_completed" && m.summary) {
+        summaries.push(m.summary);
+        gamesCompleted += 1;
+        const elapsedSec = (Date.now() - runStartedAt) / 1000;
+        process.stderr.write(
+          `[selfplay ${gamesCompleted}/${seeds.length} w${workerId}] seed=${m.summary.seed} winner=${m.summary.winner ?? "none"} rows=${m.summary.rowCount} elapsed=${elapsedSec.toFixed(1)}s\n`,
+        );
+      } else if (m.kind === "done") {
+        workerDone = true;
+      }
+    });
+    child.on("error", (err) => reject(err));
+    child.on("exit", (code) => {
+      if (!workerReady) {
+        reject(new Error(`selfplay worker ${workerId} exited before becoming ready (code=${code})`));
+      } else if (!workerDone) {
+        reject(new Error(`selfplay worker ${workerId} exited before completing seeds (code=${code})`));
+      } else if (code !== 0 && code !== null) {
+        reject(new Error(`selfplay worker ${workerId} exited non-zero (code=${code})`));
+      } else {
+        resolve();
+      }
+    });
+  })));
+  // Concatenate shard files into the canonical outPath.
+  for (const shardPath of shardPaths) {
+    try {
+      const data = readFileSync(shardPath, "utf8");
+      if (data.length > 0) appendFileSync(args.outPath, data, "utf8");
+      unlinkSync(shardPath);
+    } catch {
+      // Shard may not exist if its slice was empty; ignore.
+    }
+  }
+}
+
+async function runWorker(args: SelfPlayArgs): Promise<void> {
+  if (!process.send) {
+    process.stderr.write("mctsSelfPlay worker has no IPC channel\n");
+    process.exit(2);
+    return;
+  }
+  mkdirSync(dirname(args.outPath), { recursive: true });
+  writeFileSync(args.outPath, "", "utf8");
+  process.send({ kind: "ready" });
+  process.on("message", async (msg: unknown) => {
+    const m = msg as { kind: string; workerId?: number; seeds?: string[] };
+    if (m.kind !== "seeds" || !m.seeds) return;
+    try {
+      for (const seed of m.seeds) {
+        const record = await runSelfPlayGame(args, seed);
+        if (record.rows.length) {
+          appendFileSync(args.outPath, record.rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+        }
+        const summary = gameRecordToSummary(seed, record);
+        process.send!({ kind: "game_completed", summary });
+      }
+      process.send!({ kind: "done" });
+      setTimeout(() => process.exit(0), 25);
+    } catch (err) {
+      process.stderr.write(`selfplay worker error: ${(err as Error).message}\n`);
+      process.exit(1);
+    }
+  });
 }
 
 export async function runSelfPlayGame(args: SelfPlayArgs, seed: string): Promise<GameRecord> {
@@ -271,23 +404,35 @@ function pickFromVisits(
   return weights.length - 1;
 }
 
-function summarize(games: GameRecord[]) {
-  const totalRows = games.reduce((sum, g) => sum + g.rows.length, 0);
-  const playerWins = games.filter((g) => g.winner === "player").length;
-  const opponentWins = games.filter((g) => g.winner === "opponent").length;
-  const draws = games.filter((g) => g.winner === null).length;
-  const meanLen = games.length ? games.reduce((s, g) => s + g.modelDecisions, 0) / games.length : 0;
-  const meanVisitEntropy = games.length
-    ? games.reduce((s, g) => s + g.rows.reduce((rs, r) => rs + visitEntropy(r.visitDistribution), 0), 0) / Math.max(1, totalRows)
-    : 0;
+function summarizeFromSummaries(summaries: GameSummary[]) {
+  const totalRows = summaries.reduce((sum, g) => sum + g.rowCount, 0);
+  const playerWins = summaries.filter((g) => g.winner === "player").length;
+  const opponentWins = summaries.filter((g) => g.winner === "opponent").length;
+  const draws = summaries.filter((g) => g.winner === null).length;
+  const meanLen = summaries.length ? summaries.reduce((s, g) => s + g.modelDecisions, 0) / summaries.length : 0;
+  const totalEntropy = summaries.reduce((s, g) => s + g.visitEntropySum, 0);
+  const meanVisitEntropy = totalRows > 0 ? totalEntropy / totalRows : 0;
   return {
-    games: games.length,
+    games: summaries.length,
     totalRows,
     playerWins,
     opponentWins,
     draws,
     meanGameLength: meanLen,
     meanVisitEntropy,
+  };
+}
+
+function gameRecordToSummary(seed: string, record: GameRecord): GameSummary {
+  const visitEntropySum = record.rows.reduce((s, r) => s + visitEntropy(r.visitDistribution), 0);
+  return {
+    seed,
+    winner: record.winner,
+    points: record.points,
+    modelDecisions: record.modelDecisions,
+    rowCount: record.rows.length,
+    visitEntropySum,
+    terminalReason: record.terminalReason,
   };
 }
 
@@ -324,6 +469,8 @@ function parseArgs(argv: string[]): SelfPlayArgs {
     temperatureValue: Number(get("--temperature-value", "1.0")),
     outPath: get("--out", "runs/R12-selfplay/selfplay.jsonl"),
     manifestOut: get("--manifest-out", "") || null,
+    workers: Math.max(1, Number(get("--workers", "1"))),
+    workerMode: argv.includes("--worker-mode"),
   };
 }
 

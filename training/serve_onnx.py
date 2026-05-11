@@ -25,7 +25,19 @@ class PolicyServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(address, handler)
         preload_cuda_libraries(provider)
-        self.session = ort.InferenceSession(model_path, providers=resolve_providers(provider))
+        # Determinism under concurrent /predict callers (e.g. eval-gate
+        # --workers N): ORT's default intra-op thread pool can reorder
+        # reductions across threads, producing tiny floating-point
+        # differences that cascade into divergent games over many MCTS
+        # decisions. Pinning ORT to single-threaded execution removes
+        # that source of non-determinism. Per-request latency on this
+        # small model is negligible (the bottleneck is the TS simulator),
+        # and N worker processes still scale wall-clock by N.
+        session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = 1
+        session_options.inter_op_num_threads = 1
+        session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        self.session = ort.InferenceSession(model_path, sess_options=session_options, providers=resolve_providers(provider))
         self.runtime_card_vocab = card_vocab_metadata()
         self.expected_card_vocab = load_meta_card_vocab(model_path)
         if self.expected_card_vocab is not None and self.runtime_card_vocab.get("hash") != "missing":
