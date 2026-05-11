@@ -155,6 +155,22 @@ def main() -> None:
             if r["winner"] not in valid_winners:
                 print(f"[parallel-smoke] {label} {key} has invalid winner={r['winner']}", file=sys.stderr)
                 sys.exit(1)
+    # R14.B determinism — with AsyncLocalStorage installed in
+    # backend/src/sim/rngAsyncStore.ts, serial-vs-parallel must now be
+    # bit-exact on (winner, modelWon, turnNumber). If this fires, either
+    # the storage provider isn't being installed for all entry points or
+    # there's still a Math.random()-reachable code path the rng doesn't
+    # cover.
+    mismatches = []
+    for key, s in serial.items():
+        p = parallel[key]
+        if s["winner"] != p["winner"] or s["modelWon"] != p["modelWon"] or s["turnNumber"] != p["turnNumber"]:
+            mismatches.append((key, s, p))
+    if mismatches:
+        print(f"[parallel-smoke] determinism FAIL — {len(mismatches)} mismatches (R14.B regression?)", file=sys.stderr)
+        for k, s, p in mismatches:
+            print(f"  {k}: serial={s} parallel={p}", file=sys.stderr)
+        sys.exit(1)
 
     speedup = t_serial / max(0.001, t_parallel)
     speedup_ok = speedup >= 1.0
@@ -167,7 +183,7 @@ def main() -> None:
         "t_parallel_sec": round(t_parallel, 2),
         "speedup": round(speedup, 2),
         "speedup_check_ok": speedup_ok,
-        "note": "serial-vs-parallel divergence on identical seeds is expected (engine Math.random leak, task #34); smoke validates valid games + speedup, not bit-exact reproduction",
+        "determinism": "serial==parallel bit-exact on (winner, modelWon, turnNumber); R14.B AsyncLocalStorage active",
     }, indent=2))
 
 
