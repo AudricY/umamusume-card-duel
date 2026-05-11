@@ -10,6 +10,7 @@ import {
   enumerateLegalAiActions,
 } from "../../../frontend/src/game/engine/ai-policy/actions";
 import { cloneGame } from "../../../frontend/src/game/engine/core/stateClone";
+import "./rngAsyncStore";
 import { createSeededRng, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
 import type { GameState, SideId } from "../../../shared/src/types";
 import {

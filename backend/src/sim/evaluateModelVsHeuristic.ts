@@ -22,6 +22,7 @@ import { buildPublicObservation } from "../../../frontend/src/game/engine/ai-pol
 import type { LegalAiAction } from "../../../frontend/src/game/engine/ai-policy/types";
 import { getAiPhase } from "../../../frontend/src/game/engine/ai-policy/phase";
 import { cloneGame } from "../../../frontend/src/game/engine/core/stateClone";
+import "./rngAsyncStore";
 import { createSeededRng, randomFloat, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
 import { attachEnergy } from "../../../frontend/src/game/engine/flow/energy";
 import { canUseUmamusumeAbility } from "../../../frontend/src/game/engine/flow/eligibility";

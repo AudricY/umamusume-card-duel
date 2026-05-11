@@ -23,6 +23,7 @@ import { dirname } from "node:path";
 import { fork, type ChildProcess } from "node:child_process";
 import { enumerateLegalAiActions, chooseHighestScoredAction } from "../../../frontend/src/game/engine/ai-policy/actions";
 import { buildPublicObservation } from "../../../frontend/src/game/engine/ai-policy/observation";
+import "./rngAsyncStore";
 import { createSeededRng, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
 import type { LegalAiAction } from "../../../frontend/src/game/engine/ai-policy/types";
 import type { GameState, SideId } from "../../../shared/src/types";

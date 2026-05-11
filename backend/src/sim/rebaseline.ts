@@ -8,6 +8,7 @@ import {
   enumerateLegalAiActions,
   chooseHighestScoredAction,
 } from "../../../frontend/src/game/engine/ai-policy/actions";
+import "./rngAsyncStore";
 import { createSeededRng, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
 import type { GameState, SideId } from "../../../shared/src/types";
 import { stateFingerprint } from "./stateFingerprint";

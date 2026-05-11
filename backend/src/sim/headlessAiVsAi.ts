@@ -12,6 +12,7 @@ import {
 } from "../../../frontend/src/game/engine";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import "./rngAsyncStore";
 import { createSeededRng, randomFloat, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
 import { chooseAiSetupSelection } from "../../../frontend/src/app/gameUiHelpers";
 import type { CoinFlipResult, EnergyCost, GameState, SideId, UmamusumeInstance } from "../../../shared/src/types";

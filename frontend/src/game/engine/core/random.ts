@@ -6,7 +6,31 @@ export type Rng = {
   label?: string;
 };
 
+export type RngStorageProvider = {
+  get: () => Rng | null;
+  run: <T>(rng: Rng, fn: () => T) => T;
+};
+
 let activeRng: Rng | null = null;
+
+const defaultProvider: RngStorageProvider = {
+  get: () => activeRng,
+  run: <T>(rng: Rng, fn: () => T): T => {
+    const previous = activeRng;
+    activeRng = rng;
+    try {
+      return fn();
+    } finally {
+      activeRng = previous;
+    }
+  },
+};
+
+let storageProvider: RngStorageProvider = defaultProvider;
+
+export function installRngStorageProvider(provider: RngStorageProvider): void {
+  storageProvider = provider;
+}
 
 export function createSeededRng(seed: string | number, label = "root"): Rng {
   const initial = normalizeSeed(seed);
@@ -25,17 +49,11 @@ export function createSeededRng(seed: string | number, label = "root"): Rng {
 }
 
 export function withRng<T>(rng: Rng, run: () => T): T {
-  const previous = activeRng;
-  activeRng = rng;
-  try {
-    return run();
-  } finally {
-    activeRng = previous;
-  }
+  return storageProvider.run(rng, run);
 }
 
 export function randomFloat(): number {
-  return activeRng?.next() ?? Math.random();
+  return storageProvider.get()?.next() ?? Math.random();
 }
 
 export function randomInt(maxExclusive: number): number {

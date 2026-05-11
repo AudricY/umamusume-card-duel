@@ -7,6 +7,7 @@ import {
 import { ACTION_FEATURE_COUNT, ACTION_FEATURE_SCHEMA_VERSION, enumerateLegalAiActions, chooseHighestScoredAction } from "../../../frontend/src/game/engine/ai-policy/actions";
 import { buildPublicObservation } from "../../../frontend/src/game/engine/ai-policy/observation";
 import type { LegalAiAction, TrainingExample } from "../../../frontend/src/game/engine/ai-policy/types";
+import "./rngAsyncStore";
 import { createSeededRng, withRng, type Rng } from "../../../frontend/src/game/engine/core/random";
 import { cloneGame } from "../../../frontend/src/game/engine/core/stateClone";
 import type { GameState, SideId } from "../../../shared/src/types";
