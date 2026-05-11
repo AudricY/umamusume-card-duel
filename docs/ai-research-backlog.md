@@ -415,6 +415,20 @@ In parallel: game-level parallelism (~4× speedup), latency dials (K=1 / adaptiv
 
 Iter-1 promoted as the new strongest model. Per-side: player 0.667 / opponent 0.65 — **R-WILD side gap is closed** (was historically ~16pp opp-favored, briefly 9pp player-favored in R12, now within 2pp). Zero heuristic fallbacks → MCTS execution is clean. Iter-1 checkpoint: `runs/R13-W6-phase-d/iter-1/checkpoint.pt`.
 
+### R14 sprint — refinement (2026-05-11)
+
+See `docs/r14-sprint-plan.md`. After R13's two production configs landed, the next sprint splits between shipping (W5 UI finish + Pareto-tuned latency) and one final honest RL attempt (MCTS-trajectory off-policy PPO). Also includes the engine determinism fix that closes R-WILD — a subagent investigation pinpointed `withRng` losing `activeRng` across `await` boundaries; AsyncLocalStorage is the ~10-LOC fix.
+
+R14 workstreams:
+- **A** OOD gate for iter-1 (compute only, 30 min) — falsifies "iter-1 value-head leaf overfits its own selfplay distribution"
+- **B** Engine determinism fix via AsyncLocalStorage (~1 hour) — closes #34 if it works
+- **C** W8 stop rule after iter-2 — concave-compounding guard
+- **D** MCTS-trajectory PPO with V-trace (~3 days code + 1 day compute) — the only PPO variant we never honestly ran
+- **E** W5 UI integration finish (~1 day code) — the deliverable
+- **F** Adaptive-ratio Pareto sweep (~20 min) — picks the W5 default config
+
+Dropped: larger model, more entropy-BC variants, n=400 headline gate (cosmetic), temperature-ramp-only PPO (R3 already settled peakedness-alone).
+
 ### R13 PPO probe on iter-1 — still doesn't move (2026-05-11)
 
 Three iterations of `ppo_orchestrator` from the W6 iter-1 checkpoint (20 games/update, 30-game gate per iter, `--selection policy` for both collection and gate):
