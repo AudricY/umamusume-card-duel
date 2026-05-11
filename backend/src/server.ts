@@ -6,6 +6,9 @@ import { randomInt } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { CollectionReference } from "firebase-admin/firestore";
 import { getFirebaseAuth, getFirebaseDb, isFirebaseConfigured, readFirebaseProjectId } from "./firebase";
+import { defaultMctsConfig, runMcts, type MctsConfig } from "./sim/mcts";
+import { enumerateLegalAiActions } from "../../frontend/src/game/engine/ai-policy/actions";
+import type { GameState, SideId } from "../../shared/src/types";
 import {
   aiPremadeDecks,
   cards,
@@ -49,6 +52,81 @@ app.use(express.json({ limit: "256kb" }));
 app.get("/api/health", (_request, response) => {
   response.json({ ok: true });
 });
+
+// R13.W5: live MCTS decision endpoint.
+// The UI's opponent loop calls this with the current GameState to obtain one
+// modeled action. serve_onnx must be running at AI_MODEL_URL (or as passed in
+// the request body) — this endpoint does NOT run inference itself; it only
+// runs the MCTS tree-search shell on top of /predict.
+//
+// Body:
+//   {
+//     state: GameState,
+//     modelSide: SideId,
+//     modelUrl?: string,            // defaults to env AI_MODEL_URL or 127.0.0.1:8765
+//     seed?: string,                // deterministic per-call rng seed
+//     mctsConfig?: Partial<MctsConfig>,
+//   }
+// Response:
+//   {
+//     actionIndex: number,          // index into the legal-actions array
+//     selectedActionId: string,
+//     decisionMs: number,
+//     simulationsRun: number,
+//     haltedEarly: boolean,
+//   }
+//
+// If the state has 0 or 1 legal actions the endpoint short-circuits without
+// calling /predict so the UI can fall through to its normal advance step.
+const aiModelUrlDefault = process.env.AI_MODEL_URL?.trim() || "http://127.0.0.1:8765";
+
+app.post("/ai/decide", asyncHandler(async (request, response) => {
+  const body = (request.body ?? {}) as {
+    state?: GameState;
+    modelSide?: SideId;
+    modelUrl?: string;
+    seed?: string;
+    mctsConfig?: Partial<MctsConfig>;
+  };
+  const state = body.state;
+  const modelSide = body.modelSide;
+  if (!state || typeof state !== "object") {
+    response.status(400).json({ error: "state is required" });
+    return;
+  }
+  if (modelSide !== "player" && modelSide !== "opponent") {
+    response.status(400).json({ error: "modelSide must be 'player' or 'opponent'" });
+    return;
+  }
+  const legalActions = enumerateLegalAiActions(state, modelSide);
+  if (legalActions.length === 0) {
+    response.json({ actionIndex: -1, selectedActionId: "", decisionMs: 0, simulationsRun: 0, haltedEarly: false, reason: "no_legal_actions" });
+    return;
+  }
+  if (legalActions.length === 1) {
+    response.json({ actionIndex: 0, selectedActionId: legalActions[0]!.id, decisionMs: 0, simulationsRun: 0, haltedEarly: false, reason: "single_action" });
+    return;
+  }
+  const config: MctsConfig = defaultMctsConfig(body.mctsConfig);
+  const modelUrl = body.modelUrl?.trim() || aiModelUrlDefault;
+  const seed = body.seed?.toString() || `ai-decide:${Date.now()}:${randomInt(1_000_000)}`;
+  const startedAt = Date.now();
+  try {
+    const result = await runMcts(state, modelSide, config, modelUrl, seed);
+    const decisionMs = Date.now() - startedAt;
+    const selectedIndex = Math.min(Math.max(0, result.selectedIndex), legalActions.length - 1);
+    response.json({
+      actionIndex: selectedIndex,
+      selectedActionId: legalActions[selectedIndex]?.id ?? "",
+      decisionMs,
+      simulationsRun: result.diagnostics.simulationsRun,
+      haltedEarly: result.diagnostics.haltedEarly,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "ai-decide failed";
+    response.status(502).json({ error: message });
+  }
+}));
 
 app.get("/api/firebase/health", async (_request, response) => {
   if (!isFirebaseConfigured()) {
