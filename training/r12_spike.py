@@ -113,6 +113,8 @@ def main() -> None:
                     "--mcts-simulations", str(args.mcts_simulations),
                     "--mcts-c-puct", str(args.mcts_c_puct),
                     "--mcts-leaf", args.mcts_leaf,
+                    "--mcts-rollout-crn-samples", str(args.mcts_rollout_crn_samples),
+                    "--mcts-rollout-steps", str(args.mcts_rollout_steps),
                     "--mcts-prior", args.mcts_prior,
                     "--mcts-collapse-max-steps", str(args.mcts_collapse_max_steps),
                     "--mcts-max-nodes", str(args.mcts_max_nodes),
@@ -182,7 +184,9 @@ def parse_args() -> argparse.Namespace:
                    help="Side-balanced games per side (total games = 2 × games when --model-side both).")
     p.add_argument("--mcts-simulations", type=int, default=100)
     p.add_argument("--mcts-c-puct", type=float, default=1.5)
-    p.add_argument("--mcts-leaf", default="value-head")
+    p.add_argument("--mcts-leaf", default="value-head", choices=["value-head", "rollout"])
+    p.add_argument("--mcts-rollout-crn-samples", type=int, default=3)
+    p.add_argument("--mcts-rollout-steps", type=int, default=200)
     p.add_argument("--mcts-prior", default="uniform", choices=["uniform", "policy"])
     p.add_argument("--mcts-collapse-max-steps", type=int, default=64)
     p.add_argument("--mcts-max-nodes", type=int, default=5000)
