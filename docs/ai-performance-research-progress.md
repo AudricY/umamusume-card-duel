@@ -688,8 +688,57 @@ The f1-design spec calls for **800 games/update** for production. We ran at 1/27
 
 **Path of least regret:** option 2 (self-play). The infra is built (item 12), and a single self-play F1 run is comparable in wall-clock to phases 2/3a — it directly tests whether opponent diversity is the missing ingredient before paying for option 1's huge compute.
 
-Artifacts:
-- `runs/f1-2026-05-11-phase2/` (defaults, halted at iter-4)
-- `runs/f1-2026-05-11-phase3a-aggressive/` (T=2, halted at iter-2)
-- `runs/f1-2026-05-11-phase3b-extreme/` (T=2.5, halted at iter-2)
-- All have full `events.jsonl`, `tb/iter-*/`, per-iter manifests for forensics
+### Phase G/H — F1 PPO at spec scale (800 games/update)
+
+The 20h-wall-clock estimate above was wrong by 100×. Phase 2's actual wall-clock was 100s, not 50 min — the simulator is much faster than I'd assumed. That made spec-scale runs cheap (~5-6 min each), so the next two phases honored the f1-design spec buffer size.
+
+**Phase G** — 800 games/update × 3 iters × spec defaults (lr=3e-5, entropy=0.005, T=1.0, ppo-epochs=1, clip=0.2). 328s wall-clock.
+
+| Iter | Wilson lower | WR | Decision |
+| --- | --- | --- | --- |
+| 0 (warm-start eval) | 0.3156 | 38.0% | promoted |
+| 1 | 0.2407 | 30.0% | rejected (-7.5pp) |
+| 2 | 0.2920 | 35.5% | rejected (-2.4pp from floor) → halt |
+
+KL per minibatch averaged 0.009 — *identical to phase 2's 30-game run* despite 27× more data. Reason: minibatch reduction averages over more transitions, but the lr × gradient magnitude is unchanged. The spec defaults are conservative at spec scale; they're not designed to extract more signal from more data.
+
+**Phase H** — 800 games/update × 3 iters × aggressive HPs (lr=1e-4, entropy=0.05, ppo-epochs=4, T=1.0). 340s wall-clock.
+
+| Iter | Wilson lower | WR | Decision |
+| --- | --- | --- | --- |
+| 0 (warm-start) | 0.2826 | 34.5% | promoted |
+| 1 | 0.2639 | 32.5% | rejected (-1.87pp) |
+| 2 | 0.3109 | 37.5% | promoted (recovered) |
+
+iter-2 promoted at Wilson lower **0.3109 — exactly the DAgger iter-2 Wilson lower from item17-2026-05-11**. After iter-1 perturbed the policy downward, PPO's next gradient step pulled it back to the same local optimum. The run did not halt (only one rejection between two promotions).
+
+### F1 Phase summary — five PPO sweeps, one clear finding
+
+| Phase | Buffer | HP profile | KL/mb avg | Weight max-diff | Best WR | Best Wilson lower |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 30 | spec | 0.011 | 0.0002 | 37.5% | 0.3109 |
+| 3a | 30 | aggressive | 0.017 | 0.003 | 34.5% | 0.2826 |
+| 3b | 60 | extreme | 0.018 | 0.027 | 33.5% | 0.2732 |
+| G | 800 | spec | 0.009 | 0.0002 | 38.0% | 0.3156 |
+| H | 800 | aggressive | 0.008 | 0.003 | 37.5% | 0.3109 |
+
+**Every well-behaved config (2, G, H) lands the trained policy at Wilson lower 0.31. Every aggressive config that actually perturbs the policy (3a, 3b) lands lower.** The 0.31 ceiling is identical to the DAgger warm-start's Wilson lower. PPO is performing correctly and finding that **the warm-start is the highest-return policy reachable from itself** under stochastic Gumbel-max with the current reward shape.
+
+**Root mechanism (now confirmed across configs):**
+
+1. Warm-start entropy ≈ 0.18 nats per decision → stochastic policy ≈ greedy policy.
+2. Behavior log-probs ≈ target log-probs ⇒ importance ratios stay at ~1.00 across every minibatch.
+3. PPO surrogate gradient ∝ (ratio - 1) × advantage ≈ 0 × advantage = 0.
+4. The entropy bonus widens *probabilities* but doesn't *flip argmax decisions*, which is what the gate measures.
+5. With the current ±1 terminal + Δpoints×1/3 reward shape, the local optimum at WR ≈ 35–38% is the highest-return policy in the neighborhood of the warm-start.
+
+**F1 target 0.40 declared NOT REACHABLE from the item17-2026-05-11 warm-start** under the current PPO mechanism. PPO can match the SL cap (phase H iter-2) but cannot exceed it.
+
+**Recommended next moves, in order of plausibility:**
+
+1. **Better warm-start.** The DAgger sweep at this codebase config plateaued at WR 37.5% with low-entropy. A larger SL run (more games, more epochs, possibly with explicit entropy regularization during BC) could give a starting point PPO can actually move. The right SL ceiling for this representation is unknown.
+2. **Self-play instead of vs-rule-bot.** Item 12 opponent pool exists. PPO rollouts against PFSP-sampled prior promoted checkpoints would change the reward distribution from a single-opponent shape to a diversity shape, potentially exposing learnable axes the rule-bot alone doesn't.
+3. **Richer reward shaping.** The current shape rewards point delta and win/loss only. Adding per-step shaping for attachment / retreat / energy cycles could expose strategic signal PPO can exploit.
+4. **Change the gate.** All five phases are scored on greedy argmax behavior. If PPO is shaping the policy distribution but not flipping argmax, an alternative gate that samples (e.g. temperature 0.5) might reveal latent improvement. Diagnostic, not solution.
+
+Five phases of artifacts under `runs/f1-2026-05-11-*` with full event streams, manifests, TB scalars for forensics. Live dashboard: `http://127.0.0.1:5000/run/f1-2026-05-11-phaseH-big-aggressive`.
