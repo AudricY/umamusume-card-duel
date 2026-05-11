@@ -326,6 +326,21 @@ After Tier-1 + stretch experiments + strategist + auditor analysis, the chosen p
 
 R7/R8/R9/R10 are kept on the backlog as fallbacks; their task descriptions are annotated to reflect their fallback status.
 
+### R12 implementation progress (2026-05-11)
+
+All sprint phases are coded and smoke-validated. Day-1 spike at 100 games × 100 sims is running; pending result.
+
+| Phase | Artifact | Smoke result |
+| --- | --- | --- |
+| Day-1 | `backend/src/sim/mcts.ts`, `training/r12_spike.py`, `r12_spike_smoke.py` | smoke PASS (8 games, 0 fallbacks). 100-game gate in flight. |
+| A | `mcts.ts` policy-prior + Dirichlet noise (`--mcts-prior policy`, `--mcts-root-dirichlet`) | TS build clean; activated by Phase B/D smokes. |
+| B | `backend/src/sim/mctsSelfPlay.ts`, `npm sim:mcts-selfplay`, `r12_selfplay_smoke.py` | PASS — 2 games × 8 sims → 65 rows, schema valid. |
+| C | `training/uma_ai/selfplay_dataset.py`, `train_bc.py --data-mode mcts-distill`, `r12_distill_smoke.py` | PASS — 2 epochs, loss 1.75 → 1.47, accuracy 61% → 72%. |
+| D | `training/r12_orchestrator.py`, `r12_orchestrator_smoke.py` | PASS — 1 iter × 4 games × 8 sims, all 10 expected event_types emitted. |
+| E | `observability_app.py` STAGES extension (`selfplay`, `distill`, `mcts-gate`, `mcts-spike`, `r12-orchestrator`) | n/a (dashboard render check, no smoke). |
+
+Decision: Day-1 spike is the gate on whether to launch a Phase D multi-iteration run. If GO, run 4 iterations × (200 games / 100 sims) per the plan; on the trained Phase-D output, run final 400-game gate at `--mcts-simulations 200` for the headline ≥0.40 Wilson-lower target.
+
 ## Open / wild
 
 - **Side-imbalance verification.** Gate manifests record player/opponent splits inconsistently across phases. Worth a one-off script to extract the side-WR delta and check whether the model is offensively weak or defensively weak.
