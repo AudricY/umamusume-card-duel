@@ -404,6 +404,17 @@ The cheap falsifiable answer: retrain JUST the value head on rollout-mean outcom
 
 In parallel: game-level parallelism (~4× speedup), latency dials (K=1 / adaptive sims / batched /predict) to push p95 decision time under 3 s, UI integration, and an MCTS-vs-MCTS strength ladder so we stop relying solely on a saturating rule-bot.
 
+### R13.W6 result — Phase D iterations compound (2026-05-11)
+
+2 production iterations of `r12_orchestrator` from the W3-retrained warm-start (60 selfplay × 100 sims × rollout-leaf K=3; 20 epochs of mcts-distill with KL anchor 0.05; 120-game gate per iter).
+
+| Iter | WR | Wilson lower | Δ vs prev |
+| --- | --- | --- | --- |
+| 0 | 0.625 | 0.536 | +5.3pp vs R12 baseline (0.483 / 0.556 at n=200) |
+| 1 | **0.658** | **0.570** | +3.4pp vs iter-0 |
+
+Iter-1 promoted as the new strongest model. Per-side: player 0.667 / opponent 0.65 — **R-WILD side gap is closed** (was historically ~16pp opp-favored, briefly 9pp player-favored in R12, now within 2pp). Zero heuristic fallbacks → MCTS execution is clean. Iter-1 checkpoint: `runs/R13-W6-phase-d/iter-1/checkpoint.pt`. W7 headline n=400 gate is the final validation step before deployment.
+
 ### R13.W3 result — value head retrain is **PARTIAL** (2026-05-11)
 
 50 rollout-leaf selfplay games (100 sims, K=3, R4 prior) → 25-epoch frozen-trunk MSE retrain → 100-game gate at `--mcts-leaf value-head` over the retrained checkpoint.
