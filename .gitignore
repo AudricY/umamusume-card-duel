@@ -8,3 +8,4 @@ local-data/
 training/.venv/
 training/runs/
 runs/
+.claude/
