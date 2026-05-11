@@ -66,15 +66,34 @@ R13 produced strong gate numbers but nothing ships yet — the UI hook is plumbe
 - **Exit criterion:** identify a setting that keeps Wilson lower ≥ 0.42 while cutting wall-clock ≥30% vs ratio=0. Feeds into W5's default config.
 - **Cost:** ~20 min wall-clock total.
 
+### G — Unpin ORT for /predict concurrency (gated on B, ~10 min)
+
+**Why:** R13.W1 set `intra_op_num_threads=1`, `inter_op_num_threads=1`, sequential execution mode in `serve_onnx.py` to remove FP non-determinism under concurrent /predict callers. With R14.B's AsyncLocalStorage fix, engine determinism is enforced at the right layer (the engine's RNG state, not the inference reduction order). Giving back ORT concurrency should restore meaningful /predict throughput when many workers call simultaneously — especially relevant to value-head-leaf workloads (W8-style loops) where the simulator finishes fast and workers are starved on inference.
+
+- **Modify:** `training/serve_onnx.py` — remove the SessionOptions pinning OR add a CLI flag `--ort-threads N` (default `auto`).
+- **Validation:** rerun `training/r13_parallel_smoke.py` and `training/r13_selfplay_parallel_smoke.py`. With B+G, serial-vs-parallel results should still be bit-exact (engine-level RNG dominates) AND parallel wall-clock should drop materially (probably ≥30% on W8-style runs).
+- **Exit criterion:** ≥2× /predict throughput per worker measured via `training/throughputProbe` (or a new small probe), no determinism regression in the parallel smoke.
+- **Cost:** ~10 min code + ~10 min validation. Gated on R14.B landing first.
+
+### H — Batched /predict proxy (conditional on G not being enough)
+
+**Why:** even with ORT unpinned, our model is small enough that each /predict is microseconds and GPU sits idle. A Python proxy in front of serve_onnx could buffer concurrent calls (e.g., 5ms window or 32-call batch), issue one batched inference, and demultiplex the results. Real GPU work happens, and the ~per-call HTTP overhead is amortized.
+
+- **Build:** `training/serve_onnx_proxy.py` with `--upstream-port` and `--max-batch N --batch-window-ms M`. Same /predict interface; same response shape. Demultiplexer assembles batched logits/value back into per-caller responses.
+- **Risk:** the upside ceiling is bounded by per-call overhead, not GPU compute. If the model stays small, batching may give only 1.5–2× — worth measuring but not a sprint priority.
+- **Validation:** parallel smoke + W8 selfplay wall-clock. Tolerate ≤5% strength regression (introduces tiny FP non-determinism via batch-mate reordering).
+- **Exit criterion:** ≥2× selfplay wall-clock improvement at 4 workers vs G alone. If <1.3×, ship without it.
+- **Cost:** ~250 LOC + ~half day. Only schedule if G yields <2× throughput.
+
 ## Sequencing
 
-- **Day 1:** A (OOD gate) + B (determinism fix) in parallel. Both are short.
-- **Day 2:** W8 iter-2 inspection (C); start E (UI integration).
+- **Day 1:** A (OOD gate) + B (determinism fix) in parallel. Both are short. Once B lands, do G (unpin ORT) and rerun parallel smoke.
+- **Day 2:** W8 iter-2 inspection (C); start E (UI integration). F (adaptive ratio sweep) opportunistic.
 - **Day 3:** D.1 + D.2 (MCTS-trajectory PPO plumbing).
-- **Day 4:** D.3 + first 3-iter run; finish E.
-- **Day 5:** D analysis; F sweep; sprint write-up.
+- **Day 4:** D.3 + first 3-iter run; finish E. If G alone hasn't given ≥2× throughput, consider H.
+- **Day 5:** D analysis; F sweep if not done; sprint write-up.
 
-Total: 5 days, ~1 day of compute, ~3 days of code.
+Total: 5 days, ~1 day of compute, ~3 days of code (excluding H which is conditional).
 
 ## What we explicitly DROP
 
