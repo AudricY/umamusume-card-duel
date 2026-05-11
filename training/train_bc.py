@@ -76,6 +76,10 @@ def main() -> None:
         )
 
     events: EventWriter | None = EventWriter(args.events_out) if args.events_out else None
+    tb_writer = None
+    if args.tb_log_dir:
+        from torch.utils.tensorboard import SummaryWriter
+        tb_writer = SummaryWriter(log_dir=args.tb_log_dir)
     if events is not None:
         events.emit(
             iteration=args.events_iteration,
@@ -120,9 +124,26 @@ def main() -> None:
                 val_loss=val_metrics.get("loss"),
                 val_accuracy=val_metrics.get("accuracy"),
             )
+        if tb_writer is not None:
+            for key, value in train_metrics.items():
+                if isinstance(value, (int, float)) and value == value:  # skip NaN
+                    tb_writer.add_scalar(f"train/{key}", float(value), epoch)
+            for key, value in (val_metrics or {}).items():
+                if isinstance(value, (int, float)) and value == value:
+                    tb_writer.add_scalar(f"val/{key}", float(value), epoch)
+            tb_writer.flush()
 
     final_train = evaluate(model, train_loader, value_weight=args.value_weight)
     final_val = evaluate(model, val_loader, value_weight=args.value_weight) if val_loader else {}
+    if tb_writer is not None:
+        for key, value in final_train.items():
+            if isinstance(value, (int, float)) and value == value:
+                tb_writer.add_scalar(f"final_train/{key}", float(value), 0)
+        for key, value in (final_val or {}).items():
+            if isinstance(value, (int, float)) and value == value:
+                tb_writer.add_scalar(f"final_val/{key}", float(value), 0)
+        tb_writer.flush()
+        tb_writer.close()
     diagnostics = {
         "train": evaluate_grouped(model, dataset, train_indices, value_weight=args.value_weight, batch_size=args.batch_size),
         "val": evaluate_grouped(model, dataset, val_indices, value_weight=args.value_weight, batch_size=args.batch_size) if val_indices else {},
@@ -656,6 +677,8 @@ def parse_args() -> argparse.Namespace:
                         help="Append per-epoch loss events to this JSONL stream (events.jsonl).")
     parser.add_argument("--events-iteration", type=int, default=-1,
                         help="Iteration index recorded on emitted events when orchestrated; -1 for standalone runs.")
+    parser.add_argument("--tb-log-dir", default=None,
+                        help="Write per-epoch TensorBoard scalars under this directory. View with `tensorboard --logdir <parent>`.")
     parser.add_argument("--kl-anchor-checkpoint", default=None,
                         help="Frozen prior-iteration checkpoint to regularize toward (anti-forgetting).")
     parser.add_argument("--kl-anchor-weight", type=float, default=0.0,

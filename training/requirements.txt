@@ -3,3 +3,6 @@ numpy==2.2.6
 torch==2.7.1+cpu
 onnx==1.18.0
 onnxruntime==1.22.0
+# Observability: TensorBoard SummaryWriter for live training scalars
+# during DAgger/PPO sweeps. View with `tensorboard --logdir runs/<run>/tb`.
+tensorboard==2.20.0

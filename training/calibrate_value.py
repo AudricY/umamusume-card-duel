@@ -94,6 +94,36 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf8")
+    if args.events_out:
+        from events import EventWriter
+        EventWriter(args.events_out).emit(
+            iteration=args.events_iteration,
+            stage="calibrate",
+            event_type="completed",
+            status=output["status"],
+            value_brier=value_metrics["brier"],
+            value_ece=value_metrics["ece"],
+            point_margin_brier=pm_metrics["brier"],
+            point_margin_ece=pm_metrics["ece"],
+            lift_mean=lift_summary["mean"],
+            lift_ci_lower=lift_summary["lower_2_5"],
+            lift_ci_upper=lift_summary["upper_97_5"],
+            n_rows=len(eval_rows),
+        )
+    if args.tb_log_dir:
+        from torch.utils.tensorboard import SummaryWriter
+        tb = SummaryWriter(log_dir=args.tb_log_dir)
+        tb.add_scalar("calibration/value_brier", value_metrics["brier"], 0)
+        tb.add_scalar("calibration/value_ece", value_metrics["ece"], 0)
+        tb.add_scalar("calibration/value_max_bucket_ece", value_metrics["max_bucket_ece"], 0)
+        tb.add_scalar("calibration/point_margin_brier", pm_metrics["brier"], 0)
+        tb.add_scalar("calibration/point_margin_ece", pm_metrics["ece"], 0)
+        tb.add_scalar("calibration/lift_mean", lift_summary["mean"], 0)
+        tb.add_scalar("calibration/lift_ci_lower", lift_summary["lower_2_5"], 0)
+        tb.add_scalar("calibration/lift_ci_upper", lift_summary["upper_97_5"], 0)
+        tb.add_scalar("calibration/pass", 1.0 if gate_pass else 0.0, 0)
+        tb.flush()
+        tb.close()
     print(json.dumps({
         "status": output["status"], "out": str(out_path),
         "value_brier": value_metrics["brier"], "point_margin_brier": pm_metrics["brier"],
@@ -323,6 +353,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fit-fraction", type=float, default=0.5, help="Fraction of labeled rows used to fit point-margin k.")
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--allow-loose-schema", action="store_true", help="Disable strict schemaVersion enforcement.")
+    p.add_argument("--events-out", default=None, help="Append calibration status to this JSONL events stream.")
+    p.add_argument("--events-iteration", type=int, default=-1, help="Iteration index recorded on emitted events.")
+    p.add_argument("--tb-log-dir", default=None, help="Write calibration scalars under this TensorBoard log dir.")
     return p.parse_args()
 
 

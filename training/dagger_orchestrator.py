@@ -323,6 +323,10 @@ def run_iteration(
         # Pass events.jsonl + iteration id to train_bc so per-epoch loss
         # events land on the same stream as the orchestrator's stage events.
         train_args += ["--events-out", str(events.path), "--events-iteration", str(cfg.iteration)]
+        # Per-iteration TensorBoard subtree under runs/<run>/tb/iter-NNN.
+        # `tensorboard --logdir runs/<run>/tb` overlays all iterations.
+        tb_dir = events.run_dir / "tb" / f"iter-{cfg.iteration:03d}"
+        train_args += ["--tb-log-dir", str(tb_dir)]
     subprocess.run(train_args, cwd=repo_root, check=True)
     train_manifest = json.loads((train_dir / "manifest.json").read_text(encoding="utf8"))
     if events is not None:

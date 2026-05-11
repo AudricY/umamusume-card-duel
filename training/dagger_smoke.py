@@ -148,6 +148,19 @@ def main() -> None:
                 f"DAgger warm-start is not actually training. Bug regression."
             )
 
+        # Observability Stage 2: TensorBoard event files must appear under
+        # runs/<run>/tb/iter-NNN/ for each iteration. We don't parse them
+        # (binary protobuf) but presence + non-empty is the contract.
+        for it in (0, 1, 2):
+            tb_dir = work_dir / "tb" / f"iter-{it:03d}"
+            if not tb_dir.exists():
+                raise AssertionError(f"Missing TB log dir {tb_dir}")
+            tfevents = list(tb_dir.glob("events.out.tfevents.*"))
+            if not tfevents:
+                raise AssertionError(f"No TensorBoard event files under {tb_dir}")
+            if max(f.stat().st_size for f in tfevents) == 0:
+                raise AssertionError(f"TB event files are empty under {tb_dir}")
+
         # Item 12: opponent-pool persistence + per-iteration snapshot.
         pool_path = work_dir / "opponent-pool.json"
         if not pool_path.exists():
