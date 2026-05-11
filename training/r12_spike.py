@@ -113,6 +113,7 @@ def main() -> None:
                     "--mcts-simulations", str(args.mcts_simulations),
                     "--mcts-c-puct", str(args.mcts_c_puct),
                     "--mcts-leaf", args.mcts_leaf,
+                    "--mcts-prior", args.mcts_prior,
                     "--mcts-collapse-max-steps", str(args.mcts_collapse_max_steps),
                     "--mcts-max-nodes", str(args.mcts_max_nodes),
                     "--min-ci-lower", str(args.min_ci_lower),
@@ -182,6 +183,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mcts-simulations", type=int, default=100)
     p.add_argument("--mcts-c-puct", type=float, default=1.5)
     p.add_argument("--mcts-leaf", default="value-head")
+    p.add_argument("--mcts-prior", default="uniform", choices=["uniform", "policy"])
     p.add_argument("--mcts-collapse-max-steps", type=int, default=64)
     p.add_argument("--mcts-max-nodes", type=int, default=5000)
     p.add_argument("--model-side", default="both", choices=["both", "player", "opponent"])
