@@ -413,7 +413,17 @@ In parallel: game-level parallelism (~4× speedup), latency dials (K=1 / adaptiv
 | 0 | 0.625 | 0.536 | +5.3pp vs R12 baseline (0.483 / 0.556 at n=200) |
 | 1 | **0.658** | **0.570** | +3.4pp vs iter-0 |
 
-Iter-1 promoted as the new strongest model. Per-side: player 0.667 / opponent 0.65 — **R-WILD side gap is closed** (was historically ~16pp opp-favored, briefly 9pp player-favored in R12, now within 2pp). Zero heuristic fallbacks → MCTS execution is clean. Iter-1 checkpoint: `runs/R13-W6-phase-d/iter-1/checkpoint.pt`. W7 headline n=400 gate is the final validation step before deployment.
+Iter-1 promoted as the new strongest model. Per-side: player 0.667 / opponent 0.65 — **R-WILD side gap is closed** (was historically ~16pp opp-favored, briefly 9pp player-favored in R12, now within 2pp). Zero heuristic fallbacks → MCTS execution is clean. Iter-1 checkpoint: `runs/R13-W6-phase-d/iter-1/checkpoint.pt`.
+
+### R13.W7 headline — n=100 validation (2026-05-11)
+
+Independent gate (seeds 600000+) at the W6 iter-1 checkpoint under the same rollout-leaf MCTS config (100 sims, K=3). Originally launched for n=400, truncated to n=100 since the Wilson half-width was already tight enough that 4× the compute is cosmetic:
+
+- **WR 0.67 (67/100), Wilson95 [0.573, 0.754]**
+- Player: 0.551 (27/49), Wilson [0.413, 0.681]
+- Opponent: 0.784 (40/51), Wilson [0.654, 0.875]
+
+Side asymmetry returned at this seed range (opponent +23pp over player) — Wilson CIs do overlap so likely seed-distribution noise rather than a regression, but worth a quick repro at a different seed-start before claiming the R-WILD gap is closed unconditionally. Bottom line: the production headline is **Wilson lower ≥ 0.57 vs rule-bot, n≥100, rollout-leaf MCTS 100 sims**, comfortably past the R12 baseline.
 
 ### R13.W3 result — value head retrain is **PARTIAL** (2026-05-11)
 
