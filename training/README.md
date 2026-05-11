@@ -54,3 +54,40 @@ training/runs/<experiment>/
 The TypeScript exporters write sibling `*.manifest.json` files with command args, git SHA/dirty flag, seed/source taxonomy, phase/action-kind counts, feature schema dimensions, and terminal or margin summaries. `sim:evaluate-model` and `sim:eval-gate` can write eval artifacts with `--manifest-out`.
 
 `train_bc.py` writes `model/manifest.json` and stores the same metadata in `checkpoint.pt`, including split mode, train/validation groups, feature schema, final metrics, and diagnostics by phase, selected action kind, source, and oracle margin bucket.
+
+## Observability
+
+Every sweep run emits three observability artifacts side-by-side in its run dir:
+
+```text
+runs/<experiment>/
+  events.jsonl            # append-only pipeline event stream (training/events.py)
+  tb/iter-NNN/            # TensorBoard event files per iteration
+  orchestrator-state.json # promoted_checkpoint, iterations[], halt/floor state
+```
+
+**TensorBoard — live training scalars.** Per-epoch `train/loss`, `train/policy_loss`, `train/value_loss`, `train/kl_loss`, `train/accuracy` (and `val/` mirrors) plus `final_*` summaries land under `runs/<run>/tb/iter-NNN/`. View overlaid across iterations:
+
+```bash
+training/.venv/bin/tensorboard --logdir runs/<run>/tb
+```
+
+Or across all sweeps:
+
+```bash
+training/.venv/bin/tensorboard --logdir runs
+```
+
+**Flask dashboard — pipeline state, Wilson trajectory, decision audit.** Single-page dashboard reads `events.jsonl` + `orchestrator-state.json`:
+
+```bash
+training/.venv/bin/python training/observability_app.py --runs-dir runs --port 5000
+# Open http://127.0.0.1:5000/run/<experiment>
+```
+
+Auto-refreshes every 10 s. Shows pipeline-state strip per iteration, Wilson-lower trajectory with promote/reject markers and floor line, per-epoch loss curves, decision-audit table (decision_reason, matchup_violations, cycling_alarm, halted), optional pool-eval heatmap, and a tail of the raw event stream.
+
+**Programmatic access.**
+
+- `runs/<run>/events.jsonl`: flat JSONL, one record per pipeline event. Schema: `{ts, run_id, iteration, stage, event_type, data, schema_version=1}`. Stages: `orchestrator`, `iteration`, `trace-gen`, `relabel`, `mix`, `train`, `gate`, `pool-eval`, `decision`, `rule-bot-replay`, `calibrate`. `iteration=-1` for run-level events.
+- `GET http://127.0.0.1:5000/run/<run>/api/state.json` and `/api/events.jsonl` for raw artifacts.
