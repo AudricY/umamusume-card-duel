@@ -119,6 +119,41 @@ The Tier-1 experiments are designed to discriminate between these three in <2 ho
 
 After Tier 1 completes, the picture should be clear enough to commit to Tier 2 or escalate to Tier 3.
 
+## Tier 1 results (2026-05-11)
+
+### R1 — Q1 REFUTED
+
+rollout-CRN×3 vs rule-bot at n=200 (100 games × 2 sides): **WR 58.5%, Wilson95 [0.516, 0.651].**
+
+The teacher comfortably beats the rule-bot. The trained-policy ceiling at 37.5% WR has a **21pp imitation gap** to its own teacher. The cap is not a teacher-strength cap. Whatever the binding constraint is, it lives between the rollout-CRN labels and the trained policy.
+
+This refocuses the research: stop hunting for stronger teachers (search, MCTS) and start asking why the SL fit doesn't capture what the teacher knows. Candidates:
+
+- **Feature representation gap.** State encoding may lose strategic information the rollout uses.
+- **Label quality at rare states.** Rollout teacher is strong on common states but bad on rare ones; SL averages.
+- **Policy capacity.** 64-hidden × depth-2 may underfit a 58.5%-strength teacher.
+- **Mix bias.** Rule-bot replay rows in the mixed corpus may dilute the rollout-labeled rows.
+
+### R4 — Q3 partially resolved
+
+R4 (50 epochs, value_weight 1.0, fresh from iter-2 mixed data): train accuracy **94.7%** (up from 88%), `calibrate_value` PASS with value_brier 0.084 (down from 0.243), lift_mean +0.134 (Wilson lower +0.119 — significant).
+
+**Value-head miscalibration is fixable** by training longer at higher weight. But the same checkpoint shows gate WR **34.5%** (Wilson [0.283, 0.413]) — slightly below the 37.5% warm-start, with a stark side imbalance (26% as player, 43% as opponent).
+
+Calibration alone doesn't move the gate. The fixed value head matters only if it's used as a critic (PPO advantage signal). Open question: does PPO from R4 produce coherent gradient direction now that the advantages aren't systematically biased?
+
+### R3 — entropy intervention works, PPO test pending
+
+R3 (β=0.05): final entropy **0.527 nats** per decision (3× the warm-start's ~0.18), train accuracy 82.2% (down ~3pp from warm-start), gate WR **38.5%, Wilson [0.320, 0.454]** — statistically equivalent to the warm-start.
+
+**Peakedness intervention succeeds without hurting gate WR.** PPO from this warm-start is running; the critical question is whether the higher entropy lets PPO's importance ratios stay non-trivial and produce coherent gradient direction.
+
+### Side imbalance — opportunistic finding
+
+Across DAgger iter-2 warm-start, R3, R4 gate evals: the trained policy consistently performs much better as the *opponent* than as the *player* (DAgger 41% vs 30%; R4 43% vs 26%; R3 not yet broken out). The model is offensively weak. This may be its own research question (does training set under-represent player-side decisions? feature parity issue?) or a manifestation of the same imitation gap.
+
+R-WILD's side-imbalance subitem should be promoted to its own Tier-1-adjacent task.
+
 ## Open / wild
 
 - **Side-imbalance verification.** Gate manifests record player/opponent splits inconsistently across phases. Worth a one-off script to extract the side-WR delta and check whether the model is offensively weak or defensively weak.
