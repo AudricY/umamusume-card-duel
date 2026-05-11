@@ -1,8 +1,9 @@
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { NeutralButton } from "../components/buttons/NeutralButton";
 import { DeckSummaryCard } from "./DeckBrowserScreen";
 import type { PremadeDeck } from "../types/ui";
 import { borders, buttonStyle, colors, filters, glassPanelStyle, radius, shadows, uiMutedTextColor, uiTextColor, uiTextShadow } from "../styles/shared";
+import { readAiBackend, setAiBackend, type AiBackend } from "../utils/aiBackend";
 
 export function MainMenuScreen({
   equippedDeck,
@@ -36,8 +37,18 @@ export function MainMenuScreen({
   onQuit: () => void;
 }) {
   const [accountOpen, setAccountOpen] = useState(false);
+  const [aiBackend, setAiBackendState] = useState<AiBackend>(() => readAiBackend());
   const accountCloudAvailable = cloudAvailable && isGoogleLinked;
   const accountCloudLabel = accountBusy ? "Cloud Connecting" : accountCloudAvailable ? "Cloud Available" : "Cloud Unavailable";
+
+  // R14.E: dev toggle to swap the opponent AI between rule-bot and MCTS.
+  // Persists to localStorage so the choice survives reloads. Visible in the
+  // menu so the operator can flip without touching DevTools; hidden semantics
+  // (no permanent UI placement / tooltip) keep this from feeling like a
+  // shipped feature until the latency story is tighter.
+  useEffect(() => {
+    setAiBackend(aiBackend);
+  }, [aiBackend]);
 
   return (
     <section style={menuScreenStyle}>
@@ -86,6 +97,13 @@ export function MainMenuScreen({
             <NeutralButton style={menuPrimaryButtonStyle} onClick={onOpenDecks}>Decks</NeutralButton>
             <NeutralButton style={menuPrimaryButtonStyle} onClick={onOpenCards}>Cards</NeutralButton>
             <NeutralButton style={menuPrimaryButtonStyle} onClick={onOpenCustomisation}>Customisation</NeutralButton>
+            <NeutralButton
+              style={menuPrimaryButtonStyle}
+              onClick={() => setAiBackendState((current) => (current === "mcts" ? "rule-bot" : "mcts"))}
+              ariaLabel="Toggle opponent AI between rule bot and MCTS"
+            >
+              AI: {aiBackend === "mcts" ? "MCTS (slow)" : "Rule Bot"}
+            </NeutralButton>
             <NeutralButton style={menuPrimaryButtonStyle} onClick={onQuit}>Quit</NeutralButton>
           </div>
         </div>
