@@ -102,6 +102,16 @@ The W6 → W8 → W6-extension thread is now the highest-information compute spe
 
 Total: 2–3 days if I succeeds, 5 days if D becomes necessary. The hybrid: while I.2 burns compute unattended, write D's plumbing in parallel so it's ready if needed.
 
+## Progress (2026-05-11)
+
+- **B — DONE.** AsyncLocalStorage via `frontend/.../random.ts` installRngStorageProvider + `backend/.../rngAsyncStore.ts`. `training/r14_determinism_smoke.py` shows 12/12 games bit-exact between --workers 1 and --workers 4 (post-fix); previously divergent. Closes R-WILD #34.
+- **I.1 — DONE.** `training/r14_value_crossover_probe.py` measures val_mse + pearson_r between checkpoint value head and rootValue (rollout-CRN K=3 mean) on a held-out selfplay corpus. Crossed iff val_mse <= 1.10 * mse_floor AND pearson_r >= 0.7. mse_floor anchored on the W3 retrain manifest. Wired into `r12_orchestrator.run_iteration` between distill and gate (records `iterations[i].crossover`). Baseline sanity at W6 iter-1 vs its own iter-1 selfplay (in-distribution): val_mse 0.659, pearson 0.535, ratio 1.158, crossed=false — consistent with W8 regression (cheap-leaf selfplay distillation didn't compound because the value head wasn't ready).
+- **I.2 — IN FLIGHT.** Resuming W6 phase-d in `runs/R13-W6-phase-d/` for iter-2/3/4 (rollout-leaf MCTS, 60 selfplay × 100 sims K=3, 120-game gate, kl-anchor 0.05). Each iter's distill is followed by a crossover probe against the previous iter's selfplay. ETA ~60 min total wall-clock.
+- **E — PARTIAL (code complete, e2e smoke pending).** `/ai/decide` now applies the chosen action server-side and returns `nextState`; frontend swaps state on success or falls back to `advanceOpponentTurnStep` on timeout/error/engine-fallback. Toggle via `localStorage.setItem("umamusume-card-duel-ai-backend", "mcts")`. Visible UI toggle in MainMenuScreen still pending. End-to-end UI smoke deferred until W6 extension frees up serve_onnx.
+- **G — CODE READY.** `serve_onnx.py` exposes `--ort-threads` (default `1` preserves R13.W1 legacy). `training/r14_ort_throughput_smoke.py` validates `auto` mode >=1.5x faster than pinned at bit-exact engine determinism. Smoke run deferred until W6 extension finishes.
+- **F — CODE READY.** `training/r14_adaptive_ratio_sweep.py` sweeps ratio in {0, 1.5, 2, 3, 5} at value-head leaf; picks the highest ratio satisfying Wilson lower >= 0.42 and wall-clock cut >= 30%. Deferred.
+- **A — CODE READY.** `training/r14_ood_gate.py` runs Gate 1 (fresh seeds 800000+ vs rule-bot) + Gate 2 (MCTS-vs-MCTS against R4). Deferred.
+
 ## What we explicitly DROP
 
 - **Larger model.** R6 evidence is dispositive — bigger nets fit the labels harder and play worse.
