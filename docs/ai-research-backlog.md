@@ -222,6 +222,45 @@ Tier-1 verdict: peakedness and calibration are not the binding constraints. Pivo
 
 R5 is the next concrete experiment. R6/R7/R8/R10 stay on the backlog as larger-cost asymmetric-upside bets.
 
+### R6 (capacity) — overfit teacher labels, plays worse
+
+Trained `--hidden-dim 128 --depth 3 --epochs 50 --value-weight 1.0` on iter-002 mixed data:
+
+| Metric | Warm-start (64/2) | R4 (64/2, 50ep) | R6 (128/3, 50ep) |
+| --- | --- | --- | --- |
+| Train accuracy | 0.88 | 0.95 | **0.97** |
+| Argmax-match vs teacher | 0.747 | 0.810 | **0.832** |
+| value_brier | 0.243 | 0.084 | **0.062** |
+| Gate WR | 37.5% | 34.5% | **33.0%** |
+
+R6 is the strongest imitator (83% argmax-match, 97% accuracy, best calibration) AND the weakest player. **The cap isn't a capacity issue — it's an imitation-target-quality issue.** The teacher's 25% argmax errors get inherited by the SL fit; bigger model just locks them in more cleanly.
+
+### Combined intervention (R3-b020 + PPO) — same 0.30 cap
+
+PPO from R3-b020 (entropy 0.39 + calibrated value + accuracy 89%) at aggressive HPs:
+
+| Iter | Wilson lower | Decision |
+| --- | --- | --- |
+| 0 (warm-start eval) | 0.3014 | promoted |
+| 1 | 0.2639 | rejected |
+| 2 | 0.2826 | rejected → halt |
+
+Max 0.3014 — same as every other PPO sweep. **Combining peakedness fix + calibration fix + aggressive HPs doesn't break the cap.**
+
+### Imitation-cap statement
+
+After 7 PPO sweeps + 4 BC variants + 1 capacity bump:
+
+> **No combination of warm-start adjustment + PPO HP tuning broke the Wilson-lower 0.31 ceiling vs rule-bot.** Better imitation, larger models, calibrated values, higher entropy, longer training, bigger PPO buffers — every well-behaved variant lands at WR ≈ 33–38%, Wilson lower 0.27–0.32. The 0.31 cap is the imitation cap: SL on a 58.5%-WR teacher whose 41% disagreement rows are noisy at decision-critical states.
+
+To break it, we need labels or training signal that isn't just "imitate the teacher harder":
+
+- **R5 (PFSP self-play)** — different opponent, different reward shape, possibly different gradient direction. Running.
+- **R7 (multi-teacher BC)** — different label distribution. Reduces single-teacher mode-collapse.
+- **R8 (DPO)** — different objective. Trains on preference pairs instead of argmax labels.
+- **Margin-weighted training** — weight samples by `selectedVsRunnerUpMargin`; high-margin rows are the teacher's confident decisions and likely the high-leverage ones.
+- **Reward shape refinement** — Δpoints + ±1 win/loss may miss strategic value. F1 could find direction with richer reward.
+
 ## Open / wild
 
 - **Side-imbalance verification.** Gate manifests record player/opponent splits inconsistently across phases. Worth a one-off script to extract the side-WR delta and check whether the model is offensively weak or defensively weak.
