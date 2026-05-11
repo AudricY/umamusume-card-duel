@@ -5,12 +5,8 @@ of seeds via --workers 1 (control) and --workers 4, asserts:
   - both runs complete successfully
   - row schemas validate (kind, valueTarget, visitDistribution sums to 1)
   - the union of seeds in the parallel run matches the seeds we requested
-
-NOTE: serial-vs-parallel bit-exact reproduction is NOT required — the engine
-has a known Math.random() leak across async boundaries (task #34) which means
-two different processes can take different code paths on the same seed.
-Aggregate signal is what matters for the gate, so the smoke only checks each
-parallel-produced game is well-formed.
+  - per-seed result tuples (winner, points) match exactly between serial
+    and parallel runs (R14.B AsyncLocalStorage fix now in)
 
 Tiny config: 4 games × 8 sims so the smoke completes in well under a minute.
 """
@@ -155,6 +151,23 @@ def main() -> None:
             if not (0.999 <= sum(dist) <= 1.001):
                 print(f"[r13-selfplay-smoke] visit dist sum={sum(dist)}", file=sys.stderr)
                 sys.exit(1)
+
+    # R14.B determinism — bit-exact serial==parallel on per-seed first-row
+    # result + row count. Should hold now that AsyncLocalStorage propagates
+    # rng across async awaits.
+    mismatches = []
+    for seed in expected_seeds:
+        s_first = serial[seed][0]
+        p_first = parallel[seed][0]
+        if s_first["result"] != p_first["result"]:
+            mismatches.append((seed, "result", s_first["result"], p_first["result"]))
+        if len(serial[seed]) != len(parallel[seed]):
+            mismatches.append((seed, "row_count", len(serial[seed]), len(parallel[seed])))
+    if mismatches:
+        print(f"[r13-selfplay-smoke] determinism FAIL — {len(mismatches)} divergences (R14.B regression?)", file=sys.stderr)
+        for m in mismatches:
+            print(f"  {m}", file=sys.stderr)
+        sys.exit(1)
 
     speedup = t_serial / max(0.001, t_parallel)
     total_rows_parallel = sum(len(rs) for rs in parallel.values())
