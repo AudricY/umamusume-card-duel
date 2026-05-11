@@ -6,3 +6,5 @@ onnxruntime==1.22.0
 # Observability: TensorBoard SummaryWriter for live training scalars
 # during DAgger/PPO sweeps. View with `tensorboard --logdir runs/<run>/tb`.
 tensorboard==2.20.0
+# observability: Flask dashboard for live sweep state (training/observability_app.py).
+flask>=3.0
