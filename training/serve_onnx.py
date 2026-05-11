@@ -22,22 +22,33 @@ class PolicyServer(ThreadingHTTPServer):
         *,
         default_sampling: str = "greedy",
         default_temperature: float | None = None,
+        ort_threads: int | None = 1,
     ) -> None:
         super().__init__(address, handler)
         preload_cuda_libraries(provider)
-        # Determinism under concurrent /predict callers (e.g. eval-gate
-        # --workers N): ORT's default intra-op thread pool can reorder
-        # reductions across threads, producing tiny floating-point
-        # differences that cascade into divergent games over many MCTS
-        # decisions. Pinning ORT to single-threaded execution removes
-        # that source of non-determinism. Per-request latency on this
-        # small model is negligible (the bottleneck is the TS simulator),
-        # and N worker processes still scale wall-clock by N.
+        # R14.G: ort_threads controls ORT's intra/inter-op thread pool.
+        # Default 1 pins to single-threaded execution, removing the small
+        # FP non-determinism that ORT's default parallel reductions can
+        # introduce. With R14.B's AsyncLocalStorage fix landing engine
+        # determinism at the right layer (the engine RNG state, not the
+        # inference reduction order), it becomes safe to pass
+        # ``--ort-threads 0`` (let ORT pick) or a specific count to
+        # restore concurrent /predict throughput for workloads where the
+        # simulator is fast and workers are starved on inference (e.g.
+        # value-head-leaf selfplay loops).
         session_options = ort.SessionOptions()
-        session_options.intra_op_num_threads = 1
-        session_options.inter_op_num_threads = 1
-        session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        if ort_threads is not None and ort_threads > 0:
+            session_options.intra_op_num_threads = ort_threads
+            session_options.inter_op_num_threads = ort_threads
+            session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        # else: leave ORT defaults — parallel reductions, multi-threaded
+        # within and between operators. Determinism guarantee narrows from
+        # bit-exact /predict to bit-exact engine state (engine RNG still
+        # deterministic; tiny per-call FP variation in policy logits is
+        # absorbed by MCTS's visit counts at simulation budgets > a few
+        # sims).
         self.session = ort.InferenceSession(model_path, sess_options=session_options, providers=resolve_providers(provider))
+        self.ort_threads = ort_threads
         self.runtime_card_vocab = card_vocab_metadata()
         self.expected_card_vocab = load_meta_card_vocab(model_path)
         if self.expected_card_vocab is not None and self.runtime_card_vocab.get("hash") != "missing":
@@ -226,6 +237,12 @@ def request_to_arrays(payload: dict[str, Any]) -> tuple[dict[str, np.ndarray], l
 def main() -> None:
     args = parse_args()
     model_path = str(Path(args.model))
+    # --ort-threads parsing: "auto" -> None (ORT defaults), int -> pin.
+    raw = args.ort_threads
+    if raw == "auto":
+        ort_threads: int | None = None
+    else:
+        ort_threads = int(raw)
     server = PolicyServer(
         (args.host, args.port),
         Handler,
@@ -233,6 +250,7 @@ def main() -> None:
         args.provider,
         default_sampling=args.default_sampling,
         default_temperature=args.default_temperature,
+        ort_threads=ort_threads,
     )
     print(json.dumps({
         "status": "serving",
@@ -243,6 +261,7 @@ def main() -> None:
         "card_vocab": server.runtime_card_vocab,
         "default_sampling": server.default_sampling,
         "default_temperature": server.default_temperature,
+        "ort_threads": ort_threads if ort_threads is not None else "auto",
     }))
     server.serve_forever()
 
@@ -304,6 +323,17 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Temperature injected when a /predict body omits ``temperature``. "
             "Defaults to 0.0 under greedy and 1.0 under stochastic when not set."
+        ),
+    )
+    parser.add_argument(
+        "--ort-threads",
+        default="1",
+        help=(
+            "ORT intra/inter-op thread count. Default '1' pins to single-threaded "
+            "execution (the legacy R13.W1 behavior, FP-deterministic under "
+            "concurrent /predict). Pass 'auto' to let ORT decide (parallel "
+            "reductions, higher /predict throughput, microscopic FP non-determinism "
+            "that's absorbed by MCTS at >a-few sims). Pass an integer to pin to N."
         ),
     )
     return parser.parse_args()
