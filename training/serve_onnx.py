@@ -19,6 +19,9 @@ class PolicyServer(ThreadingHTTPServer):
         handler: type[BaseHTTPRequestHandler],
         model_path: str,
         provider: str,
+        *,
+        default_sampling: str = "greedy",
+        default_temperature: float | None = None,
     ) -> None:
         super().__init__(address, handler)
         preload_cuda_libraries(provider)
@@ -31,6 +34,15 @@ class PolicyServer(ThreadingHTTPServer):
                     f"Card vocab hash mismatch at serve time: model={self.expected_card_vocab.get('hash')}"
                     f" runtime={self.runtime_card_vocab.get('hash')}"
                 )
+        # Server-wide defaults injected when /predict bodies omit ``sampling``
+        # / ``temperature``. F1/PPO rollout drives this with
+        # ``--default-sampling stochastic --default-temperature 1.0`` so the
+        # existing greedy TS evaluator transport produces stochastic traces
+        # without TS-side changes. See ppo_orchestrator for rationale.
+        if default_sampling not in {"greedy", "stochastic"}:
+            raise ValueError(f"unknown default sampling mode: {default_sampling}")
+        self.default_sampling = default_sampling
+        self.default_temperature = default_temperature
 
 
 def load_meta_card_vocab(model_path: str) -> dict[str, Any] | None:
@@ -65,10 +77,23 @@ class Handler(BaseHTTPRequestHandler):
             # ``actionLogProbs`` always reflects the distribution actually
             # used to sample (post-temperature) so trace consumers can use
             # it directly as ``behavior_logp`` for importance weights.
-            sampling = str(payload.get("sampling", "greedy")).lower()
+            # Server defaults are consulted only when the request body
+            # omits the field. Explicit ``sampling: greedy`` in a body still
+            # forces greedy even if the server was started with
+            # ``--default-sampling stochastic``. This is the escape hatch
+            # the gate-eval path uses to stay greedy under a stochastic PPO
+            # collector server (item 18: gate is greedy, collection is
+            # stochastic, both share the serve_onnx process).
+            sampling = str(payload.get("sampling", self.server.default_sampling)).lower()
             if sampling not in {"greedy", "stochastic"}:
                 raise ValueError(f"unknown sampling mode: {sampling}")
-            temperature = float(payload.get("temperature", 0.0 if sampling == "greedy" else 1.0))
+            default_temp = self.server.default_temperature
+            if "temperature" in payload:
+                temperature = float(payload["temperature"])
+            elif default_temp is not None:
+                temperature = float(default_temp)
+            else:
+                temperature = 0.0 if sampling == "greedy" else 1.0
             if sampling == "stochastic" and temperature <= 0.0:
                 # Stochastic with temp=0 collapses to argmax; treat as greedy
                 # to avoid divide-by-zero in the Gumbel softmax.
@@ -189,7 +214,14 @@ def request_to_arrays(payload: dict[str, Any]) -> tuple[dict[str, np.ndarray], l
 def main() -> None:
     args = parse_args()
     model_path = str(Path(args.model))
-    server = PolicyServer((args.host, args.port), Handler, model_path, args.provider)
+    server = PolicyServer(
+        (args.host, args.port),
+        Handler,
+        model_path,
+        args.provider,
+        default_sampling=args.default_sampling,
+        default_temperature=args.default_temperature,
+    )
     print(json.dumps({
         "status": "serving",
         "host": args.host,
@@ -197,6 +229,8 @@ def main() -> None:
         "model": model_path,
         "providers": server.session.get_providers(),
         "card_vocab": server.runtime_card_vocab,
+        "default_sampling": server.default_sampling,
+        "default_temperature": server.default_temperature,
     }))
     server.serve_forever()
 
@@ -240,6 +274,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--provider", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument(
+        "--default-sampling",
+        choices=["greedy", "stochastic"],
+        default="greedy",
+        help=(
+            "Sampling mode injected when a /predict body omits ``sampling``. "
+            "F1/PPO rollout sets this to ``stochastic`` so the TS evaluator's "
+            "default greedy POST body still produces stochastic traces "
+            "without TS-side flag changes."
+        ),
+    )
+    parser.add_argument(
+        "--default-temperature",
+        type=float,
+        default=None,
+        help=(
+            "Temperature injected when a /predict body omits ``temperature``. "
+            "Defaults to 0.0 under greedy and 1.0 under stochastic when not set."
+        ),
+    )
     return parser.parse_args()
 
 
