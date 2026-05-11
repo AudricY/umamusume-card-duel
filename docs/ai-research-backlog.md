@@ -404,6 +404,20 @@ The cheap falsifiable answer: retrain JUST the value head on rollout-mean outcom
 
 In parallel: game-level parallelism (~4× speedup), latency dials (K=1 / adaptive sims / batched /predict) to push p95 decision time under 3 s, UI integration, and an MCTS-vs-MCTS strength ladder so we stop relying solely on a saturating rule-bot.
 
+### R13.W3 result — value head retrain is **PARTIAL** (2026-05-11)
+
+50 rollout-leaf selfplay games (100 sims, K=3, R4 prior) → 25-epoch frozen-trunk MSE retrain → 100-game gate at `--mcts-leaf value-head` over the retrained checkpoint.
+
+| Metric | Retrained head (W3) | R4 baseline (R12 Phase A) | Δ |
+| --- | --- | --- | --- |
+| WR vs rule-bot | 0.44 | 0.345 | +9.5pp |
+| Wilson lower (n=100) | **0.347** | 0.30 | +4.7pp |
+| Wilson upper | 0.538 | 0.40 | +14pp |
+| Player side WR | 0.40 | — | — |
+| Opponent side WR | 0.48 | — | — |
+
+The retrained head is materially better than R4's at the same leaf evaluator, but doesn't clear the 0.40 GO threshold by itself. Verdict: **PARTIAL**. Per the sprint plan, full Phase D (W6) is still worth running with this checkpoint as warm-start — the rollout-mean target reduces value-head variance, and visit-count distillation could compound on top of that. Rollout-leaf inference (Wilson lower 0.556 at n=200, R12) remains the strongest single config we have; W3 narrowed but did not close the gap between value-head leaf and rollout-CRN leaf.
+
 ### Tasks deleted as obsolete (2026-05-11 post-R12)
 
 R7 (multi-teacher BC blend), R8 (DPO), R9 (Q-learning head), R10 (full-scale DAgger) were all queued only as fallbacks IF R12 failed. R12 didn't fail. Tasks #29-32 removed from the active backlog. The hypotheses they tested (label-quality fixes for the imitation cap) are also obsolete: R12 proved the cap is downstream of the *value-head leaf noise*, not the *training labels*.
