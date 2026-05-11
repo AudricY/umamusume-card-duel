@@ -415,6 +415,24 @@ In parallel: game-level parallelism (~4× speedup), latency dials (K=1 / adaptiv
 
 Iter-1 promoted as the new strongest model. Per-side: player 0.667 / opponent 0.65 — **R-WILD side gap is closed** (was historically ~16pp opp-favored, briefly 9pp player-favored in R12, now within 2pp). Zero heuristic fallbacks → MCTS execution is clean. Iter-1 checkpoint: `runs/R13-W6-phase-d/iter-1/checkpoint.pt`.
 
+### R13 cheap-inference verdict — value-head-leaf at iter-1 clears GO (2026-05-11)
+
+Gate at the W6 iter-1 checkpoint with `--mcts-leaf value-head` (no rollouts), 100 sims, 100 games seeds 700000+:
+
+- **WR 0.55 (55/100), Wilson95 [0.452, 0.644]**
+- Player 0.48 (Wilson [0.348, 0.615]); Opponent 0.62 (Wilson [0.482, 0.741])
+- Zero fallbacks, 194s wall-clock for 100 games (~2s/game with 4 workers)
+
+Value-head-leaf progression at the same evaluator and 100 sims:
+
+| Config | Wilson lower | Δ vs R4 |
+| --- | --- | --- |
+| R4 baseline | 0.30 | — |
+| W3 retrain alone | 0.347 | +4.7pp |
+| W6 iter-1 (W3 + visit-count distill) | **0.452** | **+15.2pp** |
+
+Visit-count distillation on top of W3's variance fix did real work. Iter-1 at cheap inference clears the 0.40 GO bar — **cheap-inference deployment is viable**. Trade-off vs rollout-leaf (Wilson 0.573): -12pp Wilson for ~20× latency reduction (2s/game vs 40s/game). For human-facing UI play, value-head-leaf is the natural production config.
+
 ### R13.W7 headline — n=100 validation (2026-05-11)
 
 Independent gate (seeds 600000+) at the W6 iter-1 checkpoint under the same rollout-leaf MCTS config (100 sims, K=3). Originally launched for n=400, truncated to n=100 since the Wilson half-width was already tight enough that 4× the compute is cosmetic:
