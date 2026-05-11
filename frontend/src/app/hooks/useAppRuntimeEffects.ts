@@ -1,4 +1,4 @@
-import { useEffect, type MutableRefObject, type SetStateAction } from "react";
+import { useEffect, useRef, type MutableRefObject, type SetStateAction } from "react";
 import {
   advanceOpponentTurnStep,
   advancePlayerAiTurnStep,
@@ -11,6 +11,9 @@ import {
   getUmamusumeCard,
   resolvePendingPlayerChoice,
 } from "../../game/engine";
+import { enumerateLegalAiActions } from "../../game/engine/ai-policy/actions";
+import { requestMctsDecision } from "../../game/engine/ai-policy/mctsClient";
+import { readAiBackend } from "../../utils/aiBackend";
 import type { GameState, SideState } from "../../../../shared/src/types";
 import type { InspectTarget } from "../../inspect";
 import type { AppScreen, PendingSelection } from "../../types/ui";
@@ -263,13 +266,45 @@ export function useAppRuntimeEffects({
     setGame((current) => resolvePendingPlayerChoice(current, preferredBenchUid));
   }, [game, isAiVsAi, setGame]);
 
+  // R14.E: opponent step dispatch. When the dev-flag aiBackend is "mcts"
+  // we await the backend's /ai/decide and apply the returned nextState; any
+  // failure path (timeout, transport, fallback, no decision) routes back to
+  // the rule-bot advance step. The mctsInFlightRef prevents a re-render-
+  // driven double dispatch while a decision is still on the wire.
+  const mctsInFlightRef = useRef(false);
   useEffect(() => {
     if (isNetworkMatch || isTurnFlowBlocked || game.phase !== "play" || game.currentSide !== "opponent" || game.gameOver || game.pendingPlayerChoice) return undefined;
+    const aiBackend = readAiBackend();
     const timeoutId = window.setTimeout(() => {
       const coinAttack = getPendingAttackCoinFlip(game, "opponent", coinFlipIdRef.current++);
       if (coinAttack) {
         setPendingCoinAttack({ eventId: coinAttack.id, attackerId: "opponent", result: coinAttack.result, results: coinAttack.results });
         setActiveCoinFlip(coinAttack);
+        return;
+      }
+      if (aiBackend === "mcts" && !mctsInFlightRef.current) {
+        mctsInFlightRef.current = true;
+        const legalActions = enumerateLegalAiActions(game, "opponent");
+        void requestMctsDecision(game, "opponent", legalActions)
+          .then((result) => {
+            if (!result.ok) {
+              console.warn("[mcts] decision failed, falling back to rule-bot:", result.reason, result.message);
+              setGame((current) => advanceOpponentTurnStep(current));
+              return;
+            }
+            if (result.nextState) {
+              setGame(() => result.nextState as GameState);
+            } else {
+              setGame((current) => advanceOpponentTurnStep(current));
+            }
+          })
+          .catch((error) => {
+            console.warn("[mcts] decision threw, falling back to rule-bot:", error);
+            setGame((current) => advanceOpponentTurnStep(current));
+          })
+          .finally(() => {
+            mctsInFlightRef.current = false;
+          });
         return;
       }
       setGame((current) => advanceOpponentTurnStep(current));

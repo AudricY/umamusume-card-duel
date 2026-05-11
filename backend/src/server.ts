@@ -6,8 +6,11 @@ import { randomInt } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { CollectionReference } from "firebase-admin/firestore";
 import { getFirebaseAuth, getFirebaseDb, isFirebaseConfigured, readFirebaseProjectId } from "./firebase";
+import "./sim/rngAsyncStore";
 import { defaultMctsConfig, runMcts, type MctsConfig } from "./sim/mcts";
 import { enumerateLegalAiActions } from "../../frontend/src/game/engine/ai-policy/actions";
+import { advanceModeledTurnStep, getForcedAttackCoinResults, stateHash } from "./sim/evaluateModelVsHeuristic";
+import { createSeededRng, withRng } from "../../frontend/src/game/engine/core/random";
 import type { GameState, SideId } from "../../shared/src/types";
 import {
   aiPremadeDecks,
@@ -74,6 +77,9 @@ app.get("/api/health", (_request, response) => {
 //     decisionMs: number,
 //     simulationsRun: number,
 //     haltedEarly: boolean,
+//     nextState?: GameState,        // R14.E: state after applying the chosen
+//                                   //   action; absent on short-circuit so the
+//                                   //   caller falls back to its rule-bot path.
 //   }
 //
 // If the state has 0 or 1 legal actions the endpoint short-circuits without
@@ -115,12 +121,31 @@ app.post("/ai/decide", asyncHandler(async (request, response) => {
     const result = await runMcts(state, modelSide, config, modelUrl, seed);
     const decisionMs = Date.now() - startedAt;
     const selectedIndex = Math.min(Math.max(0, result.selectedIndex), legalActions.length - 1);
+    const chosenAction = legalActions[selectedIndex];
+    // R14.E: apply the chosen action server-side and ship the new state back.
+    // This avoids porting advanceModeledTurnStep + its helpers to the frontend.
+    // The applyRng is seeded from the per-call seed so forced coin flips +
+    // ability rolls stay deterministic given the same (state, seed, action).
+    let nextState: GameState | undefined;
+    let fallback = false;
+    if (chosenAction) {
+      const applyRng = createSeededRng(`${seed}:apply`, "ai-decide-apply");
+      const forcedCoinResults = withRng(applyRng, () => getForcedAttackCoinResults(state, applyRng));
+      const candidate = advanceModeledTurnStep(state, modelSide, chosenAction, forcedCoinResults, applyRng);
+      // stateHash unchanged ⇒ engine declined to apply (illegal in current
+      // phase, blocked by a pending choice, etc.). Surface as a fallback so
+      // the caller can route to its rule-bot advance step instead.
+      fallback = stateHash(candidate) === stateHash(state);
+      if (!fallback) nextState = candidate;
+    }
     response.json({
       actionIndex: selectedIndex,
-      selectedActionId: legalActions[selectedIndex]?.id ?? "",
+      selectedActionId: chosenAction?.id ?? "",
       decisionMs,
       simulationsRun: result.diagnostics.simulationsRun,
       haltedEarly: result.diagnostics.haltedEarly,
+      ...(nextState ? { nextState } : {}),
+      ...(fallback ? { fallback: true } : {}),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "ai-decide failed";

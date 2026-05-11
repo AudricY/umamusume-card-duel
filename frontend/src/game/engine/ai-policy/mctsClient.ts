@@ -21,10 +21,12 @@ export type MctsDecisionResponse = {
   simulationsRun: number;
   haltedEarly: boolean;
   reason?: string;
+  nextState?: GameState;
+  fallback?: boolean;
 };
 
 export type MctsDecisionResult =
-  | { ok: true; action: LegalAiAction | null; response: MctsDecisionResponse }
+  | { ok: true; action: LegalAiAction | null; nextState: GameState | null; response: MctsDecisionResponse }
   | { ok: false; reason: "timeout" | "http_error" | "transport_error" | "bad_response"; message: string };
 
 export type MctsClientOptions = {
@@ -83,7 +85,8 @@ export async function requestMctsDecision(
     const action = payload.actionIndex >= 0 && payload.actionIndex < legalActions.length
       ? legalActions[payload.actionIndex] ?? null
       : null;
-    return { ok: true, action, response: payload };
+    const nextState = payload.fallback ? null : payload.nextState ?? null;
+    return { ok: true, action, nextState, response: payload };
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       return { ok: false, reason: "timeout", message: `MCTS decision exceeded ${timeoutMs}ms` };
