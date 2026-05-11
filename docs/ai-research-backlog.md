@@ -154,6 +154,74 @@ Across DAgger iter-2 warm-start, R3, R4 gate evals: the trained policy consisten
 
 R-WILD's side-imbalance subitem should be promoted to its own Tier-1-adjacent task.
 
+### R3+PPO and R4+PPO — interventions don't break the gate cap
+
+PPO from R3 (entropy-regularized warm-start) and PPO from R4 (calibrated-value warm-start) both land at the same ~0.31 Wilson lower ceiling that every prior F1 phase hit:
+
+| Run | Warm-start | Final Wilson lower | Best WR |
+| --- | --- | --- | --- |
+| F1 phase 2 (defaults at 30g) | DAgger iter-2 | 0.3109 | 37.5% |
+| F1 phase G (spec defaults at 800g) | DAgger iter-2 | 0.3156 | 38.0% |
+| F1 phase H (aggressive HPs at 800g) | DAgger iter-2 | 0.3109 | 37.5% |
+| R3+PPO (high entropy + aggressive HPs) | R3 entropy-reg | 0.3156 | ~38% |
+| R4+PPO (calibrated value + aggressive HPs) | R4 retrain | 0.3014 | ~36% |
+
+R4+PPO's GAE `mean_advantage` improved from phase-H's −0.10 to −0.03 (calibration *did* help the value baseline). Per-minibatch KL rose from 0.008 to 0.022 — PPO made slightly bigger updates. **But none of it moved the gate WR.**
+
+### Diagnostic finding: the peakedness diagnosis was wrong
+
+The "warm-start entropy is 0.18 nats" claim from F1 phase F was based on `train_ppo`'s per-minibatch entropy metric, which apparently reports something different than the policy entropy on the training distribution. Directly measuring `masked_policy_entropy(model_logits, action_mask)` over `iter-002/mixed.jsonl` shows:
+
+| Checkpoint | Policy entropy on mixed.jsonl |
+| --- | --- |
+| DAgger iter-2 (warm-start) | **0.532** |
+| R3-b005 (β=0.05 entropy bonus) | 0.528 |
+| R3-b020 (β=0.2 + value_weight=1.0 + 50ep) | 0.386 |
+| R3+PPO iter-2 | 0.574 |
+| R4 (value re-train) | (not measured but accuracy 94.7% suggests low) |
+
+So the warm-start's actual entropy is comparable to R3's — the "peakedness mechanism" we built R3 around was a misdiagnosis. R3+PPO didn't help because the warm-start wasn't actually peaked.
+
+### Diagnostic finding: imitation accuracy ≠ play strength
+
+argmax-match rate against rollout-CRN teacher labels on `iter-002/relabeled.jsonl`:
+
+| Checkpoint | argmax-match | Gate WR |
+| --- | --- | --- |
+| DAgger iter-2 (warm-start) | 74.7% | 37.5% |
+| R3-b005 | 75.2% | 38.5% |
+| R4 (50ep, value_weight=1.0) | 81.0% | 34.5% |
+| R3-b020 (combined) | 80.9% | (gate eval pending) |
+
+**Better imitation does not yield better play.** R4 imitates the teacher 6pp more accurately and plays 3pp worse. This rules out the simple "fit the labels harder" path: the teacher's 19–25% argmax errors must concentrate on a small set of high-leverage states (combat finishers, evolution decisions) where one wrong move blows the game.
+
+### The 0.31 cap is structural
+
+Combining R1 (teacher at 58.5%) + R3 + R4 + R3-b020 (planned) + 5 F1 PPO phases:
+
+- Teacher strength: 58.5% (Wilson lower 0.516). Not the cap.
+- Imitation accuracy: 74–81%. Not the limit — improving it doesn't move gate WR.
+- Value head calibration: now PASS. Doesn't move gate WR.
+- Policy entropy at warm-start: 0.5 nats. Already non-peaked.
+- PPO HPs: tried spec, aggressive, extreme. Always 0.30 ± 0.01.
+
+**The gate WR ceiling at 0.31 is structural** — not from any single mechanism we've tested. The remaining hypotheses:
+
+1. **State-feature gap.** The 25% argmax disagreements between trained policy and teacher concentrate on high-leverage decisions; the policy can't tell those states apart in feature space.
+2. **Sample-weight bias.** Low-margin rollout labels (where teacher itself was unsure) get the same weight as high-margin ones; training picks up noise.
+3. **Action-coverage gap.** Candidate ranker filters out some actions the teacher would pick; the BC fit can't recover those.
+4. **Side asymmetry.** The 26–30% player vs 41–43% opponent gap suggests a systematic blind spot in player-side decisions.
+
+### Pivot
+
+Tier-1 verdict: peakedness and calibration are not the binding constraints. Pivot to:
+
+- **R5 (PFSP self-play)** — different opponent distribution, different reward landscape. Smallest infra delta.
+- **Margin-weighted training** (new Tier-2 idea) — sample weights by `selectedVsRunnerUpMargin` so high-margin rows get more training emphasis.
+- **R-WILD side imbalance** — measure where in the game the player-side gap comes from; might suggest a feature gap or a data-skew fix.
+
+R5 is the next concrete experiment. R6/R7/R8/R10 stay on the backlog as larger-cost asymmetric-upside bets.
+
 ## Open / wild
 
 - **Side-imbalance verification.** Gate manifests record player/opponent splits inconsistently across phases. Worth a one-off script to extract the side-WR delta and check whether the model is offensively weak or defensively weak.
