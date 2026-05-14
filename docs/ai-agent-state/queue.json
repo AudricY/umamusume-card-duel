@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T23",
+  "updated": "2026-05-14T24",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -39,8 +39,8 @@
       "id": "r15-s3-value-head-trace-instrumentation",
       "priority": "P3",
       "status": "ready",
-      "summary": "Sim-side prerequisite for Phase O value-head tempo signal. (1) Audit rollout.onnx / policy.gate.onnx output signature for a named value head; if missing, extend the export step. (2) Update the TS-side ONNX inference call site (search backend/src/sim/ for the policy-server client) to capture the value scalar per request. (3) Extend the decision-trace schema (likely `behaviorPolicy.valueEstimate: number` or top-level `valuePred`) and update relabelDecisionTrace.ts to forward it. (4) Regenerate a smoke trace; verify the new field is present. Then unblock r15-s3-value-head-tempo-signal.",
-      "next_action": "Glob backend/src/sim/ for policy/onnx client; read training/ppo_orchestrator.py:840-880 trace parse to confirm value_pred placeholder; check training/export_onnx.py or equivalent for current rollout.onnx outputs; design minimal schema extension; smoke via TMPDIR=/tmp npm run test:train."
+      "summary": "Scoping landed in notes.md '## F1 reward shaping value-head tempo — TS instrumentation scoping (2026-05-14)'. ONNX export already names value (export_onnx.py:46) and serve_onnx /predict already returns it (serve_onnx.py:146); TS client at evaluateModelVsHeuristic.ts:513-519 discards the field. Total estimated diff ~4-6 LOC across 2 TS files (evaluateModelVsHeuristic.ts + relabelDecisionTrace.ts), ~30-45 min human time. No ONNX-export change, no Python-side change required. Awaiting human go/no-go on (a) value-head tempo vs (b) R7 multi-teacher vs (c) R8 DPO ranking before implementing.",
+      "next_action": "Human-blocked on (a)/(b)/(c) ranking decision in escalations.md. If (a) is picked: implement the 2-file TS diff per notes.md scoping, smoke via TMPDIR=/tmp npm run test:train, verify trace.jsonl rows carry behaviorPolicy.valueEstimate ∈ [-1, +1] on policy-source rows; then Phase P consumes the field inside parse_trace_to_trajectories."
     },
     {
       "id": "r15-s3-reduced-mix-sweep",

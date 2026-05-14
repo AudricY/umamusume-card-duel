@@ -589,3 +589,126 @@ Escalation filed in `docs/ai-agent-state/escalations.md` `## Open`; queue item
 `r15-s3-branch-synthesis-and-next-pick` P2 ready (autonomous-launch ineligible). A
 non-per-step reward-shaping framework (turn-based or game-phase aggregate shaping) is a
 **fourth, untested** possibility — call it out but rank below the three above.
+
+## F1 reward shaping value-head tempo — TS instrumentation scoping (2026-05-14)
+
+**Scope at a glance: is the value-head trace instrumentation orchestrator-only? No — but it
+is NOT a "TS+ONNX+schema half-day change" either.** It is a **2-file TS-only change** (no
+ONNX-export change, no Python-side schema change required). The prior worker's
+"deeper than a parsing-time Python diff" framing was correct, but the depth is smaller than
+they implied: the ONNX export already names a `value` output, the `/predict` server already
+returns it, and the TS client just drops it on the floor.
+
+**ONNX export (already correct).** `training/export_onnx.py:46` passes
+`output_names=["logits", "value"]` and `dynamic_axes={..., "value": {0: "batch"}}` (line 52)
+to `torch.onnx.export`. The model class `CandidatePolicyNet` returns
+`(logits, value)` from `forward()` (`training/uma_ai/model.py:81-95`), with the value head
+defined at `model.py:73-79` (LayerNorm → Linear → GELU → Linear(1) → Tanh, range [-1, +1]).
+**No ONNX export change required.**
+
+**ONNX server side (already correct).** `training/serve_onnx.py:95` unpacks
+`logits, value = self.server.session.run(None, arrays)` and the `/predict` response includes
+`"value": value.tolist()` at line 146. **No `serve_onnx.py` change required.**
+
+**TS-side `/predict` client (instrumentation needed here).**
+`backend/src/sim/evaluateModelVsHeuristic.ts:504` is the per-decision `/predict` call inside
+`chooseModelAction`. The current return-payload type at lines **513-519** destructures
+`{selectedIndex, actionLogProbs, actionProbs, selectedLogProb, behaviorPolicy}` and **omits
+`value`** — the field returns from Python but is discarded. To capture it: add
+`value?: number[]` to the payload type (line 519 +1), and in the snapshot construction at
+**lines 527-536** copy `payload.value?.[0]` onto the snapshot (+1 line, with a defensive
+typeof-number check). The single-action shortcut at **lines 494-502** does NOT call
+`/predict` (it short-circuits before fetch), so on those rows the field is absent — that is
+correct behavior, mirroring how `actionLogProbs` etc. are absent there today.
+
+**Schema types (two declarations, must stay in lockstep).** The `BehaviorPolicySnapshot`
+type is duplicated:
+- `backend/src/sim/evaluateModelVsHeuristic.ts:140-146` (5 fields, +1 for `valueEstimate?: number`)
+- `backend/src/sim/dagger/relabelDecisionTrace.ts:5-11` (5 fields, +1 for `valueEstimate?: number`)
+
+`relabelDecisionTrace.ts:109` already forwards the entire `row.behaviorPolicy` object through
+to the training row unchanged, so **no relabeler logic change is required** — only the type
+declaration needs the new field for type-safety.
+
+**Trace writer (no logic change).** The trace row is constructed at
+`backend/src/sim/evaluateModelVsHeuristic.ts:308-329`. `behaviorPolicy` is populated at line
+**328** via `trace.behaviorPolicy = behavior` from `decision.behavior`. Because we attach
+`valueEstimate` to the `BehaviorPolicySnapshot` object inside `chooseModelAction` (not as a
+top-level trace field), this site needs **zero new lines**. Design choice rationale: nesting
+under `behaviorPolicy` matches the existing convention that policy-server-derived scalars
+live on the snapshot (kind/temperature/actionLogProbs/selectedLogProb), and it inherits the
+existing "only present for policy-source rows" semantics so single-action and
+rule/heuristic/rollout/planner selections cleanly omit it (matching the test asserts at
+`backend/src/tests/evalGateSmoke.ts:182-203` which check presence/absence by selection
+source).
+
+**Backward compat — readers.**
+- Python parser `training/ppo_orchestrator.py:844` does
+  `behavior = row.get("behaviorPolicy") or {}` and only reads `behavior.get("selectedLogProb")`
+  (line 849). Unknown keys on the snapshot are silently ignored. **No Python-side change
+  required for backward compat;** the value-head tempo signal consumer will be a separate diff
+  inside `parse_trace_to_trajectories` that does `behavior.get("valueEstimate")` (the actual
+  use of the new field — that's the unblocked R15.S3 Phase P work, NOT part of this
+  instrumentation slot).
+- TS readers: `relabelDecisionTrace.ts:109` does object-pass-through; no shape check.
+  `evalGateSmoke.ts:182-213` does explicit `assert.equal(row.behaviorPolicy, undefined, ...)` /
+  `assert.ok(row.behaviorPolicy, ...)` checks but never asserts the snapshot shape is exactly
+  5 fields — adding a 6th optional field is safe.
+- `daggerRoundSmoke.ts:65-86` plants a `behaviorPolicy` and asserts forwarded-through; the
+  planted object has no `valueEstimate` and the test won't break (the new field is optional).
+
+**Estimated per-file diff.**
+- `training/export_onnx.py`: **0 LOC** (already exports value).
+- `training/serve_onnx.py`: **0 LOC** (already returns value in /predict response).
+- `backend/src/sim/evaluateModelVsHeuristic.ts`:
+  - `BehaviorPolicySnapshot` type at line 140-146: **+1 LOC** (`valueEstimate?: number;`).
+  - `/predict` payload type at line 513-519: **+1 LOC** (`value?: number[];`).
+  - `chooseModelAction` snapshot construction at line 527-536: **+1-2 LOC** (assign
+    `payload.value?.[0]` with a `typeof === "number"` guard).
+- `backend/src/sim/dagger/relabelDecisionTrace.ts`:
+  - `BehaviorPolicySnapshot` type at line 5-11: **+1 LOC** (`valueEstimate?: number;`).
+- Smoke-test updates: **0 LOC strictly required** but recommended **+1-2 LOC** in
+  `backend/src/tests/evalGateSmoke.ts` policy-source block (~line 201-213) to assert
+  `typeof row.behaviorPolicy.valueEstimate === "number"` when `kind ∈ {greedy, stochastic}` —
+  catches future regressions where the field gets dropped.
+
+**Grand total: ~4-6 LOC across 2 production files (`evaluateModelVsHeuristic.ts`,
+`relabelDecisionTrace.ts`), optionally +1-2 LOC in 1 smoke test.** Human time estimate:
+**~30-45 min** including a `TMPDIR=/tmp npm run test:train` + `head -1 .../trace.jsonl | jq
+.behaviorPolicy` smoke check. **This is closer to the "30-min Python diff equivalent" than
+to a "half-day TS+ONNX+schema change"** because the export and server are already correct.
+
+**Validation strategy.**
+1. `TMPDIR=/tmp npm run build` — TS type-check confirms both schema declarations stay in
+   sync (production code uses both).
+2. `TMPDIR=/tmp npm run test:train` — full ts/test suite catches any
+   behaviorPolicy assertion regression.
+3. Single-game smoke: `node --experimental-strip-types backend/src/sim/evaluateModelVsHeuristic.ts
+   --games 1 --selection policy --decision-trace-out /tmp/smoke-trace.jsonl
+   --model-url http://localhost:8000 ...` (needs a running serve_onnx); then
+   `jq -c 'select(.selection=="policy") | .behaviorPolicy.valueEstimate'
+   /tmp/smoke-trace.jsonl | head -5` — expect numbers in [-1, +1] (Tanh output range).
+4. Trace size regression check: compare bytes-per-row on a 100-row trace before/after; expect
+   <1% inflation (a single float adds ~25 bytes to ~3 KB rows).
+
+**Risks.**
+- **(low) value-head output index ordering.** `serve_onnx.py:95` assumes
+  `(logits, value)` tuple order matching `output_names=["logits", "value"]`. If a future
+  re-export reorders outputs (e.g. someone changes to `["value", "logits"]`), the unpack
+  silently swaps. Mitigation: `serve_onnx.py:95` could be tightened with a named-output
+  lookup, but that is outside this slot's scope. Today's behavior matches.
+- **(low) trace-file bloat.** 232 MB × ~1% = ~2.3 MB additional per R15-S3 trace. Negligible.
+- **(medium) gate vs collector value semantics drift.** The same value scalar will be logged
+  under both greedy gate-eval and stochastic PPO collector modes. Phase P (the eventual
+  consumer) needs to decide whether to use the value Δ as a shaping signal only on collector
+  rows or on both; this is a Phase P design decision, not a blocker for the instrumentation
+  slot.
+- **(low) duplicate type-decl drift.** `BehaviorPolicySnapshot` exists in two TS files; the
+  build catches mismatched usages at compile time, but the *type itself* can drift if a future
+  edit only touches one. Mitigation deferred: a shared types file in `shared/src/` is the
+  right answer but is out of scope here. Note left for a future refactor slot.
+
+**Bottom line.** This is a **2-file, ~5-LOC TS-only schema-extension change** taking
+**~30-45 min** including smoke validation. The ONNX export and `/predict` server are already
+emitting the value scalar; the TS client just needs to start carrying it through to the
+trace row. Comparable cost to a small `parse_trace_to_trajectories` parameter addition.
