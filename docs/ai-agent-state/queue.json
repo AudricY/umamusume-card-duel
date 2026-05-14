@@ -11,7 +11,10 @@
     {
       "id": "f1-self-play-sweep",
       "priority": "P2",
-      "status": "ready",
+      "status": "in_progress",
+      "started_at": "2026-05-14",
+      "run_dir": "runs/R14-f1-self-play-sweep/",
+      "pid": 1755515,
       "summary": "Run one cheap PPO sweep with --rollout-vs-pool against a hand-built pool of W6/iter-{0,1,2} promoted checkpoints. Materially different from R5 (which used the item17 DAgger pool ~30pp weaker). Plumbing caveat: today's _select_pool_opponent picks one opponent per run uniformly, not per-game PFSP — accept that as the v1 experiment.",
       "next_action": "See docs/ai-agent-state/notes.md '## F1 self-play readiness — scoping (2026-05-14)' for full config. Briefly: build opponent-pool.json with runs/R13-W6-phase-d/iter-{0,1,2}/checkpoint.pt as entries 0/1/2; run ppo_orchestrator with --init-from runs/R13-W6-phase-d/iter-2/checkpoint.pt --rollout-vs-pool --pool-path <that file> --iterations 3 --games-per-update 800, aggressive HPs mirroring F1 phase H. Gate: Wilson lower >= 0.40."
     },
