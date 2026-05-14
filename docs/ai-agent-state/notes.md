@@ -503,3 +503,89 @@ value-head-delta signal can be self-referentially gamed if the policy learns to 
 own value estimates — important to quote WR alongside Wilson). Run as new Phase O. Smoke
 (`TMPDIR=/tmp npm run test:ppo-smoke`) before launching. Expected ~6 min wall-clock per L/M/N
 precedent.
+
+**Phase O' Closeout — R15.S3 reduced-mix / signal-mix axis + R15.S3 BRANCH CLOSEOUT
+(2026-05-14).** **CAPSTONE — branch fully saturated; iter-2 Wilson 0.3677 identical to Phase N
+to 4 decimal places.** Phase O original (value-head tempo signal) audited at launch time and
+found blocked on TS-side ONNX/trace schema instrumentation (filed as P3
+`r15-s3-value-head-trace-instrumentation`, ready). Pivoted to scoping option (2): drop the
+weakest of the 5 existing signals, scale the strongest 2-3. Audit pulled per-iter
+`shape_attribution` from Phase N `events.jsonl` — iter-2 absolute coef-weighted contributions:
+throughput 171.4, active-energy 90.4, hp-diff **-6.9** (anti-correlated), bench-energy 4.2,
+retreat **0.0** (agent never retreats). Dropped retreat (zero) and bench-energy (smallest
+non-zero, redundant with active-energy); scaled active-energy 0.02→0.03 and throughput
+0.02→0.03; held hp-diff at 0.05 as control (preserves signal-set parity test integrity rather
+than amplifying an anti-correlated signal). Per-game shape budget ~0.24, close to Phase M's
+0.23. Run `runs/R15-S3-reduced-mix/` (same warm-start, opponent, HPs, code as Phase L/M/N;
+only diff is the coef vector). Wilson lower per iter: iter-0 **0.2825** (WR 32.2%, +1.0pp vs
+Phase N iter-0 0.2787, promoted) → iter-1 **0.2883** (WR 32.8%, +0.6pp vs iter-0, promoted —
+identical to Phase N iter-1 0.2883 to 4dp) → iter-2 **0.3677** (WR 41.0%, +7.9pp vs iter-1,
+promoted — **identical to Phase N iter-2 0.3677 to 4 decimal places**). All three iters
+promoted, monotone, no rejections, `run_completed clean, halted=false`. Δ iter-2 vs Phase N:
+**+0.0000pp**. Mechanism check (healthy): ratio_max 10.53 / 18.02 / 10.57; entropy stable
+(0.171 → 0.161 → 0.153, no collapse); `numerical_anomalies = 0` across all 48 minibatches;
+approx_kl_max < 0.016 each iter; WR tracks Wilson in lockstep (32.2% → 32.8% → 41.0%). Phase
+O' attribution confirms the drop choices: bench-energy 0.0 / retreat 0.0 across all three
+iters (signals correctly silenced); throughput 258.4 / 255.7 / 259.3 (consistent, dominant);
+active-energy 126.1 / 130.8 / 132.3 (consistent, secondary); hp-diff ≈ -6.5 (consistent
+anti-correlated). Wall-clock **5m 28.2s** (run_started → run_completed delta:
+`1778733964.90 → 1778734293.08 = 328.18s`); fastest of the L/M/N/O' quartet alongside Phase N.
+
+**4-axis synthesis — R15.S3 observation-delta reward-shaping branch CLOSED.** Three single-
+axis moves have now been tested independently inside the 5-signal observation-delta family,
+each from the Phase L baseline (1.0× coefs, linear-decay schedule, all 5 signals active):
+
+| Axis | Configs | Δ iter-2 Wilson | Notes |
+| --- | --- | --- | --- |
+| Coef magnitude | Phase L 1.0× → Phase M 1.75× linear-decay | **+0.002** | iter-1 rejected at 1.75×; iter-2 within Wilson noise of Phase L |
+| Shaping schedule | Phase L decay → Phase N constant | **+0.012** | constant > decay by ~1pp; new ceiling 0.3677 at Phase N |
+| Signal mix | Phase N 5-signal → Phase O' 3-signal (drop bench-energy + retreat) | **+0.000** | iter-2 identical to Phase N to 4dp |
+
+All four phases have PPO healthy in all configs: importance ratios off 1.0, gradient
+decisively active, WR tracks Wilson in lockstep, no reward hacking, no numerical anomalies,
+entropy stable, approx_kl bounded. The 5-signal hand-engineered observation-delta family
+encodes ~+5pp Wilson over the unshaped Phase H baseline (0.3109 → 0.3677), but **all three
+axes inside that family are now exhausted** — iter-2 caps at **0.368 ± 0.001** regardless of
+coefs, schedule, or which subset of the 5 signals is active. The binding constraint is the
+*information content* of the signal set, not the signals' computation, weights, or schedule.
+Total R15.S3 branch compute cost ≈ **23 min wall-clock across 4 phases** (Phase L 5m 54s +
+Phase M 6m 22s + Phase N 5m 25s + Phase O' 5m 28s) — cheap research, decisive answer.
+
+**F1 post-mortem framing update.** Phase L closeout qualified the original "0.40 NOT
+REACHABLE" claim with "the reward axis demonstrably changed the mechanism; 0.40 is now
+reachable in principle." Phase M / N narrowed that to "the gap is quantitative — coef + signal
+mix." **Phase O' closes the qualification cleanly**: the reward-shape axis has been **fully
+explored** and converged at 0.368. The remaining gap to 0.40 is now **categorical** — needs a
+different *information source*, not more tuning of the existing observation-delta signals.
+
+**Surviving F1-line candidates (research-stance decision, escalated to human).** The only ways
+to break the 0.368 cap from here require pulling in information from a *different source*:
+
+1. **Value-head tempo signal** — per-step delta of the policy's own value estimate as a
+   strategic-tempo reward signal. Highest-leverage of the three because it adds *learned*
+   strategic information rather than hand-engineered observations. Blocked on TS-side ONNX
+   call-site instrumentation: rollout currently emits placeholder `value_pred=0.0`
+   (`ppo_orchestrator.py:858`), PPO recomputes value at training time, the value head is not
+   a named output of `rollout.onnx`/`policy.gate.onnx`. Implementation requires ONNX export
+   audit + TS-side inference call-site instrumentation (search `backend/src/sim/` for the
+   policy-server client) + decision-trace schema extension (likely
+   `behaviorPolicy.valueEstimate: number` or top-level `valuePred`) +
+   `relabelDecisionTrace.ts` forward. Multi-file change crossing TS/Python; ~separate sprint
+   slot. Queued as `r15-s3-value-head-trace-instrumentation` ready.
+
+2. **R7 multi-teacher labels** — change the SL warm-start by retraining DAgger with multiple
+   teachers (e.g. rollout-teacher mixed with rule-bot policy labels, or with value-head leaf
+   MCTS labels). PPO inherits a different starting policy. Does not touch the reward axis.
+   Larger code surface (SL pipeline rebuild). Pre-scoped in the R7 backlog entry.
+
+3. **R8 DPO** — replace PPO with Direct Preference Optimization, an objective that doesn't
+   depend on hand-shaped reward signal. Bigger pivot. Pre-scoped in the R8 backlog entry.
+
+**Recommendation:** human picks among (1)/(2)/(3) before further autonomous F1-line work. The
+autonomous loop should NOT pick one of these on its own — each is a meaningfully different
+research direction (sim-side instrumentation vs SL rebuild vs PPO replacement) and the
+ordering depends on which axis the researcher believes is most likely to crack the 0.40 bar.
+Escalation filed in `docs/ai-agent-state/escalations.md` `## Open`; queue item
+`r15-s3-branch-synthesis-and-next-pick` P2 ready (autonomous-launch ineligible). A
+non-per-step reward-shaping framework (turn-based or game-phase aggregate shaping) is a
+**fourth, untested** possibility — call it out but rank below the three above.

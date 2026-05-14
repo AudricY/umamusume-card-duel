@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T22",
+  "updated": "2026-05-14T23",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -16,11 +16,18 @@
       "next_action": "Use /work to brief the worker for a planning/refinement task: read docs/r14-sprint-plan.md, docs/ai-research-backlog.md, docs/ai-performance-research-progress.md, docs/ai-agent-state/escalations.md, and recent relevant run state; update queue and existing docs only where evidence changes the next action."
     },
     {
+      "id": "r15-s3-branch-synthesis-and-next-pick",
+      "priority": "P2",
+      "status": "ready",
+      "summary": "R15.S3 observation-delta reward-shaping branch fully explored across 4 phases (L coef magnitude, M coef scaling, N schedule, O' signal mix) — iter-2 capped at Wilson 0.368 in all configs. Surviving F1-line candidates: (a) value-head tempo signal (blocked on `r15-s3-value-head-trace-instrumentation`); (b) R7 multi-teacher labels (SL warm-start rebuild); (c) R8 DPO (PPO replacement). Read the synthesis in notes.md `## F1 reward shaping — scoping (2026-05-14)` Phase O' Closeout + branch-synthesis block. Human research-stance decision needed before further autonomous F1-line work — see escalations.md open entry.",
+      "next_action": "Human-blocked: pick (a), (b), or (c) as the next F1-line research branch. Autonomous launch ineligible — this is a research-stance decision, not a launch-and-watch decision."
+    },
+    {
       "id": "r15-s3-signal-mix-or-schedule",
       "priority": "P3",
       "status": "done",
       "run_dir": "runs/R15-S3-constant-shape",
-      "summary": "Schedule axis explored; constant beat linear-decay by ~+1pp (Phase N 0.368 vs Phase L 0.356) but signal-set is the binding constraint. Next move: signal-mix change (drop weak signals; add value-head-delta tempo signal per scoping notes option (1))."
+      "summary": "Schedule axis explored; constant beat linear-decay by ~+1pp (Phase N 0.368 vs Phase L 0.356). Closed by Phase O' branch-synthesis: signal-mix tested at Phase O' (`r15-s3-reduced-mix-sweep`) and also capped at 0.368."
     },
     {
       "id": "r15-s3-value-head-tempo-signal",
@@ -38,11 +45,9 @@
     {
       "id": "r15-s3-reduced-mix-sweep",
       "priority": "P3",
-      "status": "in_progress",
-      "started_at": "2026-05-14T22:46Z",
+      "status": "done",
       "run_dir": "runs/R15-S3-reduced-mix",
-      "pid": 2782486,
-      "summary": "Phase O' — drop the 2 weakest of the 5 reward shaping signals, scale the strongest 2-3 to ~1.5x. Tests whether signal-MIX composition has further headroom independent of signal-SET. Same constant schedule, same warm-start, same HPs. If iter-2 >= 0.40 -> signal-mix unlocks F1 success. If iter-2 ~= 0.37 -> signal-set is genuinely binding; pivot to value-head instrumentation or R7/R8. Coefs: active-energy 0.03 (was 0.02 x1.5), bench-energy 0.0 (dropped - 2nd weakest non-zero), retreat 0.0 (dropped - zero contribution per Phase N attribution), throughput 0.03 (was 0.02 x1.5 - largest contributor), hp-diff 0.05 (held - anti-correlated per attribution, kept as control). Per-game budget ~0.24, close to Phase M's 0.23."
+      "summary": "Phase O' CLOSED — signal-mix axis fully explored. Dropped bench-energy + retreat (both effectively dead in Phase N attribution); scaled active-energy 0.02→0.03 and throughput 0.02→0.03; held hp-diff 0.05 as control. All 3 iters promoted, monotone trajectory 0.2825 → 0.2883 → 0.3677. Iter-2 Wilson **0.3677 identical to Phase N's 0.3677 to 4 decimal places** — signal-mix change moved iter-2 by 0.0000pp. Capstone observation for R15.S3 branch: 3 axes (coef magnitude / schedule / signal mix) each moved iter-2 by ≤1.2pp; the binding constraint is the information content of the 5-signal observation-delta family, not the signals' weights or schedule. Total R15.S3 branch cost ~25 min compute across 4 phases (L+M+N+O'). Branch CLOSED / SATURATED."
     }
   ]
 }

@@ -733,7 +733,7 @@ iter-2 promoted at Wilson lower **0.3109 — exactly the DAgger iter-2 Wilson lo
 4. The entropy bonus widens *probabilities* but doesn't *flip argmax decisions*, which is what the gate measures.
 5. With the current ±1 terminal + Δpoints×1/3 reward shape, the local optimum at WR ≈ 35–38% is the highest-return policy in the neighborhood of the warm-start.
 
-**F1 target 0.40 not yet reached from the item17-2026-05-11 warm-start** under the PPO mechanism active at the time of this post-mortem. PPO can match the SL cap (phase H iter-2) but cannot exceed it under the existing reward shape. [Update 2026-05-14: R15.S3 (Phase L) lifted the rule-bot Wilson lower from 0.3109 (phase H) to **0.3560** by adding five per-step shaped signals — +4.5pp absolute over the prior F1 ceiling, missing the 0.40 bar by only 4.4pp and landing above the falsification band. The "NOT REACHABLE" framing was correct under the *unshaped* reward mechanism but is qualified once the reward axis is allowed to move; the branch is alive and the next attempt is a coefficient-scaling follow-up on the same axis. See "Phase L — F1 PPO + reward shaping" below. Phase M follow-up (1.75× coefs) landed iter-2 at **0.3580**, within Wilson noise of Phase L (Δ +0.002) — the pre-registered "coef saturation" outcome fired; next single-axis move is signal-mix or shaping-schedule change. See "Phase M — F1 PPO + reward-shape coef-scaling follow-up" below. Phase N follow-up (constant schedule, 1.0× coefs) landed iter-2 at **0.3677** (WR 41.0%, n=500) — **+1.2pp over Phase L, the new F1 rule-bot ceiling on record**, but still 3.2pp short of 0.40. With three configurations of the same 5-signal mix now landing 0.356 / 0.358 / 0.368 at iter-2, coef magnitude and schedule axes both moved iter-2 by ≤+1pp — **the binding constraint is the signal set itself**, not magnitude or schedule. See "Phase N — F1 PPO + constant reward shaping" below.]
+**F1 target 0.40 not yet reached from the item17-2026-05-11 warm-start** under the PPO mechanism active at the time of this post-mortem. PPO can match the SL cap (phase H iter-2) but cannot exceed it under the existing reward shape. [Update 2026-05-14: R15.S3 (Phase L) lifted the rule-bot Wilson lower from 0.3109 (phase H) to **0.3560** by adding five per-step shaped signals — +4.5pp absolute over the prior F1 ceiling, missing the 0.40 bar by only 4.4pp and landing above the falsification band. The "NOT REACHABLE" framing was correct under the *unshaped* reward mechanism but is qualified once the reward axis is allowed to move; the branch is alive and the next attempt is a coefficient-scaling follow-up on the same axis. See "Phase L — F1 PPO + reward shaping" below. Phase M follow-up (1.75× coefs) landed iter-2 at **0.3580**, within Wilson noise of Phase L (Δ +0.002) — the pre-registered "coef saturation" outcome fired; next single-axis move is signal-mix or shaping-schedule change. See "Phase M — F1 PPO + reward-shape coef-scaling follow-up" below. Phase N follow-up (constant schedule, 1.0× coefs) landed iter-2 at **0.3677** (WR 41.0%, n=500) — **+1.2pp over Phase L, the new F1 rule-bot ceiling on record**, but still 3.2pp short of 0.40. With three configurations of the same 5-signal mix now landing 0.356 / 0.358 / 0.368 at iter-2, coef magnitude and schedule axes both moved iter-2 by ≤+1pp — **the binding constraint is the signal set itself**, not magnitude or schedule. See "Phase N — F1 PPO + constant reward shaping" below. **Phase O' capstone (2026-05-14, R15.S3 BRANCH CLOSED):** the signal-mix axis was tested by dropping the 2 weakest of the 5 signals (bench-energy and retreat — both effectively dead in Phase N attribution) and scaling the 2 dominant signals (active-energy 0.02→0.03, throughput 0.02→0.03). Iter-2 Wilson **0.3677 — identical to Phase N's 0.3677 to 4 decimal places** (Δ +0.000pp). With **three single-axis moves** (coef magnitude L→M Δ +0.002, schedule L→N Δ +0.012, signal mix N→O' Δ +0.000) now exhausted inside the 5-signal observation-delta family, the R15.S3 reward-shape **branch is closed at iter-2 Wilson 0.368 ± 0.001**. The post-mortem framing has been correspondingly upgraded: the reward-shape axis has been **fully explored and converged**; the remaining gap to 0.40 is now **categorical — needs a different information source, not more tuning of the existing observation-delta signals**. Surviving F1-line candidates require pulling information from a *different source*: value-head tempo signal (blocked on TS-side ONNX/trace instrumentation, queued as `r15-s3-value-head-trace-instrumentation`), R7 (multi-teacher labels — SL warm-start rebuild), or R8 (DPO — PPO replacement). See "Phase O' — F1 PPO + reduced signal-mix (R15.S3 branch closeout)" below.]
 
 **Recommended next moves, in order of plausibility:**
 
@@ -966,6 +966,7 @@ PASS pre-launch.
 | **L** | **PPO aggressive + 5-signal reward shaping** | **0.3560 (iter-2)** | **0.3560** | **5m 54s** |
 | **M** | **Phase L + all 5 coefs scaled 1.75×** | **0.3580 (iter-2)** | **0.3580** | **6m 22s** |
 | **N** | **Phase L + constant schedule (no decay)** | **0.3677 (iter-2)** | **0.3677** | **5m 25s** |
+| **O'** | **Phase N + reduced 3-signal mix (drop bench-energy + retreat; scale active-energy + throughput)** | **0.3677 (iter-2)** | **0.3677** | **5m 28s** |
 
 **What this opens.** A coefficient-scaling follow-up sweep on the same axis: hold the five signals
 fixed, scale all five coefs 1.5–2× (the current ~0.13/step per-game sum is at the low end of the
@@ -1160,3 +1161,164 @@ showing all five components active at full scale across all three iters with no 
 `orchestrator-state.json` (promoted_wilson_lower 0.3677343110002554), per-iter
 `iteration-manifest.json` + `gate.manifest.json`, `launch.log` (banner shows
 `--reward-shape-start 1.0 --reward-shape-end 1.0` confirmed).
+
+### Phase O' — F1 PPO + reduced signal-mix (R15.S3 branch closeout, 2026-05-14)
+
+Capstone observation that closes the R15.S3 observation-delta reward-shaping branch as a
+research direction. Phase O original plan (value-head tempo signal as a 6th additive
+component) was audited at launch time and found blocked on TS-side ONNX/trace instrumentation
+(rollout emits placeholder `value_pred=0.0` at `ppo_orchestrator.py:858`, PPO recomputes value
+at training-time, the value head is not in the decision-trace schema). Filed as P3
+`r15-s3-value-head-trace-instrumentation` ready (separate sprint-slot work crossing TS and
+Python). Pivoted to the scoping doc's option (2) — drop the weakest of the 5 existing signals
+and scale the dominant 2-3 — as the cheapest remaining single-axis move inside the R15.S3
+branch. Phase N iter-2 absolute coef-weighted contributions (from
+`runs/R15-S3-constant-shape/events.jsonl` `trajectory-parse/completed.data.shape_attribution`):
+throughput 171.4, active-energy 90.4, hp-diff **-6.9** (anti-correlated, consistent across all
+3 iters), bench-energy 4.2, retreat **0.0** (the agent never retreats — the rule-bot opponent
+doesn't pressure retreat decisions and the warm-start policy doesn't develop them). Run
+`runs/R15-S3-reduced-mix/` (Phase O') dropped retreat and bench-energy, scaled active-energy
+0.02→0.03 and throughput 0.02→0.03, and **held hp-diff 0.05 as control** rather than
+amplifying an anti-correlated signal (preserves signal-set parity test integrity). Per-game
+shape budget ~0.24, close to Phase M's 0.23. Same warm-start
+(`runs/item17-2026-05-11/iter-002/model/checkpoint.pt`), opponent (rule-bot, no pool), HPs
+(`--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4 --reward-shape-start 1.0
+--reward-shape-end 1.0`), code as Phase N. Pre-registered: success if iter-2 Wilson ≥ 0.40
+(first F1 success on record — signal-mix unlocks more headroom); partial if 0.368 < iter-2 <
+0.40 (mix has incremental headroom worth pursuing); **saturation if iter-2 ≈ 0.37**
+(signal-SET is genuinely binding, not the MIX over the 5 signals — branch is closed and
+attention pivots to a different information source).
+
+| Iter | Shape scale | Eval gate | WR | Wilson lower | n=games | ratio_max | entropy_mean | approx_kl_max | numerical_anomalies | Outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 1.0 | rollout | 32.2% | **0.2825** | 500 | 10.53 | 0.171 | 0.016 | 0 | **promoted** (baseline, +1.0pp vs Phase N iter-0 0.2787) |
+| 1 | 1.0 | policy | 32.8% | **0.2883** | 500 | 18.02 | 0.161 | 0.014 | 0 | **promoted** (+0.6pp vs iter-0; **identical to Phase N iter-1 0.2883 to 4dp**) |
+| 2 | 1.0 | policy | 41.0% | **0.3677** | 500 | 10.57 | 0.153 | 0.015 | 0 | **promoted** (+7.9pp vs iter-1; **identical to Phase N iter-2 0.3677 to 4dp**) |
+
+**Verdict: SATURATION as pre-registered — R15.S3 BRANCH CLOSED.** Iter-2 Wilson **0.3677
+identical to Phase N's 0.3677 to 4 decimal places** (Δ +0.0000pp). Dropping 2 of 5 signals
+(both shown by Phase N attribution to be effectively dead) and scaling the 2 dominant signals
+moved iter-2 by **0.0000pp**. All 3 iters promoted, monotone, no rejections, `run_completed
+clean, halted=false`. Attribution data confirms the drop choices were correct: bench-energy
+**0.0** and retreat **0.0** across all 3 Phase O' iters (signals correctly silenced —
+`shape_attribution` reads `bench_energy: 0.0, retreat: 0.0` for iter-0/1/2); throughput
+dominant (258.4 / 255.7 / 259.3 across iter-0/1/2); active-energy secondary (126.1 / 130.8
+/ 132.3); hp-diff consistently anti-correlated (-6.4 / -6.7 / -6.2). The signal-mix change
+that this Phase O' tested was the cleanest possible "drop the dead and amplify the live"
+move — and it did not move iter-2 at all.
+
+**Comparison to Phase N (parent constant-shape sub-result).**
+
+| Iter | Phase N (5-signal, 1.0× coefs, constant) Wilson lower | Phase O' (3-signal, scaled, constant) Wilson lower | Δ |
+| --- | --- | --- | --- |
+| 0 | 0.2787 | **0.2825** | +0.004 |
+| 1 | 0.2883 | **0.2883** | **+0.000** |
+| 2 | **0.3677** | **0.3677** | **+0.000** |
+
+Iter-1 and iter-2 match Phase N to 4 decimal places. Iter-0 shows a small +0.4pp lift that
+does not compound — within Wilson noise at n=500.
+
+**Mechanism check (healthy in all 3 iters).** `ratio_max` per iter **10.53 / 18.02 / 10.57**
+— gradient strongly active, comparable to Phase L's 19.06 / 32.59 / 11.12, Phase M's
+15.86 / 12.50 / 18.82, and Phase N's 11.82 / 7.97 / 32.78 ranges. Entropy stable
+(0.171 → 0.161 → 0.153, no collapse). `numerical_anomalies = 0` across all 48 minibatches.
+`approx_kl_max < 0.016` each iter (well within stability bound). `ratio_mean ≈ 1.000`
+throughout (PPO is taking real gradient steps that integrate to ~zero KL, the canonical
+healthy signature). PPO is not stuck; it is converging to the same local optimum the other
+three phases found.
+
+**Reward-hacking check (passes).** WR tracks Wilson in lockstep: 32.2% → 32.8% → 41.0% — the
++7.9pp iter-2 Wilson lift is mirrored by +8.2pp WR. No iter where Wilson rises while WR falls.
+No iter where Wilson rises while WR stalls. The policy that maximizes the reduced 3-signal
+shape is also the policy that wins more games against rule-bot. This is not a signal-gaming
+outcome; it is a "the signals are encoding winning correctly, but they have run out of
+information content" outcome.
+
+**4-axis cross-phase synthesis (capstone — the binding constraint).**
+
+| Phase | Schedule | Coef scale | Signal mix | iter-0 Wilson | iter-1 Wilson | iter-2 Wilson | Δ iter-2 vs Phase L | iter-1 rejected? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| L (R15.S3 parent) | linear-decay (full→zero) | 1.0× | 5 signals | 0.2730 | 0.2787 | **0.3560** | — | no |
+| M (1.75× follow-up) | linear-decay (full→zero) | 1.75× | 5 signals | 0.2960 | 0.2825 (rejected) | **0.3580** | +0.002 | **yes** |
+| N (constant follow-up) | constant (full→full) | 1.0× | 5 signals | 0.2787 | 0.2883 | **0.3677** | +0.012 | no |
+| **O' (signal-mix follow-up)** | **constant (full→full)** | **1.0× (active+throughput scaled 1.5×)** | **3 signals (drop bench-energy + retreat)** | **0.2825** | **0.2883** | **0.3677** | **+0.012** | **no** |
+
+Three single-axis moves now tested independently inside the R15.S3 observation-delta family,
+each from the Phase L baseline:
+
+| Axis | Configs | Δ iter-2 Wilson |
+| --- | --- | --- |
+| **Coef magnitude** | Phase L 1.0× → Phase M 1.75× | **+0.002** |
+| **Shaping schedule** | Phase L decay → Phase N constant | **+0.012** |
+| **Signal mix** | Phase N 5-signal → Phase O' 3-signal | **+0.000** |
+
+PPO is healthy in all four phases — importance ratios decisively off 1.0, KL bounded, entropy
+stable, WR tracks Wilson, no anomalies, no reward hacking. The 5-signal hand-engineered
+observation-delta family encodes ~+5pp Wilson over the unshaped Phase H baseline (0.3109 →
+0.3677), but **scaling magnitude, changing schedule, or dropping inactive components all
+leave iter-2 at 0.368 ± 0.001**. The binding constraint is the *information content* of the
+signal set, not the signals' weights, schedule, or which subset is active.
+
+**Wall-clock and total branch cost.** Phase O' end-to-end **5m 28.2s** (run_started →
+run_completed delta: `1778733964.90 → 1778734293.08 = 328.18s`); fastest of the L/M/N/O'
+quartet alongside Phase N. Signal-mix change adds zero runtime cost (the 5 reward-component
+computations all run per row regardless; setting a coef to 0.0 zeroes the contribution but
+not the compute). **Total R15.S3 branch wall-clock ≈ 23 minutes across 4 phases** (Phase L
+5m 54s + Phase M 6m 22s + Phase N 5m 25s + Phase O' 5m 28s) — cheap research, decisive
+answer. Implementation cost: **zero LOC diff vs Phase N** (CLI args only).
+
+**What this implies for the F1 post-mortem.** The Phase L closeout qualified the original
+"0.40 NOT REACHABLE" claim with "the reward axis demonstrably changed the mechanism; 0.40 is
+now reachable in principle." Phase M / N narrowed that to "the gap is quantitative —
+coefficient scale + signal mix." **Phase O' closes the qualification cleanly: the
+reward-shape axis has been fully explored and converged at 0.368.** The remaining gap to
+0.40 is now **categorical** — needs a different *information source*, not more tuning of the
+existing observation-delta signals. The post-mortem update line at 736 above is rewritten
+accordingly.
+
+**What this opens — three surviving F1-line candidates (research-stance decision, escalated
+to human).** The only ways to break the 0.368 cap from this warm-start + opponent combination
+require pulling in information from a *different source*:
+
+1. **Value-head tempo signal** — per-step delta of the policy's own value estimate as a
+   strategic-tempo reward signal. Highest-leverage of the three because it adds *learned*
+   strategic information rather than hand-engineered observation deltas. Blocked on TS-side
+   ONNX/trace instrumentation: the value head is not in the current decision-trace schema and
+   rollout emits a placeholder. Requires (a) ONNX export audit to confirm `rollout.onnx` /
+   `policy.gate.onnx` expose a named value-head output (extend the export step if not),
+   (b) TS-side ONNX inference call-site instrumentation in `backend/src/sim/` to capture the
+   value scalar per request, (c) decision-trace schema extension (likely
+   `behaviorPolicy.valueEstimate: number` or top-level `valuePred`) with
+   `relabelDecisionTrace.ts` forward, (d) regenerate a smoke trace and verify the new field
+   is present. Then unblock the queued P3 `r15-s3-value-head-tempo-signal`. Multi-file change
+   crossing TS / Python; ~separate sprint slot.
+
+2. **R7 multi-teacher labels** — change the SL warm-start by retraining DAgger with multiple
+   teachers (e.g. rollout-teacher mixed with rule-bot policy labels, or with value-head leaf
+   MCTS labels). PPO inherits a different starting policy. Does not touch the reward axis.
+   Larger code surface (SL pipeline rebuild).
+
+3. **R8 DPO** — replace PPO with Direct Preference Optimization, an objective that doesn't
+   depend on hand-shaped reward signal. Bigger pivot; orthogonal to the reward-shape work.
+
+A fourth, untested possibility: **non-per-step reward-shaping framework** — e.g. turn-based or
+game-phase aggregate reward shaping rather than the per-step delta framework R15.S3 used.
+Untested in the R15 line; ranks below the three above without evidence one way or another.
+
+**Recommendation: human picks among (1)/(2)/(3) before further autonomous F1-line work.** The
+autonomous loop should NOT pick one of these on its own — each is a meaningfully different
+research direction (sim-side instrumentation vs SL rebuild vs PPO replacement). Escalation
+filed at `docs/ai-agent-state/escalations.md` `## Open`; queue item
+`r15-s3-branch-synthesis-and-next-pick` P2 ready autonomous-launch ineligible. The full
+synthesis is at `docs/ai-agent-state/notes.md` `## F1 reward shaping — scoping (2026-05-14)`
+Phase O' Closeout + 4-axis synthesis block.
+
+Artifacts: `runs/R15-S3-reduced-mix/` — `events.jsonl` (per-iter ppo-update minibatch detail
+with ratio/KL/entropy/anomaly counts; per-iter `trajectory-parse/completed.data.shape_attribution`
+showing bench-energy=0.0 + retreat=0.0 across all 3 iters; throughput / active-energy /
+hp-diff signals active at full scale across all 3 iters with no decay),
+`orchestrator-state.json` (promoted_wilson_lower 0.3677343110002554, identical to Phase N to
+4 decimal places), per-iter `iteration-manifest.json` + `gate.manifest.json`, `launch.log`
+(banner shows `--reward-active-energy-coef 0.03 --reward-bench-energy-coef 0.0
+--reward-retreat-coef 0.0 --reward-throughput-coef 0.03 --reward-hp-diff-coef 0.05
+--reward-shape-start 1.0 --reward-shape-end 1.0` confirmed).

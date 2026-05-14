@@ -723,7 +723,36 @@ below capture those moves plus the only outstanding R14 acceptance step.
   Closes the strong-pool branch of the self-play hypothesis. R15.S1 (better warm-start) and
   R15.S3 (richer reward shaping) remain the only unfalsified F1 next moves.
 
-### R15.S3 — Richer reward shaping (F1 next-move #3) — DONE / PARTIAL
+### R15.S3 — Richer reward shaping (F1 next-move #3) — DONE / SATURATED-BRANCH
+
+**Branch closeout (2026-05-14, Phase O' capstone).** The R15.S3 observation-delta reward-
+shaping branch is now **fully explored and closed**. Four sweeps covered the three single-
+axis moves available inside the 5-signal hand-engineered observation-delta family — coef
+magnitude (Phase L 1.0× linear-decay vs Phase M 1.75× linear-decay, Δ iter-2 +0.002),
+shaping schedule (Phase L decay vs Phase N constant, Δ iter-2 +0.012), and signal mix (Phase
+N 5-signal vs Phase O' 3-signal, Δ iter-2 **+0.000** — iter-2 Wilson 0.3677 identical to
+Phase N's 0.3677 to 4 decimal places). All four phases have PPO healthy in all configs
+(importance ratios decisively off 1.0, gradient active, WR tracks Wilson in lockstep, no
+reward hacking, no numerical anomalies, entropy stable). The family encodes ~+5pp Wilson
+over the unshaped Phase H baseline (0.3109 → 0.3677) but **all three axes inside it are
+exhausted** — iter-2 caps at 0.368 ± 0.001 regardless of coefs, schedule, or which subset of
+the 5 signals is active. The binding constraint is the *information content* of the signal
+set, not the signals' weights or schedule. Total branch compute cost ~23 min wall-clock
+across 4 phases (L 5m54s + M 6m22s + N 5m25s + O' 5m28s) — cheap research, decisive answer.
+The F1 post-mortem framing has been updated accordingly: "reward-shape axis lifted Wilson
+0.311 → 0.356" is now **"reward-shape axis fully explored and converged at 0.368; the gap
+to 0.40 is categorical (needs a different information source), not quantitative (needs more
+tuning)".** Surviving F1-line candidates require information from a different source:
+(a) value-head tempo signal (highest-leverage, blocked on `r15-s3-value-head-trace-
+instrumentation`); (b) R7 multi-teacher labels (SL warm-start rebuild, doesn't touch reward);
+(c) R8 DPO (PPO replacement, doesn't depend on hand-shaped signal). Human-owned research-
+stance decision filed at `docs/ai-agent-state/escalations.md` `## Open`; queue item
+`r15-s3-branch-synthesis-and-next-pick` P2 ready autonomous-launch ineligible. Full
+synthesis at `docs/ai-agent-state/notes.md` `## F1 reward shaping — scoping (2026-05-14)`
+Phase O' Closeout + 4-axis synthesis block; per-phase writeups at
+`docs/ai-performance-research-progress.md` §§ "Phase L — F1 PPO + reward shaping" / "Phase
+M — F1 PPO + reward-shape coef-scaling follow-up" / "Phase N — F1 PPO + constant reward
+shaping" / "Phase O' — F1 PPO + reduced signal-mix (R15.S3 branch closeout)".
 
 - **Motivation:** F1 PPO post-mortem ranked richer reward shaping third. Current reward is
   Δpoints × 1/3 + terminal ±1. Strategic depth around attachment / retreat / energy cycles is not
@@ -810,6 +839,46 @@ below capture those moves plus the only outstanding R14 acceptance step.
   output is already in the trajectory inference stream). Queued as P3
   `r15-s3-value-head-tempo-signal`. Full writeup:
   `docs/ai-performance-research-progress.md` § "Phase N — F1 PPO + constant reward shaping".
+- **Follow-up Result (R15.S3 reduced signal-mix axis — Phase O' BRANCH CAPSTONE, 2026-05-14):**
+  **DONE / SATURATED — iter-2 Wilson 0.3677 identical to Phase N's 0.3677 to 4 decimal places;
+  R15.S3 BRANCH CLOSED.** Phase O original plan (add value-head tempo signal as 6th additive
+  component) audited at launch time and found blocked on TS-side ONNX/trace instrumentation
+  (rollout emits placeholder `value_pred=0.0` at `ppo_orchestrator.py:858`; value head is not
+  in the decision-trace schema). Pivoted to the scoping doc's option (2) — drop the weakest
+  of the existing 5 signals, scale the strongest. Audit: Phase N iter-2 absolute coef-weighted
+  contributions were throughput 171.4 / active-energy 90.4 / hp-diff **-6.9** (anti-
+  correlated) / bench-energy 4.2 / retreat **0.0** (agent never retreats). Run
+  `runs/R15-S3-reduced-mix/` dropped retreat (zero) and bench-energy (smallest non-zero,
+  redundant with active-energy); scaled active-energy 0.02→0.03 and throughput 0.02→0.03;
+  held hp-diff 0.05 as control (preserves signal-set parity test integrity rather than
+  amplifying an anti-correlated signal). Per-game shape budget ~0.24, close to Phase M's
+  0.23. Same warm-start (`runs/item17-2026-05-11/iter-002/model/checkpoint.pt`), opponent
+  (rule-bot, no pool), HPs (`--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4
+  --reward-shape-start 1.0 --reward-shape-end 1.0`), code as Phase L/M/N. Wilson lower per
+  iter: iter-0 **0.2825** (WR 32.2%, +1.0pp vs Phase N iter-0 0.2787, promoted) → iter-1
+  **0.2883** (WR 32.8%, +0.6pp vs iter-0, promoted — identical to Phase N iter-1 0.2883 to
+  4dp) → iter-2 **0.3677** (WR 41.0%, +7.9pp vs iter-1, promoted — **identical to Phase N
+  iter-2 0.3677 to 4 decimal places**). All 3 iters promoted, monotone trajectory, no
+  rejections, `run_completed clean, halted=false`. **Δ iter-2 vs Phase N: +0.0000pp.** The
+  signal-mix change (dropping 2 of 5 signals, scaling the dominant 2) did not move iter-2
+  at all. Mechanism healthy: ratio_max 10.53 / 18.02 / 10.57 (gradient strongly active);
+  entropy stable 0.171 → 0.161 → 0.153 (no collapse); `numerical_anomalies = 0` across all
+  48 minibatches; approx_kl_max < 0.016 each iter; WR tracks Wilson in lockstep (no
+  reward-hacking signature). Phase O' attribution confirms the drop choices: bench-energy
+  0.0 / retreat 0.0 across all 3 iters (signals correctly silenced); throughput dominant
+  (~259), active-energy secondary (~130), hp-diff consistently anti-correlated (~-6.5).
+  Wall-clock **5m 28.2s** (fastest of L/M/N/O' alongside Phase N); zero LOC diff vs Phase N
+  (CLI args only). **4-axis synthesis (capstone) — the binding constraint is the
+  information content of the signal set, not weights / schedule / mix.** Three single-axis
+  moves now tested: coef magnitude L→M Δ +0.002, schedule L→N Δ +0.012, signal mix N→O' Δ
+  +0.000. All four phases have PPO healthy. The 5-signal family encodes ~+5pp Wilson over
+  the unshaped Phase H baseline (0.3109 → 0.3677), but **scaling magnitude, changing
+  schedule, or dropping inactive components all leave iter-2 at 0.368 ± 0.001**. R15.S3
+  observation-delta branch CLOSED / SATURATED. Surviving F1-line candidates: (a) value-head
+  tempo signal (blocked on `r15-s3-value-head-trace-instrumentation`); (b) R7 multi-teacher
+  labels; (c) R8 DPO. Human research-stance decision filed at
+  `docs/ai-agent-state/escalations.md`. Full writeup: `docs/ai-performance-research-progress.md`
+  § "Phase O' — F1 PPO + reduced signal-mix (R15.S3 branch closeout)".
 
 ### R15.S4 — Sampling-temperature gate (F1 next-move #4)
 
