@@ -356,7 +356,16 @@ def run_epoch(
         batch = move_batch(batch, model)
         autocast_ctx = torch.cuda.amp.autocast() if use_amp else _NullContext()
         with autocast_ctx:
-            logits, values = model(batch["state_features"], batch["action_features"], batch["action_mask"])
+            # R7.b.2 Phase 2: forward the new embedding tensors when present
+            # (post-Phase-1 datasets carry them; legacy or test paths may
+            # omit them and the model.forward defaults to zero-tensors).
+            logits, values = model(
+                batch["state_features"],
+                batch["action_features"],
+                batch["action_mask"],
+                card_ids_by_zone=batch.get("card_ids_by_zone"),
+                action_card_idx=batch.get("action_card_idx"),
+            )
             weights = normalized_weights(batch["sample_weights"])
             policy_targets = batch.get("policy_targets")
             if policy_targets is not None:
@@ -373,7 +382,17 @@ def run_epoch(
             kl_loss = torch.zeros((), device=logits.device)
             if anchor_model is not None and kl_anchor_weight > 0.0:
                 with torch.no_grad():
-                    anchor_logits, _ = anchor_model(batch["state_features"], batch["action_features"], batch["action_mask"])
+                    # Forward the same embedding tensors through the anchor
+                    # so the KL is computed on the same input distribution
+                    # (otherwise the anchor would see zero pooled features
+                    # and KL would inflate spuriously).
+                    anchor_logits, _ = anchor_model(
+                        batch["state_features"],
+                        batch["action_features"],
+                        batch["action_mask"],
+                        card_ids_by_zone=batch.get("card_ids_by_zone"),
+                        action_card_idx=batch.get("action_card_idx"),
+                    )
                 kl_loss = masked_kl_divergence(anchor_logits, logits, batch["action_mask"])
             # R3 entropy bonus: subtract β·H(π) so loss minimization
             # pushes the policy toward higher entropy. The unused-tensor
@@ -425,7 +444,14 @@ def evaluate(
     totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "count": 0.0}
     for batch in loader:
         batch = move_batch(batch, model)
-        logits, values = model(batch["state_features"], batch["action_features"], batch["action_mask"])
+        # R7.b.2 Phase 2: forward the embedding tensors when present.
+        logits, values = model(
+            batch["state_features"],
+            batch["action_features"],
+            batch["action_mask"],
+            card_ids_by_zone=batch.get("card_ids_by_zone"),
+            action_card_idx=batch.get("action_card_idx"),
+        )
         weights = normalized_weights(batch["sample_weights"])
         policy_targets = batch.get("policy_targets")
         if policy_targets is not None:

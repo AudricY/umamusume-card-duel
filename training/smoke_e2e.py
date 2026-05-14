@@ -183,6 +183,7 @@ def main() -> None:
     assert_resume_continues_training(repo_root, run_dir, examples_path)
     assert_kl_anchor_smoke(repo_root, run_dir, examples_path, anchor_checkpoint=model_dir / "checkpoint.pt")
     assert_multi_teacher_dataset_loader(repo_root, run_dir, examples_path)
+    assert_card_embedding_forward(repo_root, run_dir, examples_path)
     assert_dpo_smoke(repo_root, run_dir, reference_checkpoint=model_dir / "checkpoint.pt")
 
     print(json.dumps({
@@ -378,6 +379,216 @@ def assert_multi_teacher_dataset_loader(repo_root: Path, run_dir: Path, baseline
         raise AssertionError(
             f"R7 regression: one-hot soft-CE must equal hard-CE under uniform logits; got "
             f"soft={soft_loss.tolist()} hard={hard_loss.tolist()}"
+        )
+
+
+def assert_card_embedding_forward(repo_root: Path, run_dir: Path, baseline_jsonl: Path) -> None:
+    """R7.b.2 Phase 2: end-to-end smoke for the card-embedding pass.
+
+    Covers four contracts from the brief:
+
+      (1) `observation_to_card_ids` produces non-empty arrays for a fixture
+          observation drawn from the live baseline corpus (which Phase 1
+          ensured emits `cardIdsByZone`). Per-zone shapes match
+          `CARD_ID_SHAPES`.
+      (2) `load_policy_samples` populates `card_ids_by_zone` /
+          `action_card_idx` on every sample; `collate_policy_batch` emits
+          packed `LongTensor[B, NUM_ZONES, max_cards_per_zone]` and
+          `LongTensor[B, max_actions, 2]` in the batch dict with correct
+          shapes and dtypes.
+      (3) `CandidatePolicyNet.forward` with the new tensors produces
+          gradients on `card_embed.weight` AND `zone_projection.weight` —
+          confirming the embedding pass is on the autograd graph.
+      (4) Padding semantics: a batch with all-zero card ids must produce
+          the SAME forward output as omitting the new tensors entirely.
+          This validates that `padding_idx=0` doesn't leak signal and the
+          additive-residual choice is structurally null when no cards are
+          present.
+    """
+
+    import numpy as np
+    import torch
+
+    from uma_ai.dataset import JsonlPolicyDataset, collate_policy_batch
+    from uma_ai.features import (
+        CARD_ID_SHAPES,
+        ZONE_ORDER,
+        observation_to_card_ids,
+    )
+    from uma_ai.model import (
+        ACTION_PAIR_FANOUT,
+        CARD_EMBED_DIM,
+        CARD_VOCAB_TABLE_SIZE,
+        CandidatePolicyNet,
+        ModelConfig,
+        NUM_ZONES,
+    )
+
+    # (1) Fixture observation: pull from the live baseline corpus.
+    dataset = JsonlPolicyDataset(baseline_jsonl, min_actions=2)
+    sample = dataset.samples[0]
+    observation = sample.example.get("observation", {})
+    if "cardIdsByZone" not in observation:
+        raise AssertionError(
+            "R7.b.2 Phase 2 smoke: baseline corpus observation missing 'cardIdsByZone'. "
+            "Phase 1 TS schema bump did not propagate to sim:export-training; rebuild backend."
+        )
+    card_ids = observation_to_card_ids(observation)
+    if set(card_ids.keys()) != set(CARD_ID_SHAPES.keys()):
+        raise AssertionError(
+            f"R7.b.2 Phase 2 smoke: observation_to_card_ids keys {set(card_ids.keys())} "
+            f"must match CARD_ID_SHAPES {set(CARD_ID_SHAPES.keys())}"
+        )
+    for zone, width in CARD_ID_SHAPES.items():
+        if card_ids[zone].shape != (width,):
+            raise AssertionError(
+                f"R7.b.2 Phase 2 smoke: zone {zone!r} shape {card_ids[zone].shape} != ({width},)"
+            )
+        if card_ids[zone].dtype != np.int64:
+            raise AssertionError(
+                f"R7.b.2 Phase 2 smoke: zone {zone!r} dtype {card_ids[zone].dtype} != int64"
+            )
+    # At least one zone should have a non-zero entry (active is always
+    # populated when the side has an active uma); else the corpus is
+    # producing empty observations.
+    if all(int(arr.sum()) == 0 for arr in card_ids.values()):
+        raise AssertionError(
+            "R7.b.2 Phase 2 smoke: every zone empty on the fixture observation; "
+            "expected at least one card across own/opp active+bench+hand."
+        )
+
+    # Fail-loud guard: a fabricated observation without `cardIdsByZone`
+    # must raise. This is the substantive replacement for the row-level
+    # schemaVersion bump (which Phase 2 deferred to Phase 4).
+    bare_obs = {"sideToAct": "player", "phase": "stadiumOrEnd"}
+    raised = False
+    try:
+        observation_to_card_ids(bare_obs)
+    except ValueError:
+        raised = True
+    if not raised:
+        raise AssertionError(
+            "R7.b.2 Phase 2 smoke: observation_to_card_ids must raise on missing cardIdsByZone"
+        )
+
+    # (2) Loader + collator shapes.
+    if any(s.card_ids_by_zone is None or s.action_card_idx is None for s in dataset.samples):
+        raise AssertionError(
+            "R7.b.2 Phase 2 smoke: load_policy_samples did not populate card_ids_by_zone / "
+            "action_card_idx on every sample"
+        )
+    batch = collate_policy_batch(list(dataset.samples[: min(8, len(dataset.samples))]))
+    if "card_ids_by_zone" not in batch or "action_card_idx" not in batch:
+        raise AssertionError(
+            f"R7.b.2 Phase 2 smoke: collate_policy_batch missing new keys; got {sorted(batch.keys())}"
+        )
+    czi = batch["card_ids_by_zone"]
+    aci = batch["action_card_idx"]
+    bsz = int(batch["action_features"].shape[0])
+    max_actions = int(batch["action_features"].shape[1])
+    expected_max_cards = max(CARD_ID_SHAPES.values())
+    if czi.shape != (bsz, NUM_ZONES, expected_max_cards):
+        raise AssertionError(
+            f"R7.b.2 Phase 2 smoke: card_ids_by_zone shape {tuple(czi.shape)} != "
+            f"({bsz}, {NUM_ZONES}, {expected_max_cards})"
+        )
+    if czi.dtype != torch.int64:
+        raise AssertionError(f"R7.b.2 Phase 2 smoke: card_ids_by_zone dtype {czi.dtype} != int64")
+    if aci.shape != (bsz, max_actions, 2):
+        raise AssertionError(
+            f"R7.b.2 Phase 2 smoke: action_card_idx shape {tuple(aci.shape)} != ({bsz}, {max_actions}, 2)"
+        )
+    if aci.dtype != torch.int64:
+        raise AssertionError(f"R7.b.2 Phase 2 smoke: action_card_idx dtype {aci.dtype} != int64")
+    # Smaller-cap zones (active, stadium) must have zeros beyond their cap.
+    for zone_index, zone in enumerate(ZONE_ORDER):
+        cap = CARD_ID_SHAPES[zone]
+        if cap < expected_max_cards:
+            beyond = czi[:, zone_index, cap:expected_max_cards]
+            if int(beyond.abs().sum().item()) != 0:
+                raise AssertionError(
+                    f"R7.b.2 Phase 2 smoke: zone {zone!r} has non-zero ids beyond its cap {cap}; "
+                    f"collator padding broken (collator wrote {int(beyond.abs().sum().item())} non-zero entries)"
+                )
+
+    # (3) Forward + backward produces gradients on the embedding params.
+    config = ModelConfig(hidden_dim=32, depth=1, dropout=0.0)
+    model = CandidatePolicyNet(config)
+    model.train()
+    # Confirm the embedding table is the expected shape (108 × 32).
+    if tuple(model.card_embed.weight.shape) != (CARD_VOCAB_TABLE_SIZE, CARD_EMBED_DIM):
+        raise AssertionError(
+            f"R7.b.2 Phase 2 smoke: card_embed.weight shape {tuple(model.card_embed.weight.shape)} != "
+            f"({CARD_VOCAB_TABLE_SIZE}, {CARD_EMBED_DIM})"
+        )
+    if model.zone_projection.in_features != NUM_ZONES * CARD_EMBED_DIM:
+        raise AssertionError(
+            f"R7.b.2 Phase 2 smoke: zone_projection.in_features {model.zone_projection.in_features} != "
+            f"{NUM_ZONES * CARD_EMBED_DIM}"
+        )
+    # Confirm joint_projection input dim grew by ACTION_PAIR_FANOUT * embed.
+    expected_joint_in = 3 * config.hidden_dim + ACTION_PAIR_FANOUT * CARD_EMBED_DIM
+    actual_joint_in = model.joint_projection[0].in_features
+    if actual_joint_in != expected_joint_in:
+        raise AssertionError(
+            f"R7.b.2 Phase 2 smoke: joint_projection.in_features {actual_joint_in} != {expected_joint_in}"
+        )
+
+    logits, values = model(
+        batch["state_features"],
+        batch["action_features"],
+        batch["action_mask"],
+        card_ids_by_zone=czi,
+        action_card_idx=aci,
+    )
+    # Build a sham loss that propagates through both the policy head and
+    # the value head so both branches of the embedding pass receive grad.
+    loss = logits.sum() + values.sum()
+    loss.backward()
+    if model.card_embed.weight.grad is None or model.card_embed.weight.grad.abs().sum().item() == 0.0:
+        raise AssertionError(
+            "R7.b.2 Phase 2 smoke: card_embed.weight received no gradient — the embedding "
+            "pass is detached from the loss graph"
+        )
+    if model.zone_projection.weight.grad is None or model.zone_projection.weight.grad.abs().sum().item() == 0.0:
+        raise AssertionError(
+            "R7.b.2 Phase 2 smoke: zone_projection.weight received no gradient"
+        )
+    # padding_idx=0's row must remain zero-grad (pad rows don't accumulate).
+    if model.card_embed.weight.grad[0].abs().sum().item() != 0.0:
+        raise AssertionError(
+            "R7.b.2 Phase 2 smoke: card_embed pad row (idx 0) received gradient; "
+            "padding_idx semantics violated"
+        )
+
+    # (4) All-zero card ids produces same output as omitting the new args.
+    # This is the additive-residual sanity check: with no cards, the
+    # embedding pool is zero and the joint projection sees the same input
+    # in both branches. We compare two no_grad forwards under eval mode
+    # so dropout doesn't introduce stochastic noise.
+    model.eval()
+    with torch.no_grad():
+        zero_czi = torch.zeros_like(czi)
+        zero_aci = torch.zeros_like(aci)
+        logits_zero, values_zero = model(
+            batch["state_features"],
+            batch["action_features"],
+            batch["action_mask"],
+            card_ids_by_zone=zero_czi,
+            action_card_idx=zero_aci,
+        )
+        logits_none, values_none = model(
+            batch["state_features"],
+            batch["action_features"],
+            batch["action_mask"],
+        )
+    max_logit_diff = float((logits_zero - logits_none).abs().max().item())
+    max_value_diff = float((values_zero - values_none).abs().max().item())
+    if max_logit_diff > 1e-6 or max_value_diff > 1e-6:
+        raise AssertionError(
+            f"R7.b.2 Phase 2 smoke: zero-id forward != omitted-arg forward; logits diff "
+            f"{max_logit_diff}, values diff {max_value_diff}. padding_idx=0 leaks signal "
+            "or the default-zero branch is wired differently from the embed(0) path."
         )
 
 

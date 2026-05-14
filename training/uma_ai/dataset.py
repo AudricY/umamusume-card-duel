@@ -9,8 +9,37 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .features import ACTION_DIM, STATE_DIM, legal_actions_to_features, observation_to_features
+from .features import (
+    ACTION_DIM,
+    CARD_ID_SHAPES,
+    STATE_DIM,
+    ZONE_ORDER,
+    action_card_idx_pair,
+    legal_actions_to_features,
+    observation_to_card_ids,
+    observation_to_features,
+)
 
+# R7.b.2 Phase 2 NOTE on schema versions:
+# There are TWO schema-version axes in this codebase. They are independent.
+#   - `ROW_SCHEMA_VERSION` (this constant): the TS row writer's
+#     `TrainingExample.schemaVersion` (and `relabelDecisionTrace.ts`'s
+#     relabel-row `schemaVersion`). Set by the TS pipeline at row-write
+#     time.
+#   - `STATE_FEATURE_SCHEMA_VERSION` (in `features.py`): the Python
+#     state-encoder version. Bumped 2.1 → 3.0 by Phase 2 to mark the
+#     observation_to_card_ids contract going live.
+#
+# Phase 2 chooses NOT to bump `ROW_SCHEMA_VERSION` past 1 even though
+# scoping § 11 Phase 2 anticipated a bump to 3. Rationale: the TS-side
+# writers still emit `schemaVersion: 1`, and Phase 2's brief constrains
+# us to "no backend/frontend TS changes" — bumping the Python constant
+# alone would reject every existing TS-produced corpus (incl. the python
+# smoke), with no upside. The fail-loud requirement (reject pre-Phase-1
+# corpora that lack `cardIdsByZone`) is enforced inside
+# `observation_to_card_ids` itself, which is the substantive guard.
+# Phase 4's re-extractor (separate slot) will land the row-level bump
+# alongside the TS row-writer bump.
 ROW_SCHEMA_VERSION = 1
 
 
@@ -32,6 +61,16 @@ class PolicySample:
     # `target_index`. Mirrors the same field on `MctsSelfPlaySample` so
     # collation can emit a padded `policy_targets` tensor uniformly.
     policy_target: np.ndarray | None = None
+    # R7.b.2 Phase 2: per-zone packed card-vocab indices (8 zones, fixed
+    # `CARD_ID_SHAPES`) and per-action source/target idx (shape `(A, 2)`).
+    # Reuses the `policy_target | None` pattern: legacy / pre-Phase-1
+    # corpora that lack `cardIdsByZone` raise in `observation_to_card_ids`
+    # at load time, so any loaded sample is guaranteed to carry both
+    # fields. `None` is kept as the type-level nullable to mirror legacy
+    # PolicySamples that may be constructed by tests with the embedding
+    # branch disabled.
+    card_ids_by_zone: dict[str, np.ndarray] | None = None
+    action_card_idx: np.ndarray | None = None
 
 
 class JsonlPolicyDataset(Dataset[PolicySample]):
@@ -69,13 +108,23 @@ def load_policy_samples(path: str | Path, *, min_actions: int = 2, ablations: se
             target_index = int(example.get("selectedActionIndex", -1))
             if len(actions) < min_actions or target_index < 0 or target_index >= len(actions):
                 continue
-            state_features = observation_to_features(example.get("observation", {}), ablations=ablations)
+            observation = example.get("observation", {})
+            state_features = observation_to_features(observation, ablations=ablations)
             action_features = legal_actions_to_features(actions, ablations=ablations)
             if state_features.shape != (STATE_DIM,):
                 raise ValueError(f"Bad state feature shape at line {line_number}: {state_features.shape}")
             if action_features.shape[1:] != (ACTION_DIM,):
                 raise ValueError(f"Bad action feature shape at line {line_number}: {action_features.shape}")
             policy_target = _policy_target(example, num_actions=len(actions), line_number=line_number)
+            # R7.b.2 Phase 2: emit packed per-zone card-id arrays and
+            # per-action source/target idx. `observation_to_card_ids`
+            # raises on missing `cardIdsByZone` so pre-Phase-1 corpora
+            # surface at load time rather than as silent zero-tensors.
+            try:
+                card_ids_by_zone = observation_to_card_ids(observation)
+            except ValueError as exc:
+                raise ValueError(f"{path}:{line_number}: {exc}") from exc
+            action_card_idx = np.stack([action_card_idx_pair(action) for action in actions], axis=0)
             yield PolicySample(
                 state_features=state_features,
                 action_features=action_features,
@@ -84,12 +133,23 @@ def load_policy_samples(path: str | Path, *, min_actions: int = 2, ablations: se
                 sample_weight=_sample_weight(example),
                 example=example,
                 policy_target=policy_target,
+                card_ids_by_zone=card_ids_by_zone,
+                action_card_idx=action_card_idx,
             )
 
 
 def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]:
     batch_size = len(samples)
     max_actions = max(sample.action_features.shape[0] for sample in samples)
+    # R7.b.2 Phase 2: pack per-zone card-id arrays into a single 3-D
+    # `LongTensor[B, NUM_ZONES, max_cards_per_zone]` for `nn.Embedding`
+    # gather. `max_cards_per_zone` is the global max across zones (30, the
+    # discard cap) so the smaller-cap zones (active=1, bench=4, hand=10)
+    # see padding beyond their cap; the embedding's `padding_idx=0`
+    # zeroes those positions in the gather, and the `(ids != 0)` mask in
+    # `model.forward` zeroes them again in the pool — defense in depth.
+    max_cards_per_zone = max(CARD_ID_SHAPES.values())
+    num_zones = len(ZONE_ORDER)
 
     state_features = np.zeros((batch_size, STATE_DIM), dtype=np.float32)
     action_features = np.zeros((batch_size, max_actions, ACTION_DIM), dtype=np.float32)
@@ -97,6 +157,27 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
     targets = np.zeros((batch_size,), dtype=np.int64)
     value_targets = np.zeros((batch_size,), dtype=np.float32)
     sample_weights = np.ones((batch_size,), dtype=np.float32)
+
+    # R7.b.2 Phase 2: only emit the embedding tensors when every sample in
+    # the batch has them. Same gating pattern as `policy_targets` below:
+    # avoids silently zero-tensoring mixed batches (one v2 row + one v3
+    # row), and the model.forward's `is None` branch fires uniformly.
+    # In practice all rows in a batch come from the same loader and the
+    # same schema; this guard is a defense-in-depth signal.
+    all_have_card_ids = all(
+        sample.card_ids_by_zone is not None and sample.action_card_idx is not None
+        for sample in samples
+    )
+    card_ids_buffer = (
+        np.zeros((batch_size, num_zones, max_cards_per_zone), dtype=np.int64)
+        if all_have_card_ids
+        else None
+    )
+    action_card_idx_buffer = (
+        np.zeros((batch_size, max_actions, 2), dtype=np.int64)
+        if all_have_card_ids
+        else None
+    )
 
     # R7 step 3: emit a padded `policy_targets` tensor only when *every*
     # sample in the batch carries a soft target. Mixed batches (some rows
@@ -120,6 +201,19 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
         if policy_targets is not None:
             # Pad parallel to action_features (above) — same `:count` slice.
             policy_targets[row, :count] = sample.policy_target  # type: ignore[index]
+        if card_ids_buffer is not None and action_card_idx_buffer is not None:
+            # Per-zone fill: walk ZONE_ORDER so the packed axis matches the
+            # zone enumeration the model.forward expects (NUM_ZONES dim).
+            # Each zone's per-sample array has shape `(CARD_ID_SHAPES[zone],)`;
+            # the global packed `max_cards_per_zone` is >= that, so we
+            # write into the `:width` prefix and leave the rest as 0 (pad).
+            for zone_index, zone in enumerate(ZONE_ORDER):
+                zone_arr = sample.card_ids_by_zone[zone]  # type: ignore[index]
+                width = zone_arr.shape[0]
+                card_ids_buffer[row, zone_index, :width] = zone_arr
+            # Action source/target idx: pad parallel to action_features.
+            pair = sample.action_card_idx  # type: ignore[assignment]
+            action_card_idx_buffer[row, :count, :] = pair
 
     batch: dict[str, torch.Tensor] = {
         "state_features": torch.from_numpy(state_features),
@@ -131,6 +225,9 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
     }
     if policy_targets is not None:
         batch["policy_targets"] = torch.from_numpy(policy_targets)
+    if card_ids_buffer is not None and action_card_idx_buffer is not None:
+        batch["card_ids_by_zone"] = torch.from_numpy(card_ids_buffer)
+        batch["action_card_idx"] = torch.from_numpy(action_card_idx_buffer)
     return batch
 
 

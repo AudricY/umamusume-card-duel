@@ -257,3 +257,40 @@ Total delta ~93 modified LOC + 100 new LOC. The +13 LOC over scoping's ~80 LOC e
 **Smokes (TMPDIR=/tmp).** `npm run build` PASS; `npm run test:train` PASS (7/7 TS smokes including new `cardVocabIndexSmoke`); `npm run test:dagger-orchestrator` PASS — observation → relabel pipeline unaffected by the additive schema bump (Python row-schemaVersion is the relabel row's own version, independent of the nested `observation.schemaVersion`).
 
 **Out of scope (deferred to Phase 2).** Python encoder change (`model.py`, `features.py` per-zone int extraction, `dataset.py` collation); ONNX export; feature re-extractor; SL retrain; gate eval. `STATE_FEATURE_SCHEMA_VERSION` Python-side bump waits for Phase 2 (no Python consumer yet reads `cardIdsByZone`).
+
+## 13. Result: R7.b.2 Phase 2 — Python encoder LANDED (2026-05-14)
+
+**Verdict: LANDED.** Card embedding table `nn.Embedding(108, 32, padding_idx=0)` wired as an additive residual on the state branch (per-zone sum-pool → `zone_projection` (bias=False) → ADD to `state_encoded`) and as a per-action source+target concat on the action branch (joint_projection input dim grew `3*hidden → 3*hidden + 64`). `STATE_FEATURE_SCHEMA_VERSION` 2.1 → **3.0**. New `CARD_ID_SHAPES` constant (ownActive/oppActive/stadium=1, ownBench/oppBench=4, ownHand=10, ownDiscard/oppDiscard=30) shared by features.py + dataset collator so the packed tensor shape is single-sourced.
+
+**Files changed (LOC delta, `git diff --stat`).**
+- `training/uma_ai/features.py` +98 (-1) — `CARD_ID_SHAPES`, `ZONE_ORDER`, `observation_to_card_ids` (fail-loud on missing `cardIdsByZone`), `action_card_idx_pair`, schema-version bump.
+- `training/uma_ai/model.py` +114 (-3) — `card_embed`, `zone_projection` (bias=False), widened `joint_projection`, `forward` now takes optional `card_ids_by_zone` / `action_card_idx` kwargs.
+- `training/uma_ai/dataset.py` +101 (-3) — `PolicySample` gains the two new fields, `load_policy_samples` calls the new helpers, `collate_policy_batch` emits packed `LongTensor[B, 8, 30]` + `LongTensor[B, max_actions, 2]`.
+- `training/train_bc.py` +32 (-3) — keyword-forwards the new kwargs through both train and eval forwards AND through the KL anchor forward.
+- `training/smoke_e2e.py` +211 (-0) — new `assert_card_embedding_forward` (wired into `test:python-train`) covering shape, dtype, gradient flow, padding semantics, and the zero-id == omitted-arg equivalence.
+
+Total: +556 / -10 inserted/deleted (well above scoping § 11's ~190 LOC estimate; overshoot is the new smoke (~211 LOC) being the dominant chunk — the encoder change itself is ~190 LOC as planned).
+
+**Schema-version alignment decision (SPLIT).** Two constants exist; Phase 2 bumped one and deferred the other:
+- `STATE_FEATURE_SCHEMA_VERSION` (features.py): **2.1 → 3.0**. Marks the Python-side encoder going live on `cardIdsByZone`.
+- `ROW_SCHEMA_VERSION` (dataset.py): **kept at 1**, NOT bumped to 3 despite scoping § 11. Rationale: TS-side `TrainingExample.schemaVersion` / `relabelDecisionTrace.ts` row schemaVersion are still 1 (the brief's "no TS changes" constraint forbids bumping them), and bumping only the Python constant would reject every current TS-emitted corpus — breaking the python smoke with no upside. The substantive fail-loud guard (the brief's "reject pre-Phase-1-corpus rows") is implemented inside `observation_to_card_ids`: rows without `cardIdsByZone` raise at load time. Phase 4's re-extractor will land the row-level bump alongside the TS row-writer bump in a coordinated change.
+
+**Model kwargs: OPTIONAL with sensible defaults.** `forward(card_ids_by_zone=None, action_card_idx=None)`. When omitted, the embedding branches are skipped (no `zone_projection` call, zero-tensor stub for the action-pair concat). Rationale per brief § Validation point 7: keeps existing positional callers (`train_ppo.py:486`, `train_dpo.py:239,245`, `r13_value_retrain.py:145`, `r14_value_crossover_probe.py:126`, `calibrate_value.py:176`, `train_bc.py:325` ONNX roundtrip, and `export_onnx.py:42` ONNX export) working unchanged until Phase 3 plumbs the new tensors through them. Trades the strictest "fail-loud" interpretation for clean Phase 2/3 decoupling. The decoupling is sound because `zone_projection` is initialized with `bias=False` and the `padding_idx=0` semantic gives `embed(0) = 0` — so `forward(...)` with zero embedding inputs is bit-equivalent to `forward(...)` with the kwargs omitted (verified by smoke contract (4)).
+
+**Smokes (TMPDIR=/tmp).** `npm run build` PASS; `npm run test:train` PASS (7/7 TS smokes); `npm run test:python-train` PASS — including new `assert_card_embedding_forward`:
+- (1) `observation_to_card_ids` returns 8-key dict, shapes match `CARD_ID_SHAPES`, dtype int64, at least one zone non-empty; AND raises on bare observation lacking `cardIdsByZone`.
+- (2) Loader populates fields on every sample; collator emits `card_ids_by_zone: [B, 8, 30]` (int64) + `action_card_idx: [B, A, 2]` (int64); small-cap zones zero beyond their cap.
+- (3) `loss.backward()` puts non-zero grad on `card_embed.weight` and `zone_projection.weight`; pad row (idx 0) grad stays zero per `padding_idx=0` semantics.
+- (4) Zero-id forward produces bit-identical (`<1e-6`) logits/values to omitted-kwarg forward — additive-residual is structurally null when no cards are present.
+
+`npm run test:dagger-orchestrator` PASS — the orchestrator never hits the embedding-aware code paths (it shells out through node_bridge).
+
+**Embedding parameter count delta (default `ModelConfig(hidden_dim=128, depth=3)`).** New params:
+- `card_embed.weight`: `108 × 32 = 3456`.
+- `zone_projection.weight`: `8*32 × 128 = 32768` (bias=False).
+- `joint_projection[0]`: `448 × 128 + 128 = 57472` (vs old `384 × 128 + 128 = 49280`); delta `+8192` from the widened input dim.
+- Total new params: **~44 416** (≈3.5% of a hidden=128/depth=3 baseline ~1.27M, dominated by `zone_projection`).
+
+**Open question for Phase 3.** ONNX `Gather` with `padding_idx=0` `nn.Embedding` at opset 17 needs roundtrip validation. Expected to work per scoping § 11 Phase 3 (opset 17 native). If it fails, the Phase 3 fallback is `F.embedding(idx, weight)`. Phase 2's optional-kwargs design keeps the existing 110-d ONNX export passing (no new graph inputs yet); Phase 3 will add `card_ids_by_zone` + `action_card_idx` to the export dummy inputs, `input_names`, and `dynamic_axes`.
+
+**One-line digest pointer.** R7.b.2 Phase 2 LANDED: card embedding (108×32 padding_idx=0) additive on state, source+target concat on action; STATE_FEATURE_SCHEMA_VERSION 3.0; model kwargs OPTIONAL so Phase 3 ONNX rewire stays decoupled; smokes including new card_embedding_forward PASS.

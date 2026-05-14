@@ -21,8 +21,35 @@ import numpy as np
 # JSONLs re-extract under v2.1 without resimulating (R7.b.0 verdict YES).
 STATE_DIM = 110
 ACTION_DIM = 48
-STATE_FEATURE_SCHEMA_VERSION = 2.1
+# R7.b.2 Phase 2 bumps STATE_FEATURE_SCHEMA_VERSION 2.1 → 3.0 because the
+# Python encoder now consumes the new TS-side fields landed in Phase 1
+# (`PublicObservation.cardIdsByZone`, per-action `actionSourceCardIdx` /
+# `actionTargetCardIdx`). STATE_DIM is unchanged — the embedding pass is
+# ADDITIVE over the 110-d hygiene encoding (see model.py header for the
+# additive-vs-replace rationale); Phase 6 will decide whether the 16
+# identity-hash slots (32–47) can be retired in a future bump.
+STATE_FEATURE_SCHEMA_VERSION = 3.0
 ACTION_FEATURE_SCHEMA_VERSION = 2
+
+# R7.b.2 Phase 2: per-zone pad widths consumed by `observation_to_card_ids`
+# AND the dataset collator (so packed `LongTensor[B, 8, max_cards_per_zone]`
+# has stable per-zone slots) AND any future ONNX exporter (Phase 3) so the
+# graph shape is fixed across producers. ORDER is load-bearing — it matches
+# the 8-zone enumeration in `frontend/src/game/engine/ai-policy/types.ts`
+# `ZoneKey` and the per-zone concat order in `CandidatePolicyNet.forward`.
+# Caps chosen per scoping § 11 Phase 2 (active/stadium single, bench up to
+# 4, hand up to 10, discards up to 30 for headroom).
+CARD_ID_SHAPES: dict[str, int] = {
+    "ownActive": 1,
+    "oppActive": 1,
+    "ownBench": 4,
+    "oppBench": 4,
+    "ownHand": 10,
+    "ownDiscard": 30,
+    "oppDiscard": 30,
+    "stadium": 1,
+}
+ZONE_ORDER: tuple[str, ...] = tuple(CARD_ID_SHAPES.keys())
 
 PHASES = [
     "setup",
@@ -100,6 +127,75 @@ def legal_actions_to_features(actions: list[dict[str, Any]], ablations: set[Feat
     if not rows:
         return np.zeros((0, ACTION_DIM), dtype=np.float32)
     return np.stack(rows, axis=0)
+
+
+def observation_to_card_ids(observation: dict[str, Any]) -> dict[str, np.ndarray]:
+    """R7.b.2 Phase 2: extract per-zone packed card-vocab indices.
+
+    Reads the new TS-side `cardIdsByZone` field on `PublicObservation`
+    (landed Phase 1, see `frontend/src/game/engine/ai-policy/types.ts:62`).
+    Returns a `{zone: np.ndarray(int64)}` dict whose array shape matches
+    `CARD_ID_SHAPES[zone]`; entries beyond the variable-length TS list are
+    zero-padded (index 0 doubles as `unknownIndex` AND the embedding
+    `padding_idx`, per `shared/src/cardVocab.json:3-4`). Entries that exceed
+    the cap are clipped silently — `WARNING` logs would spam under heavy
+    discards; the cap of 30 already covers 95th-percentile observed sizes.
+
+    Fail-loud guard: if the observation lacks `cardIdsByZone`, raise
+    `ValueError`. This rejects pre-Phase-1 trace JSONLs at load time so the
+    embedding pass never silently zero-tensors a corpus that should have
+    been re-extracted by Phase 4. Older corpora must run through
+    `r7b2_extract_features.py` (Phase 4, separate slot) to gain the field.
+    """
+
+    if "cardIdsByZone" not in observation:
+        raise ValueError(
+            "observation_to_card_ids: missing 'cardIdsByZone' — this row predates R7.b.2 Phase 1 "
+            "TS schema bump. Re-extract via Phase 4 (`r7b2_extract_features.py`) before training. "
+            "The Phase 2 embedding pass refuses to silently zero-tensor pre-v3 corpora."
+        )
+    raw = observation.get("cardIdsByZone") or {}
+    out: dict[str, np.ndarray] = {}
+    for zone, width in CARD_ID_SHAPES.items():
+        arr = np.zeros((width,), dtype=np.int64)
+        ids = raw.get(zone) or []
+        if not isinstance(ids, list):
+            raise ValueError(
+                f"observation_to_card_ids: cardIdsByZone[{zone!r}] must be a list, got {type(ids).__name__}"
+            )
+        # Clip to the per-zone cap; pre-Phase-2 reextractors are expected to
+        # already respect these widths, but TS-side is variable-length so we
+        # cannot rely on it.
+        for slot, value in enumerate(ids[:width]):
+            try:
+                idx = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"observation_to_card_ids: cardIdsByZone[{zone!r}][{slot}] must be int-coercible; got {value!r}"
+                ) from exc
+            arr[slot] = idx
+        out[zone] = arr
+    return out
+
+
+def action_card_idx_pair(action: dict[str, Any]) -> np.ndarray:
+    """R7.b.2 Phase 2: pull the (source, target) card-vocab idx pair off a
+    LegalAiAction. Phase 1 added these fields on the TS side
+    (`frontend/src/game/engine/ai-policy/types.ts:38-39`); `null` means
+    "no clear source/target" → maps to 0 (the shared embedding pad/unknown).
+
+    Pre-Phase-1 actions lack the fields; fall back to 0/0 with NO error here
+    because the row-level missing-cardIdsByZone guard in
+    `observation_to_card_ids` is the canonical fail point — duplicating it
+    per-action would obscure the error.
+    """
+
+    src = action.get("actionSourceCardIdx")
+    tgt = action.get("actionTargetCardIdx")
+    return np.asarray(
+        [0 if src is None else int(src), 0 if tgt is None else int(tgt)],
+        dtype=np.int64,
+    )
 
 
 def apply_state_ablations(features: np.ndarray, ablations: set[FeatureAblation]) -> None:
