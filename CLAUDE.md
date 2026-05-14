@@ -14,56 +14,28 @@ Do not create a new orchestration framework unless the user explicitly asks. Pre
 
 ## Default Workflow
 
-Use `/work` as the default operating command.
+Use `/work` as the default operating command — see `.claude/commands/work.md` for the loop's full prose. Two subagents live in `.claude/agents/`: `investigator` (read-only) and `implementer` (write-capable). The main session stays small; it owns judgment and synthesis.
 
-The main Claude session should stay small. It owns judgment and synthesis: choose the highest-leverage bounded job, delegate context-heavy work to a role-specific subagent, then persist the useful result.
+**Size each step to the next external gate** — a training run, a re-extraction, a verdict eval, human input. Not to the next code unit that smokes green. If nothing real separates two phases of work, they are one step. Phase splits inside a single end-to-end code change (e.g. schema → encoder → ONNX wire, all smoke-validated together) are artificial and waste session overhead.
 
-Two subagents are available:
-
-- `investigator` — read-only. Use for deep code exploration, run analysis, log triage, and validation-as-evidence. Returns findings.
-- `implementer` — write-capable. Use for code edits, doc updates (sprint/backlog/progress, queue, escalations, digests), and validation cycles after changes.
-
-Pick by whether the job ends in evidence or in a change. Small direct edits and simple state updates can stay in the main session.
-
-Parallelize subagents when it speeds work up without creating conflicts. The failure modes to think about are write-scope collisions (especially on shared state like `queue.json`, `escalations.md`, sprint/backlog/progress docs) and resource contention (GPU, training, large evals). Read-only investigations rarely hit either, so multi-investigator surveys are usually fine. When you're unsure what a subagent will touch or how heavy it is, run serially.
-
-Backlog refinement and big-picture planning are normal `/work` jobs. The loop should not only debug and implement. Choose planning/refinement when the queue is stale, run evidence changes priorities, escalations block the current path, sprint/backlog/progress docs disagree, or local work is no longer clearly moving the AI objective forward.
-
-Do not use `/loop` or a timed wakeup just to continue ordinary work. Use a timeout/wakeup only when the next useful action is blocked on wall-clock time or an external dependency, such as:
-
-- A training/eval/background process that is still running.
-- A scheduled checkpoint or log file that will exist later.
-- Human input or approval.
-- A deliberate cool-down after a resource-heavy run.
+Use a timeout or `/loop` only when blocked on wall-clock or external dependency. Backlog refinement and big-picture planning are normal `/work` jobs.
 
 ## Claude Harness State
 
-Lightweight Claude operating state lives in:
+Lightweight Claude operating state lives in `docs/ai-agent-state/`:
 
-```text
-docs/ai-agent-state/
-  queue.json
-  escalations.md
-  notes.md
-  digests/
-```
-
-Use these files as steering aids, not as a project-management database.
-
-- `queue.json`: small list of next useful jobs.
+- `queue.json`: small list of next useful jobs. `summary`/`next_action` are pointers to scoping/progress docs, not inlined plans. Strip `status: done` entries to digests when they pile up.
 - `escalations.md`: blockers, unsafe stop lines, missing local artifacts, or human decisions needed.
-- `notes.md`: durable harness notes that do not belong in sprint/progress docs.
+- `notes.md`: durable harness notes.
 - `digests/YYYY-MM-DD.md`: short summaries from meaningful `/work` runs.
 
 Canonical AI research evidence:
 
 - `docs/ai-research/progress/r<N>.md` — phase writeups (R15+).
 - `docs/ai-performance-research-progress.md` — R1–R14 history, read-mostly.
-- `docs/ai-research/scoping/<topic>.md` — pre-registered hypotheses, sweep configs.
+- `docs/ai-research/scoping/<topic>.md` — hypothesis + sweep config + exit gate. **Do not pre-decompose implementation into phase counts + LOC budgets here** — that turns scoping into a /work-slot schedule and over-splits the work.
 - `docs/ai-research-backlog.md` — forward-looking.
 - `docs/ai-performance-research-harness.md`, `docs/r<N>-sprint-plan.md`.
-
-`queue.json` holds immediate Claude operating priorities; update it when planning work changes the next best action.
 
 ## Safety And Scope
 
@@ -75,37 +47,6 @@ Canonical AI research evidence:
 - Missing checkpoints under `runs/` are environment gaps, not product passes.
 - Hooks are intentionally not part of this harness unless repeated concrete failures prove they are needed.
 
-## Validation Tiers
-
-Choose the smallest validation set that matches the change.
-
-Fast repo confidence:
-
-```bash
-npm run build
-TMPDIR=/tmp npm run test:train
-```
-
-Python/training smoke:
-
-```bash
-TMPDIR=/tmp npm run test:python-train
-```
-
-Orchestrator smoke:
-
-```bash
-TMPDIR=/tmp npm run test:dagger-orchestrator
-```
-
-PPO smoke:
-
-```bash
-TMPDIR=/tmp npm run test:ppo-smoke
-```
-
-Use deeper targeted smokes only when touching their area: determinism, MCTS, `/ai/decide`, ONNX serving, observability, or parallel simulation.
-
 ## Documentation Discipline
 
 Each fact lives in one file. Everywhere else links to it. State files are pointers, not copies.
@@ -113,13 +54,11 @@ Each fact lives in one file. Everywhere else links to it. State files are pointe
 Homes:
 
 - Phase result (mechanism + numbers): `docs/ai-research/progress/r<N>.md` (R15+) or the R1–R14 monolith.
-- Scoping (hypothesis, sweep config, exit gate): `docs/ai-research/scoping/<topic>.md` — one file each. Not `notes.md`.
+- Scoping: `docs/ai-research/scoping/<topic>.md` — hypothesis, sweep config, exit gate. Not implementation phase plans.
 - Backlog: forward-looking only. Landed/failed → one-line pointer.
-- `notes.md`: durable harness conventions only.
+- `notes.md`: durable harness conventions.
 - `digests/YYYY-MM-DD.md`: daily index. One slot = ≤8 lines (verdict, number, 1-line mechanism, link). No file changelogs, no "next action" prose.
 - `escalations.md`: ≤500 chars per bullet; longer rationale → link a scoping doc.
-- `queue.json`: `summary`/`next_action` are pointers.
+- `queue.json`: pointers, not plans.
 
-Caps (hard): digest ≤150 lines, backlog ≤300, notes ≤200, per-sprint progress ≤500.
-
-Trim before append: if the file is at or above its cap, your first action is to roll older content to its canonical home and leave a pointer. Then write.
+Caps (hard): digest ≤150 lines, backlog ≤300, per-sprint progress ≤500. Trim before append.

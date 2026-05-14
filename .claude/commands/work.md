@@ -35,7 +35,9 @@ Use a subagent when the task would otherwise bloat the main context with explora
 
 Small direct edits or simple state updates can stay in the main session.
 
-Give the subagent a bounded brief with the objective, relevant context, write scope (for the implementer), notable constraints, and expected output. Let it decide the detailed procedure.
+Give the subagent a scoped brief with the objective, relevant context, write scope (for the implementer), notable constraints, and expected output. Let it decide the detailed procedure.
+
+Size the brief to the next external gate (training run, re-extraction, verdict, human input) — not to the next code unit that smokes green. If nothing real separates two phases of work, brief them as one step.
 
 Use multiple subagents only for genuinely independent, low-resource tasks with disjoint write scopes.
 
@@ -54,10 +56,10 @@ Persist useful state where it belongs. Follow CLAUDE.md "Documentation Disciplin
 
 Commit any coherent workstream result (code + related docs) before continuing or stopping; split by workstream and follow the repo's commit-message convention. This overrides the global "never commit unless asked" default for `/work` runs.
 
-Continue immediately when the next step is clearly still the same bounded objective and cost, risk, and context budget remain reasonable. Spawn another single subagent (investigator or implementer) if that next step would otherwise bloat the main context.
+Continue immediately when the next step is clearly still the same workstream and cost, risk, and context budget remain reasonable. Spawn another single subagent (investigator or implementer) if that next step would otherwise bloat the main context.
 
 Use `/loop`, a timeout, or a timed wakeup only for genuine waits: running training/eval jobs, future logs/checkpoints, human input, or deliberate resource cool-downs.
 
 ## Response
 
-Close with a concise summary of the job chosen, result, files changed, validation, commit(s) made, and next action. Do not exit with an uncommitted coherent result. Stop when the bounded objective is complete, the next step requires waiting, or continuing would exceed sensible cost/risk/context budget.
+Close with a concise summary of the job chosen, result, files changed, validation, commit(s) made, and next action. Do not exit with an uncommitted coherent result. Stop when the workstream is complete, the next step requires waiting, or continuing would exceed sensible cost/risk/context budget.

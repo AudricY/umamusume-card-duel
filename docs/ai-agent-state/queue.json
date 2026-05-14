@@ -9,119 +9,11 @@
       "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section."
     },
     {
-      "id": "r15-s3-branch-synthesis-and-next-pick",
-      "priority": "P2",
-      "status": "done",
-      "summary": "Closed 2026-05-14 self-directed: picked R7 (multi-teacher BC blend) over R8. Reasoning in docs/ai-agent-state/escalations.md `## Resolved`."
-    },
-    {
-      "id": "r7-multi-teacher-warmstart-scoping",
-      "priority": "P2",
-      "status": "done",
-      "summary": "Scoping doc landed at docs/ai-research/scoping/r7-multi-teacher-warmstart.md (113 lines). Key wins: train_bc.py:361-369 already implements soft-target CE (R12 phase C) so no trainer change; three teachers already wired (rollout/search/planner). Pre-flight pairwise-teacher-agreement probe built into step 1 as cheap go/no-go."
-    },
-    {
-      "id": "r7-pre-flight-teacher-agreement-probe",
-      "priority": "P2",
-      "status": "done",
-      "run_dir": "runs/R7-pre-flight-teacher-agreement",
-      "summary": "GO. N=300 in 1m 46s. rollout↔search=0.800 (in [0.30,0.85] band), rollout↔planner=0.180, search↔planner=0.230. All-three-agree=0.133 (< 0.50). Mean normalised mixture entropy=0.618. Diversity hypothesis confirmed: planner is structurally different from rollout/search (turn-bundle planning vs greedy leaf), provides genuine per-state disagreement. NO-GO-reweight rule did not fire (rollout↔search stays in band). Planner is ~14× slower per state than rollout (315ms vs 13ms) — projects to +5–6 min trace-gen wall-clock if all three teachers run on every row. Probe at backend/src/sim/r7TeacherAgreementProbe.ts; output at runs/R7-pre-flight-teacher-agreement/probe-300-20260514T061913Z.json. Result block appended to docs/ai-research/scoping/r7-multi-teacher-warmstart.md § 8."
-    },
-    {
-      "id": "r7-step-2-schema-change",
-      "priority": "P2",
-      "status": "done",
-      "summary": "TS schema change landed + back-compat preserved. `DecisionTraceRow.teacher` → `teachers: Array<...>` (length 1-3); `chooseTraceTeacher` calls all requested selectors with per-teacher sub-seeds; `parseTraceTeacher` accepts comma-separated CLI; relabel emits `policyTargets: number[]` with uniform 1/K weights. New smoke `backend/src/tests/multiTeacherTraceSmoke.ts` asserts mixed + single paths. All 6 train smokes PASS (~60s)."
-    },
-    {
-      "id": "r7-step-3-python-dataset-loader",
-      "priority": "P2",
-      "status": "done",
-      "summary": "Python dataset loader plumbing landed. `PolicySample.policy_target: np.ndarray | None` added; `collate_policy_batch` emits padded `(B, max_actions)` `policy_targets` tensor when every sample in batch is soft (homogeneous-batch policy — mixed batches drop back to hard-CE; the parent corpus mixer is responsible for batch homogeneity, as scoping § 3 commits to skipping mix-sources for v1). Legacy traces without `policyTargets` → `policy_target is None` → trainer's hard-CE branch (`train_bc.py:361-369`) fires unchanged. Smoke at `training/smoke_e2e.py::assert_multi_teacher_dataset_loader` covers: all-soft batch, all-hard batch, mixed batch, one-hot-equals-hard-CE numerical equivalence. Validation: `test:python-train` PASS ~6 min, `test:train` PASS ~2 min."
-    },
-    {
-      "id": "r7-step-4-trace-gen-and-sl-train",
-      "priority": "P2",
-      "status": "done",
-      "run_dir": "runs/R7-multi-teacher-warmstart",
-      "summary": "DONE / FAIL. Iter-0 SL gate Wilson lower **0.2921** (n=500, rule-bot, side-balanced; player 0.228, opponent 0.326 — same +10pp gap as every F1 phase). vs R15.S1 iter-0 0.2844 → Δ +0.0077 (wash, within Wilson half-width ~4.2pp); pre-registered SL gate ≥0.35 missed by ~4pp. No PPO sweep launched; SL gate close-out fires per scoping § 4. Plateau-then-overfit signature replicated more strongly than R15.S1: peak val_acc 0.7855 @ ep16 → final 0.7473 @ ep75 (drift down); val_loss 0.93 @ ep1 → 2.21 @ ep75 (climb) while train_acc 0.68 → 0.93. Mixed corpus 12387 rows (8826 mixed-teacher + 3561 sampled rule-bot replay; rule-bot replay 4432 exact byte-match with R15.S1). Result block at docs/ai-research/progress/r15.md § R7."
-    },
-    {
-      "id": "r7-step-4-monitor",
-      "priority": "P2",
-      "status": "done",
-      "summary": "DONE — verdict observed at orchestrator run_completed (iteration=-1). Iter-0 wilson_lower=0.2921 from orchestrator-state.json::iterations[0]; gate detail from iter-000/gate.manifest.json::summary (wilson95 [0.2921, 0.3744], modelWinRate 0.332, byModelSide player 0.28 / opponent 0.384, terminalReasons gameOver:500). Folded into r7-step-4-trace-gen-and-sl-train DONE summary above."
-    },
-    {
-      "id": "r8-dpo-scoping",
-      "priority": "P2",
-      "status": "done",
-      "summary": "Scoping doc landed at docs/ai-research/scoping/r8-dpo.md (144 lines). Trainer: new training/train_dpo.py (sibling of train_bc.py — DPO needs per-action gather + frozen-ref forward, structurally distinct). β=0.1 (DPO paper default). Reference: runs/item17-2026-05-11/iter-002/model/checkpoint.pt (Wilson 0.311). Pair-noise filter: τ=max(0.02, sqrt(mean(rewardVariance)/3)) using oracle.rewardVariance already in outcome-export. CRITICAL: existing R15.S1/R7 dagger-trace JSONLs are NOT reusable — relabelDecisionTrace.ts:24-43 carries no margin; runner-up + per-candidate rewards live in exportOutcomeTrainingExamples.ts (npm run sim:export-training path) at lines 140-141/168/173/176-184. R8 step-1 must generate a fresh outcome-export corpus. Risk (c) elevated: a Wilson-0.31 reference may bound DPO from above via Bradley-Terry's action-support constraint."
-    },
-    {
-      "id": "r8-step-1-corpus-and-trainer",
-      "priority": "P2",
-      "status": "done",
-      "summary": "DONE. Audit: existing training/runs/outcome-crn/examples.jsonl was rollout-outcome-v1 (NO oracle field) — regenerated as training/runs/r8-outcome-crn/examples.jsonl via `sim:export-outcome-training --games 90 --max-examples 10000 --samples 3 --seed-start 50000` (4094 rows, ~2 min, all oracle fields present, missing_counts=0). τ probe (100 rows, seed=0): mean rewardVariance=0.157, sqrt(mean/3)=0.229, tau=0.229 above the 0.02 floor. kept_pairs=568/4094 (13.9%) at τ=0.229; at the 0.02 floor 880/4094 (21.5%). Files (LOC): training/pair_corpus.py 257, training/train_dpo.py 332, training/smoke_e2e.py +151 (`assert_dpo_smoke`). Smoke gated through `test:python-train` (PASS, 22.9s wall-clock); covers (a) finite loss, (b) policy grads flow, (c) reference frozen, (d) loss strictly decreases over 10 SGD steps."
-    },
-    {
-      "id": "r8-step-2a-train-only",
-      "priority": "P2",
-      "status": "done",
-      "run_dir": "runs/R8-dpo/iter-000",
-      "summary": "DONE 2026-05-14T07:33Z. Background launch via direct python -u (no nohup×npm wrapper, no pidfile race). Wall-clock ~30s on CUDA — much under scoping ~10-min estimate because actual corpus is 568 kept pairs (τ=0.3005 at training time, computed by in-trainer probe with different seed than step-1 audit's 0.229) not the assumed ~10k. Status PASS. Loss 0.683→0.615 monotone over 5 epochs; val_acc 0.628→0.681; policy_margin train 1.47→3.02 / val 2.45→3.27 (model moves away from reference as expected for non-zero β). ONNX roundtrip smoke PASS (max_logit_diff 7e-7, max_value_diff 3e-7). Outputs at runs/R8-dpo/iter-000/model/{checkpoint.pt, manifest.json} + train.log."
-    },
-    {
-      "id": "r8-step-2b-gate-eval",
-      "priority": "P2",
-      "status": "done",
-      "run_dir": "runs/R8-dpo/iter-000",
-      "summary": "DONE / FAIL 2026-05-14T15:43Z. Iter-0 Wilson lower **0.3318** (n=1000 side-balanced — note: --games 500 gave 1000 total, 2× R7's n=500; verdict direction unchanged). modelWinRate 36.1%; player 31.8% Wilson [0.279, 0.360], opponent 40.4% Wilson [0.362, 0.448] (opp-side clears 0.40 lower). +3.97pp over R7 (0.2921), +2.08pp over item17 (0.311), +0.49pp over R15.S1 iter-2 (0.3269), -3.59pp vs R15.S3 ceiling (0.3677), -6.82pp vs pre-reg ≥0.40 gate. **Wilson < 0.37 → branch closes** per scoping § 5(b); marginal-band β=0.3 follow-up NOT triggered (would need 0.37 ≤ Wilson < 0.40). Real objective-family lift over labels (R7) + reference (item17) but didn't break R15.S3 reward-shape ceiling. Driver `training/r8_gate_eval.py` (~150 LOC) wraps export_checkpoint_to_onnx + serve_onnx_context + run_eval_gate. Gate wall-clock 1m 18s. Result block at `docs/ai-research/progress/r15.md` § R8 (lines 143-278). Next pick: R7.b.2 (card-embedding feature pass)."
-    },
-    {
-      "id": "r7-backlog-shrink-to-pointer",
-      "priority": "P3",
-      "status": "done",
-      "summary": "Backlog § R7 collapsed to one-line pointer mirroring R7.b's compact form; summary line at L93-97 also updated (R7 status RUNNING with launch-time and PID). R8 entry left expanded (no scoping doc yet)."
-    },
-    {
-      "id": "harness-pidfile-race-fix",
-      "priority": "P4",
-      "status": "ready",
-      "summary": "Pidfile race observed across digest slots 18/20/22/25/26 when launching orchestrator via `nohup npm run … &`: captured PID is the wrapper, not the orchestrator's real Python PID; recovered each time via `ps aux | grep <out-dir>`. Slot 34's direct `nohup training/.venv/bin/python -u … &` invocation did NOT trigger the race (observed at 2m16s, 5m25s, 9m28s into the R7 step 4 run). Working hypothesis: the race is a `nohup` × `npm run` wrapper interaction, not a Python-side bug. Cheap fix candidate: standardise harness launch commands on direct-python invocation + write PID into `<out-dir>/pid.txt` from inside the Python orchestrator before any fork.",
-      "next_action": "When this becomes the highest-leverage open item: investigator confirms the working hypothesis by reading `npm run` wrapper behaviour + the digest evidence; if confirmed, implementer adds `pid.txt` write inside `training/dagger_orchestrator.py` startup and updates harness documentation to prefer direct-python invocation. Low-priority — direct invocation already works as a workaround."
-    },
-    {
-      "id": "r7b-trace-reencodability-spike",
-      "priority": "P3",
-      "status": "done",
-      "autonomous_launch_eligible": true,
-      "summary": "R7.b.0 precondition spike CLOSED — VERDICT YES. Sampled runs/R14-f1-self-play-sweep/iter-000/trace.jsonl (row1=2051B) and runs/R15-S1-warmstart-sweep/iter-000/trace.jsonl (row1=2025B); both schemaVersion=1 carry raw `observation` (full PublicObservation: own/opponent active+bench per-card detail, handCardIds, energyZone, discard, shared.stadiumCardId, firstPlayer, pendingChoiceKind) plus `legalActions[i].{id,kind,phase,payload,features}` where payload retains targetUid/handIndex/attackIndex for action-target embedding (#2) recompute. Encoder inputs FULLY recoverable — every R7.b schema bump (v2.1 hygiene → v3 embedding → v3.x set-encoder) costs only feature re-extraction (tens of seconds per corpus, not multi-hour DAgger regen). Exception: intervention #4 (recent-action history) needs cross-row state — separate offline-reconstruction check when R7.b.4 promotes. Result block appended to docs/ai-research/scoping/r7b-feature-representation.md § 9. Unblocks R7.b.2 cost estimate."
-    },
-    {
-      "id": "r7b-hygiene-wire-unused-fields",
-      "priority": "P3",
-      "status": "done",
-      "summary": "R7.b.1 LANDED. Schema v2.1 additive bump (STATE_DIM 96→110, +14 slots): [96] firstPlayer polarity vs sideToAct, [97:100] pendingChoiceKind one-hot in hard-coded `PENDING_CHOICE_KINDS` order, [100:110] per-uma toolCardId hashed-float matching `_identity_features` 10-uma accounting. STATE_FEATURE_SCHEMA_VERSION 2→2.1. TS-side already emits all three fields — zero TS edits. Files: `training/uma_ai/features.py` +63, `training/train_bc.py` +1 (added `state_hygiene_v21` ablation choice). Old 96-d checkpoints fail loud via strict load + `export_onnx.py:17-21` dim check. Smokes (TMPDIR=/tmp): npm run build PASS; npm run test:train PASS; npm run test:python-train PASS (manifest verifies state_dim=110, state_feature_schema_version=2.1, ONNX roundtrip PASS). Result block at docs/ai-research/scoping/r7b-feature-representation.md § 10. SL gate retrain to confirm Wilson non-regression is a separate followup (R7.b.2 reuses anyway)."
-    },
-    {
       "id": "r7b-card-embedding-pass",
       "priority": "P2",
       "status": "ready",
-      "summary": "R7.b.2 headline pass: card embedding (#1) + action-target embedding (#2) bundled per scoping § 4 #1 + #2. Phases 1-6 per scoping § 11. **Phase 1 LANDED 2026-05-14** (TS schema bump → scoping § 12). **Phase 2 LANDED 2026-05-14** — Python encoder (~556/-10 LOC); embedding param delta ~44.4k @ hidden=128 (3.5% of baseline); result block at scoping § 13. **Phase 3 LANDED 2026-05-14** — ONNX export + serve_onnx wired for `card_ids_by_zone` + `action_card_idx` (~273/-24 LOC across export_onnx.py / serve_onnx.py / train_bc.py / smoke_e2e.py). Opset stayed at 17 (no bump); `nn.Embedding(padding_idx=0)` exported cleanly via `Gather` — NO `F.embedding` fallback needed. ONNX roundtrip <2.4e-7 on populated random ids, <2.3e-6 on all-zeros, and zero-id forward bit-identical (0.0/0.0) to omitted-kwarg forward — `padding_idx=0` survives export. Direct-ORT vs served-prediction <1e-3 on legal positions (catches `request_to_arrays` packing bugs). Sidecar `.meta.json` now records `num_zones`, `max_cards_per_zone`, `card_vocab_table_size`. Vocab→embedding fail-loud guard in `export_onnx.py` asserts `card_embed.num_embeddings == vocabSize + 1`. Smokes (TMPDIR=/tmp): build PASS, test:train PASS (7/7), test:python-train PASS (extended roundtrip smoke covering populated + zero-id + padding-equivalence), test:dagger-orchestrator PASS. Result block at scoping § 14. Corpus pick R7's 12387-row mixed (apples-to-apples vs prior best on this schema; starting Wilson 0.2921). Pre-reg exit per § 7: Wilson ≥ 0.40 PASS ship; ≥ 0.37 ∧ < 0.40 → R7.b.3 attention follow-up; < 0.37 → close R7.b family.",
-      "next_action": "Phase 4 feature re-extractor (~120 LOC standalone script) per scoping § 11 Phase 4. PARALLELISABLE with Phase 5 (SL retrain ~30 min CPU). New file `training/r7b2_extract_features.py`: read `runs/R7-multi-teacher-warmstart/iter-000/mixed.jsonl` row-by-row, call v3 `observation_to_features` + `observation_to_card_ids` + reconstruct per-action source/target idx from `legalActions[i].payload.{targetUid,handIndex,attackIndex,retreatTarget}` mapped against `observation.{own,opponent}.{active,bench}.{uid,cardId}` + `observation.own.handCardIds[handIndex]`. Write new JSONL with `schemaVersion: 3` plus new fields; preserve `policyTargets` unchanged. Re-encodability evidence: scoping § 9 confirms all needed fields preserved in the trace rows. Wall-clock: tens of seconds. After Phase 4 PASS, Phase 5 SL retrain (`train_bc.py --data <re-extracted v3 jsonl> --epochs 75 --hidden 64 --depth 2`, same hyperparams as R7 baseline) and Phase 6 gate eval (`r8_gate_eval.py` reuses as-is, schema-agnostic). Pre-reg exit gates already wired."
-    },
-    {
-      "id": "r7b-attention-set-encoder",
-      "priority": "P4",
-      "status": "parked-pending-r7b-2",
-      "summary": "R7.b.3 conditional follow-up (per scoping § 4 #3): set-encoder / 1–2 layer self-attention over per-card tokens; replaces R7.b.2's sum-pool with attention pooling. ~1 day on top of R7.b.2. Launch only if R7.b.2 lifts but caps below 0.40."
-    },
-    {
-      "id": "r7b-history-and-aux-heads",
-      "priority": "P4",
-      "status": "parked-pending-r7b-2",
-      "summary": "R7.b.4 + R7.b.5 deprioritised entries (per scoping § 4 #4–#6): recent-action history (gated on r7b-trace-reencodability-spike) and aux heads / capacity bump (revisit after R7.b.2 outcome). Held as parked entries so they aren't forgotten; not in the v1 R7.b plan."
+      "summary": "R7.b.2 headline pass: card embedding (#1) + action-target embedding (#2) bundled. Phases 1-2 LANDED (scoping § 12-13): schema bump, Python encoder, all smokes PASS. Remaining: ONNX wire + feature re-extract + SL retrain + gate eval. Pre-reg exit per scoping § 7. See docs/ai-research/scoping/r7b-feature-representation.md.",
+      "next_action": "Execute remaining work up to the SL retrain gate as one /work step: ONNX export change + serve_onnx tensor build + feature re-extractor + kick off SL retrain. Stop at retrain launch (the next external wall-clock gate, ~30 min CPU). See scoping § 11 phases 3-5."
     },
     {
       "id": "planning-refresh-after-r14-e",
@@ -131,38 +23,23 @@
       "next_action": "Use /work to brief the implementer for a planning/refinement task: read docs/r14-sprint-plan.md, docs/ai-research-backlog.md, docs/ai-performance-research-progress.md, docs/ai-agent-state/escalations.md, and recent relevant run state; update queue and existing docs only where evidence changes the next action."
     },
     {
-      "id": "r15-s3-signal-mix-or-schedule",
-      "priority": "P3",
-      "status": "done",
-      "run_dir": "runs/R15-S3-constant-shape",
-      "summary": "Schedule axis explored; constant beat linear-decay by ~+1pp (Phase N 0.368 vs Phase L 0.356). Closed by Phase O' branch-synthesis: signal-mix tested at Phase O' (`r15-s3-reduced-mix-sweep`) and also capped at 0.368."
+      "id": "harness-pidfile-race-fix",
+      "priority": "P4",
+      "status": "ready",
+      "summary": "Pidfile race observed across digest slots 18/20/22/25/26 when launching orchestrator via `nohup npm run … &`: captured PID is the wrapper, not the orchestrator's real Python PID. Slot 34's direct `nohup training/.venv/bin/python -u … &` did NOT trigger the race. Working hypothesis: `nohup` × `npm run` wrapper interaction. Direct-python invocation already works as workaround.",
+      "next_action": "When this becomes the highest-leverage open item: investigator confirms the hypothesis; if confirmed, implementer adds `pid.txt` write inside `training/dagger_orchestrator.py` startup and updates harness docs to prefer direct-python invocation."
     },
     {
-      "id": "r15-s3-value-head-trace-instrumentation",
-      "priority": "P3",
-      "status": "done",
-      "summary": "Phase O prerequisite landed. Added `valueEstimate?: number` to both `BehaviorPolicySnapshot` declarations (`backend/src/sim/evaluateModelVsHeuristic.ts:140-147`, `backend/src/sim/dagger/relabelDecisionTrace.ts:5-12`); added `value?: number[]` to the `/predict` payload destructure; copied `payload.value?.[0]` onto the snapshot when it is a finite number. Updated `evalGateSmoke.ts` fake-server to emit `value: [0.42]` and added an assertion that policy-source trace rows carry numeric `behaviorPolicy.valueEstimate ≈ 0.42`. `TMPDIR=/tmp npm run test:train` PASS post-diff."
+      "id": "r7b-attention-set-encoder",
+      "priority": "P4",
+      "status": "parked-pending-r7b-2",
+      "summary": "R7.b.3 conditional follow-up (per scoping § 4 #3): set-encoder / 1-2 layer self-attention over per-card tokens; replaces R7.b.2's sum-pool with attention pooling. Launch only if R7.b.2 lifts but caps below 0.40."
     },
     {
-      "id": "r15-s3-value-head-tempo-signal",
-      "priority": "P3",
-      "status": "done",
-      "run_dir": "runs/R15-S3-value-head-tempo",
-      "summary": "Phase O CLOSED — REGRESSED. iter-2 Wilson 0.3502 (WR 39.2%), 1.8pp worse than Phase N's 0.3677. Trajectory 0.2845 (promoted) → 0.2768 (REJECTED at floor 0.2845, same over-shape pattern as Phase M) → 0.3502 (promoted from iter-0 parent). `promoted_iterations: [0, 2]`. Wall-clock 5m 22s. Mechanism diagnosis: signal correctly wired but magnitude is ~20× the design budget — Tanh output range ±1 gives per-step delta ±2; at coef 0.05 per-step contribution is ±0.1; at ~60 steps/game per-game total is ±6, vs ±0.3 budget. iter-0 shape_attribution.value_head=26.01 confirms empirically; iter-1/2 attributions drop to 9.28/8.25 as policy flattens the delta (over-shape signature). PPO healthy in all non-reward dimensions (ratio_max 12.7/12.3/22.4, entropy stable, no anomalies). Follow-up: Phase P launched at coef 0.01 (5× smaller). Full writeup at docs/ai-performance-research-progress.md § Phase O."
-    },
-    {
-      "id": "r15-s3-value-head-tempo-low-coef",
-      "priority": "P3",
-      "status": "done",
-      "run_dir": "runs/R15-S3-value-head-tempo-low",
-      "summary": "Phase P CLOSED — REGRESSED. iter-2 Wilson **0.3463** (WR 38.8%), **2.1pp worse than Phase N's 0.3677 AND 0.4pp worse than Phase O's 0.3502**. Trajectory clean (no rejections): iter-0 0.2730 (identical to Phase L iter-0 to 4dp; at coef 0.01 the value-head signal contributes effectively nothing at iter-0) → iter-1 0.2845 (no rejection unlike Phase O) → iter-2 0.3463. `promoted_iterations: [0, 1, 2]`, halted=false. Wall-clock 5m 23.2s. Dimensional check on coef ratio passes: iter-0 shape_attribution.value_head = 5.03 (Phase P) vs 26.01 (Phase O), ratio 5.17× matches the 5× coef ratio. **Lowering the coef did not help — the value-head-delta signal mechanism is wrong-shape, not wrong-magnitude.** R15.S3 BRANCH CLOSED across both axes: obs-delta saturated at 0.368 (axis 1, phases L/M/N/O'), value-head regressed at 0.346-0.350 (axis 2, phases O/P). Total branch cost ~36 min compute across 6 phases. Surviving F1-line candidates: R7 (multi-teacher labels) and R8 (DPO) — both autonomous-launch-INELIGIBLE. Full writeup at docs/ai-performance-research-progress.md § 'Phase P — F1 PPO + value-head tempo signal, coef 0.01 (R15.S3 GENUINE BRANCH CLOSEOUT)'."
-    },
-    {
-      "id": "r15-s3-reduced-mix-sweep",
-      "priority": "P3",
-      "status": "done",
-      "run_dir": "runs/R15-S3-reduced-mix",
-      "summary": "Phase O' CLOSED — signal-mix axis fully explored. Dropped bench-energy + retreat (both effectively dead in Phase N attribution); scaled active-energy 0.02→0.03 and throughput 0.02→0.03; held hp-diff 0.05 as control. All 3 iters promoted, monotone trajectory 0.2825 → 0.2883 → 0.3677. Iter-2 Wilson **0.3677 identical to Phase N's 0.3677 to 4 decimal places** — signal-mix change moved iter-2 by 0.0000pp. Capstone observation for R15.S3 branch: 3 axes (coef magnitude / schedule / signal mix) each moved iter-2 by ≤1.2pp; the binding constraint is the information content of the 5-signal observation-delta family, not the signals' weights or schedule. Total R15.S3 branch cost ~25 min compute across 4 phases (L+M+N+O'). Branch CLOSED / SATURATED."
+      "id": "r7b-history-and-aux-heads",
+      "priority": "P4",
+      "status": "parked-pending-r7b-2",
+      "summary": "R7.b.4 + R7.b.5 deprioritised entries (per scoping § 4 #4-#6): recent-action history and aux heads / capacity bump. Held as parked entries so they aren't forgotten; not in the v1 R7.b plan."
     }
   ]
 }
