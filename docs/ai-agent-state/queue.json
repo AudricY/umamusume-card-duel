@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T26",
+  "updated": "2026-05-14T28",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -7,6 +7,14 @@
       "status": "ready",
       "summary": "R14.E acceptance: play 20 full UI games with aiBackend=mcts, value-head leaf + adaptive-ratio=1.5, capture fallback rate (<5%) and median decision time (<3s). Only remaining R14 sprint acceptance step.",
       "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section."
+    },
+    {
+      "id": "r15-s3-branch-synthesis-and-next-pick",
+      "priority": "P2",
+      "status": "ready",
+      "autonomous_launch_eligible": false,
+      "summary": "R15.S3 reward-shape branch CLOSED across both axes (axis 1 observation-delta saturated at 0.368 ± 0.001 across L/M/N/O'; axis 2 value-head tempo REGRESSED at coef 0.05 → 0.3502 and coef 0.01 → 0.3463 across Phases O/P). Total branch cost ~36 min compute across 6 phases. F1 post-mortem framing now: 'reward-shape mechanism cannot break 0.368; surviving moves must change warm-start (R7) or optimization objective (R8).' Path (a) value-head tempo was executed and exhausted at Phases O+P — no longer a surviving candidate. **Two F1-line candidates remain, both autonomous-launch-INELIGIBLE (human-rank decisions, meaningfully different research directions):** (b) R7 multi-teacher labels (SL warm-start rebuild; doesn't touch reward, changes SL pipeline); (c) R8 DPO (PPO replacement; doesn't depend on per-step hand-shaped reward signal; bigger pivot). A non-per-step reward-shaping framework (turn-based or game-phase aggregate shaping) is a fourth, untested possibility — ranked below R7/R8.",
+      "next_action": "Human picks R7 vs R8 vs hybrid as the next F1-line research direction. Decision filed at docs/ai-agent-state/escalations.md `## Open`; full synthesis at docs/ai-agent-state/notes.md `## F1 reward shaping — scoping (2026-05-14)` Final R15.S3 branch summary block; closeout writeup at docs/ai-performance-research-progress.md § 'Phase P — F1 PPO + value-head tempo signal, coef 0.01 (R15.S3 GENUINE BRANCH CLOSEOUT)'."
     },
     {
       "id": "planning-refresh-after-r14-e",
@@ -38,12 +46,9 @@
     {
       "id": "r15-s3-value-head-tempo-low-coef",
       "priority": "P3",
-      "status": "in_progress",
+      "status": "done",
       "run_dir": "runs/R15-S3-value-head-tempo-low",
-      "pid": 3017314,
-      "started_at": "2026-05-14T13:18Z",
-      "summary": "Phase P LAUNCHED — single change vs Phase O: `--reward-value-head-coef 0.05` → `0.01` (5× smaller). Per-step contribution becomes ±0.02; at ~60 steps/game per-game total ±1.2 — still above the ±0.3 budget but ~5× closer than Phase O. All else identical to Phase O: same warm-start (`runs/item17-2026-05-11/iter-002/model/checkpoint.pt`), same opponent (rule-bot, no pool), same Phase H HPs (`--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4`), same 5 obs-delta coefs at Phase L 1.0× (active 0.02 / bench 0.02 / retreat 0.03 / throughput 0.02 / hp-diff 0.05), same constant schedule (1.0→1.0), same `--reward-alpha 0.333 --reward-beta 1.0 --eval-games 250 --iterations 3 --games-per-update 800`. PID 3017314 alive at +7s; iter-0 trace eval running at expected ~0.20-0.30 WR (in line with item17 warm-start). ETA ~6 min wall-clock. NB pidfile race recurred (4th time) — bash & redirect captures wrapper PID, real orchestrator is wrapper's child; need to add a helper that writes the orchestrator's real PID atomically.",
-      "next_action": "Monitor `runs/R15-S3-value-head-tempo-low/events.jsonl` and per-iter `gate.manifest.json`. Exit gate: SUCCESS iter Wilson lower ≥0.40 (first F1 success on record); PARTIAL iter-2 in (0.368, 0.40) (signal contributes additively at low magnitude); NEUTRAL iter-2 ≈0.36-0.37 (redundant with obs-delta family at low magnitude); REGRESSION iter-2 <0.35 (value-head info quality, not magnitude, is the problem — pivot to R7/R8)."
+      "summary": "Phase P CLOSED — REGRESSED. iter-2 Wilson **0.3463** (WR 38.8%), **2.1pp worse than Phase N's 0.3677 AND 0.4pp worse than Phase O's 0.3502**. Trajectory clean (no rejections): iter-0 0.2730 (identical to Phase L iter-0 to 4dp; at coef 0.01 the value-head signal contributes effectively nothing at iter-0) → iter-1 0.2845 (no rejection unlike Phase O) → iter-2 0.3463. `promoted_iterations: [0, 1, 2]`, halted=false. Wall-clock 5m 23.2s. Dimensional check on coef ratio passes: iter-0 shape_attribution.value_head = 5.03 (Phase P) vs 26.01 (Phase O), ratio 5.17× matches the 5× coef ratio. **Lowering the coef did not help — the value-head-delta signal mechanism is wrong-shape, not wrong-magnitude.** R15.S3 BRANCH CLOSED across both axes: obs-delta saturated at 0.368 (axis 1, phases L/M/N/O'), value-head regressed at 0.346-0.350 (axis 2, phases O/P). Total branch cost ~36 min compute across 6 phases. Surviving F1-line candidates: R7 (multi-teacher labels) and R8 (DPO) — both autonomous-launch-INELIGIBLE. Full writeup at docs/ai-performance-research-progress.md § 'Phase P — F1 PPO + value-head tempo signal, coef 0.01 (R15.S3 GENUINE BRANCH CLOSEOUT)'."
     },
     {
       "id": "r15-s3-reduced-mix-sweep",

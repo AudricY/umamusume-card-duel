@@ -640,6 +640,89 @@ magnitude. Neutral if iter-2 ≈ 0.36-0.37 — signal is redundant with the obse
 family at low magnitude. Regression if iter-2 < 0.35 — value-head info quality (not
 magnitude) is genuinely the problem; pivot to R7/R8.
 
+**Phase P Closeout — value-head tempo signal at coef 0.01, REGRESSED (2026-05-14).** Run
+`runs/R15-S3-value-head-tempo-low/` finished clean (`run_completed`, `halted=false`,
+**5m 23.2s** wall-clock; run_started ts 1778735914.37 → run_completed 1778736237.61, delta
+323.24s). Trajectory: iter-0 Wilson **0.2730** (WR 31.2%, promoted — **identical to Phase
+L iter-0 0.2730 to 4dp**; at coef 0.01 the value-head signal contributes effectively
+nothing at iter-0) → iter-1 **0.2845** (WR 32.4%, promoted, +1.1pp; **no rejection**,
+unlike Phase O which rejected iter-1 at 0.2768 < 0.2845 floor) → iter-2 **0.3463** (WR
+38.8%, promoted, +6.2pp from iter-1). `promoted_iterations: [0, 1, 2]`, halted=false. **Δ
+iter-2 vs Phase N: -0.021; Δ iter-2 vs Phase O: -0.004**. Adding the value-head signal
+at coef 0.01 made iter-2 *worse* than Phase N's unshaped-by-value-head baseline AND
+slightly worse than Phase O at coef 0.05. **Lowering the coef did not help — the value-
+head-delta signal mechanism is wrong-shape, not wrong-magnitude.**
+
+**Dimensional check on the coef ratio.** iter-0 `shape_attribution.value_head = 5.03`
+(Phase P) vs `26.01` (Phase O); ratio **5.17×** matches the 5× coef ratio within rounding
+— the value-head signal is wired and scaled correctly, and iter-0 shape attribution moves
+linearly with the coef. iter-1 / iter-2 attributions are 1.45 / 1.27 (Phase P) vs 9.28 /
+8.25 (Phase O); same policy-flattens-the-delta pattern at both magnitudes, but at Phase
+P's absolute level the flattening contributes neither helpful gradient (Phase O over-
+shape signature) nor harm (Phase O iter-1 rejection). PPO healthy in non-reward
+dimensions: ratio_max 12.53 / 13.29 / 21.63 (gradient active, comparable to L/M/N/O');
+approx_kl_mean 0.013 / 0.012 / 0.009 (no anomalies); entropy 0.173 → 0.164 → 0.164
+(stable); `numerical_anomalies = 0` across all 48 minibatches.
+
+**Why coef 0.01 didn't help and slightly hurt.** At coef 0.05 the value-head signal was
+*loud and over-shaped* the policy (Phase O iter-1 rejection signature; iter-0 over-shaped
+policy that exploits the shape, iter-1 overfits, greedy WR falls below floor). At coef
+0.01 the signal is *quiet but noisy* and contributes random variance to the surrogate
+gradient without informational gain (Phase P clean trajectory but lower ceiling than
+Phase O). Lower coef means less "averaging-out" of the noisy delta during PPO updates,
+so noise dominates more relative to signal. Both magnitudes regressed vs Phase N; the
+data point is the *mechanism*, not the coefficient.
+
+**Final R15.S3 branch summary — both axes exhausted (2026-05-14).** This is the
+authoritative final synthesis. The R15.S3 reward-shaping branch is now **fully explored
+and closed across both signal axes**. The prior `87e9e77` "BRANCH CLOSED" framing was
+premature — it tested only axis 1 (observation-delta) and queued axis 2 (value-head
+tempo) as the next move. Phases O + P then executed axis 2 and both regressed. Six
+sweeps total:
+
+| Phase | Signal axis | Config | iter-2 Wilson | Δ vs Phase N | Decision |
+| --- | --- | --- | --- | --- | --- |
+| L | obs-delta | 5 signals, 1.0× coefs, linear-decay | 0.3560 | -0.012 | promoted |
+| M | obs-delta | 5 signals, 1.75× coefs, linear-decay | 0.3580 | -0.010 | promoted |
+| N | obs-delta | 5 signals, 1.0× coefs, constant | **0.3677** | — | promoted (F1 rule-bot ceiling on record) |
+| O' | obs-delta | 3 signals (scaled), constant | 0.3677 | +0.000 | promoted |
+| O | value-head | + value-head coef 0.05, constant | 0.3502 | -0.018 | promoted (iter-1 rejected) |
+| P | value-head | + value-head coef 0.01, constant | **0.3463** | **-0.021** | promoted (no rejections) |
+
+**Axis 1 — hand-engineered observation-delta signals.** 4 phases. Capped at iter-2 Wilson
+**0.368 ± 0.001**. Coef magnitude (L vs M, Δ +0.002), schedule (L vs N, Δ +0.012), signal
+mix (N vs O', Δ +0.000) — all saturated.
+
+**Axis 2 — per-step value-head-delta tempo signal.** 2 phases spanning 5× coef range.
+Both regressed. Phase O at coef 0.05 → 0.3502 (loud, over-shaped, iter-1 rejection).
+Phase P at coef 0.01 → 0.3463 (quiet, noisy, lower ceiling). Lowering the coef did not
+help — the signal mechanism is wrong-shape, not wrong-magnitude.
+
+**Total cost.** ~36 min wall-clock across 6 phases (L 5m54s + M 6m22s + N 5m25s + O'
+5m28s + O 5m22s + P 5m23s). All six PPO-healthy in non-reward dimensions. Cheap research,
+decisive answer on both axes.
+
+**F1 post-mortem framing — final update.** Prior framing (`87e9e77`): "reward-shape axis
+fully explored and converged at 0.368; gap to 0.40 is categorical — needs a different
+information source, not more tuning." Phases O + P tested *exactly* that — a different
+information source (value-head delta) — and that information source actively regressed at
+both magnitudes. **New framing: "The F1 reward-shape mechanism cannot break 0.368 from
+this warm-start. Per-step shaping from any observation-derived signal saturates at 0.368,
+and per-step shaping from the policy's own value-head delta actively regresses. The
+remaining F1 moves must change either the warm-start (R7 multi-teacher labels rebuild)
+or the optimization objective (R8 DPO replacement). The reward-shape branch is closed."**
+
+**What survives.** Two F1-line candidates remain, both human-rank (not autonomous-launch):
+(a) **R7 multi-teacher labels** — retrain DAgger SL warm-start with multiple expert
+teachers; doesn't touch reward, changes SL pipeline. (b) **R8 DPO** — replace PPO with
+Direct Preference Optimization; doesn't depend on per-step hand-shaped reward signal at
+all; bigger pivot. The previously-queued "value-head tempo signal" path (a-prime) has
+been executed and exhausted at Phases O + P; it is no longer a surviving candidate. A
+non-per-step reward-shaping framework (turn-based or game-phase aggregate shaping)
+remains a fourth, untested possibility — call it out but rank below R7/R8. Escalation
+re-opened at `docs/ai-agent-state/escalations.md` `## Open`; queue item
+`r15-s3-branch-synthesis-and-next-pick` P2 ready autonomous-launch ineligible.
+
 ## F1 reward shaping value-head tempo — TS instrumentation scoping (2026-05-14)
 
 **Scope at a glance: is the value-head trace instrumentation orchestrator-only? No — but it

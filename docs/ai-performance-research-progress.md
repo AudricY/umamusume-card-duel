@@ -733,7 +733,7 @@ iter-2 promoted at Wilson lower **0.3109 — exactly the DAgger iter-2 Wilson lo
 4. The entropy bonus widens *probabilities* but doesn't *flip argmax decisions*, which is what the gate measures.
 5. With the current ±1 terminal + Δpoints×1/3 reward shape, the local optimum at WR ≈ 35–38% is the highest-return policy in the neighborhood of the warm-start.
 
-**F1 target 0.40 not yet reached from the item17-2026-05-11 warm-start** under the PPO mechanism active at the time of this post-mortem. PPO can match the SL cap (phase H iter-2) but cannot exceed it under the existing reward shape. [Update 2026-05-14: R15.S3 (Phase L) lifted the rule-bot Wilson lower from 0.3109 (phase H) to **0.3560** by adding five per-step shaped signals — +4.5pp absolute over the prior F1 ceiling, missing the 0.40 bar by only 4.4pp and landing above the falsification band. The "NOT REACHABLE" framing was correct under the *unshaped* reward mechanism but is qualified once the reward axis is allowed to move; the branch is alive and the next attempt is a coefficient-scaling follow-up on the same axis. See "Phase L — F1 PPO + reward shaping" below. Phase M follow-up (1.75× coefs) landed iter-2 at **0.3580**, within Wilson noise of Phase L (Δ +0.002) — the pre-registered "coef saturation" outcome fired; next single-axis move is signal-mix or shaping-schedule change. See "Phase M — F1 PPO + reward-shape coef-scaling follow-up" below. Phase N follow-up (constant schedule, 1.0× coefs) landed iter-2 at **0.3677** (WR 41.0%, n=500) — **+1.2pp over Phase L, the new F1 rule-bot ceiling on record**, but still 3.2pp short of 0.40. With three configurations of the same 5-signal mix now landing 0.356 / 0.358 / 0.368 at iter-2, coef magnitude and schedule axes both moved iter-2 by ≤+1pp — **the binding constraint is the signal set itself**, not magnitude or schedule. See "Phase N — F1 PPO + constant reward shaping" below. **Phase O' capstone (2026-05-14, R15.S3 BRANCH CLOSED):** the signal-mix axis was tested by dropping the 2 weakest of the 5 signals (bench-energy and retreat — both effectively dead in Phase N attribution) and scaling the 2 dominant signals (active-energy 0.02→0.03, throughput 0.02→0.03). Iter-2 Wilson **0.3677 — identical to Phase N's 0.3677 to 4 decimal places** (Δ +0.000pp). With **three single-axis moves** (coef magnitude L→M Δ +0.002, schedule L→N Δ +0.012, signal mix N→O' Δ +0.000) now exhausted inside the 5-signal observation-delta family, the R15.S3 reward-shape **branch is closed at iter-2 Wilson 0.368 ± 0.001**. The post-mortem framing has been correspondingly upgraded: the reward-shape axis has been **fully explored and converged**; the remaining gap to 0.40 is now **categorical — needs a different information source, not more tuning of the existing observation-delta signals**. Surviving F1-line candidates require pulling information from a *different source*: value-head tempo signal (blocked on TS-side ONNX/trace instrumentation, queued as `r15-s3-value-head-trace-instrumentation`), R7 (multi-teacher labels — SL warm-start rebuild), or R8 (DPO — PPO replacement). See "Phase O' — F1 PPO + reduced signal-mix (R15.S3 branch closeout)" below. **Phase O (2026-05-14, value-head tempo signal at coef 0.05):** the value-head trace instrumentation unblocked the original Phase O plan; coef 0.05 was tested and iter-2 landed at Wilson **0.3502** — **1.8pp regression vs Phase N's 0.3677**. Iter-1 rejected at 0.2768 < iter-0 0.2845 floor (same over-shape pattern as Phase M); iter-2 promoted from iter-0 parent. Mechanism diagnosis: the value-head Tanh output gives ±2 per-step delta range; at coef 0.05 the per-step shape contribution is ±0.1, yielding a per-game total of ±6 across ~60 steps — **20× the ±0.3/game design budget**. Signal is correctly wired but magnitude is dominantly loud. Phase P launched as `runs/R15-S3-value-head-tempo-low/` with coef 0.01 (5× smaller) as the natural follow-up — if Phase P also regresses, the value-head-delta signal mechanism is genuinely a wrong shape (pivot R7/R8); if neutral at ~0.368 the signal is redundant; if ≥0.40, first F1 success. See "Phase O — F1 PPO + value-head tempo signal, coef 0.05" below.]
+**F1 target 0.40 not yet reached from the item17-2026-05-11 warm-start** under the PPO mechanism active at the time of this post-mortem. PPO can match the SL cap (phase H iter-2) but cannot exceed it under the existing reward shape. [Update 2026-05-14: R15.S3 (Phase L) lifted the rule-bot Wilson lower from 0.3109 (phase H) to **0.3560** by adding five per-step shaped signals — +4.5pp absolute over the prior F1 ceiling, missing the 0.40 bar by only 4.4pp and landing above the falsification band. The "NOT REACHABLE" framing was correct under the *unshaped* reward mechanism but is qualified once the reward axis is allowed to move; the branch is alive and the next attempt is a coefficient-scaling follow-up on the same axis. See "Phase L — F1 PPO + reward shaping" below. Phase M follow-up (1.75× coefs) landed iter-2 at **0.3580**, within Wilson noise of Phase L (Δ +0.002) — the pre-registered "coef saturation" outcome fired; next single-axis move is signal-mix or shaping-schedule change. See "Phase M — F1 PPO + reward-shape coef-scaling follow-up" below. Phase N follow-up (constant schedule, 1.0× coefs) landed iter-2 at **0.3677** (WR 41.0%, n=500) — **+1.2pp over Phase L, the new F1 rule-bot ceiling on record**, but still 3.2pp short of 0.40. With three configurations of the same 5-signal mix now landing 0.356 / 0.358 / 0.368 at iter-2, coef magnitude and schedule axes both moved iter-2 by ≤+1pp — **the binding constraint is the signal set itself**, not magnitude or schedule. See "Phase N — F1 PPO + constant reward shaping" below. **Phase O' capstone (2026-05-14, R15.S3 BRANCH CLOSED):** the signal-mix axis was tested by dropping the 2 weakest of the 5 signals (bench-energy and retreat — both effectively dead in Phase N attribution) and scaling the 2 dominant signals (active-energy 0.02→0.03, throughput 0.02→0.03). Iter-2 Wilson **0.3677 — identical to Phase N's 0.3677 to 4 decimal places** (Δ +0.000pp). With **three single-axis moves** (coef magnitude L→M Δ +0.002, schedule L→N Δ +0.012, signal mix N→O' Δ +0.000) now exhausted inside the 5-signal observation-delta family, the R15.S3 reward-shape **branch is closed at iter-2 Wilson 0.368 ± 0.001**. The post-mortem framing has been correspondingly upgraded: the reward-shape axis has been **fully explored and converged**; the remaining gap to 0.40 is now **categorical — needs a different information source, not more tuning of the existing observation-delta signals**. Surviving F1-line candidates require pulling information from a *different source*: value-head tempo signal (blocked on TS-side ONNX/trace instrumentation, queued as `r15-s3-value-head-trace-instrumentation`), R7 (multi-teacher labels — SL warm-start rebuild), or R8 (DPO — PPO replacement). See "Phase O' — F1 PPO + reduced signal-mix (R15.S3 branch closeout)" below. **Phase O (2026-05-14, value-head tempo signal at coef 0.05):** the value-head trace instrumentation unblocked the original Phase O plan; coef 0.05 was tested and iter-2 landed at Wilson **0.3502** — **1.8pp regression vs Phase N's 0.3677**. Iter-1 rejected at 0.2768 < iter-0 0.2845 floor (same over-shape pattern as Phase M); iter-2 promoted from iter-0 parent. Mechanism diagnosis: the value-head Tanh output gives ±2 per-step delta range; at coef 0.05 the per-step shape contribution is ±0.1, yielding a per-game total of ±6 across ~60 steps — **20× the ±0.3/game design budget**. Signal is correctly wired but magnitude is dominantly loud. Phase P launched as `runs/R15-S3-value-head-tempo-low/` with coef 0.01 (5× smaller) as the natural follow-up — if Phase P also regresses, the value-head-delta signal mechanism is genuinely a wrong shape (pivot R7/R8); if neutral at ~0.368 the signal is redundant; if ≥0.40, first F1 success. See "Phase O — F1 PPO + value-head tempo signal, coef 0.05" below. **Phase P (2026-05-14, value-head tempo signal at coef 0.01, R15.S3 BRANCH GENUINELY CLOSED across both axes):** the 5× lower coef was tested and iter-2 landed at Wilson **0.3463** — **2.1pp regression vs Phase N's 0.3677, AND 0.4pp worse than Phase O's 0.3502**. Trajectory was clean (no rejections; iter-0 0.2730 → iter-1 0.2845 → iter-2 0.3463, all promoted; `promoted_iterations: [0, 1, 2]`, `halted=false`). At coef 0.01 the per-game value-head shape contribution drops to ±1.2 (4× the ±0.3/game budget, ~5× closer to budget than Phase O's ±6) and iter-0 `shape_attribution.value_head` drops from 26.01 to **5.03** (~5× smaller, dimensional check on the coef ratio). **Both magnitudes regressed — lowering the coef did not help; if anything it hurt slightly more.** The value-head-delta signal mechanism is **wrong-shape, not wrong-magnitude** — at coef 0.05 the signal is loud and over-shapes the policy; at coef 0.01 the signal is quiet but noisy and contributes random variance without informational gain. **Both R15.S3 axes are now exhausted: observation-delta (4 phases L/M/N/O', capped 0.368 ± 0.001) and value-head tempo (2 phases O/P, regressed 0.350 / 0.346)**. The previous `87e9e77` "BRANCH CLOSED" commit framing was premature — that closeout had only tested axis 1; Phases O + P add axis 2 and produce the genuine cross-axis closeout. Total R15.S3 branch compute cost ~36 min wall-clock across 6 phases (L 5m54s + M 6m22s + N 5m25s + O' 5m28s + O 5m22s + P 5m23s). F1 post-mortem framing updated again: **"The F1 reward-shape mechanism cannot break 0.368 from this warm-start. Per-step shaping from any observation-derived signal saturates at 0.368, and per-step shaping from the policy's own value-head delta actively regresses. The remaining F1 moves must change either the warm-start (R7 multi-teacher labels rebuild) or the optimization objective (R8 DPO replacement). The reward-shape branch is closed."** See "Phase P — F1 PPO + value-head tempo signal, coef 0.01 (R15.S3 GENUINE BRANCH CLOSEOUT)" below.]
 
 **Recommended next moves, in order of plausibility:**
 
@@ -967,6 +967,8 @@ PASS pre-launch.
 | **M** | **Phase L + all 5 coefs scaled 1.75×** | **0.3580 (iter-2)** | **0.3580** | **6m 22s** |
 | **N** | **Phase L + constant schedule (no decay)** | **0.3677 (iter-2)** | **0.3677** | **5m 25s** |
 | **O'** | **Phase N + reduced 3-signal mix (drop bench-energy + retreat; scale active-energy + throughput)** | **0.3677 (iter-2)** | **0.3677** | **5m 28s** |
+| **O** | **Phase N + value-head tempo signal at coef 0.05 (axis 2 — learned-signal, magnitude=design budget × 20)** | **0.3502 (iter-2)** | **0.3502** | **5m 22s** |
+| **P** | **Phase N + value-head tempo signal at coef 0.01 (axis 2 — learned-signal, magnitude=design budget × 4)** | **0.3463 (iter-2)** | **0.3463** | **5m 23s** |
 
 **What this opens.** A coefficient-scaling follow-up sweep on the same axis: hold the five signals
 fixed, scale all five coefs 1.5–2× (the current ~0.13/step per-game sum is at the low end of the
@@ -1406,3 +1408,116 @@ Artifacts: `runs/R15-S3-value-head-tempo/` — `events.jsonl` (per-iter `ratio_m
 `iteration-manifest.json` + `gate.manifest.json` (model WR 0.324 / 0.316 / 0.392), `launch.log`
 (banner shows `--reward-value-head-coef 0.05 --reward-shape-start 1.0 --reward-shape-end 1.0`
 confirmed). Wall-clock 322s end-to-end.
+
+### Phase P — F1 PPO + value-head tempo signal, coef 0.01 (R15.S3 GENUINE BRANCH CLOSEOUT, 2026-05-14)
+
+**Verdict: REGRESSED — second value-head data point worse than the first; R15.S3 branch
+genuinely closed across both axes.** Run `runs/R15-S3-value-head-tempo-low/` finished clean
+(`run_completed`, `halted=false`, 5m 23.2s wall-clock; run_started ts 1778735914.37 →
+run_completed 1778736237.61, delta 323.24s). Single change vs Phase O:
+`--reward-value-head-coef 0.05` → `0.01` (5× smaller). All else identical: same warm-start
+(`runs/item17-2026-05-11/iter-002/model/checkpoint.pt`), same opponent (rule-bot, no pool),
+same Phase H HPs (`--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4`), same
+5 obs-delta coefs at Phase L 1.0× (active 0.02 / bench 0.02 / retreat 0.03 / throughput
+0.02 / hp-diff 0.05), same constant schedule (`--reward-shape-start 1.0
+--reward-shape-end 1.0`), same `--reward-alpha 0.333 --reward-beta 1.0 --eval-games 250
+--iterations 3 --games-per-update 800`.
+
+**Trajectory.** All three iters promoted, monotone increasing, **no rejections** (unlike
+Phase O which had iter-1 rejected):
+
+| Iter | Shape | Source | WR | Wilson lower | Games | ratio_max | entropy | approx_kl_mean | numerical_anomalies | Decision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 1.0 | rollout | 31.2% | **0.2730** | 500 | 12.53 | 0.173 | 0.013 | 0 | **promoted** (baseline; **identical to Phase L iter-0 0.2730 to 4dp** — at coef 0.01 the value-head signal contributes effectively nothing at iter-0) |
+| 1 | 1.0 | policy | 32.4% | **0.2845** | 500 | 13.29 | 0.164 | 0.012 | 0 | **promoted** (+1.1pp vs iter-0; **no rejection**, unlike Phase O iter-1 which rejected at 0.2768 < 0.2845 floor) |
+| 2 | 1.0 | policy | 38.8% | **0.3463** | 500 | 21.63 | 0.164 | 0.009 | 0 | **promoted** (+6.2pp vs iter-1; **2.1pp regression vs Phase N's 0.3677, AND 0.4pp worse than Phase O's 0.3502**) |
+
+`promoted_iterations: [0, 1, 2]`, `consecutive_failures: 0`, `halted: false`,
+`promoted_wilson_lower: 0.34629528411824795`.
+
+**Both magnitudes regressed — the value-head-delta signal mechanism is wrong-shape, not
+wrong-magnitude.** Phase O at coef 0.05 landed iter-2 0.3502 (-1.8pp vs Phase N 0.3677);
+Phase P at coef 0.01 (5× smaller) lands iter-2 0.3463 (-2.1pp vs Phase N, and -0.4pp
+vs Phase O). Lowering the coefficient did not help — if anything it hurt slightly more,
+probably because lower coef means less "averaging-out" of the noisy delta signal during
+PPO updates so noise dominates more. At coef 0.05 the signal was *loud and over-shaped*
+the policy (Phase O iter-1 rejection signature); at coef 0.01 the signal is *quiet and
+noisy* and contributes random variance without informational gain (Phase P clean
+trajectory but lower ceiling). **Two data points spanning a 5× coef range, both lower
+than Phase N's no-value-head baseline — the per-step value-head-delta signal cannot lift
+PPO past 0.368 from this warm-start at any tested magnitude.**
+
+**Dimensional check on the coef ratio.** iter-0
+`shape_attribution.value_head = 5.027` (Phase P) vs `26.01` (Phase O). Ratio
+26.01 / 5.027 = **5.17×**, matching the 5× coef ratio (Phase O coef 0.05 / Phase P coef
+0.01) within rounding — the value-head signal is wired and scaled correctly, and iter-0
+shape attribution moves linearly with the coef. iter-1 / iter-2 attributions are
+1.45 / 1.27 (Phase P) vs 9.28 / 8.25 (Phase O); both show the policy partially flattening
+the value-head delta after iter-0, but the absolute level is now small enough that the
+flattening contributes neither helpful gradient (Phase O over-shape signature) nor harm
+(Phase O iter-1 rejection).
+
+**Mechanism still healthy in non-reward dimensions.** Per-iter `ratio_max` 12.53 / 13.29
+/ 21.63 (gradient strongly active, comparable to Phase L/M/N/O ranges); `approx_kl_mean`
+0.013 / 0.012 / 0.009 (no anomalies); entropy 0.173 → 0.164 → 0.164 (stable, no
+collapse); `numerical_anomalies = 0` across all 48 minibatches. PPO is *fine*; the
+information-content of the value-head-delta signal at any tested magnitude does not
+contribute usefully to greedy-rule-bot win rate from this warm-start.
+
+**Cross-phase iter-2 Wilson summary — R15.S3 BRANCH CLOSED across both axes.**
+
+| Phase | Signal axis | Config | iter-2 Wilson lower | Δ vs Phase N | Decision |
+| --- | --- | --- | --- | --- | --- |
+| L | obs-delta | 5 signals, 1.0× coefs, linear-decay | 0.3560 | -0.012 | promoted |
+| M | obs-delta | 5 signals, 1.75× coefs, linear-decay | 0.3580 | -0.010 | promoted |
+| N | obs-delta | 5 signals, 1.0× coefs, constant | **0.3677** | — (baseline) | promoted (F1 rule-bot ceiling on record) |
+| O' | obs-delta | 3 signals (scaled), constant | 0.3677 | +0.000 | promoted |
+| O | value-head | + value-head coef 0.05, constant | 0.3502 | -0.018 | promoted (iter-1 rejected; iter-2 from iter-0 parent) |
+| P | value-head | + value-head coef 0.01, constant | **0.3463** | **-0.021** | promoted (no rejections; iter-2 from iter-1 parent) |
+
+**R15.S3 final synthesis (both axes exhausted).** Two axes tested:
+
+- **Axis 1 — hand-engineered observation-delta signals.** 4 phases (L decay 1.0×, M decay
+  1.75×, N constant 1.0×, O' reduced-mix constant 1.0×). Capped at iter-2 Wilson **0.368
+  ± 0.001**. Coef magnitude (L vs M, Δ +0.002), schedule (L vs N, Δ +0.012), signal mix
+  (N vs O', Δ +0.000) — all single-axis moves saturated.
+- **Axis 2 — per-step value-head-delta tempo signal.** 2 phases (O coef 0.05, P coef
+  0.01). Both regressed below Phase N. Ceiling **0.350** at the higher coef; **0.346** at
+  the lower coef. Lowering the coef did not help — the signal mechanism is wrong-shape,
+  not wrong-magnitude.
+
+**Total R15.S3 branch cost.** ~36 min wall-clock across 6 phases (L 5m54s + M 6m22s +
+N 5m25s + O' 5m28s + O 5m22s + P 5m23s). All six runs PPO-healthy in all non-reward
+dimensions; no compute-floor or implementation issues found. Cheap research, decisive
+answer.
+
+**F1 post-mortem framing — final update.** The prior `87e9e77` framing said: "reward-
+shape axis fully explored and converged at 0.368; the gap to 0.40 is categorical — needs
+a different information source, not more tuning of the existing observation-delta
+signals." Phases O + P then tested *exactly* that — a different information source (the
+policy's own value-head delta) — and that information source actively regressed iter-2
+at both tested magnitudes. **The F1 reward-shape mechanism cannot break 0.368 from this
+warm-start. Per-step shaping from any observation-derived signal saturates at 0.368, and
+per-step shaping from the policy's own value-head delta actively regresses. The
+remaining F1 moves must change either the warm-start (R7 multi-teacher labels rebuild)
+or the optimization objective (R8 DPO replacement). The reward-shape branch is closed.**
+
+**What survives.** Two F1-line candidates remain:
+- **R7 multi-teacher labels** — retrain the DAgger SL warm-start with multiple expert
+  teachers so the policy that PPO inherits is a different starting point; doesn't touch
+  the reward signal, changes the SL pipeline.
+- **R8 DPO** — replace PPO with Direct Preference Optimization, which doesn't depend on
+  per-step hand-shaped reward signal at all; bigger pivot.
+
+Both are human-rank decisions, not autonomous-launch. Escalation re-opened in
+`docs/ai-agent-state/escalations.md` `## Open` with updated framing.
+
+Artifacts: `runs/R15-S3-value-head-tempo-low/` — `events.jsonl` (per-iter `ratio_max`
+12.53 / 13.29 / 21.63, `approx_kl_mean` 0.013 / 0.012 / 0.009, entropy 0.173 / 0.164 /
+0.164, `numerical_anomalies = 0` × 48 minibatches, per-iter
+`trajectory-parse/completed.data.shape_attribution.value_head` **5.03 / 1.45 / 1.27**
+— ~5× smaller than Phase O's 26.01 / 9.28 / 8.25, matches the 5× coef ratio),
+`orchestrator-state.json` (`promoted_wilson_lower 0.34629528411824795`,
+`promoted_iterations: [0, 1, 2]`, `consecutive_failures: 0`, `halted: false`),
+per-iter `gate.manifest.json` (model WR 0.312 / 0.324 / 0.388, Wilson 0.2730 / 0.2845 /
+0.3463). Wall-clock 323s end-to-end.
