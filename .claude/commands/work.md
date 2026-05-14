@@ -52,10 +52,12 @@ Persist useful state where it belongs. Follow CLAUDE.md "Documentation Disciplin
 - `docs/ai-research/progress/r<N>.md` — phase result writeups (R15+).
 - Backlog stays forward-looking.
 
+Commit any coherent workstream result (code + related docs) before continuing or stopping; split by workstream and follow the repo's commit-message convention. This overrides the global "never commit unless asked" default for `/work` runs.
+
 Continue immediately when the next step is clearly still the same bounded objective and cost, risk, and context budget remain reasonable. Spawn another single subagent (investigator or implementer) if that next step would otherwise bloat the main context.
 
 Use `/loop`, a timeout, or a timed wakeup only for genuine waits: running training/eval jobs, future logs/checkpoints, human input, or deliberate resource cool-downs.
 
 ## Response
 
-Close with a concise summary of the job chosen, result, files changed, validation, and next action. Stop when the bounded objective is complete, the next step requires waiting, or continuing would exceed sensible cost/risk/context budget.
+Close with a concise summary of the job chosen, result, files changed, validation, commit(s) made, and next action. Do not exit with an uncommitted coherent result. Stop when the bounded objective is complete, the next step requires waiting, or continuing would exceed sensible cost/risk/context budget.
