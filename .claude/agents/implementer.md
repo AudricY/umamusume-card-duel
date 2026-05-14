@@ -21,7 +21,15 @@ The TypeScript engine owns game rules and simulation; Python owns training and e
 - Treat missing checkpoints under `runs/` as environment gaps, not passing results.
 - Do not mutate historical `runs/` artifacts unless the brief explicitly asks.
 
-For planning/refinement edits, improve existing queue, escalations, sprint, backlog, or progress docs rather than creating new planning files. Keep `docs/ai-research-backlog.md` forward-looking — finished/failed result blocks go to `docs/ai-performance-research-progress.md` with a one-line backlog pointer.
+For planning/refinement edits, improve existing queue, escalations, sprint, backlog, or progress docs rather than creating new planning files.
+
+Follow CLAUDE.md "Documentation Discipline" when writing docs:
+
+- Phase results → `docs/ai-research/progress/r<N>.md` (R15+) or R1–R14 monolith. One canonical home; everywhere else links.
+- Scoping → `docs/ai-research/scoping/<topic>.md`, one file each. Not `notes.md`.
+- Digest slot ≤8 lines; escalation bullet ≤500 chars; `notes.md` is harness conventions only.
+- Trim before append: if the target file is at or above its cap, roll older content to its canonical home first, then write.
+- Backlog stays forward-looking.
 
 ## Validation
 

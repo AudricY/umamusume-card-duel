@@ -53,14 +53,15 @@ Use these files as steering aids, not as a project-management database.
 - `notes.md`: durable harness notes that do not belong in sprint/progress docs.
 - `digests/YYYY-MM-DD.md`: short summaries from meaningful `/work` runs.
 
-Canonical AI research evidence still belongs in the existing AI docs, especially:
+Canonical AI research evidence:
 
-- `docs/ai-performance-research-harness.md`
-- `docs/ai-performance-research-progress.md`
-- `docs/ai-research-backlog.md`
-- `docs/r14-sprint-plan.md`
+- `docs/ai-research/progress/r<N>.md` — phase writeups (R15+).
+- `docs/ai-performance-research-progress.md` — R1–R14 history, read-mostly.
+- `docs/ai-research/scoping/<topic>.md` — pre-registered hypotheses, sweep configs.
+- `docs/ai-research-backlog.md` — forward-looking.
+- `docs/ai-performance-research-harness.md`, `docs/r<N>-sprint-plan.md`.
 
-Use `docs/ai-agent-state/queue.json` for immediate Claude operating priorities, and update it when planning/refinement work changes the next best action.
+`queue.json` holds immediate Claude operating priorities; update it when planning work changes the next best action.
 
 ## Safety And Scope
 
@@ -105,11 +106,18 @@ Use deeper targeted smokes only when touching their area: determinism, MCTS, `/a
 
 ## Documentation Discipline
 
-Keep docs close to the evidence.
+Each fact lives in one file. Everywhere else links to it. State files are pointers, not copies.
 
-- Update existing sprint/backlog/progress docs instead of creating new planning sprawl.
-- Use `docs/ai-agent-state/digests/` for short Claude run summaries.
-- Keep queue entries concise and actionable.
-- Add escalations when useful work is blocked by missing artifacts, ambiguous direction, or unsafe next steps.
-- `docs/ai-research-backlog.md` is forward-looking only (target ≤300 lines). Finished/failed sprint phases and dated result blocks belong in `docs/ai-performance-research-progress.md`; the backlog entry shrinks to a one-line pointer.
-- Daily digests target ≤150 lines. If a doc is already past its target, roll older blocks forward before appending new content.
+Homes:
+
+- Phase result (mechanism + numbers): `docs/ai-research/progress/r<N>.md` (R15+) or the R1–R14 monolith.
+- Scoping (hypothesis, sweep config, exit gate): `docs/ai-research/scoping/<topic>.md` — one file each. Not `notes.md`.
+- Backlog: forward-looking only. Landed/failed → one-line pointer.
+- `notes.md`: durable harness conventions only.
+- `digests/YYYY-MM-DD.md`: daily index. One slot = ≤8 lines (verdict, number, 1-line mechanism, link). No file changelogs, no "next action" prose.
+- `escalations.md`: ≤500 chars per bullet; longer rationale → link a scoping doc.
+- `queue.json`: `summary`/`next_action` are pointers.
+
+Caps (hard): digest ≤150 lines, backlog ≤300, notes ≤200, per-sprint progress ≤500.
+
+Trim before append: if the file is at or above its cap, your first action is to roll older content to its canonical home and leave a pointer. Then write.

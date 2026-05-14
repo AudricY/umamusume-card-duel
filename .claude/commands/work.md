@@ -43,12 +43,14 @@ Use multiple subagents only for genuinely independent, low-resource tasks with d
 
 When the subagent returns, spot-check outputs, inspect changed files, and reconcile inconsistencies. Do not replay the whole exploration without a concrete reason.
 
-Persist useful state where it belongs:
+Persist useful state where it belongs. Follow CLAUDE.md "Documentation Discipline" — one canonical home per fact, hard caps, trim before append.
 
-- Claude operating priorities: `docs/ai-agent-state/queue.json`
-- Blockers or human decisions: `docs/ai-agent-state/escalations.md`
-- Short run summaries: `docs/ai-agent-state/digests/YYYY-MM-DD.md`
-- Durable research evidence: results go to the progress doc; the backlog stays forward-looking. See CLAUDE.md "Documentation Discipline" for the role+cap rules.
+- `queue.json` — operating priorities; `summary`/`next_action` are pointers.
+- `escalations.md` — blockers; ≤500 chars per bullet.
+- `digests/YYYY-MM-DD.md` — daily index; one slot ≤8 lines.
+- `docs/ai-research/scoping/<topic>.md` — scoping docs (not `notes.md`).
+- `docs/ai-research/progress/r<N>.md` — phase result writeups (R15+).
+- Backlog stays forward-looking.
 
 Continue immediately when the next step is clearly still the same bounded objective and cost, risk, and context budget remain reasonable. Spawn another single subagent (investigator or implementer) if that next step would otherwise bloat the main context.
 
