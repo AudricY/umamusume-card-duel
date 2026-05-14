@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T25",
+  "updated": "2026-05-14T26",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -31,12 +31,19 @@
     {
       "id": "r15-s3-value-head-tempo-signal",
       "priority": "P3",
-      "status": "in_progress",
+      "status": "done",
       "run_dir": "runs/R15-S3-value-head-tempo",
-      "pid": 2904732,
-      "started_at": "2026-05-14T13:07Z",
-      "summary": "Phase O LAUNCHED. Added `--reward-value-head-coef` (default 0.0) to `ppo_orchestrator.py`; inside `parse_trace_to_trajectories` the new shape term reads `behaviorPolicy.valueEstimate` from the current and next trace rows and adds `coef · (v_{t+1} − v_t)` for non-terminal steps (zero on terminal, zero when either value is missing — backward compat with pre-Phase-O traces). Attribution dict extended with `value_head`. `TMPDIR=/tmp npm run test:ppo-smoke` PASS pre-launch. Launched at Phase L coefs + constant schedule + new coef 0.05.",
-      "next_action": "Monitor `runs/R15-S3-value-head-tempo/events.jsonl` and `gate.manifest.json` per iter; exit gate is iter-2 Wilson lower >= 0.40 (success), 0.37 < iter-2 < 0.40 (partial), iter-2 ~= 0.37 (saturation — entire 6-signal mix saturated)."
+      "summary": "Phase O CLOSED — REGRESSED. iter-2 Wilson 0.3502 (WR 39.2%), 1.8pp worse than Phase N's 0.3677. Trajectory 0.2845 (promoted) → 0.2768 (REJECTED at floor 0.2845, same over-shape pattern as Phase M) → 0.3502 (promoted from iter-0 parent). `promoted_iterations: [0, 2]`. Wall-clock 5m 22s. Mechanism diagnosis: signal correctly wired but magnitude is ~20× the design budget — Tanh output range ±1 gives per-step delta ±2; at coef 0.05 per-step contribution is ±0.1; at ~60 steps/game per-game total is ±6, vs ±0.3 budget. iter-0 shape_attribution.value_head=26.01 confirms empirically; iter-1/2 attributions drop to 9.28/8.25 as policy flattens the delta (over-shape signature). PPO healthy in all non-reward dimensions (ratio_max 12.7/12.3/22.4, entropy stable, no anomalies). Follow-up: Phase P launched at coef 0.01 (5× smaller). Full writeup at docs/ai-performance-research-progress.md § Phase O."
+    },
+    {
+      "id": "r15-s3-value-head-tempo-low-coef",
+      "priority": "P3",
+      "status": "in_progress",
+      "run_dir": "runs/R15-S3-value-head-tempo-low",
+      "pid": 3017314,
+      "started_at": "2026-05-14T13:18Z",
+      "summary": "Phase P LAUNCHED — single change vs Phase O: `--reward-value-head-coef 0.05` → `0.01` (5× smaller). Per-step contribution becomes ±0.02; at ~60 steps/game per-game total ±1.2 — still above the ±0.3 budget but ~5× closer than Phase O. All else identical to Phase O: same warm-start (`runs/item17-2026-05-11/iter-002/model/checkpoint.pt`), same opponent (rule-bot, no pool), same Phase H HPs (`--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4`), same 5 obs-delta coefs at Phase L 1.0× (active 0.02 / bench 0.02 / retreat 0.03 / throughput 0.02 / hp-diff 0.05), same constant schedule (1.0→1.0), same `--reward-alpha 0.333 --reward-beta 1.0 --eval-games 250 --iterations 3 --games-per-update 800`. PID 3017314 alive at +7s; iter-0 trace eval running at expected ~0.20-0.30 WR (in line with item17 warm-start). ETA ~6 min wall-clock. NB pidfile race recurred (4th time) — bash & redirect captures wrapper PID, real orchestrator is wrapper's child; need to add a helper that writes the orchestrator's real PID atomically.",
+      "next_action": "Monitor `runs/R15-S3-value-head-tempo-low/events.jsonl` and per-iter `gate.manifest.json`. Exit gate: SUCCESS iter Wilson lower ≥0.40 (first F1 success on record); PARTIAL iter-2 in (0.368, 0.40) (signal contributes additively at low magnitude); NEUTRAL iter-2 ≈0.36-0.37 (redundant with obs-delta family at low magnitude); REGRESSION iter-2 <0.35 (value-head info quality, not magnitude, is the problem — pivot to R7/R8)."
     },
     {
       "id": "r15-s3-reduced-mix-sweep",

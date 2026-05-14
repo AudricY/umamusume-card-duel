@@ -879,6 +879,42 @@ shaping" / "Phase O' — F1 PPO + reduced signal-mix (R15.S3 branch closeout)".
   labels; (c) R8 DPO. Human research-stance decision filed at
   `docs/ai-agent-state/escalations.md`. Full writeup: `docs/ai-performance-research-progress.md`
   § "Phase O' — F1 PPO + reduced signal-mix (R15.S3 branch closeout)".
+- **Follow-up Result (R15.S3 value-head tempo signal, coef 0.05 — Phase O, 2026-05-14):**
+  **DONE / REGRESSED — iter-2 Wilson 0.3502, 1.8pp worse than Phase N's 0.3677.** TS-side
+  value-head trace instrumentation (queued P3 `r15-s3-value-head-trace-instrumentation`)
+  landed first (7 LOC TS + ~30 LOC orchestrator), unblocking the original Phase O plan that
+  was deferred at Phase O' time. Run `runs/R15-S3-value-head-tempo/` added a 6th additive
+  signal — per-step delta of the policy's own value-head output — at
+  `--reward-value-head-coef 0.05`, holding all other Phase L/N parameters fixed (5 obs-delta
+  signals at 1.0× coefs, constant schedule, same warm-start, same opponent, same HPs). Per-iter
+  Wilson lower: iter-0 **0.2845** (WR 32.4%, promoted) → iter-1 **0.2768** (WR 31.6%,
+  **REJECTED** — `wilson_lower 0.2768 < floor 0.2845`, same regression pattern as Phase M
+  iter-1) → iter-2 **0.3502** (WR 39.2%, promoted, rolled forward from iter-0 parent).
+  `promoted_iterations: [0, 2]`. **Δ iter-2 vs Phase N: -0.018**. Adding the value-head signal
+  at coef 0.05 made iter-2 *worse*, not better. Wall-clock **5m 22.0s**. **Mechanism diagnosis:
+  signal is correctly wired but magnitude is ~20× the design budget.** Value head Tanh output
+  has range [−1, +1] so per-step delta range is [−2, +2]; at coef 0.05 the per-step
+  contribution is ±0.1; at ~60 steps/game the per-game contribution is ±6.0, **20× the
+  ±0.3/game budget the R15.S3 scoping doc set**. iter-0
+  `shape_attribution.value_head = 26.01` confirms empirically: third-largest absolute
+  attribution behind throughput's 171.4 (accumulates positively across all steps so its
+  magnitude is mostly positive bias) and active-energy's 85.1; for a mean-zero (Tanh delta)
+  signal, an absolute attribution of 26 represents genuine per-step *variance* dominating
+  every observation-delta signal except the two energy-related ones. iter-1 / iter-2
+  attributions drop to 9.28 / 8.25 as iter-0's promoted policy learns to flatten the
+  value-head delta — the classic over-shaping signature. Iter-1 rejection mirrors Phase M's
+  1.75×-coef regression: over-shaped iter-0 promotes a policy that exploits the shape, iter-1
+  overfits further, greedy WR falls below the tolerance=0 floor. PPO healthy in all
+  non-reward dimensions: ratio_max 12.7 / 12.3 / 22.4 (gradient active); approx_kl_mean
+  0.014 / 0.011 / 0.012; entropy 0.167 → 0.159 → 0.158 (stable); `numerical_anomalies = 0`
+  across 48 minibatches. Next move: Phase P launched as `runs/R15-S3-value-head-tempo-low/`
+  with `--reward-value-head-coef 0.01` (5× smaller; per-game shape contribution ±1.2, closer
+  to the ±0.3 budget). Exit gate for Phase P: success ≥0.40 (first F1 success), partial
+  improvement 0.368 < iter-2 < 0.40 (signal contributes additively), neutral ≈0.36-0.37
+  (signal redundant with obs-delta family at low magnitude), regression <0.35 (signal
+  disrupts even at low magnitude — value-head info quality is the problem, not magnitude;
+  pivot to R7/R8). Full writeup: `docs/ai-performance-research-progress.md` § "Phase O — F1
+  PPO + value-head tempo signal, coef 0.05".
 
 ### R15.S4 — Sampling-temperature gate (F1 next-move #4)
 

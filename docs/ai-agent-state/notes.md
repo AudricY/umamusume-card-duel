@@ -590,6 +590,56 @@ Escalation filed in `docs/ai-agent-state/escalations.md` `## Open`; queue item
 non-per-step reward-shaping framework (turn-based or game-phase aggregate shaping) is a
 **fourth, untested** possibility — call it out but rank below the three above.
 
+**Phase O Closeout — value-head tempo signal at coef 0.05, REGRESSED (2026-05-14).** After
+the queued P3 `r15-s3-value-head-trace-instrumentation` landed (~7 LOC TS + ~30 LOC
+orchestrator, both smokes green), the original Phase O plan was unblocked and executed.
+Run `runs/R15-S3-value-head-tempo/` added a 6th additive signal — per-step delta of the
+policy's own value-head Tanh output — at `--reward-value-head-coef 0.05`, holding all other
+parameters at Phase N's setup. Result: iter-0 Wilson **0.2845** (WR 32.4%, promoted) →
+iter-1 **0.2768** (WR 31.6%, **REJECTED** at floor 0.2845, same regression pattern as Phase
+M iter-1 at 1.75× coefs) → iter-2 **0.3502** (WR 39.2%, promoted, rolled from iter-0 parent).
+`promoted_iterations: [0, 2]`. **Δ iter-2 vs Phase N: -0.018**. Adding the value-head signal
+at coef 0.05 made iter-2 *worse* than the unshaped Phase N baseline. Wall-clock 5m 22.0s.
+
+**Mechanism diagnosis: signal is correctly wired but magnitude is ~20× the design budget.**
+Value head Tanh output range [−1, +1] gives per-step delta range [−2, +2]; at coef 0.05 the
+per-step shape contribution is bounded by ±0.1; at the F1 episode length of ~60 steps/game
+the per-game contribution is therefore ±6.0 — **20× the ±0.3/game budget the R15.S3 scoping
+doc set**. iter-0 `shape_attribution.value_head = 26.01` confirms the magnitude empirically
+dominates: it is third-largest in absolute terms behind throughput (171.4 — accumulates
+positively across all steps so its absolute magnitude is mostly positive bias) and
+active-energy (85.1). For a mean-zero (Tanh delta) signal, an absolute attribution of 26
+represents genuine per-step *variance* contributed to the surrogate gradient — larger than
+every observation-delta signal except the two energy-related ones. iter-1 / iter-2
+attributions drop to 9.28 / 8.25 as iter-0's promoted policy learns to flatten the
+value-head delta, the classic over-shaping signature. iter-1 rejection mirrors Phase M:
+over-shaped iter-0 promotes a policy that exploits the shape; iter-1 trains against more of
+the same shape and overfits to it; greedy match-vs-rule-bot win rate falls below the
+tolerance=0 floor; iter-2 rolls back to iter-0 as parent and re-trains one more pass,
+clawing back ~6pp from the iter-1 trough but not recovering the ground Phase N covered
+without over-shaping.
+
+**PPO healthy in non-reward dimensions.** ratio_max 12.7 / 12.3 / 22.4 (gradient strongly
+active, comparable to Phase L/M/N); approx_kl_mean 0.014 / 0.011 / 0.012 (no anomalies);
+entropy 0.167 → 0.159 → 0.158 (stable, no collapse); `numerical_anomalies = 0` across all
+48 minibatches. PPO is fine; the signal at this coefficient is wrong.
+
+**Phase P scoping — coef 0.01 (5× smaller).** The signal isn't *wrong*, it's *too loud*.
+At `--reward-value-head-coef 0.01`, per-step contribution becomes ±0.02; at ~60 steps/game,
+per-game total ±1.2 — still 4× above the ±0.3 budget but ~5× closer than Phase O.
+**Single change** vs Phase O. All else identical: same warm-start
+(`runs/item17-2026-05-11/iter-002/model/checkpoint.pt`), same opponent (rule-bot, no pool),
+same Phase H HPs (`--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4`), same
+5 obs-delta coefs at Phase L 1.0× (active 0.02 / bench 0.02 / retreat 0.03 / throughput
+0.02 / hp-diff 0.05), same constant schedule (`--reward-shape-start 1.0
+--reward-shape-end 1.0`), same `--reward-alpha 0.333 --reward-beta 1.0 --eval-games 250
+--iterations 3 --games-per-update 800`. Output dir: `runs/R15-S3-value-head-tempo-low/`.
+**Exit gate.** Success if any iter Wilson lower ≥0.40 (first F1 success on record). Partial
+improvement if iter-2 in (0.368, 0.40) — value-head signal contributes additively at low
+magnitude. Neutral if iter-2 ≈ 0.36-0.37 — signal is redundant with the observation-delta
+family at low magnitude. Regression if iter-2 < 0.35 — value-head info quality (not
+magnitude) is genuinely the problem; pivot to R7/R8.
+
 ## F1 reward shaping value-head tempo — TS instrumentation scoping (2026-05-14)
 
 **Scope at a glance: is the value-head trace instrumentation orchestrator-only? No — but it
