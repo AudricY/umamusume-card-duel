@@ -57,7 +57,7 @@
       "priority": "P2",
       "status": "ready",
       "summary": "Follow-up monitor slot for the R7 step 4 background launch. Trace-gen ETA ~9 min (planner ~14× slower per state vs rollout-only baseline), SL train ~3.5 min, eval gate ~3 min, total ~15-25 min wall-clock.",
-      "next_action": "Check `ps -p 3211541` (orchestrator alive?), `tail runs/R7-multi-teacher-warmstart/launch.log`, then `cat runs/R7-multi-teacher-warmstart/orchestrator-state.json` once run_completed event fires in events.jsonl. Read iter-000/gate.manifest.json for wilson_lower. Flip r7-step-4-trace-gen-and-sl-train to done with the verdict (PASS ≥ 0.35 → step 5 PPO sweep; FAIL → close R7)."
+      "next_action": "When `run_completed` event fires in events.jsonl: read `runs/R7-multi-teacher-warmstart/orchestrator-state.json` → `iterations[0].wilson_lower` (also at top-level `promoted_wilson_lower` if promoted). Comparison reference: R15.S1 iter-0 wilson_lower = 0.2844, R15.S1 iter-2 was 0.3269 FAIL. Detailed Wilson interval is at `iter-000/gate.manifest.json` → `summary.wilson95.{lower,upper}` (NOT `wilson_lower` top-level there; the manifest is keyed by `summary.wilson95.lower`). Flip r7-step-4-trace-gen-and-sl-train to done with the verdict (PASS ≥ 0.35 → step 5 PPO sweep; FAIL → close R7 with new SL ceiling, write result block to docs/ai-research/progress/r15.md per new CLAUDE.md docs structure, demote R7 in backlog)."
     },
     {
       "id": "r7-backlog-shrink-to-pointer",
