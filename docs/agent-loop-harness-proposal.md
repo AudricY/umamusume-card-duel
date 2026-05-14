@@ -12,9 +12,9 @@ This should not become a Codex abstraction, a Python framework, or another train
 
 Build this as first-class Claude Code support:
 
-- Use `.claude/commands/*.md` for the loop entrypoints.
+- Use one Claude command: `.claude/commands/work.md`.
 - Use a minimal `.claude/agents/*.md` only if one clearly pays for itself.
-- Use `CLAUDE.md` or `AGENTS.md` as the repo entrypoint.
+- Use `CLAUDE.md` as the repo entrypoint.
 - Reuse existing npm, Python, and training scripts directly.
 - Keep persistent state as plain markdown/JSON files, not a new service.
 
@@ -83,7 +83,7 @@ For this project, hooks would mostly duplicate normal engineering judgment:
 - Do not launch long GPU runs accidentally.
 - Do not mutate historical `runs/` artifacts unless explicitly intended.
 
-Those are better captured in `CLAUDE.md` / `AGENTS.md` and command instructions first. Add hooks only after a repeated concrete failure shows that documentation is not enough.
+Those are better captured in `CLAUDE.md` and command instructions first. Add hooks only after a repeated concrete failure shows that documentation is not enough.
 
 ## Proposed Lightweight Layout
 
@@ -216,7 +216,7 @@ Add `CLAUDE.md` with:
 - Testing tiers.
 - Instruction to prefer existing training orchestrators over new orchestration code.
 
-`AGENTS.md` can mirror the same content if useful for non-Claude agents, but Claude Code should be the primary target.
+Do not add `AGENTS.md` for the initial version. This harness targets Claude Code first.
 
 ## General Worker Subagent
 

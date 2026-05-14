@@ -1,0 +1,12 @@
+{
+  "updated": "2026-05-14",
+  "items": [
+    {
+      "id": "bootstrap-claude-loop",
+      "priority": "P1",
+      "status": "ready",
+      "summary": "Exercise the new lightweight Claude Code loop once and confirm /work can choose and brief a bounded worker task.",
+      "next_action": "Run /work without arguments after reviewing current git status and AI research state."
+    }
+  ]
+}

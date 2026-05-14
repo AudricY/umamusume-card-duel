@@ -8,4 +8,9 @@ local-data/
 training/.venv/
 training/runs/
 runs/
-.claude/
+.claude/*
+!.claude/commands/
+!.claude/commands/**
+!.claude/agents/
+!.claude/agents/**
+.claude/scheduled_tasks.lock
