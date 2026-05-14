@@ -135,6 +135,44 @@ results (2026-05-11)".
 - **Status:** Surviving R15.S3 closeout candidate. Human rank required;
   bigger pivot than R7 (replaces PPO entirely).
 
+### R7.b. Feature representation expansion (forward, contingent on R7 probe)
+
+- **Q:** Does the current 96-d hand-engineered observation lose information
+  that caps the policy regardless of label source (R7) or objective (R8)?
+  Specifically: card identity collapses to a single hashed float per slot
+  (`features.py` slots 32–47, 16 floats via `cardVocab.json`), there is
+  no recent-action history, and hand/board are flat scalar aggregates with
+  no set/permutation-invariant encoding.
+- **Hypothesis:** A card-embedding table + short opponent/own action history
+  expands the function class along the axes the post-mortem named
+  ("needs a different information source"). Holds the MLP trunk fixed so
+  the lift, if any, is attributable to representation not capacity.
+- **Design (scoped pass, two changes only):**
+  1. Replace the 16 identity-hash floats with a learned embedding table
+     keyed off `cardVocab.json` (embed dim ~16–32, summed/concatenated per
+     slot group: active, bench, hand, discard).
+  2. Append a 1–2 step recent-action history (own + opponent) to state.
+  - Bump `STATE_DIM` and feature `schema_version` to 3. TS-side encoder
+    in `backend/src/sim/` and Python `training/uma_ai/features.py` must
+    move together. Trainer input layer adapts to new dim.
+- **Cost:** ~1 day code (TS encoder + Python schema + model input + retrain
+  pipeline) + ~30 min SL retrain + ~5 min PPO sweep at phase-N scale.
+  Invalidates prior numeric comparisons against the 96-d baseline.
+- **Pre-register exit:** (a) SL warm-start does not regress vs current
+  best (no harm from added dim) AND (b) one PPO sweep Wilson lower ≥ 0.40,
+  OR document the new ceiling at 96-d and close the representation branch.
+- **Status:** **Queued behind R7.** R7 pre-flight teacher-agreement probe
+  landed GO 2026-05-14 (diversity confirmed: rollout↔planner 0.18,
+  search↔planner 0.23, all-three-agree 0.13), so R7 proceeds first.
+  R7.b fires as the surviving structural lever if R7 closes without
+  breaking the F1 cap (or as a parallel pick if R7 lifts the SL ceiling
+  but PPO from the new warm-start still saturates). Distinct from R11
+  (aux objectives in the trunk) — R7.b changes the *input*, not the loss.
+  Catalog rationale: progress doc has unfinished pointers at L362
+  (item 5b: set encoders / recent-action history / embedding model),
+  L1547 (feature-representation gap), L1625 (state-feature gap), L1727
+  (state-feature audit) — none ever landed.
+
 ## Tier 3 — structural changes (HISTORICAL)
 
 - **R9.** Q-learning head as the policy — **DELETED 2026-05-11.** Obsoleted

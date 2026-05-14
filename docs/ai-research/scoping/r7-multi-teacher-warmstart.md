@@ -111,3 +111,34 @@ Concrete steps the next implementer slot will follow:
 - Non-uniform teacher weights or learned weights — v1 is uniform 1/3.
 - DPO objective (R8) — separate branch, separate scope.
 - Q-head replacement (R9), capacity scaling (R10), self-supervised aux (R11) — historical, deprecated by R12 GO.
+
+## 8. Result: pre-flight teacher-agreement probe (step 1)
+
+- **Date:** 2026-05-14
+- **Probe code:** `backend/src/sim/r7TeacherAgreementProbe.ts` (~340 lines). Read-only; exports added to the three selectors in `evaluateModelVsHeuristic.ts` (`chooseRolloutAction`, `chooseSearchAction`, `choosePlannerAction`), no behavior change.
+- **Run:** `runs/R7-pre-flight-teacher-agreement/probe-300-20260514T061913Z.json`. N=300 states sampled from 50 rule-bot-driven AI-vs-AI games (alternating modelSide). Wall-clock 1m 46s. Selector hyperparameters match `evaluateModelVsHeuristic.ts` `parseArgs` defaults (rolloutCrnSamples=1, rolloutSteps=500, searchDepth=2, searchTopK=4, searchSamples=1, plannerCrnSamples=3, plannerTopK=4, plannerMaxSequences=64, plannerMaxDepth=8) — i.e. honest against the trace-gen recipe R7 § 3 commits to.
+
+**Aggregates:**
+
+| Metric | Value |
+|---|---|
+| pairwise agreement rollout↔search | 0.800 |
+| pairwise agreement rollout↔planner | 0.180 |
+| pairwise agreement search↔planner | 0.230 |
+| all three agree | 0.133 |
+| all three disagree | 0.057 |
+| mean normalised mixture entropy | 0.618 |
+| mean per-state ms: rollout / search / planner | 13.4 / 22.7 / 315.5 |
+| mean legal actions per state | (see JSON `aggregates.legal_actions`) |
+
+**Verdict: GO.** Rule that fired: `rollout↔search = 0.800 is in [0.30, 0.85] AND all-three-agree = 0.133 < 0.50` — meaningful per-state disagreement exists, teachers do not collapse to a single label.
+
+**Key observations:**
+
+- **rollout↔search agreement is high (0.80) but not collapsed.** This is unsurprising — both teachers use the same rollout-heuristic leaf evaluator and the same `enumerateLegalAiActions` ranker; they differ mainly in search depth + CRN structure. They still disagree on ~20% of states, which is the slice the mixture target regularises.
+- **planner disagrees a lot with both** (rollout↔planner=0.18, search↔planner=0.23). The planner enumerates *turn-bundles* (chained action sequences) and picks the first action whose grouped first-action score is best — a structurally different decision rule from greedy-leaf rollout. This is the diversity source the R7 hypothesis hinges on; the probe shows it is genuinely present, not synthetic noise.
+- The NO-GO-reweight rule (rollout↔search AND rollout↔planner both < 0.30) did *not* fire — rollout and search still agree most of the time, so the mixture does not drown rollout in junk.
+- **Planner is ~14× slower than rollout per state** (315ms vs 13ms). At the trace-gen budget R15.S1 used, this projects to roughly +5–6 min wall-clock per iteration of trace-gen if all three teachers run on every row. Not blocking, but worth noting for step 4's row-budget plan — keeping plannerMaxSequences=64 is the right cap.
+
+**Next step:** R7 step 2 (schema change — extend `DecisionTraceRow.teacher` → `teachers: []`, build `policyTargets` in relabel pass).
+

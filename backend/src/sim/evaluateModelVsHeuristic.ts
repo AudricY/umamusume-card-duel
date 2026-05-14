@@ -706,7 +706,7 @@ function terminalValue(state: GameState, sideId: SideId): number {
   return pointMargin;
 }
 
-function chooseRolloutAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string, fallbackRng: Rng): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
+export function chooseRolloutAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string, fallbackRng: Rng): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
   const samples = Math.max(1, args.rolloutCrnSamples);
@@ -751,7 +751,7 @@ function chooseRolloutAction(args: EvaluateModelArgs, state: GameState, sideId: 
   return rankedDecision(legalActions, bestIndex);
 }
 
-function chooseSearchAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
+export function chooseSearchAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
   const memo = new Map<string, number>();
@@ -770,7 +770,7 @@ function chooseSearchAction(args: EvaluateModelArgs, state: GameState, sideId: S
   return rankedDecision(legalActions, bestIndex);
 }
 
-function choosePlannerAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
+export function choosePlannerAction(args: EvaluateModelArgs, state: GameState, sideId: SideId, seed: string): { action: LegalAiAction; selectedIndex: number; selectedOriginalRank?: number } {
   const legalActions = enumerateLegalAiActions(state, sideId);
   if (legalActions.length <= 1) return { action: legalActions[0] ?? chooseHighestScoredAction(legalActions), selectedIndex: 0 };
   const bundles = enumerateTurnBundles(args, state, sideId, seed);

@@ -23,10 +23,16 @@
     {
       "id": "r7-pre-flight-teacher-agreement-probe",
       "priority": "P2",
+      "status": "done",
+      "run_dir": "runs/R7-pre-flight-teacher-agreement",
+      "summary": "GO. N=300 in 1m 46s. rollout↔search=0.800 (in [0.30,0.85] band), rollout↔planner=0.180, search↔planner=0.230. All-three-agree=0.133 (< 0.50). Mean normalised mixture entropy=0.618. Diversity hypothesis confirmed: planner is structurally different from rollout/search (turn-bundle planning vs greedy leaf), provides genuine per-state disagreement. NO-GO-reweight rule did not fire (rollout↔search stays in band). Planner is ~14× slower per state than rollout (315ms vs 13ms) — projects to +5–6 min trace-gen wall-clock if all three teachers run on every row. Probe at backend/src/sim/r7TeacherAgreementProbe.ts; output at runs/R7-pre-flight-teacher-agreement/probe-300-20260514T061913Z.json. Result block appended to docs/ai-research/scoping/r7-multi-teacher-warmstart.md § 8."
+    },
+    {
+      "id": "r7-step-2-schema-change",
+      "priority": "P2",
       "status": "ready",
-      "autonomous_launch_eligible": true,
-      "summary": "R7 step 1: cheap pairwise-teacher-agreement probe before committing to full trace-gen. If agreement < ~30% across rollout/search/planner OR all three converge tightly, the diversity hypothesis is empty. Full scope: docs/ai-research/scoping/r7-multi-teacher-warmstart.md § 5 risk (b), § 6 step 1.",
-      "next_action": "Implementer writes a small probe script that runs all three trace teachers on N=200-500 states, reports pairwise argmax-agreement + entropy of the mixture. Reuses existing `chooseTraceTeacher` machinery. If GO, proceed to step 2 (schema change). If NO-GO, close R7 with the probe data as evidence."
+      "summary": "R7 step 2 (per scoping § 6): schema change. Extend DecisionTraceRow.teacher → teachers: Array<{selection,selectedActionId,selectedActionIndex,selectedOriginalRank?}> (length 1-3). Update chooseTraceTeacher (`backend/src/sim/evaluateModelVsHeuristic.ts:428`) to call all three selectors when a multi-teacher flag is set, with per-teacher sub-seeds (`...:rollout`, `...:search`, `...:planner`). Update parseTraceTeacher (`backend/src/sim/evalGate.ts:393`) to accept comma-separated input. Update relabelDecisionTrace.ts to consume row.teachers and emit policyTargets: number[] (uniform 1/3 weights v1). NO dataset/trainer change needed yet — that is step 3.",
+      "next_action": "Implementer: edit backend/src/sim/evaluateModelVsHeuristic.ts (DecisionTraceRow teacher field + chooseTraceTeacher multi-teacher branch), backend/src/sim/evalGate.ts (parseTraceTeacher comma-separated), backend/src/sim/dagger/relabelDecisionTrace.ts (DecisionTraceRow type + policyTargets construction). Add a smoke test exercising the multi-teacher path. Keep back-compat: single-teacher --trace-teacher rollout still works."
     },
     {
       "id": "r7-backlog-shrink-to-pointer",
@@ -34,6 +40,13 @@
       "status": "ready",
       "summary": "Doc-hygiene followup: per new CLAUDE.md 'one canonical home', backlog § R7 (lines 101-118) duplicates content now in docs/ai-research/scoping/r7-multi-teacher-warmstart.md. Shrink backlog entry to one-line pointer.",
       "next_action": "Direct edit: replace docs/ai-research-backlog.md § R7 body (lines 101-118) with a one-line pointer to the scoping doc. Pair with the parallel R8 entry: leave that one expanded for now since no scoping doc exists yet."
+    },
+    {
+      "id": "r7b-feature-representation-expansion",
+      "priority": "P3",
+      "status": "parked-pending-r7",
+      "summary": "Forward, human-rank: feature representation expansion (card embedding table replacing 16 identity hashes at features.py slots 32-47, + 1-2 step recent-action history). Holds MLP trunk fixed; bumps STATE_DIM/schema_version to 3. Queued behind R7 since R7 pre-flight probe landed GO. Fires if R7 closes without breaking the F1 cap, or as a parallel branch if R7 lifts SL ceiling but PPO from new warm-start saturates. Distinct from R11 (aux objectives in trunk) — R7.b changes input, not loss. Full rationale + design + cost + exit gate: docs/ai-research-backlog.md § R7.b.",
+      "next_action": "Wait for R7 step 2/3 outcome. If R7 closes negative on F1 gate, promote R7.b to P2 ready and write a scoping doc at docs/ai-research/scoping/r7b-feature-representation.md before launching."
     },
     {
       "id": "planning-refresh-after-r14-e",
