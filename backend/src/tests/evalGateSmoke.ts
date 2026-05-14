@@ -209,6 +209,16 @@ try {
         Math.abs(row.behaviorPolicy.selectedLogProb - expectedLogP) < 1e-6,
         `selectedLogProb ${row.behaviorPolicy.selectedLogProb} should be log(1/n) ${expectedLogP}`,
       );
+      // Phase O wire-through: the fake server returns value=[0.42]; the
+      // TS client must forward it onto behaviorPolicy.valueEstimate.
+      assert.ok(
+        typeof row.behaviorPolicy.valueEstimate === "number",
+        `policy-source row should carry numeric behaviorPolicy.valueEstimate; got ${row.behaviorPolicy.valueEstimate}`,
+      );
+      assert.ok(
+        Math.abs(row.behaviorPolicy.valueEstimate - 0.42) < 1e-9,
+        `valueEstimate ${row.behaviorPolicy.valueEstimate} should match fake server payload 0.42`,
+      );
     } else {
       assert.equal(row.behaviorPolicy.selectedLogProb, 0, "single-action selectedLogProb must be 0");
       assert.equal(row.legalActions.length, 1, "single-action snapshots imply legalActions.length == 1");
@@ -277,6 +287,7 @@ function handlePredict(request: IncomingMessage, response: ServerResponse): void
       actionLogProbs: [actionLogProbs],
       actionProbs: [actionProbs],
       selectedLogProb: [uniformLogP],
+      value: [0.42],
       behaviorPolicy: { kind: "fake-uniform", temperature: 1 },
     });
   });

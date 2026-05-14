@@ -265,6 +265,7 @@ def run_iteration(
         "retreat": args.reward_retreat_coef * shape_scale,
         "throughput": args.reward_throughput_coef * shape_scale,
         "hp_diff": args.reward_hp_diff_coef * shape_scale,
+        "value_head": args.reward_value_head_coef * shape_scale,
     }
     n_episodes, n_transitions, shape_attribution = parse_trace_to_trajectories(
         trace_path,
@@ -726,14 +727,19 @@ def parse_trace_to_trajectories(
     log-prob to use as the importance-sampling denominator.
 
     R15.S3 reward shaping. When ``shape_coefs`` is provided, the per-step
-    reward additionally receives five shaped signals derived from already-
-    traced ``PublicObservation`` fields (no sim-side change):
+    reward additionally receives shaped signals derived from already-
+    traced ``PublicObservation`` fields (no sim-side change) plus, for
+    Phase O, the policy's own value-head estimate persisted on
+    ``behaviorPolicy.valueEstimate``:
 
     - ``active_energy``: Δ ``own.active.energyTotal``
     - ``bench_energy``: Δ Σ bench[i].energyTotal (non-empty slots)
     - ``retreat``: +1 on the row that flips ``own.usedRetreatThisTurn`` to true
     - ``throughput``: Δ (handCount + len(discard))
     - ``hp_diff``: Δ (own.active.hp/maxHp − opp.active.hp/maxHp)
+    - ``value_head``: Δ ``behaviorPolicy.valueEstimate`` (Phase O); 0 on
+      the terminal row (no fictional s_{t+1}); 0 on any row where the
+      field is missing (backward compat with pre-Phase-O traces).
 
     Each ``shape_coefs[key]`` is multiplied by its delta and added to the
     step reward. Defaults of 0.0 (omitted dict) reproduce the prior
@@ -746,7 +752,7 @@ def parse_trace_to_trajectories(
     """
 
     coefs = shape_coefs or {}
-    attribution = {k: 0.0 for k in ("active_energy", "bench_energy", "retreat", "throughput", "hp_diff")}
+    attribution = {k: 0.0 for k in ("active_energy", "bench_energy", "retreat", "throughput", "hp_diff", "value_head")}
 
     # Group rows by episode (seed + modelSide) and order by step.
     by_episode: dict[str, list[dict[str, Any]]] = {}
@@ -827,6 +833,26 @@ def parse_trace_to_trajectories(
                 prev_retreat = retreat_now
                 prev_throughput = throughput
                 prev_hp_diff = hp_diff
+
+                # R15.S3 Phase O: value-head tempo signal — shape(t) =
+                # coef · (v_{t+1} − v_t) on non-terminal rows; 0 on the
+                # terminal row (no fictional s_{t+1}) and 0 on any row
+                # where either v_t or v_{t+1} is missing from the
+                # behaviorPolicy snapshot (backward compat with pre-Phase-O
+                # traces and with single-action rows). Forward delta is
+                # specified by the Phase O scoping rather than the
+                # observation-delta family's backward-delta convention.
+                value_head_coef = coefs.get("value_head", 0.0)
+                if value_head_coef != 0.0 and step_idx < len(rows) - 1:
+                    cur_behavior = row.get("behaviorPolicy") or {}
+                    next_behavior = rows[step_idx + 1].get("behaviorPolicy") or {}
+                    v_t = cur_behavior.get("valueEstimate")
+                    v_next = next_behavior.get("valueEstimate")
+                    if isinstance(v_t, (int, float)) and isinstance(v_next, (int, float)):
+                        d_value = float(v_next) - float(v_t)
+                        contribution = value_head_coef * d_value
+                        reward += contribution
+                        attribution["value_head"] += contribution
 
                 done = step_idx == len(rows) - 1
                 if done:
@@ -931,6 +957,9 @@ def parse_args() -> argparse.Namespace:
                         help="R15.S3: Δ (handCount + len(discard)) coef (recommended 0.02).")
     parser.add_argument("--reward-hp-diff-coef", type=float, default=0.0,
                         help="R15.S3: Δ (own.active.hp/maxHp − opp.active.hp/maxHp) coef (recommended 0.05).")
+    parser.add_argument("--reward-value-head-coef", type=float, default=0.0,
+                        help="R15.S3 Phase O: Δ behaviorPolicy.valueEstimate per-step coef "
+                             "(value(s_{t+1}) − value(s_t); zero on terminal). Recommended 0.05.")
     parser.add_argument("--reward-shape-start", type=float, default=0.0,
                         help="R15.S3: schedule scale at iter-0 (1.0 = full coefs, 0.0 = off).")
     parser.add_argument("--reward-shape-end", type=float, default=0.0,

@@ -8,6 +8,7 @@ type BehaviorPolicySnapshot = {
   actionLogProbs: number[];
   actionProbs?: number[];
   selectedLogProb: number | null;
+  valueEstimate?: number;
 };
 
 type DecisionTraceRow = {

@@ -143,6 +143,7 @@ type BehaviorPolicySnapshot = {
   actionLogProbs: number[];
   actionProbs?: number[];
   selectedLogProb: number | null;
+  valueEstimate?: number;
 };
 
 type DecisionTraceRow = {
@@ -515,6 +516,7 @@ async function chooseModelAction(modelUrl: string, state: GameState, sideId: Sid
     actionLogProbs?: number[][];
     actionProbs?: number[][];
     selectedLogProb?: number[];
+    value?: number[];
     behaviorPolicy?: { kind?: string; temperature?: number };
   };
   const selectedIndex = Math.max(0, Math.min(legalActions.length - 1, Number(payload.selectedIndex?.[0] ?? 0)));
@@ -532,6 +534,7 @@ async function chooseModelAction(modelUrl: string, state: GameState, sideId: Sid
       selectedLogProb: typeof payload.selectedLogProb?.[0] === "number" ? payload.selectedLogProb[0] : null,
     };
     if (payload.actionProbs?.[0]) snapshot.actionProbs = payload.actionProbs[0].slice(0, legalActions.length);
+    if (typeof payload.value?.[0] === "number") snapshot.valueEstimate = payload.value[0];
     behavior = snapshot;
   }
   const result: { action: LegalAiAction; selectedIndex: number; behavior?: BehaviorPolicySnapshot } = {

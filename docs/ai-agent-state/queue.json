@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T24",
+  "updated": "2026-05-14T25",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -16,13 +16,6 @@
       "next_action": "Use /work to brief the worker for a planning/refinement task: read docs/r14-sprint-plan.md, docs/ai-research-backlog.md, docs/ai-performance-research-progress.md, docs/ai-agent-state/escalations.md, and recent relevant run state; update queue and existing docs only where evidence changes the next action."
     },
     {
-      "id": "r15-s3-branch-synthesis-and-next-pick",
-      "priority": "P2",
-      "status": "ready",
-      "summary": "R15.S3 observation-delta reward-shaping branch fully explored across 4 phases (L coef magnitude, M coef scaling, N schedule, O' signal mix) — iter-2 capped at Wilson 0.368 in all configs. Surviving F1-line candidates: (a) value-head tempo signal (blocked on `r15-s3-value-head-trace-instrumentation`); (b) R7 multi-teacher labels (SL warm-start rebuild); (c) R8 DPO (PPO replacement). Read the synthesis in notes.md `## F1 reward shaping — scoping (2026-05-14)` Phase O' Closeout + branch-synthesis block. Human research-stance decision needed before further autonomous F1-line work — see escalations.md open entry.",
-      "next_action": "Human-blocked: pick (a), (b), or (c) as the next F1-line research branch. Autonomous launch ineligible — this is a research-stance decision, not a launch-and-watch decision."
-    },
-    {
       "id": "r15-s3-signal-mix-or-schedule",
       "priority": "P3",
       "status": "done",
@@ -30,17 +23,20 @@
       "summary": "Schedule axis explored; constant beat linear-decay by ~+1pp (Phase N 0.368 vs Phase L 0.356). Closed by Phase O' branch-synthesis: signal-mix tested at Phase O' (`r15-s3-reduced-mix-sweep`) and also capped at 0.368."
     },
     {
-      "id": "r15-s3-value-head-tempo-signal",
-      "priority": "P3",
-      "status": "blocked",
-      "summary": "Implementation blocked: value-head output is not in trace schema; rollout emits placeholder value_pred=0.0 (ppo_orchestrator.py:858), PPO recomputes value at training-time. Adding the signal requires TS-side ONNX call-site instrumentation in backend/src/sim/, schema extension on behaviorPolicy or top-level trace field, and ONNX export verification that the value head is a named output of rollout.onnx / policy.gate.onnx. Separate sprint-slot work — see r15-s3-value-head-trace-instrumentation."
-    },
-    {
       "id": "r15-s3-value-head-trace-instrumentation",
       "priority": "P3",
-      "status": "ready",
-      "summary": "Scoping landed in notes.md '## F1 reward shaping value-head tempo — TS instrumentation scoping (2026-05-14)'. ONNX export already names value (export_onnx.py:46) and serve_onnx /predict already returns it (serve_onnx.py:146); TS client at evaluateModelVsHeuristic.ts:513-519 discards the field. Total estimated diff ~4-6 LOC across 2 TS files (evaluateModelVsHeuristic.ts + relabelDecisionTrace.ts), ~30-45 min human time. No ONNX-export change, no Python-side change required. Awaiting human go/no-go on (a) value-head tempo vs (b) R7 multi-teacher vs (c) R8 DPO ranking before implementing.",
-      "next_action": "Human-blocked on (a)/(b)/(c) ranking decision in escalations.md. If (a) is picked: implement the 2-file TS diff per notes.md scoping, smoke via TMPDIR=/tmp npm run test:train, verify trace.jsonl rows carry behaviorPolicy.valueEstimate ∈ [-1, +1] on policy-source rows; then Phase P consumes the field inside parse_trace_to_trajectories."
+      "status": "done",
+      "summary": "Phase O prerequisite landed. Added `valueEstimate?: number` to both `BehaviorPolicySnapshot` declarations (`backend/src/sim/evaluateModelVsHeuristic.ts:140-147`, `backend/src/sim/dagger/relabelDecisionTrace.ts:5-12`); added `value?: number[]` to the `/predict` payload destructure; copied `payload.value?.[0]` onto the snapshot when it is a finite number. Updated `evalGateSmoke.ts` fake-server to emit `value: [0.42]` and added an assertion that policy-source trace rows carry numeric `behaviorPolicy.valueEstimate ≈ 0.42`. `TMPDIR=/tmp npm run test:train` PASS post-diff."
+    },
+    {
+      "id": "r15-s3-value-head-tempo-signal",
+      "priority": "P3",
+      "status": "in_progress",
+      "run_dir": "runs/R15-S3-value-head-tempo",
+      "pid": 2904732,
+      "started_at": "2026-05-14T13:07Z",
+      "summary": "Phase O LAUNCHED. Added `--reward-value-head-coef` (default 0.0) to `ppo_orchestrator.py`; inside `parse_trace_to_trajectories` the new shape term reads `behaviorPolicy.valueEstimate` from the current and next trace rows and adds `coef · (v_{t+1} − v_t)` for non-terminal steps (zero on terminal, zero when either value is missing — backward compat with pre-Phase-O traces). Attribution dict extended with `value_head`. `TMPDIR=/tmp npm run test:ppo-smoke` PASS pre-launch. Launched at Phase L coefs + constant schedule + new coef 0.05.",
+      "next_action": "Monitor `runs/R15-S3-value-head-tempo/events.jsonl` and `gate.manifest.json` per iter; exit gate is iter-2 Wilson lower >= 0.40 (success), 0.37 < iter-2 < 0.40 (partial), iter-2 ~= 0.37 (saturation — entire 6-signal mix saturated)."
     },
     {
       "id": "r15-s3-reduced-mix-sweep",
