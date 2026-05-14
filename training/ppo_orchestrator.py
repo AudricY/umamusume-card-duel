@@ -251,8 +251,27 @@ def run_iteration(
     # 2. Parse trace -> PPO format.
     trajectories_path = iter_dir / "trajectories.jsonl"
     events.emit(iteration=cfg.iteration, stage="trajectory-parse", event_type="started")
-    n_episodes, n_transitions = parse_trace_to_trajectories(
-        trace_path, trajectories_path, alpha=args.reward_alpha, beta=args.reward_beta
+    # R15.S3: linear-decay schedule for the five new shaped reward signals.
+    # iter-0 -> reward_shape_start (default 0.0 = off), iter-last -> reward_shape_end
+    # (default 0.0). Default-off keeps prior phase H/J/etc. numerics identical.
+    if args.iterations <= 1:
+        shape_scale = args.reward_shape_start
+    else:
+        frac = cfg.iteration / max(1, args.iterations - 1)
+        shape_scale = args.reward_shape_start + frac * (args.reward_shape_end - args.reward_shape_start)
+    shaping_coefs = {
+        "active_energy": args.reward_active_energy_coef * shape_scale,
+        "bench_energy": args.reward_bench_energy_coef * shape_scale,
+        "retreat": args.reward_retreat_coef * shape_scale,
+        "throughput": args.reward_throughput_coef * shape_scale,
+        "hp_diff": args.reward_hp_diff_coef * shape_scale,
+    }
+    n_episodes, n_transitions, shape_attribution = parse_trace_to_trajectories(
+        trace_path,
+        trajectories_path,
+        alpha=args.reward_alpha,
+        beta=args.reward_beta,
+        shape_coefs=shaping_coefs,
     )
     events.emit(
         iteration=cfg.iteration,
@@ -260,6 +279,8 @@ def run_iteration(
         event_type="completed",
         n_episodes=n_episodes,
         n_transitions=n_transitions,
+        shape_scale=shape_scale,
+        shape_attribution=shape_attribution,
     )
 
     # 3. PPO update.
@@ -667,13 +688,33 @@ def stochastic_serve_onnx_context(
 # ---------------------------------------------------------------------------
 
 
+def _bench_energy_total(own: dict[str, Any]) -> float:
+    """Sum of ``energyTotal`` across non-empty bench slots."""
+    total = 0.0
+    for slot in own.get("bench") or []:
+        if slot is None:
+            continue
+        total += float(slot.get("energyTotal", 0) or 0)
+    return total
+
+
+def _hp_ratio(active: dict[str, Any] | None) -> float:
+    if not active:
+        return 0.0
+    max_hp = float(active.get("maxHp", 0) or 0)
+    if max_hp <= 0:
+        return 0.0
+    return float(active.get("hp", 0) or 0) / max_hp
+
+
 def parse_trace_to_trajectories(
     trace_path: Path,
     out_path: Path,
     *,
     alpha: float,
     beta: float,
-) -> tuple[int, int]:
+    shape_coefs: dict[str, float] | None = None,
+) -> tuple[int, int, dict[str, float]]:
     """Convert TS evaluator trace.jsonl rows into PPO trajectory rows.
 
     Episode = one game = (seed, modelSide). Per-step reward = α·Δpoints
@@ -684,8 +725,28 @@ def parse_trace_to_trajectories(
     ``selection`` is not ``policy`` are skipped — they have no behavior
     log-prob to use as the importance-sampling denominator.
 
-    Returns (n_episodes, n_transitions).
+    R15.S3 reward shaping. When ``shape_coefs`` is provided, the per-step
+    reward additionally receives five shaped signals derived from already-
+    traced ``PublicObservation`` fields (no sim-side change):
+
+    - ``active_energy``: Δ ``own.active.energyTotal``
+    - ``bench_energy``: Δ Σ bench[i].energyTotal (non-empty slots)
+    - ``retreat``: +1 on the row that flips ``own.usedRetreatThisTurn`` to true
+    - ``throughput``: Δ (handCount + len(discard))
+    - ``hp_diff``: Δ (own.active.hp/maxHp − opp.active.hp/maxHp)
+
+    Each ``shape_coefs[key]`` is multiplied by its delta and added to the
+    step reward. Defaults of 0.0 (omitted dict) reproduce the prior
+    α·Δpoints + β·win reward exactly.
+
+    Returns (n_episodes, n_transitions, shape_attribution) where
+    ``shape_attribution`` is the total signed contribution of each
+    component summed across all written rows (orchestrator emits it as a
+    diagnostic for the R15.S3 falsification split).
     """
+
+    coefs = shape_coefs or {}
+    attribution = {k: 0.0 for k in ("active_energy", "bench_energy", "retreat", "throughput", "hp_diff")}
 
     # Group rows by episode (seed + modelSide) and order by step.
     by_episode: dict[str, list[dict[str, Any]]] = {}
@@ -714,16 +775,58 @@ def parse_trace_to_trajectories(
             n_episodes += 1
             prev_own = 0.0
             prev_opp = 0.0
+            # R15.S3 shaping state — per-episode previous values.
+            prev_active_energy = 0.0
+            prev_bench_energy = 0.0
+            prev_retreat = False
+            prev_throughput = 0.0
+            prev_hp_diff = 0.0
             for step_idx, row in enumerate(rows):
                 observation = row.get("observation", {})
-                own_points = float(observation.get("own", {}).get("points", 0))
-                opp_points = float(observation.get("opponent", {}).get("points", 0))
+                own = observation.get("own", {}) or {}
+                opp = observation.get("opponent", {}) or {}
+                own_points = float(own.get("points", 0))
+                opp_points = float(opp.get("points", 0))
                 # Δpoints in own's frame between successive model-side
                 # decisions. step_idx=0 starts from (0,0) — the model's
                 # first decision sees points 0/0 in a fresh game.
                 delta = (own_points - opp_points) - (prev_own - prev_opp)
                 reward = alpha * delta
                 prev_own, prev_opp = own_points, opp_points
+
+                # R15.S3 shaped components. Each delta is computed first;
+                # the coefficient (which may be 0) decides whether it
+                # contributes to ``reward``. Attribution sums the signed
+                # *contribution* (coef·delta), so an all-zero coef dict
+                # yields all-zero attribution.
+                own_active = own.get("active") or {}
+                opp_active = opp.get("active") or {}
+                active_energy = float(own_active.get("energyTotal", 0) or 0)
+                bench_energy = _bench_energy_total(own)
+                retreat_now = bool(own.get("usedRetreatThisTurn", False))
+                throughput = float(own.get("handCount", 0) or 0) + float(len(own.get("discard") or []))
+                hp_diff = _hp_ratio(own_active) - _hp_ratio(opp_active)
+                if step_idx > 0:
+                    d_active = active_energy - prev_active_energy
+                    d_bench = bench_energy - prev_bench_energy
+                    retreat_event = 1.0 if (retreat_now and not prev_retreat) else 0.0
+                    d_throughput = throughput - prev_throughput
+                    d_hp = hp_diff - prev_hp_diff
+                    components = {
+                        "active_energy": coefs.get("active_energy", 0.0) * d_active,
+                        "bench_energy": coefs.get("bench_energy", 0.0) * d_bench,
+                        "retreat": coefs.get("retreat", 0.0) * retreat_event,
+                        "throughput": coefs.get("throughput", 0.0) * d_throughput,
+                        "hp_diff": coefs.get("hp_diff", 0.0) * d_hp,
+                    }
+                    for k, v in components.items():
+                        reward += v
+                        attribution[k] += v
+                prev_active_energy = active_energy
+                prev_bench_energy = bench_energy
+                prev_retreat = retreat_now
+                prev_throughput = throughput
+                prev_hp_diff = hp_diff
 
                 done = step_idx == len(rows) - 1
                 if done:
@@ -758,7 +861,7 @@ def parse_trace_to_trajectories(
                 }
                 out.write(json.dumps(trajectory_row) + "\n")
                 n_transitions += 1
-    return n_episodes, n_transitions
+    return n_episodes, n_transitions, attribution
 
 
 # ---------------------------------------------------------------------------
@@ -812,6 +915,26 @@ def parse_args() -> argparse.Namespace:
                         help="Per-step Δpoints shaping coefficient.")
     parser.add_argument("--reward-beta", type=float, default=1.0,
                         help="Terminal win-indicator coefficient.")
+    # R15.S3: five additional shaped reward signals (orchestrator-only,
+    # sourced from already-traced PublicObservation fields). All default
+    # to 0.0 → identical numerics to phase H/J without these args.
+    # The schedule scaler is iter-linear from --reward-shape-start (iter-0)
+    # to --reward-shape-end (final iter). Both default 0.0 → shaping
+    # is fully off unless the caller opts in.
+    parser.add_argument("--reward-active-energy-coef", type=float, default=0.0,
+                        help="R15.S3: Δ own.active.energyTotal per-step coef (recommended 0.02).")
+    parser.add_argument("--reward-bench-energy-coef", type=float, default=0.0,
+                        help="R15.S3: Δ Σ bench energyTotal per-step coef (recommended 0.02).")
+    parser.add_argument("--reward-retreat-coef", type=float, default=0.0,
+                        help="R15.S3: retreat-event indicator coef (recommended 0.03).")
+    parser.add_argument("--reward-throughput-coef", type=float, default=0.0,
+                        help="R15.S3: Δ (handCount + len(discard)) coef (recommended 0.02).")
+    parser.add_argument("--reward-hp-diff-coef", type=float, default=0.0,
+                        help="R15.S3: Δ (own.active.hp/maxHp − opp.active.hp/maxHp) coef (recommended 0.05).")
+    parser.add_argument("--reward-shape-start", type=float, default=0.0,
+                        help="R15.S3: schedule scale at iter-0 (1.0 = full coefs, 0.0 = off).")
+    parser.add_argument("--reward-shape-end", type=float, default=0.0,
+                        help="R15.S3: schedule scale at final iter (linear decay between start/end).")
     # Eval / gate / pool.
     parser.add_argument("--eval-games", type=int, default=10)
     parser.add_argument("--eval-min-ci-lower", type=float, default=0.0)

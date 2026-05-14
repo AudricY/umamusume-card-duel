@@ -9,11 +9,28 @@
       "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section."
     },
     {
+      "id": "planning-refresh-after-r14-e",
+      "priority": "P2",
+      "status": "ready",
+      "summary": "After the R14.E manual UI exercise lands or blocks, run a planning/refinement pass to reconcile queue, escalations, r14 sprint status, ai research backlog, and recent run evidence.",
+      "next_action": "Use /work to brief the worker for a planning/refinement task: read docs/r14-sprint-plan.md, docs/ai-research-backlog.md, docs/ai-performance-research-progress.md, docs/ai-agent-state/escalations.md, and recent relevant run state; update queue and existing docs only where evidence changes the next action."
+    },
+    {
+      "id": "f1-reward-shaping-sweep",
+      "priority": "P2",
+      "status": "in_progress",
+      "started_at": "2026-05-14",
+      "run_dir": "runs/R15-S3-reward-shaping-sweep",
+      "pid": 2398458,
+      "summary": "R15.S3 reward-shaping experiment LAUNCHED. ppo_orchestrator.py diff added (5 new --reward-*-coef args + --reward-shape-start/--reward-shape-end linear-decay schedule + shape_attribution event); TMPDIR=/tmp npm run test:ppo-smoke PASS post-diff. Sweep: 3 iters × 800 games vs rule-bot from item17 iter-002 warm-start; phase H aggressive HPs; coefs 0.02/0.02/0.03/0.02/0.05 with full→zero linear decay across iter-0..2. Exit gate: any iter Wilson lower ≥ 0.40 at n=500 side-balanced. Falsification band: iter-2 in [0.291, 0.331] + importance-ratio diagnostic to re-rank R7 vs R8.",
+      "next_action": "Wait for run completion (~10-15 min wall-clock). When `runs/R15-S3-reward-shaping-sweep/orchestrator-state.json` shows iterations=3, read summary.json + events.jsonl (especially trajectory-parse/completed.shape_attribution per iter and ppo-update/minibatch.ratio_mean per iter), record outcome in docs/ai-performance-research-progress.md and docs/ai-research-backlog.md, then close the queue item."
+    },
+    {
       "id": "r15-s3-reward-shaping-scoping",
       "priority": "P3",
       "status": "done",
-      "summary": "Scoping landed in notes.md `## F1 reward shaping — scoping (2026-05-14)`. Five candidate signals catalogued (Δactive-energy, Δbench-energy, retreat indicator, Δcard-throughput, Δactive-hp-relative), all already on each trace row's PublicObservation — so implementation is orchestrator-only at ppo_orchestrator.py:parse_trace_to_trajectories (~50-80 line diff, ~1.5h human work, zero sim-side change). Linear-decay shaping schedule pre-registered. Two-branch falsification (reward-moved-but-didn't-win vs reward-didn't-move-PPO) re-ranks R7 vs R8. Awaiting human go/no-go on whether to implement shaping signals before launching the experiment — this is NOT a launch-and-watch decision like R15.S1/S2 were; code lands first.",
-      "next_action": "Human review of notes.md scoping block. On green light, implement the five new --reward-*-coef args + linear-decay schedule in ppo_orchestrator.py, run TMPDIR=/tmp npm run test:ppo-smoke, then queue a launch item. On red light, demote to R15.S4 (sampling-temperature diagnostic) or route directly to R7/R8."
+      "summary": "Scoping landed in notes.md `## F1 reward shaping — scoping (2026-05-14)`. Five candidate signals catalogued (Δactive-energy, Δbench-energy, retreat indicator, Δcard-throughput, Δactive-hp-relative), all already on each trace row's PublicObservation — so implementation is orchestrator-only at ppo_orchestrator.py:parse_trace_to_trajectories (~50-80 line diff, ~1.5h human work, zero sim-side change). Linear-decay shaping schedule pre-registered. Two-branch falsification (reward-moved-but-didn't-win vs reward-didn't-move-PPO) re-ranks R7 vs R8. Diff landed + smoke green + sweep launched (see f1-reward-shaping-sweep above).",
+      "next_action": "Closed — replaced in-flight by f1-reward-shaping-sweep."
     }
   ]
 }
