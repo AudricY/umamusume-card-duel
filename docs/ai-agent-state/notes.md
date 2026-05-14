@@ -358,3 +358,31 @@ distinct from outright falsification.)
 On green light: implement the diff, run `TMPDIR=/tmp npm run test:ppo-smoke` to verify
 trajectories.jsonl still parses end-to-end, then launch the sweep. On red light: demote to
 R15.S4 (sampling-temperature diagnostic) or route directly to R7/R8.
+
+**Closeout (2026-05-14).** **PARTIAL — fourth quadrant.** Run
+`runs/R15-S3-reward-shaping-sweep/` finished iter-2 at Wilson lower **0.3560** (WR 39.8%, n=500
+side-balanced) — *missed* the success bar 0.40 by 4.4pp, *landed above* the falsification band
+[0.291, 0.331] by +2.5pp. Neither outcome from the pre-registered binary scoping fired cleanly.
+Trajectory monotone 0.2730 → 0.2787 → 0.3560 (+8.3pp end-to-end, +7.7pp iter-1→iter-2). All three
+iters promoted (decision floor 0.2787, tolerance 0). **Pre-registered branch-1 mechanism check
+fired**: importance ratios moved decisively off ~1.00 in every iter (ratio_max 19.06 / 32.59 /
+11.12 vs phase H's ~1.00 baseline) — the shaped reward IS moving the surrogate gradient and the
+gradient IS moving the policy. Entropy stable (0.168 → 0.154 → 0.153, no collapse);
+`numerical_anomalies = 0` across all 48 minibatches; approx_kl_max < 0.02. Wall-clock **5m 53.7s**
+end-to-end (~4-9× faster than the 10-15 min scoping forecast). **Headline narrative:** R15.S3 is
+the **best F1 rule-bot result on record** at +4.5pp absolute over the prior phase-H/K ceiling of
+0.31, and the first F1 PPO configuration to materially exceed (not match) the SL cap. The branch
+is **alive, not closed**; the gap to 0.40 is now quantitative (coefficient scale + signal mix)
+rather than mechanistic. **Implication for F1 post-mortem:** the "0.40 NOT REACHABLE" framing in
+`docs/ai-performance-research-progress.md:735` was correct under the unshaped reward but is now
+qualified — once the reward axis is allowed to move, 0.40 is reachable in principle from this
+warm-start; the open question is whether scaling coefs gets us there. **Implementation cost:**
++103 LOC orchestrator-only diff (`training/ppo_orchestrator.py`: 5 new `--reward-*-coef` args +
+`--reward-shape-start/-end` linear decay + `shape_attribution` event); zero sim-side; zero TS-side;
+`TMPDIR=/tmp npm run test:ppo-smoke` PASS pre-launch. **Next move (queued as
+`r15-s3-followup-tune-shaping`):** hold the same 5 signals, scale all five coefs 1.5–2× (current
+~0.13/game sum sits at the low end of the scoping ±0.3 budget), rerun the 3-iter sweep at the
+same warm-start / opponent / HPs. Expected ~10-15 min compute. If iter-2 crosses 0.40 → first F1
+success on record. If iter-2 stalls at ~0.36 → coef scaling is saturated; next move is signal-mix
+change. Full writeup: `docs/ai-performance-research-progress.md` § "Phase L — F1 PPO + reward
+shaping".

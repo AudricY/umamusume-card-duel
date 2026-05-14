@@ -16,21 +16,11 @@
       "next_action": "Use /work to brief the worker for a planning/refinement task: read docs/r14-sprint-plan.md, docs/ai-research-backlog.md, docs/ai-performance-research-progress.md, docs/ai-agent-state/escalations.md, and recent relevant run state; update queue and existing docs only where evidence changes the next action."
     },
     {
-      "id": "f1-reward-shaping-sweep",
-      "priority": "P2",
-      "status": "in_progress",
-      "started_at": "2026-05-14",
-      "run_dir": "runs/R15-S3-reward-shaping-sweep",
-      "pid": 2398458,
-      "summary": "R15.S3 reward-shaping experiment LAUNCHED. ppo_orchestrator.py diff added (5 new --reward-*-coef args + --reward-shape-start/--reward-shape-end linear-decay schedule + shape_attribution event); TMPDIR=/tmp npm run test:ppo-smoke PASS post-diff. Sweep: 3 iters × 800 games vs rule-bot from item17 iter-002 warm-start; phase H aggressive HPs; coefs 0.02/0.02/0.03/0.02/0.05 with full→zero linear decay across iter-0..2. Exit gate: any iter Wilson lower ≥ 0.40 at n=500 side-balanced. Falsification band: iter-2 in [0.291, 0.331] + importance-ratio diagnostic to re-rank R7 vs R8.",
-      "next_action": "Wait for run completion (~10-15 min wall-clock). When `runs/R15-S3-reward-shaping-sweep/orchestrator-state.json` shows iterations=3, read summary.json + events.jsonl (especially trajectory-parse/completed.shape_attribution per iter and ppo-update/minibatch.ratio_mean per iter), record outcome in docs/ai-performance-research-progress.md and docs/ai-research-backlog.md, then close the queue item."
-    },
-    {
-      "id": "r15-s3-reward-shaping-scoping",
+      "id": "r15-s3-followup-tune-shaping",
       "priority": "P3",
-      "status": "done",
-      "summary": "Scoping landed in notes.md `## F1 reward shaping — scoping (2026-05-14)`. Five candidate signals catalogued (Δactive-energy, Δbench-energy, retreat indicator, Δcard-throughput, Δactive-hp-relative), all already on each trace row's PublicObservation — so implementation is orchestrator-only at ppo_orchestrator.py:parse_trace_to_trajectories (~50-80 line diff, ~1.5h human work, zero sim-side change). Linear-decay shaping schedule pre-registered. Two-branch falsification (reward-moved-but-didn't-win vs reward-didn't-move-PPO) re-ranks R7 vs R8. Diff landed + smoke green + sweep launched (see f1-reward-shaping-sweep above).",
-      "next_action": "Closed — replaced in-flight by f1-reward-shaping-sweep."
+      "status": "ready",
+      "summary": "R15.S3 promoted to a partial-success: iter-2 Wilson 0.356 lifted the F1 rule-bot ceiling by +4.5pp but missed the 0.40 bar by 4.4pp. Pre-registered branch-1 diagnostic fired (ratios moved off 1.0 across all iters, ratio_max 19.1/32.6/11.1 vs phase H ~1.00), confirming reward shape moves the gradient. Branch alive, not closed.",
+      "next_action": "Next attempt: hold the same 5 signals; scale all five coefficients 1.5x-2x (currently summing to ~0.13/game shape budget; scope target was +/-0.3); rerun the 3-iter sweep. Expected ~10-15 min compute. Same warm-start (runs/item17-2026-05-11/iter-002/checkpoint.pt), same opponent (rule-bot, no pool), same HPs (--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4). If iter-2 crosses 0.40 -> first F1 success on record. If iter-2 stalls at ~0.36 -> coef scaling is saturated and next move is signal-mix change or more iterations."
     }
   ]
 }

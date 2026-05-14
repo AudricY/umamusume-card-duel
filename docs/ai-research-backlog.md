@@ -723,7 +723,7 @@ below capture those moves plus the only outstanding R14 acceptance step.
   Closes the strong-pool branch of the self-play hypothesis. R15.S1 (better warm-start) and
   R15.S3 (richer reward shaping) remain the only unfalsified F1 next moves.
 
-### R15.S3 — Richer reward shaping (F1 next-move #3)
+### R15.S3 — Richer reward shaping (F1 next-move #3) — DONE / PARTIAL
 
 - **Motivation:** F1 PPO post-mortem ranked richer reward shaping third. Current reward is
   Δpoints × 1/3 + terminal ±1. Strategic depth around attachment / retreat / energy cycles is not
@@ -736,6 +736,32 @@ below capture those moves plus the only outstanding R14 acceptance step.
 - **Cost:** ~3–4 h code + ~20 min compute.
 - **Exit / gate:** Wilson lower ≥ 0.40 on the rule-bot eval gate. Diagnostic regardless: if it
   doesn't move WR but does change `mean_advantage` distribution, that itself is publishable.
+- **Result (2026-05-14):** **PARTIAL — best F1 rule-bot result on record, neither success nor
+  falsification.** Run `runs/R15-S3-reward-shaping-sweep/` — 3 iters × 800 games at phase-H
+  aggressive HPs from `runs/item17-2026-05-11/iter-002/checkpoint.pt`, opponent rule-bot, five
+  per-step reward signals (Δactive-energy 0.02, Δbench-energy 0.02, retreat indicator 0.03,
+  Δthroughput 0.02, Δactive-hp-relative 0.05) with linear decay full→zero across iter-0..2.
+  Wilson lower per iter: iter-0 **0.2730** (WR 31.2%) → iter-1 **0.2787** (WR 31.8%) → iter-2
+  **0.3560** (WR 39.8%); n=500 side-balanced per iter, all three promoted. Iter-2 missed the 0.40
+  success bar by **4.4pp** and landed **+2.5pp above** the pre-registered falsification band
+  [0.291, 0.331]. **+4.5pp absolute over the prior F1 ceiling** (phase H iter-2 0.3109; R15.S1
+  iter-2 0.3269; R15.S2 iter-2 0.2188). **Pre-registered branch-1 diagnostic fired**: importance
+  ratios moved decisively off ~1.00 in every iter (ratio_max 19.06 / 32.59 / 11.12 vs phase H
+  ~1.00), confirming the shaped reward unlocked non-zero PPO gradient from the same warm-start;
+  the gap to 0.40 is now quantitative (coefficient magnitudes / signal mix) rather than
+  mechanistic. Entropy stable across iters (0.168 → 0.154 → 0.153, no collapse);
+  `numerical_anomalies = 0` across all 48 minibatches; approx_kl_max < 0.02. Wall-clock **5m 53.7s**
+  end-to-end. Implementation cost: **+103 LOC orchestrator-only diff** to `training/ppo_orchestrator.py`
+  (5 new `--reward-*-coef` args + `--reward-shape-start/-end` linear decay + `shape_attribution`
+  event), zero sim-side, `TMPDIR=/tmp npm run test:ppo-smoke` PASS pre-launch. **Branch is alive,
+  not closed.** Full writeup + per-iter trajectory + comparison table in
+  `docs/ai-performance-research-progress.md` § "Phase L — F1 PPO + reward shaping". The phase-H
+  "F1 target 0.40 NOT REACHABLE" framing has been qualified (not deleted) — it was correct under
+  the unshaped reward mechanism but R15.S3 demonstrably changed that mechanism. Next move queued
+  as `r15-s3-followup-tune-shaping`: hold the same 5 signals, scale all five coefs 1.5–2× (current
+  ~0.13/game shape sum is at the low end of the scoping ±0.3 target), rerun the 3-iter sweep.
+  Expected ~10-15 min compute. If iter-2 crosses 0.40 → first F1 success on record; if iter-2
+  stalls at ~0.36 → coef scaling is saturated and the next move is signal-mix change.
 
 ### R15.S4 — Sampling-temperature gate (F1 next-move #4)
 

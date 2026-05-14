@@ -721,8 +721,9 @@ iter-2 promoted at Wilson lower **0.3109 — exactly the DAgger iter-2 Wilson lo
 | 3b | 60 | extreme | 0.018 | 0.027 | 33.5% | 0.2732 |
 | G | 800 | spec | 0.009 | 0.0002 | 38.0% | 0.3156 |
 | H | 800 | aggressive | 0.008 | 0.003 | 37.5% | 0.3109 |
+| **L** | **800** | **aggressive + 5-signal reward shaping (linear decay)** | **0.010** | n/a | **39.8% (iter-2)** | **0.3560 (iter-2)** |
 
-**Every well-behaved config (2, G, H) lands the trained policy at Wilson lower 0.31. Every aggressive config that actually perturbs the policy (3a, 3b) lands lower.** The 0.31 ceiling is identical to the DAgger warm-start's Wilson lower. PPO is performing correctly and finding that **the warm-start is the highest-return policy reachable from itself** under stochastic Gumbel-max with the current reward shape.
+**Every well-behaved config (2, G, H) lands the trained policy at Wilson lower 0.31. Every aggressive config that actually perturbs the policy (3a, 3b) lands lower. Phase L (reward shaping) is the first F1 PPO config to materially exceed 0.31 — landing at 0.3560, +4.5pp over the prior ceiling without crossing 0.40.** The 0.31 ceiling is identical to the DAgger warm-start's Wilson lower under the unshaped reward. PPO is performing correctly and finding that **the warm-start is the highest-return policy reachable from itself** under stochastic Gumbel-max with the current reward shape.
 
 **Root mechanism (now confirmed across configs):**
 
@@ -732,7 +733,7 @@ iter-2 promoted at Wilson lower **0.3109 — exactly the DAgger iter-2 Wilson lo
 4. The entropy bonus widens *probabilities* but doesn't *flip argmax decisions*, which is what the gate measures.
 5. With the current ±1 terminal + Δpoints×1/3 reward shape, the local optimum at WR ≈ 35–38% is the highest-return policy in the neighborhood of the warm-start.
 
-**F1 target 0.40 declared NOT REACHABLE from the item17-2026-05-11 warm-start** under the current PPO mechanism. PPO can match the SL cap (phase H iter-2) but cannot exceed it.
+**F1 target 0.40 not yet reached from the item17-2026-05-11 warm-start** under the PPO mechanism active at the time of this post-mortem. PPO can match the SL cap (phase H iter-2) but cannot exceed it under the existing reward shape. [Update 2026-05-14: R15.S3 (Phase L) lifted the rule-bot Wilson lower from 0.3109 (phase H) to **0.3560** by adding five per-step shaped signals — +4.5pp absolute over the prior F1 ceiling, missing the 0.40 bar by only 4.4pp and landing above the falsification band. The "NOT REACHABLE" framing was correct under the *unshaped* reward mechanism but is qualified once the reward axis is allowed to move; the branch is alive and the next attempt is a coefficient-scaling follow-up on the same axis. See "Phase L — F1 PPO + reward shaping" below.]
 
 **Recommended next moves, in order of plausibility:**
 
@@ -887,3 +888,95 @@ Artifacts: `runs/R15-S1-warmstart-sweep/` — `events.jsonl` (276 lines, per-epo
 all 3 iters), `orchestrator-state.json`, per-iter `iteration-manifest.json` + `gate.manifest.json`.
 Pool-eval matchups (n=40 each): iter-2 vs iter-0 Wilson 0.2422 (WR 37.5%), iter-2 vs iter-1 Wilson
 0.2635 (WR 40%) — confirms iter-2 is not materially stronger than its own predecessors.
+
+### Phase L — F1 PPO + reward shaping (R15.S3 closeout, 2026-05-14)
+
+Tests whether augmenting PPO's per-step reward with five shaped intermediate signals derived from
+already-traced `PublicObservation` fields can lift the F1 PPO ceiling above the 0.31 cap that every
+prior phase (2, G, H, J, K) hit. Pre-registered in `docs/ai-agent-state/notes.md` ("F1 reward
+shaping — scoping"): orchestrator-only diff (~100 LOC) adds Δactive-energy, Δbench-energy,
+retreat-event indicator, Δcard-throughput, and Δactive-hp-relative as per-step rewards at coefs
+{0.02, 0.02, 0.03, 0.02, 0.05} with linear decay from full at iter-0 to zero at iter-2. Aggregate
+per-game shaped sum targeted ≈ ±0.3 (sub-dominant to ±1 terminal). Warm-start
+`runs/item17-2026-05-11/iter-002/checkpoint.pt` and opponent (rule-bot, no pool) held fixed vs
+phase H. Pre-registered success: any iter Wilson lower ≥ **0.40** at n=500 side-balanced.
+Pre-registered falsification: iter-2 Wilson lower in **[0.291, 0.331]**.
+
+| Iter | Selection | Gate WR | Wilson lower | n | ratio_max | entropy_mean | KL/mb avg | Numerical anomalies | Decision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | rollout | 31.2% | 0.2730 | 500 | 19.06 | 0.168 | 0.0142 | 0 | promoted (baseline) |
+| 1 | policy | 31.8% | 0.2787 | 500 | 32.59 | 0.154 | 0.0098 | 0 | promoted (+0.6pp) |
+| 2 | policy | 39.8% | **0.3560** | 500 | 11.12 | 0.153 | 0.0097 | 0 | promoted (+7.7pp) |
+
+**Verdict: PARTIAL — best F1 rule-bot result on record (0.3560), missed the 0.40 success bar by
+4.4pp, landed above the falsification band [0.291, 0.331] by +2.5pp. Neither success nor
+falsification.** The trajectory is monotone (0.2730 → 0.2787 → 0.3560, +8.3pp end-to-end) and the
++7.7pp iter-1→iter-2 step is the largest single PPO jump in any F1 phase that *also* sustained at
+the final iter. This is a *go-deeper-on-this-axis* result, not a *close-this-branch* result; the
+branch is alive.
+
+**Mechanism check — pre-registered diagnostic fired.** Importance ratios moved off ~1.00 in every
+iter: ratio_max 19.1 / 32.6 / 11.1 vs phase H's ~1.00 baseline. This is the branch-split signature
+the scoping pre-registered for distinguishing "shape didn't move PPO" (branch 2, ratios stay at
+1.0, re-rank R8 over R7) from "shape moved PPO but didn't encode winning" (branch 1, ratios move,
+re-rank R7 over R8). **Branch 1 fired.** The shaped reward IS moving the surrogate gradient and
+the gradient IS moving the policy; the gap to 0.40 is now quantitative (coefficient magnitudes,
+signal mix) rather than mechanistic. Secondary stability checks all clean: entropy stable across
+iters (0.168 → 0.154 → 0.153, no collapse), `numerical_anomalies = 0` across all 48 minibatches,
+ratio_min stayed above 1e-3 (~0.0015 in all three iters), approx_kl_max < 0.02 throughout.
+
+**Comparison to references.** Iter-2 Wilson 0.3560 vs phase H iter-2 (no shape) **0.3109**, phase
+K iter-2 (compute, R15.S1) **0.3269**, phase J iter-2 (strong-pool self-play, R15.S2) **0.2188**.
+Phase L is **+4.5pp over the prior F1 ceiling** (phase H 0.3109) and **+2.9pp over R15.S1** — the
+first F1 PPO configuration that materially exceeds the SL cap rather than matching it. Gate WR
+39.8% is also the highest WR any F1 PPO config has produced (vs 38.0% phase G iter-2 best).
+
+**What this implies for the F1 post-mortem.** The phase-H post-mortem's "F1 target 0.40 NOT
+REACHABLE from the item17 warm-start under the current PPO mechanism" was a correct conservative
+read of the mechanism *that existed at the time* (unshaped Δpoints + ±1 terminal, ratios pinned
+at 1.0, surrogate gradient ≈ 0). R15.S3 demonstrably *changed the mechanism* — the reward axis
+unlocks non-zero gradient even from the same warm-start. With the mechanism unlocked, 0.40 is now
+reachable in principle from this warm-start; the open question is whether scaling shaping coefs
+or changing the signal mix gets there. The "NOT REACHABLE" line in the F1 phase summary above
+has been qualified (not deleted) to reflect this.
+
+**Pre-registered prediction check.** Scoping predicted iter-2 Wilson lower ≥ 0.40 as the success
+bar and 0.311 ± 2pp as the falsification band; the result lands 4.4pp short of success and 2.5pp
+above falsification. The branch-1 diagnostic ("ratio range moves off [0.5, 2.0]") fired clearly —
+ratio_max 11-33 across iters is well outside [0.5, 2.0] and matches the R15.S2 gradient-active
+signature (digest slot 8, ratio range 0.05-4.6 there). Shaped-component attribution per iter was
+not separately surfaced in the gate manifest beyond the aggregate signal — a follow-up to drop
+small contributors would benefit from re-extracting it from the trace stream.
+
+**Wall-clock vs scoping estimate.** Scoping forecast ~10-15 min total. Actual end-to-end **5m
+53.7s** (run_started → run_completed delta: `1778731408.98 → 1778731762.72 = 353.74s`). Per-iter
+~118s including rollout + PPO update + n=500 gate. Reward shaping added zero measurable runtime
+cost (a few extra float adds per parsed trace row); the dominant cost remained the rollout
+phase, identical to phase H. Implementation cost: **+103 LOC orchestrator-only diff** to
+`training/ppo_orchestrator.py` (5 new `--reward-*-coef` args + `--reward-shape-start/-end` linear
+decay + shape_attribution event), zero sim-side, zero TS-side. `TMPDIR=/tmp npm run test:ppo-smoke`
+PASS pre-launch.
+
+| Phase | Axis | Best iter Wilson lower | Final iter Wilson lower | Compute |
+| --- | --- | --- | --- | --- |
+| 2 | PPO spec HPs (rule-bot) | 0.3109 | 0.3109 | ~10 min |
+| H | PPO aggressive HPs (rule-bot) | 0.3109 | 0.3109 | ~10 min |
+| J | PPO aggressive + strong-pool self-play | 0.2993 (iter-1) | 0.2188 | 5m 32s |
+| K | DAgger 3× compute, fixed 64/2 | 0.3269 (iter-2) | 0.3269 | 11m 51s |
+| **L** | **PPO aggressive + 5-signal reward shaping** | **0.3560 (iter-2)** | **0.3560** | **5m 54s** |
+
+**What this opens.** A coefficient-scaling follow-up sweep on the same axis: hold the five signals
+fixed, scale all five coefs 1.5–2× (the current ~0.13/step per-game sum is at the low end of the
+scoping target ±0.3 budget), rerun the 3-iter sweep at the same warm-start / opponent / HPs.
+Expected ~10-15 min compute. If iter-2 crosses 0.40 → first F1 success on record. If iter-2 stalls
+at ~0.36 → coef scaling is saturated and the next move is signal-mix change (drop low-attribution
+components, add new ones) or more iterations. Queued as `r15-s3-followup-tune-shaping`.
+
+**No-action implication (updated).** F1's "Wilson lower ≥ 0.40" remains unreached but is no longer
+empirically out of reach. Three of the four phase-H-era F1 post-mortem moves are closed FAIL
+(warm-start R15.S1, self-play R15.S2, the SL-compute / capacity / HP-tuning baselines); the
+reward-shape axis is open and producing the strongest F1 numbers on record.
+
+Artifacts: `runs/R15-S3-reward-shaping-sweep/` — `events.jsonl` (per-iter ppo-update minibatch
+detail with ratio/KL/entropy/anomaly counts), `orchestrator-state.json` (promoted_wilson_lower
+0.35602922648461244), per-iter `iteration-manifest.json` + `gate.manifest.json`.
