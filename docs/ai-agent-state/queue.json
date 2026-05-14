@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T06:45Z",
+  "updated": "2026-05-14T06:55Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -64,6 +64,13 @@
       "priority": "P3",
       "status": "done",
       "summary": "Backlog § R7 collapsed to one-line pointer mirroring R7.b's compact form; summary line at L93-97 also updated (R7 status RUNNING with launch-time and PID). R8 entry left expanded (no scoping doc yet)."
+    },
+    {
+      "id": "harness-pidfile-race-fix",
+      "priority": "P4",
+      "status": "ready",
+      "summary": "Pidfile race observed across digest slots 18/20/22/25/26 when launching orchestrator via `nohup npm run … &`: captured PID is the wrapper, not the orchestrator's real Python PID; recovered each time via `ps aux | grep <out-dir>`. Slot 34's direct `nohup training/.venv/bin/python -u … &` invocation did NOT trigger the race (observed at 2m16s, 5m25s, 9m28s into the R7 step 4 run). Working hypothesis: the race is a `nohup` × `npm run` wrapper interaction, not a Python-side bug. Cheap fix candidate: standardise harness launch commands on direct-python invocation + write PID into `<out-dir>/pid.txt` from inside the Python orchestrator before any fork.",
+      "next_action": "When this becomes the highest-leverage open item: investigator confirms the working hypothesis by reading `npm run` wrapper behaviour + the digest evidence; if confirmed, implementer adds `pid.txt` write inside `training/dagger_orchestrator.py` startup and updates harness documentation to prefer direct-python invocation. Low-priority — direct invocation already works as a workaround."
     },
     {
       "id": "r7b-trace-reencodability-spike",
