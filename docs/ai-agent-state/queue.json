@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T06:55Z",
+  "updated": "2026-05-14T07:05Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -42,22 +42,23 @@
     {
       "id": "r7-step-4-trace-gen-and-sl-train",
       "priority": "P2",
-      "status": "running",
-      "autonomous_launch_eligible": true,
+      "status": "done",
       "run_dir": "runs/R7-multi-teacher-warmstart",
-      "pid": 3211541,
-      "start_utc": "2026-05-14T06:45:23Z",
-      "eta_minutes": 30,
-      "command": "training/.venv/bin/python -u training/dagger_orchestrator.py --out-dir runs/R7-multi-teacher-warmstart --teacher rollout --trace-teachers rollout,search,planner --iterations 1 --games 90 --epochs 75 --hidden-dim 64 --depth 2 --rollout-steps 500 --rollout-crn-samples 3 --max-steps 500 --replay-games 100 --eval-games 250",
-      "summary": "LAUNCHED. Mirrors R15.S1's iter-0 SL-compute budget exactly (games=90, epochs=75, hidden=64/depth=2, rule-bot replay 100 games → 4432 examples, max-steps=500, rollout-steps=500, rollout-crn=3, eval-games=250) on a single iter so any Δ vs R15.S1 iter-1 isolates the teacher-mix axis. Orchestrator change: added `--trace-teachers` (separate from `--teacher`) so comma-separated value bypasses the existing `choices=[rollout,search,planner]` validator while still feeding TS-side `--trace-teacher rollout,search,planner` (parseTraceTeacherList already accepts comma-separated per R7 step 2). KL-anchor weights irrelevant for iter-0 (no parent checkpoint).",
-      "next_action": "Monitor: `tail /home/audric/work/umamusume-card-duel/runs/R7-multi-teacher-warmstart/launch.log`; on completion read `orchestrator-state.json` for promoted_wilson_lower. SL gate result writes to `iter-000/gate.manifest.json`. If Wilson lower ≥ 0.35 → proceed to step 5 (one PPO sweep from new warm-start at phase-H scale). If < 0.35 → close R7 with new SL ceiling number, write result block to docs/ai-performance-research-progress.md, demote R7 in backlog per scoping § 4 close-out."
+      "summary": "DONE / FAIL. Iter-0 SL gate Wilson lower **0.2921** (n=500, rule-bot, side-balanced; player 0.228, opponent 0.326 — same +10pp gap as every F1 phase). vs R15.S1 iter-0 0.2844 → Δ +0.0077 (wash, within Wilson half-width ~4.2pp); pre-registered SL gate ≥0.35 missed by ~4pp. No PPO sweep launched; SL gate close-out fires per scoping § 4. Plateau-then-overfit signature replicated more strongly than R15.S1: peak val_acc 0.7855 @ ep16 → final 0.7473 @ ep75 (drift down); val_loss 0.93 @ ep1 → 2.21 @ ep75 (climb) while train_acc 0.68 → 0.93. Mixed corpus 12387 rows (8826 mixed-teacher + 3561 sampled rule-bot replay; rule-bot replay 4432 exact byte-match with R15.S1). Result block at docs/ai-research/progress/r15.md § R7."
     },
     {
       "id": "r7-step-4-monitor",
       "priority": "P2",
+      "status": "done",
+      "summary": "DONE — verdict observed at orchestrator run_completed (iteration=-1). Iter-0 wilson_lower=0.2921 from orchestrator-state.json::iterations[0]; gate detail from iter-000/gate.manifest.json::summary (wilson95 [0.2921, 0.3744], modelWinRate 0.332, byModelSide player 0.28 / opponent 0.384, terminalReasons gameOver:500). Folded into r7-step-4-trace-gen-and-sl-train DONE summary above."
+    },
+    {
+      "id": "r8-dpo-scoping",
+      "priority": "P2",
       "status": "ready",
-      "summary": "Follow-up monitor slot for the R7 step 4 background launch. Trace-gen ETA ~9 min (planner ~14× slower per state vs rollout-only baseline), SL train ~3.5 min, eval gate ~3 min, total ~15-25 min wall-clock.",
-      "next_action": "Verdict signal: grep events.jsonl for `\"stage\":\"orchestrator\",\"event_type\":\"run_completed\"` (iteration=-1). Iter-0-level completion is `\"stage\":\"iteration\",\"event_type\":\"completed\",\"iteration\":0` if you want to read the gate result before the orchestrator wraps. Per-iter sequence: trace-gen→relabel→mix→train→gate→decision→iteration completed (no pool-eval at iter=0 since no parent). Read `runs/R7-multi-teacher-warmstart/orchestrator-state.json` → `iterations[0].wilson_lower` (also `promoted_wilson_lower` at top-level if promoted). Comparison anchor: R15.S1 iter-0 wilson_lower=0.2844, R15.S1 iter-2 was 0.3269 FAIL. Detailed Wilson is at `iter-000/gate.manifest.json` → `summary.wilson95.{lower,upper}`; `summary` also has `modelWinRate`, `byModelSide`, `terminalReasons`. Flip r7-step-4-trace-gen-and-sl-train to done with the verdict (PASS ≥ 0.35 → step 5 PPO sweep; FAIL → close R7 with new SL ceiling, write result block to docs/ai-research/progress/r15.md per new CLAUDE.md docs structure, demote R7 in backlog)."
+      "autonomous_launch_eligible": true,
+      "summary": "R8 (DPO objective replacement) picked as next F1-line research direction after R7 closed FAIL. Cost-rank rationale: R8 ~3h code + ~10min training (backlog § R8) vs R7.b.2 ~1.5d + 0.5d card-embedding pass; cheaper-to-falsify rule fires R8 first. R7 result (iter-0 Wilson 0.2921 vs R15.S1 iter-0 0.2844, Δ +0.008) confirmed teacher-target axis cannot move the SL warm-start at this compute budget regardless of single vs multi-teacher. Hypothesis (per backlog § R8): dense pairwise preference signal from rollout-CRN top-1/runner-up margins is more learnable than sparse ±1 terminal reward; doesn't depend on the per-step shape family R15.S3 closed. Pre-registered exit: Wilson lower ≥0.40 from item17 warm-start on rule-bot gate, or document new ceiling and close. If R8 closes negative, R7.b.2 promotes next.",
+      "next_action": "Implementer authors docs/ai-research/scoping/r8-dpo.md mirroring docs/ai-research/scoping/r7-multi-teacher-warmstart.md structure (Q / hypothesis / design / pre-registered gates / cost+risks / execution plan / out-of-scope). Key design questions: trainer location (new train_dpo.py vs extending train_bc.py); preference-pair source (decoded from existing outcome-export trace per-candidate reward records — already include selected vs runner-up margin per backlog § R8 design); Bradley-Terry loss vs warm-start reference policy; same eval/gate harness as R7/R15.S1 (n=500 side-balanced rule-bot). After scoping doc lands, R8 splits into per-step queue items mirroring R7 step 2/3/4."
     },
     {
       "id": "r7-backlog-shrink-to-pointer",
@@ -90,9 +91,9 @@
     {
       "id": "r7b-card-embedding-pass",
       "priority": "P3",
-      "status": "parked-pending-r7",
-      "summary": "R7.b.2 headline pass (per scoping § 4 #1 + #2): card embedding table (108×32) replacing slots 32-47 with per-zone sum-pool over 8 zones, BUNDLED with action-target/source embedding lookup on the same table. Schema bump v3; new int input tensor in ONNX. ~1.5 days + half day. Targets audit categories 1, 2, 5, 8. Full design + ONNX plumbing + risks: docs/ai-research/scoping/r7b-feature-representation.md § 4 #1 + #2.",
-      "next_action": "Wait for R7 step 3 result. Promote to P2 ready when R7 closes (either negative on F1 gate, or positive but PPO still saturates near 0.368). If R7.b.0 spike says trace JSONLs are NOT re-encodable, factor full DAgger regen cost (~hours) into the launch decision."
+      "status": "parked-pending-r8",
+      "summary": "R7.b.2 headline pass (per scoping § 4 #1 + #2): card embedding table (108×32) replacing slots 32-47 with per-zone sum-pool over 8 zones, BUNDLED with action-target/source embedding lookup on the same table. Schema bump v3; new int input tensor in ONNX. ~1.5 days + half day. Targets audit categories 1, 2, 5, 8. Full design + ONNX plumbing + risks: docs/ai-research/scoping/r7b-feature-representation.md § 4 #1 + #2. R7 closed FAIL 2026-05-14 (teacher-target axis cannot move SL warm-start). Cheaper-to-falsify rule fires R8 (~3h + ~10min) before this (~2 days). Promote to P2 ready only if R8 also closes negative; R7.b.0 trace re-encodability is YES so schema bump v3 is feature-re-extraction only, not multi-hour DAgger regen.",
+      "next_action": "Wait for R8 outcome. Promote to P2 ready when R8 closes (either negative on F1 gate, or positive but capped below 0.40). If R8 passes ≥0.40, R7.b.2 stays parked — production line is unblocked."
     },
     {
       "id": "r7b-attention-set-encoder",

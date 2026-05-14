@@ -90,11 +90,11 @@ results (2026-05-11)".
 - **R6.** Larger model capacity — **DONE / FAIL.** hidden=128/depth=3,
   50ep, value_weight=1.0: best imitator (83% argmax-match) AND weakest player
   (gate WR 33.0%). The cap is imitation-target-quality, not capacity.
-- **R7.** Multi-teacher BC blend — **RUNNING (2026-05-14).** Picked over R8
-  post-R15.S3 closeout (self-directed). Scoping + step-by-step execution
-  in `docs/ai-research/scoping/r7-multi-teacher-warmstart.md`. Step 4
-  (mixed-teacher SL train) launched at 06:45Z. Forward brief below
-  collapsed to one-line pointer.
+- **R7.** Multi-teacher BC blend — **DONE / FAIL (2026-05-14).** Iter-0 SL
+  gate Wilson lower **0.2921** vs R15.S1 iter-0 0.2844 (Δ +0.008, wash) and
+  pre-registered ≥0.35 SL gate not met; no PPO sweep run. Scoping doc:
+  `docs/ai-research/scoping/r7-multi-teacher-warmstart.md`; result block:
+  `docs/ai-research/progress/r15.md` § "R7 — multi-teacher BC blend".
 - **R8.** Direct preference optimization (DPO) — **DEFERRED.** Same trajectory
   as R7: obsoleted post-R12, re-listed post-R15.S3. Forward brief preserved
   below.
