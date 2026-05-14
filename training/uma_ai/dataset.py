@@ -164,8 +164,15 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
     # row), and the model.forward's `is None` branch fires uniformly.
     # In practice all rows in a batch come from the same loader and the
     # same schema; this guard is a defense-in-depth signal.
+    # MctsSelfPlaySample does not carry these fields at all (mcts-distill data
+    # path predates R7.b.2 schema bump). `getattr(..., None)` keeps the
+    # cross-data-path collator non-crashing — the model's optional kwargs
+    # default to zero-tensor (padding_idx=0, zone_projection bias=False), so
+    # the embedding pathway is exactly inert for that path. Re-extracting
+    # mcts-selfplay rows to v3 schema would re-enable it.
     all_have_card_ids = all(
-        sample.card_ids_by_zone is not None and sample.action_card_idx is not None
+        getattr(sample, "card_ids_by_zone", None) is not None
+        and getattr(sample, "action_card_idx", None) is not None
         for sample in samples
     )
     card_ids_buffer = (
