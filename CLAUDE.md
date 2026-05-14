@@ -16,9 +16,14 @@ Do not create a new orchestration framework unless the user explicitly asks. Pre
 
 Use `/work` as the default operating command.
 
-The main Claude session should stay small. It owns judgment and synthesis: choose the highest-leverage bounded job, use the general `worker` subagent when the work would otherwise bloat context, then persist the useful result.
+The main Claude session should stay small. It owns judgment and synthesis: choose the highest-leverage bounded job, delegate context-heavy work to a role-specific subagent, then persist the useful result.
 
-The worker is for context-heavy exploration, implementation, run analysis, validation, and planning. The point is context isolation, not parallelism. Small direct edits and simple state updates can stay in the main session. Do not fan out multiple workers unless the tasks are independent, low-resource, and have disjoint write scopes.
+Two subagents are available:
+
+- `investigator` — read-only. Use for deep code exploration, run analysis, log triage, and validation-as-evidence. Returns findings.
+- `implementer` — write-capable. Use for code edits, doc updates (sprint/backlog/progress, queue, escalations, digests), and validation cycles after changes.
+
+Pick by whether the job ends in evidence or in a change. The point is context isolation, not parallelism. Small direct edits and simple state updates can stay in the main session. Do not fan out multiple subagents unless the tasks are independent, low-resource, and have disjoint write scopes.
 
 Backlog refinement and big-picture planning are normal `/work` jobs. The loop should not only debug and implement. Choose planning/refinement when the queue is stale, run evidence changes priorities, escalations block the current path, sprint/backlog/progress docs disagree, or local work is no longer clearly moving the AI objective forward.
 

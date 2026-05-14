@@ -21,7 +21,7 @@
       "priority": "P2",
       "status": "ready",
       "summary": "After the R14.E manual UI exercise lands or blocks, run a planning/refinement pass to reconcile queue, escalations, r14 sprint status, ai research backlog, and recent run evidence.",
-      "next_action": "Use /work to brief the worker for a planning/refinement task: read docs/r14-sprint-plan.md, docs/ai-research-backlog.md, docs/ai-performance-research-progress.md, docs/ai-agent-state/escalations.md, and recent relevant run state; update queue and existing docs only where evidence changes the next action."
+      "next_action": "Use /work to brief the implementer for a planning/refinement task: read docs/r14-sprint-plan.md, docs/ai-research-backlog.md, docs/ai-performance-research-progress.md, docs/ai-agent-state/escalations.md, and recent relevant run state; update queue and existing docs only where evidence changes the next action."
     },
     {
       "id": "r15-s3-signal-mix-or-schedule",

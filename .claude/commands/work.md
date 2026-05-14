@@ -1,5 +1,5 @@
 ---
-description: Advance the AI research loop by choosing the highest-leverage next job and delegating context-heavy work to one general worker.
+description: Advance the AI research loop by choosing the highest-leverage next job and delegating context-heavy work to a role-specific subagent.
 argument-hint: "[optional objective]"
 ---
 
@@ -28,15 +28,20 @@ Avoid launching long training/eval work unless the user or queue clearly calls f
 
 ## Delegation
 
-Use one `worker` subagent when the task would otherwise bloat the main context with exploration, logs, broad file reads, or implementation detail. Small direct edits or simple state updates can stay in the main session.
+Use a subagent when the task would otherwise bloat the main context with exploration, logs, broad file reads, or implementation detail. Pick by whether the work ends in evidence or in a change:
 
-Give the worker a bounded brief with the objective, relevant context, write scope, notable constraints, and expected output. Let the worker decide the detailed procedure.
+- `investigator` — read-only. Use for code exploration, run/log analysis, and validation-as-evidence.
+- `implementer` — write-capable. Use for code edits, doc updates, and validation cycles after changes.
 
-Use multiple workers only for genuinely independent, low-resource tasks with disjoint write scopes.
+Small direct edits or simple state updates can stay in the main session.
+
+Give the subagent a bounded brief with the objective, relevant context, write scope (for the implementer), notable constraints, and expected output. Let it decide the detailed procedure.
+
+Use multiple subagents only for genuinely independent, low-resource tasks with disjoint write scopes.
 
 ## Synthesis
 
-When the worker returns, spot-check outputs, inspect changed files, and reconcile inconsistencies. Do not replay the whole exploration without a concrete reason.
+When the subagent returns, spot-check outputs, inspect changed files, and reconcile inconsistencies. Do not replay the whole exploration without a concrete reason.
 
 Persist useful state where it belongs:
 
@@ -45,7 +50,7 @@ Persist useful state where it belongs:
 - Short run summaries: `docs/ai-agent-state/digests/YYYY-MM-DD.md`
 - Durable research evidence: results go to the progress doc; the backlog stays forward-looking. See CLAUDE.md "Documentation Discipline" for the role+cap rules.
 
-Continue immediately when the next step is clearly still the same bounded objective and cost, risk, and context budget remain reasonable. Spawn another single worker if that next step would otherwise bloat the main context.
+Continue immediately when the next step is clearly still the same bounded objective and cost, risk, and context budget remain reasonable. Spawn another single subagent (investigator or implementer) if that next step would otherwise bloat the main context.
 
 Use `/loop`, a timeout, or a timed wakeup only for genuine waits: running training/eval jobs, future logs/checkpoints, human input, or deliberate resource cool-downs.
 

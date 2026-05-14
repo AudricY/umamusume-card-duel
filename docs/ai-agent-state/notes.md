@@ -3,8 +3,8 @@
 The Claude Code harness is intentionally lightweight.
 
 - Default command: `/work`
-- Default execution path: one general `worker` subagent
-- Purpose of the worker: context isolation, not parallel throughput
+- Default execution path: one role-specific subagent (`investigator` or `implementer`)
+- Purpose: context isolation, not parallel throughput
 - No hooks in the initial implementation
 - No Python harness in the initial implementation
 
