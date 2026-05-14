@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T16:30Z",
+  "updated": "2026-05-14T17:00Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -108,8 +108,8 @@
       "id": "r7b-card-embedding-pass",
       "priority": "P2",
       "status": "ready",
-      "summary": "R7.b.2 PROMOTED 2026-05-14 by R8 closeout (R8 v1 Wilson 0.3318 < 0.37 → branch closed; both labels axis (R7) and objective axis (R8) now exhausted on the F1 line). Headline pass per scoping § 4 #1 + #2: card embedding table (108×32) replacing slots 32-47 with per-zone sum-pool over 8 zones, BUNDLED with action-target/source embedding lookup on the same table. Schema bump v3; new int input tensor in ONNX. Targets audit categories 1, 2, 5, 8. Full design + ONNX plumbing + risks: docs/ai-research/scoping/r7b-feature-representation.md § 4 #1 + #2. R7.b.0 trace-reencodability YES (digest slot 36) so schema bump v3 is feature-re-extraction only, not multi-hour DAgger regen. Cost ~1.5 days code + ½ day eval.",
-      "next_action": "Implementer: (1) author scoping doc § 6 step-by-step execution plan if not already present; surface concrete pre-flight cost-cutters (e.g. fits-in-existing-trainer? new ONNX input tensor cost?). (2) Step 1 schema bump v3 in TS-side feature builder (backend/src/sim/featureBuilder.ts or equivalent — locate via grep) emitting (108-card-id, per-zone) int tensor. (3) Step 2 Python-side encoder change: nn.Embedding(108, 32) + per-zone sum-pool + action-target/source embedding lookup on same table. (4) Step 3 retrain from item17 corpus via R7's same orchestrator (no DAgger regen — re-extract features from existing trace JSONLs). (5) Step 4 gate at n=500 side-balanced (use new training/r8_gate_eval.py driver, generalised). Pre-reg exit: Wilson lower ≥ 0.40 (clears 0.40 gate) → PASS, ship; ≥ 0.37 + < 0.40 → R7.b.3 attention/set-encoder one-shot follow-up; < 0.37 → close R7.b family, escalate to user for next direction."
+      "summary": "R7.b.2 headline pass: card embedding (#1) + action-target embedding (#2) bundled per scoping § 4 #1 + #2. Concrete pre-flight plan landed 2026-05-14 at scoping § 11 (Phases 1-6, ~515 LOC, ~30min retrain, ~5-10min gate). Cost-cutters confirmed: r8_gate_eval.py reuses as-is; train_bc.py change ~5 LOC; ONNX opset 17 Gather supports padding_idx=0 embedding; TS-side /predict unchanged. Corpus pick R7's 12387-row mixed (apples-to-apples vs prior best on this schema; starting Wilson 0.2921). Pre-reg exit per § 7: Wilson ≥ 0.40 PASS ship; ≥ 0.37 ∧ < 0.40 → R7.b.3 attention follow-up; < 0.37 → close R7.b family.",
+      "next_action": "Implementer Phase 1 only (~80 LOC, TS-side schema bump): in frontend/src/game/engine/ai-policy/types.ts bump schemaVersion 1→2, add ZoneKey type (8 members) + cardIdsByZone on PublicObservation, add actionSourceCardIdx + actionTargetCardIdx on LegalAiAction (sentinel -1 for empty). Extend buildPublicObservation in observation.ts to emit cardIdsByZone from active.cardId / bench[i].cardId / own.hand / own.discard / opp.discard / stadium. Grep backend/src/sim/ for action features construction to wire source/target idx. Confirm a TS-side cardVocabIndex helper exists (grep shared/src/) — if absent, add ~20 LOC + a TS-Python parity smoke. Validation: npm run build PASS, test:train PASS, test:dagger-orchestrator PASS. Commit Phase 1 as a separate workstream. Phases 2-6 follow in subsequent /loop slots; full per-phase plan at scoping § 11."
     },
     {
       "id": "r7b-attention-set-encoder",

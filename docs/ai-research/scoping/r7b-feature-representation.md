@@ -166,3 +166,74 @@ Verbatim from `docs/ai-research-backlog.md` § R7.b:
 **Smokes (TMPDIR=/tmp).** `npm run build` PASS; `npm run test:train` PASS (6/6 TS smokes); `npm run test:python-train` PASS — manifest verifies `feature_schema.state_dim=110`, `state_feature_schema_version=2.1`, `model_config.state_dim=110`, ONNX roundtrip PASS, served prediction matches direct ONNX.
 
 **Followup.** SL gate retrain on the R7 corpus to confirm Wilson non-regression (scoping § 7 gate (a)) is **out of scope for this slot** — single-iter retrain + n=500 gate eval (~30 min). Will be reused by R7.b.2 (card-embedding pass) anyway, so deferring is cheap.
+
+## 11. R7.b.2 Execution Plan (concrete, 2026-05-14, post-R7.b.1)
+
+Detailed phase-by-phase plan for § 6 step 2 (the headline pass: #1 card embedding + #2 action-target embedding, bundled). Total ~515 LOC, ~1.5 days code + ~30 min retrain + ~5–10 min gate eval. Phases 1–3 sequential; Phase 4 parallel with Phase 5 SL training; Phase 6 follows.
+
+### Phase 1 — TS-side schema bump (~80 LOC)
+
+- `frontend/src/game/engine/ai-policy/types.ts:23-37`: bump `schemaVersion: 1 → 2`; add `cardIdsByZone: Record<ZoneKey, number[]>` on `PublicObservation`; new `ZoneKey` type with 8 members (`"ownActive" | "oppActive" | "ownBench" | "oppBench" | "ownHand" | "ownDiscard" | "oppDiscard" | "stadium"`).
+- `types.ts:15-21` (`LegalAiAction`): add `actionSourceCardIdx: number | null` and `actionTargetCardIdx: number | null` (or `-1` sentinel, matching Python pad convention).
+- `frontend/src/game/engine/ai-policy/observation.ts:6-23`: extend `buildPublicObservation` to emit `cardIdsByZone`. Per-zone source: own/opp `active.cardId`, `bench[i].cardId`, `own.hand`, `own.discard`, `opp.discard`, `state.stadium?.cardId`.
+- Per-action source/target uid → cardId → vocab idx happens where actions are built (legal-actions enumerator). Grep `backend/src/sim/` for action `features` array construction.
+- **Risk:** need TS-side `cardVocabIndex(cardId)` helper producing identical indices to Python. Grep for existing helper in `shared/src/`. If absent, ~20 LOC + a TS-Python parity smoke.
+
+### Phase 2 — Python encoder change (~190 LOC)
+
+- `training/uma_ai/features.py` (~80 LOC): add `observation_to_card_ids(observation) -> dict[str, np.ndarray]` returning fixed-shape int array per zone with `0` padding (own bench/opp bench up to 4, hand up to 10, discards up to N_cap=30, active/stadium single). Wire `card_vocab_index:459`. Schema bump `STATE_FEATURE_SCHEMA_VERSION 2.1 → 3.0`; parallel constant `CARD_ID_SHAPES: dict[str, int]` for collator pad widths.
+- `training/uma_ai/model.py:48-66` (~60 LOC): `self.card_embed = nn.Embedding(108, 32, padding_idx=0)` (index 0 = unknownIndex + pad), `self.zone_projection = nn.Linear(8 * 32, hidden)`. `forward` accepts packed `LongTensor[B, 8, max_cards_per_zone]`; per zone: `embedded = self.card_embed(ids); mask = (ids != 0).unsqueeze(-1); pooled = (embedded * mask).sum(dim=-2)` → concat 8 × 32 → `zone_projection` → add to `state_encoded`. For #2: reuse `self.card_embed`; accept `LongTensor[B, A, 2]` (source+target); concat 32-d embed to `action_encoded` before joint projection. Widen `joint_projection` input dim.
+- `training/uma_ai/dataset.py:90-134` (~50 LOC): `collate_policy_batch` adds packed `LongTensor[B, 8, max_cards_per_zone]` + `LongTensor[B, max_actions, 2]`. `PolicySample:21-35` gains two new fields. `load_policy_samples:52-87` calls new `features.py` helpers. Schema-version strict-check at line 64 bumps to `3`.
+- `training/train_bc.py:355-371` (~5 LOC): widen positional `model(batch["state_features"], batch["action_features"], batch["action_mask"])` → keyword call adding `card_ids_by_zone` + `action_card_idx`. **No other trainer-side changes.** Soft-CE branch at `train_bc.py:362-369` keys on `policy_targets` in batch dict — fires automatically.
+
+### Phase 3 — ONNX export change (~65 LOC)
+
+- `training/export_onnx.py:38-55` (~25 LOC): two new dummy inputs `card_ids_by_zone: LongTensor[1, 8, MAX_CARDS_PER_ZONE]` + `action_card_idx: LongTensor[1, max_actions, 2]`. Add `input_names`, `dynamic_axes`. Vocab guard at lines 22-30 already wired; assert `model.card_embed.num_embeddings == card_vocab_metadata()["vocabSize"] + 1`. **Opset 17 supports `Gather` natively — no bump.**
+- `training/serve_onnx.py:206-234` (`request_to_arrays`, ~40 LOC): build `card_ids_by_zone` + `action_card_idx` from observation/legalActions JSON using new `features.py` helpers; shape-validate; add to ORT input dict.
+- `training/uma_ai/node_bridge.py`: **no change** (shells out to npm; new tensors flow as JSON fields).
+- **TS-side ONNX client: no change.** Confirmed by grep: TS only sends `{ observation, legalActions, sampling }` to Python `serve_onnx`; Python builds all tensors. As long as `buildPublicObservation` emits `cardIdsByZone` and `legalActions[i]` carries source/target idx, Python rebuilds them.
+
+### Phase 4 — Feature re-extractor (~120 LOC, parallelisable)
+
+- New file `training/r7b2_extract_features.py` (~120 LOC, standalone). Reads `runs/R7-multi-teacher-warmstart/iter-000/mixed.jsonl` row-by-row, calls new v3 `observation_to_features` + `observation_to_card_ids` + reconstructs action source/target from `legalActions[i].payload.{targetUid, handIndex, attackIndex, retreatTarget}` mapped against `observation.{own,opponent}.{active,bench}.{uid,cardId}` + `observation.own.handCardIds[handIndex]`. Writes new JSONL with `schemaVersion: 3` plus new fields; preserves `policyTargets` unchanged.
+- Wall-clock: tens of seconds (12387 rows × ~2KB/row, single-threaded numpy).
+- Re-encodability evidence: § 9 confirms all needed fields preserved.
+
+### Phase 5 — SL retrain (~30 min CPU)
+
+- **Reuse R7's 12387-row mixed corpus** (`runs/R7-multi-teacher-warmstart/iter-000/mixed.jsonl`) over item17's 3870-row corpus despite R7's lower starting Wilson (0.2921 vs 0.311). Reasons: (a) R7 corpus carries 3-teacher mixture targets that exercise the soft-CE pathway — testing representational lift wants the best-available labels; item17 confounds schema change with label change. (b) Pre-reg gate (a) is "no regression vs prior best on this schema"; apples-to-apples requires R7 corpus.
+- Soft-CE branch verification: `train_bc.py:362-369` keys on `policy_targets` being in batch dict — not on schema version. Re-extractor preserves `policyTargets`. Fires automatically.
+- Train cmd: standard `train_bc.py --data <re-extracted v3 jsonl> --epochs 75 --hidden 64 --depth 2`. Same hyperparams as R7 baseline.
+
+### Phase 6 — Gate eval (~5–10 min)
+
+**`training/r8_gate_eval.py` reuses as-is.** Schema-agnostic (lines 115-176): chains `export_checkpoint_to_onnx` → `serve_onnx_context` → `run_eval_gate`. Checkpoint's `model_config.state_dim` asserted to match (lines 17-21).
+
+```
+python training/r8_gate_eval.py \
+  --checkpoint runs/R7b2-card-embed/iter-000/model/checkpoint.pt \
+  --out-dir runs/R7b2-card-embed/iter-000 \
+  --games 500 --seed-start 9000 --min-ci-lower 0.40
+```
+
+### Pre-flight cost-cutters (concrete answers)
+
+- **Fits in existing trainer? YES.** `train_bc.py` change is ~5 LOC (positional → keyword model call). No new loop/optim/loss plumbing.
+- **New ONNX input tensor cost? LOW.** Two new int inputs; opset 17 `Gather` native; ORT-CPU embedding lookup is microseconds at batch=1. Smoke: `npm run test:python-train` already does ONNX roundtrip — extend assertion to new tensors. Residual risk = `padding_idx=0` semantics under ONNX export (verified for embedding via `Gather`; `(ids != 0).unsqueeze(-1)` mask exports cleanly).
+- **Vocab fits exactly.** `cardVocab.json` has `vocabSize=107, unknownIndex=0`. Use `nn.Embedding(108, 32, padding_idx=0)` — index 0 doubles as unknownIndex (matches `card_vocab_index` behaviour) + explicit pad. No vocab bump.
+- **DAgger regen avoided** (per § 9): every R7.b schema bump re-extracts from JSONL in tens of seconds. Phase 4 is the single touchpoint.
+- **TS-side smokes already cover this.** `npm run test:dagger-orchestrator` exercises observation JSON → relabel pipeline; catches any TS-side `cardIdsByZone` shape break.
+
+### Open questions (smoke-testable only)
+
+- ONNX `Gather` with batched int inputs at opset 17, specifically `nn.Embedding(padding_idx=0)` export. Expected to work; fallback is manual `F.embedding(idx, weight)`. Extend `train_bc.py:283-300` roundtrip smoke.
+- TS-side vocab consumer (`shared/src/cardVocab.ts` or equivalent) existence — grep first before adding duplicate.
+- Padding cap for hand/discard. Recommend fixed cap **30** for ONNX shape stability; clip with WARNING log if exceeded.
+- Action-target uid → cardId resolution at action build time. ~15 LOC TS helper; locate via grep on `payload.targetUid`.
+
+### Validation gates (cumulative, per phase)
+
+- **After Phase 3:** `npm run test:python-train` PASS (extend to assert ONNX roundtrip on new tensors); `npm run test:train` PASS; `npm run test:dagger-orchestrator` PASS.
+- **After Phase 4:** re-extractor produces JSONL with `schemaVersion: 3`, expected row count, all card-id arrays non-empty.
+- **After Phase 5:** SL training completes ~30 min, val_acc not catastrophically below R7's plateau peak (0.7855 @ ep16).
+- **After Phase 6:** Wilson lower at n=500. Exit per § 7: ≥ 0.40 PASS, ≥ 0.37 ∧ < 0.40 → R7.b.3 attention follow-up, < 0.37 → close R7.b family + escalate.
