@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T15:50Z",
+  "updated": "2026-05-14T16:30Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -101,10 +101,8 @@
     {
       "id": "r7b-hygiene-wire-unused-fields",
       "priority": "P3",
-      "status": "ready",
-      "autonomous_launch_eligible": true,
-      "summary": "R7.b.1 hygiene quick-win (per scoping § 3, § 6 step 1): wire three JSON fields the encoder currently ignores — `firstPlayer` and `pendingChoiceKind` from PublicObservation, and per-uma `toolCardId` from PublicUmaObservation. Adds ~6–10 scalar slots; schema v2.1 (additive); no regression risk. ~half day. Independent of R7 outcome — can fire now.",
-      "next_action": "Implementer: extend training/uma_ai/features.py observation_to_features to read these three fields; emit additive scalar slots (firstPlayer as own-or-opp bool, pendingChoiceKind as small one-hot, toolCardId as per-uma hash). Bump features schema_version 2 → 2.1. Update PublicUmaObservation toolCardId pass-through in backend/src/sim/ if currently stripped. SL gate eval at unchanged corpus to confirm no Wilson regression. Append result to scoping doc § 4 hygiene line."
+      "status": "done",
+      "summary": "R7.b.1 LANDED. Schema v2.1 additive bump (STATE_DIM 96→110, +14 slots): [96] firstPlayer polarity vs sideToAct, [97:100] pendingChoiceKind one-hot in hard-coded `PENDING_CHOICE_KINDS` order, [100:110] per-uma toolCardId hashed-float matching `_identity_features` 10-uma accounting. STATE_FEATURE_SCHEMA_VERSION 2→2.1. TS-side already emits all three fields — zero TS edits. Files: `training/uma_ai/features.py` +63, `training/train_bc.py` +1 (added `state_hygiene_v21` ablation choice). Old 96-d checkpoints fail loud via strict load + `export_onnx.py:17-21` dim check. Smokes (TMPDIR=/tmp): npm run build PASS; npm run test:train PASS; npm run test:python-train PASS (manifest verifies state_dim=110, state_feature_schema_version=2.1, ONNX roundtrip PASS). Result block at docs/ai-research/scoping/r7b-feature-representation.md § 10. SL gate retrain to confirm Wilson non-regression is a separate followup (R7.b.2 reuses anyway)."
     },
     {
       "id": "r7b-card-embedding-pass",

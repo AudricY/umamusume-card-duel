@@ -152,3 +152,17 @@ Verbatim from `docs/ai-research-backlog.md` § R7.b:
 **Cost implication.** Every R7.b schema bump (v2.1 hygiene → v3 embedding → v3.x set-encoder) re-extracts features by a Python script that reads each `trace.jsonl` line, calls a new `observation_to_features_vN(row['observation'])` + recomputes action vectors from `row['legalActions'][i].payload`, and writes a new feature-cache file alongside the trace. Order-of-magnitude wall-clock at ~2KB/row, ~50k rows/sweep: tens of seconds per corpus, not multi-hour. **DAgger regen is NOT required for any schema-change-only intervention in the v1 R7.b plan.** Exception: intervention #4 (recent action history) needs cross-row state that is not in any single trace row — confirm row-stream offline reconstruction works for that one separately when R7.b.4 promotes.
 
 **One-line digest pointer.** R7.b.0 verdict YES: R14/R15.S1 trace rows carry raw `PublicObservation` + legalAction payloads, so schema bumps re-extract from JSONL (~tens of sec) instead of regenerating DAgger (~hours).
+
+## 10. Result: R7.b.1 hygiene wire-unused-fields (2026-05-14)
+
+**Verdict: LANDED.** Schema v2.1 (additive) wires three free JSON fields the encoder ignored: `firstPlayer`, `pendingChoiceKind`, per-uma `toolCardId`. STATE_DIM 96 → **110** (+14 scalar slots); `STATE_FEATURE_SCHEMA_VERSION` 2 → **2.1**.
+
+**Layout (additive, slots 96-109).** `[96]` firstPlayer polarity vs `sideToAct` (+1 own / -1 opp / 0 absent). `[97:100]` `pendingChoiceKind` one-hot in hard-coded order `[none, promoteAfterKnockout, switchAfterGust]` (`PENDING_CHOICE_KINDS` in `features.py` — append-only). `[100:110]` per-uma `toolCardId` hashed-float, 10 slots in `_identity_features` accounting order (own active, own bench 0-3, opp active, opp bench 0-3); null → 0.0; uses the same vocab-indexed `_hash_to_unit` as the existing identity-hash slots.
+
+**TS-side check.** All three fields already emitted at `frontend/src/game/engine/ai-policy/observation.ts:13-14, 57`; no TS edits required.
+
+**Files changed (LOC delta).** `training/uma_ai/features.py` +63 (3 helper fns + ablation hook + slot wiring + header note); `training/train_bc.py` +1 (`state_hygiene_v21` added to `--ablate` choices). All downstream `STATE_DIM` consumers (`dataset.py`, `selfplay_dataset.py`, `value_target_dataset.py`, `pair_corpus.py`, `train_bc.py`, `train_ppo.py`, `export_onnx.py`, `serve_onnx.py`, `smoke_e2e.py`) pick up the new dim via the constant — no edits. Existing 96-d checkpoints fail loud on load via strict `model.load_state_dict` mismatch + `export_onnx.py:17-21` config check.
+
+**Smokes (TMPDIR=/tmp).** `npm run build` PASS; `npm run test:train` PASS (6/6 TS smokes); `npm run test:python-train` PASS — manifest verifies `feature_schema.state_dim=110`, `state_feature_schema_version=2.1`, `model_config.state_dim=110`, ONNX roundtrip PASS, served prediction matches direct ONNX.
+
+**Followup.** SL gate retrain on the R7 corpus to confirm Wilson non-regression (scoping § 7 gate (a)) is **out of scope for this slot** — single-iter retrain + n=500 gate eval (~30 min). Will be reused by R7.b.2 (card-embedding pass) anyway, so deferring is cheap.

@@ -7,9 +7,21 @@ from typing import Any
 
 import numpy as np
 
-STATE_DIM = 96
+# R7.b.1 hygiene wire-unused-fields: schema v2.1 additive bump.
+# Adds 14 scalar slots [96:110] surfacing three JSON fields the encoder
+# previously ignored (see scoping doc § 3 "free signals" + § 6 step 1):
+#   - slot 96: firstPlayer polarity vs sideToAct (own=+1 / opp=-1).
+#   - slots 97-99: pendingChoiceKind one-hot (none / promoteAfterKnockout /
+#     switchAfterGust). Hard-coded order in PENDING_CHOICE_KINDS so future
+#     unions append without shifting existing slot meanings.
+#   - slots 100-109: per-uma toolCardId hashed-float (own active, own bench
+#     1-4, opp active, opp bench 1-4). Matches the 10-uma accounting in
+#     `_identity_features` (slots 32-41). Empty / null → 0.0.
+# Additive only. Existing slot meanings unchanged. Existing R7/R15.S1 trace
+# JSONLs re-extract under v2.1 without resimulating (R7.b.0 verdict YES).
+STATE_DIM = 110
 ACTION_DIM = 48
-STATE_FEATURE_SCHEMA_VERSION = 2
+STATE_FEATURE_SCHEMA_VERSION = 2.1
 ACTION_FEATURE_SCHEMA_VERSION = 2
 
 PHASES = [
@@ -26,6 +38,11 @@ PHASES = [
 ]
 
 SIDES = ["player", "opponent"]
+
+# Hard-coded ordering so adding a new union arm doesn't shift v2.1 slot
+# meanings. Mirrors `PublicObservation.pendingChoiceKind` union in
+# `frontend/src/game/engine/ai-policy/types.ts`.
+PENDING_CHOICE_KINDS = ["promoteAfterKnockout", "switchAfterGust"]
 
 
 FeatureAblation = str
@@ -61,6 +78,10 @@ def observation_to_features(observation: dict[str, Any], ablations: set[FeatureA
     features[48:58] = _energy_vector((own.get("active") or {}).get("energies", {}))
     features[58:68] = _energy_vector((opponent.get("active") or {}).get("energies", {}))
     features[68:96] = _card_awareness_features(own, opponent, shared)
+    # R7.b.1 hygiene additive slots — see schema v2.1 header note.
+    features[96] = _first_player_polarity(observation, side)
+    features[97:100] = _pending_choice_one_hot(observation.get("pendingChoiceKind"))
+    features[100:110] = _tool_card_features(own, opponent)
     apply_state_ablations(features, ablations or set())
     return features
 
@@ -91,6 +112,12 @@ def apply_state_ablations(features: np.ndarray, ablations: set[FeatureAblation])
     if "state_semantic" in ablations:
         features[10:32] = 0
         features[48:96] = 0
+    # R7.b.1 v2.1 ablation hook: zero the additive hygiene slots so callers
+    # can isolate the contribution of `firstPlayer` / `pendingChoiceKind` /
+    # per-uma `toolCardId` against the legacy 96-d encoding without
+    # touching slot meanings elsewhere.
+    if "state_hygiene_v21" in ablations:
+        features[96:110] = 0
 
 
 def apply_action_ablations(features: np.ndarray, ablations: set[FeatureAblation]) -> None:
@@ -155,6 +182,67 @@ def _identity_features(own: dict[str, Any], opponent: dict[str, Any]) -> np.ndar
     values[13] = float(len(own.get("handCardIds") or [])) / 10.0
     values[14] = float(len(own.get("bench") or [])) / 4.0
     values[15] = float(len(opponent.get("bench") or [])) / 4.0
+    return values
+
+
+def _first_player_polarity(observation: dict[str, Any], side_to_act: str) -> float:
+    """Encode first-player as own/opp polarity vs the side currently acting.
+
+    `+1` when the side currently acting also went first this game; `-1` when
+    the acting side is the second player. Polarity matches the +1/-1
+    convention used by the side-of-active scalar at slot 1 (which encodes the
+    SIDES index 0/1 directly, kept unchanged to avoid disturbing legacy slot
+    meanings). Returns 0.0 if the field is absent (legacy rows pre-dating the
+    field — no v2.1 trace has been seen without it, but be permissive).
+    """
+
+    first = observation.get("firstPlayer")
+    if first not in SIDES or side_to_act not in SIDES:
+        return 0.0
+    return 1.0 if first == side_to_act else -1.0
+
+
+def _pending_choice_one_hot(kind: Any) -> np.ndarray:
+    """Stable one-hot over the union in `PublicObservation.pendingChoiceKind`.
+
+    Layout: [none, promoteAfterKnockout, switchAfterGust]. Order is hard-coded
+    in `PENDING_CHOICE_KINDS` so new union arms append (lifting STATE_DIM)
+    rather than shifting existing positions.
+    """
+
+    values = np.zeros(1 + len(PENDING_CHOICE_KINDS), dtype=np.float32)
+    if kind is None or not isinstance(kind, str):
+        values[0] = 1.0
+        return values
+    if kind in PENDING_CHOICE_KINDS:
+        values[1 + PENDING_CHOICE_KINDS.index(kind)] = 1.0
+    else:
+        # Unknown kind (new union arm in TS not yet mirrored here) → fall back
+        # to the "none" bucket so we never silently corrupt one of the named
+        # slots. Bump `PENDING_CHOICE_KINDS` + STATE_DIM when this fires.
+        values[0] = 1.0
+    return values
+
+
+def _tool_card_features(own: dict[str, Any], opponent: dict[str, Any]) -> np.ndarray:
+    """Per-uma `toolCardId` hashed-float; 10 slots in fixed positions.
+
+    Layout matches the 10-uma accounting in `_identity_features`:
+        [own.active, own.bench[0..3], opp.active, opp.bench[0..3]]
+    Uses the same `_hash_to_unit` mapping (vocab-indexed when available) so
+    a tool card's float position is stable across runs and shares the vocab
+    hash recorded on the checkpoint. Empty / null → 0.0.
+    """
+
+    values = np.zeros(10, dtype=np.float32)
+    own_active = own.get("active") or {}
+    opp_active = opponent.get("active") or {}
+    values[0] = _hash_to_unit(str(own_active.get("toolCardId") or ""))
+    for offset, entry in enumerate((own.get("bench") or [])[:4], start=1):
+        values[offset] = _hash_to_unit(str((entry or {}).get("toolCardId") or ""))
+    values[5] = _hash_to_unit(str(opp_active.get("toolCardId") or ""))
+    for offset, entry in enumerate((opponent.get("bench") or [])[:4], start=6):
+        values[offset] = _hash_to_unit(str((entry or {}).get("toolCardId") or ""))
     return values
 
 

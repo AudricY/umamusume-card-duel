@@ -734,6 +734,7 @@ def parse_args() -> argparse.Namespace:
         "state_energy_vectors",
         "state_card_awareness",
         "state_semantic",
+        "state_hygiene_v21",
         "action_source_target",
         "action_trainer_semantic",
         "action_tactical",
