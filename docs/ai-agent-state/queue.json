@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T28",
+  "updated": "2026-05-14",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -11,10 +11,16 @@
     {
       "id": "r15-s3-branch-synthesis-and-next-pick",
       "priority": "P2",
+      "status": "done",
+      "summary": "Closed 2026-05-14 self-directed: picked R7 (multi-teacher BC blend) over R8. Reasoning in docs/ai-agent-state/escalations.md `## Resolved`."
+    },
+    {
+      "id": "r7-multi-teacher-warmstart-scoping",
+      "priority": "P2",
       "status": "ready",
-      "autonomous_launch_eligible": false,
-      "summary": "R15.S3 reward-shape branch CLOSED across both axes (axis 1 observation-delta saturated at 0.368 ± 0.001 across L/M/N/O'; axis 2 value-head tempo REGRESSED at coef 0.05 → 0.3502 and coef 0.01 → 0.3463 across Phases O/P). Total branch cost ~36 min compute across 6 phases. F1 post-mortem framing now: 'reward-shape mechanism cannot break 0.368; surviving moves must change warm-start (R7) or optimization objective (R8).' Path (a) value-head tempo was executed and exhausted at Phases O+P — no longer a surviving candidate. **Two F1-line candidates remain, both autonomous-launch-INELIGIBLE (human-rank decisions, meaningfully different research directions):** (b) R7 multi-teacher labels (SL warm-start rebuild; doesn't touch reward, changes SL pipeline); (c) R8 DPO (PPO replacement; doesn't depend on per-step hand-shaped reward signal; bigger pivot). A non-per-step reward-shaping framework (turn-based or game-phase aggregate shaping) is a fourth, untested possibility — ranked below R7/R8.",
-      "next_action": "Human picks R7 vs R8 vs hybrid as the next F1-line research direction. Decision filed at docs/ai-agent-state/escalations.md `## Open`; full synthesis at docs/ai-agent-state/notes.md `## F1 reward shaping — scoping (2026-05-14)` Final R15.S3 branch summary block; closeout writeup at docs/ai-performance-research-progress.md § 'Phase P — F1 PPO + value-head tempo signal, coef 0.01 (R15.S3 GENUINE BRANCH CLOSEOUT)'."
+      "autonomous_launch_eligible": true,
+      "summary": "R7 multi-teacher BC blend scoping → execution. Forward brief: docs/ai-research-backlog.md § R7. Pre-reg exit: warm-start Wilson ≥ 0.35 AND PPO sweep Wilson ≥ 0.40 (else close branch with new SL ceiling).",
+      "next_action": "Author docs/ai-research/scoping/r7-multi-teacher-warmstart.md per new CLAUDE.md docs structure: hypothesis, pre-reg exit, code-touch list (planner-relabel call site, multi-`labelSource` row schema, mixed-corpus dataset, label-smoothing or top-K objective), ordered exec plan. Then implementer builds + runs."
     },
     {
       "id": "planning-refresh-after-r14-e",
