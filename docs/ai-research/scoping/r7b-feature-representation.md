@@ -317,3 +317,35 @@ Total: ~273 inserted, ~24 deleted across 4 files — overshoot vs scoping § 11'
 **Open question for Phase 4.** None blocking. Phase 4 (`r7b2_extract_features.py` ~120 LOC) is now fully unblocked and parallelisable with Phase 5 (SL retrain ~30 min CPU) per scoping § 11. The new ONNX inputs accept the all-zero null path bit-identically, so any pre-Phase-4 checkpoint can still export/serve under the v3 graph for ablation comparisons.
 
 **One-line digest pointer.** R7.b.2 Phase 3 LANDED: ONNX export + serve_onnx wired for `card_ids_by_zone` + `action_card_idx`; opset 17, no F.embedding fallback; padding bit-identical (0.0/0.0); populated roundtrip <2.4e-7.
+
+## 15. Result: R7.b.2 Phase 4 — re-extractor LANDED (2026-05-14)
+
+**Verdict: LANDED.** Offline feature re-extractor `training/r7b2_extract_features.py` (335 LOC incl. docstrings, ~190 LOC code) stream-reads any pre-Phase-1 v1-schema JSONL row-by-row, injects `cardIdsByZone` onto the observation and `actionSourceCardIdx`/`actionTargetCardIdx` on each `LegalAiAction`, bumps `observation.schemaVersion` 1 → 2, preserves the outer `row.schemaVersion = 1` (matches `dataset.py:ROW_SCHEMA_VERSION = 1`, the Phase 2 split decision), preserves `policyTargets` + `selectedActionId` + `teachers` + `result` etc. untouched. CLI: `--input` / `--output` required, fail-loud on missing. Prints summary JSON with rows-processed + per-zone non-empty counts + per-kind action/source/target nonnull histograms.
+
+**Per-action source/target resolution table (implemented; mirrors `frontend/src/game/engine/ai-policy/actions.ts`).**
+
+| kind | actionSourceCardIdx | actionTargetCardIdx |
+|------|---------------------|----------------------|
+| `pass` / `endTurn` / `useStadium` | null | null |
+| `setupChooseBoard` | `handCardIds[activeHandIndex]` → vocab | null |
+| `resolvePendingChoice` | null | uid → cardId → vocab |
+| `playBasic` | `handCardIds[handIndex]` → vocab | null |
+| `playTrainer` | `handCardIds[handIndex]` → vocab | `choices.umamusumeTargetUid` → cardId → vocab (else null) |
+| `evolve` | `handCardIds[handIndex]` → vocab | `targetUid` → cardId → vocab |
+| `attachEnergy` | null | `targetUid` → cardId → vocab |
+| `useAbility` (move energy) | `sourceUid` → cardId → vocab | `energySourceUid` → cardId → vocab |
+| `useAbility` (damage any) | `sourceUid` → cardId → vocab | `targetUid` → cardId → vocab |
+| `useAbility` (discard / bare) | `sourceUid` → cardId → vocab | `sourceUid` → cardId → vocab (target = source per actions.ts) |
+| `attack` / `retreatAttack` | retreatTargetUid? → bench uid → cardId → vocab; else own.active.cardId → vocab | `decision.attackTargetUid` → uid → cardId → vocab; else null * |
+
+  \* `attack`/`retreatAttack` target stays null when the decision payload lacks `attackTargetUid` (the planner only emits it for any-target attacks). R7's corpus has **0 / 1339** attack actions with `attackTargetUid` (sampled across the full mixed.jsonl), so all observed attack targets pad to null. This matches `actions.ts:402-426` (`targetUid = decision.attackTargetUid`; undefined → `target = undefined` → `actionTargetCardIdx: null`).
+
+**Files changed.**
+- `training/r7b2_extract_features.py` +335 (new — standalone script).
+- `training/smoke_e2e.py` +166 — `assert_r7b2_extractor_roundtrip` wires the extractor into `test:python-train`. Strips Phase-1 fields from a 5-row baseline slice, subprocesses the extractor, asserts: stdout summary parses, all rows produce valid `card_ids_by_zone`/`action_card_idx`, `policyTargets` unchanged when present, a `CandidatePolicyNet.forward` over the loaded batch grades non-zero on `card_embed.weight`.
+
+**Smokes (TMPDIR=/tmp).** `npm run build` PASS (vite 741ms); `npm run test:train` PASS (7/7 TS smokes); `npm run test:python-train` PASS — the new `assert_r7b2_extractor_roundtrip` slot ran clean alongside the Phase-2/3 smokes. Fixture artifacts: `training/runs/smoke/r7b2_extractor_fixture_{v1,v3}.jsonl`. Pre-merge sanity also confirmed on a hand-crafted 14-action fixture: 8 zones populate correctly, per-kind src/tgt resolutions match the table above on every kind (including `useAbility` move-energy: src=active, tgt=bench; `attack` with `attackTargetUid` set: tgt=opp uid lookup).
+
+**Phase 5 is unblocked.** Actual R7-corpus re-extract is **explicitly out of scope this slot** — the brief reserves it for Phase 5's first step so the histogram + any warnings can be monitored before launching SL retrain. The extractor is wall-clock cheap (tens of seconds on 12387 rows per scoping § 9), so Phase 5 absorbs the cost.
+
+**One-line digest pointer.** R7.b.2 Phase 4 LANDED: `r7b2_extract_features.py` 335 LOC; mirrors actions.ts 12-kind src/tgt table; fixture-smoke wired into test:python-train; actual R7 corpus re-extract reserved for Phase 5 first step.

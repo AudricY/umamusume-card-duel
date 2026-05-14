@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T23:30Z",
+  "updated": "2026-05-14T23:45Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -12,8 +12,8 @@
       "id": "r7b-card-embedding-pass",
       "priority": "P2",
       "status": "ready",
-      "summary": "R7.b.2 headline pass: card embedding (#1) + action-target embedding (#2) bundled. Phases 1-2 LANDED (scoping § 12-13): schema bump, Python encoder, all smokes PASS. Remaining: ONNX wire + feature re-extract + SL retrain + gate eval. Pre-reg exit per scoping § 7. See docs/ai-research/scoping/r7b-feature-representation.md.",
-      "next_action": "Execute remaining work up to the SL retrain gate as one /work step: ONNX export change + serve_onnx tensor build + feature re-extractor + kick off SL retrain. Stop at retrain launch (the next external wall-clock gate, ~30 min CPU). See scoping § 11 phases 3-5."
+      "summary": "R7.b.2 headline pass: card embedding (#1) + action-target embedding (#2) bundled. Phases 1-4 LANDED (scoping § 12-15): schema bump, Python encoder, ONNX export, feature re-extractor. Remaining: Phase 5 SL retrain + Phase 6 gate eval. Pre-reg exit per scoping § 7. See docs/ai-research/scoping/r7b-feature-representation.md.",
+      "next_action": "Phase 5 + 6: (a) run training/r7b2_extract_features.py on runs/R7-multi-teacher-warmstart/iter-000/mixed.jsonl → write runs/R7-multi-teacher-warmstart/iter-000/mixed-v3.jsonl; sanity-check the output histogram (~12387 rows, tens of seconds CPU). (b) Launch SL retrain: training/.venv/bin/python training/train_bc.py --data <v3 jsonl> --epochs 75 --hidden 64 --depth 2 --out-dir runs/R7b2-card-embed/iter-000/model/ — same hyperparams as R7 baseline. (c) When retrain completes (~30 min CPU), Phase 6 fires the gate eval via training/r8_gate_eval.py (n=500, --min-ci-lower 0.40). See scoping § 11 phases 5-6 for the gate exit table (≥0.40 PASS, [0.37,0.40) → R7.b.3 attention follow-up, <0.37 → close family)."
     },
     {
       "id": "planning-refresh-after-r14-e",

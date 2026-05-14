@@ -224,6 +224,7 @@ def main() -> None:
     assert_kl_anchor_smoke(repo_root, run_dir, examples_path, anchor_checkpoint=model_dir / "checkpoint.pt")
     assert_multi_teacher_dataset_loader(repo_root, run_dir, examples_path)
     assert_card_embedding_forward(repo_root, run_dir, examples_path)
+    assert_r7b2_extractor_roundtrip(repo_root, run_dir, examples_path)
     assert_dpo_smoke(repo_root, run_dir, reference_checkpoint=model_dir / "checkpoint.pt")
 
     print(json.dumps({
@@ -629,6 +630,186 @@ def assert_card_embedding_forward(repo_root: Path, run_dir: Path, baseline_jsonl
             f"R7.b.2 Phase 2 smoke: zero-id forward != omitted-arg forward; logits diff "
             f"{max_logit_diff}, values diff {max_value_diff}. padding_idx=0 leaks signal "
             "or the default-zero branch is wired differently from the embed(0) path."
+        )
+
+
+def assert_r7b2_extractor_roundtrip(repo_root: Path, run_dir: Path, baseline_jsonl: Path) -> None:
+    """R7.b.2 Phase 4: offline feature re-extractor end-to-end smoke.
+
+    Synthesises a tiny v1-schema fixture (pre-Phase-1) by stripping the
+    `cardIdsByZone` and per-action source/target idx fields from the
+    live baseline corpus (which already carries them via Phase 1 TS
+    emission). Runs `training/r7b2_extract_features.py` as a subprocess
+    on the fixture and verifies the brief's sanity-check contract:
+
+      (a) Re-extractor exits 0 and emits one output line per non-empty
+          input line.
+      (b) `load_policy_samples` accepts the output unchanged — every
+          row produces valid `card_ids_by_zone` (shapes match
+          `CARD_ID_SHAPES`, int64) and a valid `action_card_idx`
+          `(num_actions, 2)` int64 array.
+      (c) `policyTargets` is preserved unchanged.
+      (d) `CandidatePolicyNet.forward` accepts the loaded batch and
+          gradient flows back to `card_embed.weight` — confirms the
+          re-extracted output is on the same code path as Phase 1
+          live-emitted rows.
+
+    Out of scope: running on the real R7 corpus. Phase 5's brief
+    starts there; this smoke runs on a 1-row hand-stripped fixture.
+    """
+
+    import numpy as np
+    import torch
+
+    from uma_ai.dataset import collate_policy_batch, load_policy_samples
+    from uma_ai.features import CARD_ID_SHAPES, ZONE_ORDER
+    from uma_ai.model import CandidatePolicyNet, ModelConfig
+
+    # Build a v1-schema fixture by stripping the Phase-1 fields from the
+    # baseline corpus. This is the substantive test of the "fail-loud
+    # on missing cardIdsByZone" recovery path: the re-extractor must
+    # re-create exactly the fields the loader now requires.
+    raw_rows = baseline_jsonl.read_text(encoding="utf8").strip().splitlines()
+    if not raw_rows:
+        raise AssertionError(f"R7.b.2 Phase 4 smoke: baseline corpus empty: {baseline_jsonl}")
+    fixture_lines: list[str] = []
+    for raw in raw_rows[: min(5, len(raw_rows))]:
+        row = json.loads(raw)
+        observation = dict(row.get("observation") or {})
+        observation.pop("cardIdsByZone", None)
+        observation["schemaVersion"] = 1
+        row["observation"] = observation
+        legal_actions = []
+        for action in row.get("legalActions") or []:
+            stripped = {k: v for k, v in action.items() if k not in {"actionSourceCardIdx", "actionTargetCardIdx"}}
+            legal_actions.append(stripped)
+        row["legalActions"] = legal_actions
+        fixture_lines.append(json.dumps(row))
+    fixture_path = run_dir / "r7b2_extractor_fixture_v1.jsonl"
+    fixture_path.write_text("\n".join(fixture_lines) + "\n", encoding="utf8")
+    output_path = run_dir / "r7b2_extractor_fixture_v3.jsonl"
+
+    # (a) Re-extractor subprocess succeeds.
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "training" / "r7b2_extract_features.py"),
+            "--input",
+            str(fixture_path),
+            "--output",
+            str(output_path),
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"R7.b.2 Phase 4 smoke: r7b2_extract_features.py failed (rc={result.returncode}); "
+            f"stderr={result.stderr!r}"
+        )
+    # Summary JSON should be on stdout and parse.
+    try:
+        summary = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"R7.b.2 Phase 4 smoke: re-extractor stdout is not JSON: {result.stdout!r}"
+        ) from exc
+    expected_rows = len(fixture_lines)
+    if int(summary.get("rows_processed", -1)) != expected_rows:
+        raise AssertionError(
+            f"R7.b.2 Phase 4 smoke: rows_processed {summary.get('rows_processed')} != {expected_rows}"
+        )
+    # Active zones must be populated for every fixture row (baseline
+    # corpus always has an own active).
+    if int(summary["zone_nonempty_count"].get("ownActive", 0)) != expected_rows:
+        raise AssertionError(
+            f"R7.b.2 Phase 4 smoke: ownActive non-empty count "
+            f"{summary['zone_nonempty_count'].get('ownActive')} != {expected_rows}"
+        )
+
+    # (b) Loader accepts the output; (c) policyTargets preserved.
+    raw_in_payload = json.loads(fixture_lines[0])
+    original_policy_targets = raw_in_payload.get("policyTargets")
+    samples = list(load_policy_samples(output_path, min_actions=1))
+    if not samples:
+        raise AssertionError(
+            "R7.b.2 Phase 4 smoke: load_policy_samples returned 0 samples from re-extracted output"
+        )
+    for sample in samples:
+        if sample.card_ids_by_zone is None or sample.action_card_idx is None:
+            raise AssertionError(
+                "R7.b.2 Phase 4 smoke: re-extracted sample missing card_ids_by_zone / action_card_idx"
+            )
+        for zone, width in CARD_ID_SHAPES.items():
+            arr = sample.card_ids_by_zone[zone]
+            if arr.shape != (width,) or arr.dtype != np.int64:
+                raise AssertionError(
+                    f"R7.b.2 Phase 4 smoke: zone {zone!r} shape/dtype "
+                    f"{arr.shape}/{arr.dtype} != ({width},)/int64"
+                )
+        num_actions = sample.action_features.shape[0]
+        if sample.action_card_idx.shape != (num_actions, 2):
+            raise AssertionError(
+                f"R7.b.2 Phase 4 smoke: action_card_idx shape "
+                f"{sample.action_card_idx.shape} != ({num_actions}, 2)"
+            )
+        if sample.action_card_idx.dtype != np.int64:
+            raise AssertionError(
+                f"R7.b.2 Phase 4 smoke: action_card_idx dtype {sample.action_card_idx.dtype} != int64"
+            )
+    if original_policy_targets is not None:
+        roundtripped = samples[0].example.get("policyTargets")
+        if roundtripped != original_policy_targets:
+            raise AssertionError(
+                "R7.b.2 Phase 4 smoke: policyTargets mutated by re-extractor: "
+                f"original={original_policy_targets} roundtripped={roundtripped}"
+            )
+
+    # Non-trivial card ids: at least one zone for at least one sample
+    # must have a non-zero index. Baseline corpus always has an own
+    # active uma, so this holds on a real row.
+    nonzero = False
+    for sample in samples:
+        for arr in sample.card_ids_by_zone.values():  # type: ignore[union-attr]
+            if int(arr.sum()) != 0:
+                nonzero = True
+                break
+        if nonzero:
+            break
+    if not nonzero:
+        raise AssertionError(
+            "R7.b.2 Phase 4 smoke: every zone empty across all re-extracted samples"
+        )
+
+    # (d) Forward + backward: re-extracted batch must flow gradient to
+    # the embedding table, proving the re-extractor's output is on the
+    # same training code path as Phase 1 live-emitted rows.
+    batch = collate_policy_batch(list(samples))
+    config = ModelConfig(hidden_dim=32, depth=1, dropout=0.0)
+    model = CandidatePolicyNet(config)
+    model.train()
+    logits, values = model(
+        batch["state_features"],
+        batch["action_features"],
+        batch["action_mask"],
+        card_ids_by_zone=batch["card_ids_by_zone"],
+        action_card_idx=batch["action_card_idx"],
+    )
+    loss = logits.sum() + values.sum()
+    loss.backward()
+    if model.card_embed.weight.grad is None or model.card_embed.weight.grad.abs().sum().item() == 0.0:
+        raise AssertionError(
+            "R7.b.2 Phase 4 smoke: card_embed received no gradient on a re-extracted batch — "
+            "the re-extractor output is detached from the embedding pass"
+        )
+    # Reuse the ZONE_ORDER import to ensure the loader-side packing
+    # honours the canonical zone enumeration. If this fires, the
+    # collator is silently dropping a zone.
+    if batch["card_ids_by_zone"].shape[1] != len(ZONE_ORDER):
+        raise AssertionError(
+            f"R7.b.2 Phase 4 smoke: packed card_ids_by_zone has "
+            f"{batch['card_ids_by_zone'].shape[1]} zones, expected {len(ZONE_ORDER)}"
         )
 
 
