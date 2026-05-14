@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T23:45Z",
+  "updated": "2026-05-14T17:30Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -9,11 +9,36 @@
       "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section."
     },
     {
-      "id": "r7b-card-embedding-pass",
+      "id": "mcts-distill-scoping",
       "priority": "P2",
       "status": "ready",
-      "summary": "R7.b.2 headline pass: card embedding (#1) + action-target embedding (#2) bundled. Phases 1-4 LANDED (scoping § 12-15): schema bump, Python encoder, ONNX export, feature re-extractor. Remaining: Phase 5 SL retrain + Phase 6 gate eval. Pre-reg exit per scoping § 7. See docs/ai-research/scoping/r7b-feature-representation.md.",
-      "next_action": "Phase 5 + 6: (a) run training/r7b2_extract_features.py on runs/R7-multi-teacher-warmstart/iter-000/mixed.jsonl → write runs/R7-multi-teacher-warmstart/iter-000/mixed-v3.jsonl; sanity-check the output histogram (~12387 rows, tens of seconds CPU). (b) Launch SL retrain: training/.venv/bin/python training/train_bc.py --data <v3 jsonl> --epochs 75 --hidden 64 --depth 2 --out-dir runs/R7b2-card-embed/iter-000/model/ — same hyperparams as R7 baseline. (c) When retrain completes (~30 min CPU), Phase 6 fires the gate eval via training/r8_gate_eval.py (n=500, --min-ci-lower 0.40). See scoping § 11 phases 5-6 for the gate exit table (≥0.40 PASS, [0.37,0.40) → R7.b.3 attention follow-up, <0.37 → close family)."
+      "summary": "Scope MCTS-distillation as the next F1 lever after R7/R8/R7.b.2 closed FAIL. Rollout-leaf MCTS at R12 iter-2 hits Wilson 0.6479 with inference-time search; distill that visit-count distribution as the SL target. train_bc.py:887 already wires --data-mode mcts-distill. Pre-reg gate consistent with prior F1 family: Wilson lower ≥ 0.40 at iter-0 SL gate from a phase-H-scale retrain.",
+      "next_action": "Step 1 (investigator): locate where --data-mode mcts-distill labels come from — likely a sibling of rollout/search/planner trace teachers; trace the data path from train_bc.py:29 (data_mode branch) to the dataset loader and to whatever generates the mcts-selfplay rows; identify whether R12/R13/R14 already produced compatible corpora or whether a fresh MCTS-trace pass is needed. Step 2 (implementer): author scoping doc at docs/ai-research/scoping/mcts-distill.md (hypothesis + corpus source + sweep config + exit gate) following the r7-multi-teacher-warmstart.md / r8-dpo.md / r7b-feature-representation.md template."
+    },
+    {
+      "id": "r7b-card-embedding-pass",
+      "priority": "P2",
+      "status": "done",
+      "summary": "R7.b.2 CLOSEOUT FAIL (2026-05-14): iter-0 Wilson 0.3045 (n=1000 side-balanced) < 0.37 pre-reg close-out threshold; +1.24pp wash vs R7 baseline; -2.24pp vs R15.S1; -6.32pp vs R15.S3 ceiling. Branch closed per scoping § 7. Result: docs/ai-research/progress/r15.md § R7.b.2."
+    },
+    {
+      "id": "r7b-attention-set-encoder",
+      "priority": "P4",
+      "status": "superseded",
+      "summary": "R7.b.3 was conditional on R7.b.2 lifting but capping below 0.40 (scoping § 4 #3). R7.b.2 did not lift (Wilson 0.3045 = wash vs R7 0.2921). R7.b family closed; superseded by mcts-distill-scoping."
+    },
+    {
+      "id": "r7b-history-and-aux-heads",
+      "priority": "P4",
+      "status": "superseded",
+      "summary": "R7.b.4 + R7.b.5 were deprioritised-revisit-after-R7.b.2 entries (scoping § 4 #4-#6). R7.b family closed 2026-05-14; superseded by mcts-distill-scoping."
+    },
+    {
+      "id": "model-py-amp-overflow-fix",
+      "priority": "P3",
+      "status": "ready",
+      "summary": "fp16 overflow at training/uma_ai/model.py:199 — logits.masked_fill(~action_mask.bool(), -1.0e9) overflows at::Half. Triggered when train_bc.py --amp is used on CUDA. Surfaced 2026-05-14 during R7.b.2 first-launch attempt; workaround was to drop --amp. Real fix: replace -1.0e9 with torch.finfo(logits.dtype).min (or -1e4 if simpler). One-line + smoke. Low priority (workaround works).",
+      "next_action": "Implementer: change training/uma_ai/model.py:199 constant from -1.0e9 to torch.finfo(logits.dtype).min (one line), add assert_amp_overflow_regression smoke in training/smoke_e2e.py that loads model in fp16 and runs forward without RuntimeError or NaN logits, wire smoke into test:python-train, commit."
     },
     {
       "id": "planning-refresh-after-r14-e",
@@ -28,18 +53,6 @@
       "status": "ready",
       "summary": "Pidfile race observed across digest slots 18/20/22/25/26 when launching orchestrator via `nohup npm run … &`: captured PID is the wrapper, not the orchestrator's real Python PID. Slot 34's direct `nohup training/.venv/bin/python -u … &` did NOT trigger the race. Working hypothesis: `nohup` × `npm run` wrapper interaction. Direct-python invocation already works as workaround.",
       "next_action": "When this becomes the highest-leverage open item: investigator confirms the hypothesis; if confirmed, implementer adds `pid.txt` write inside `training/dagger_orchestrator.py` startup and updates harness docs to prefer direct-python invocation."
-    },
-    {
-      "id": "r7b-attention-set-encoder",
-      "priority": "P4",
-      "status": "parked-pending-r7b-2",
-      "summary": "R7.b.3 conditional follow-up (per scoping § 4 #3): set-encoder / 1-2 layer self-attention over per-card tokens; replaces R7.b.2's sum-pool with attention pooling. Launch only if R7.b.2 lifts but caps below 0.40."
-    },
-    {
-      "id": "r7b-history-and-aux-heads",
-      "priority": "P4",
-      "status": "parked-pending-r7b-2",
-      "summary": "R7.b.4 + R7.b.5 deprioritised entries (per scoping § 4 #4-#6): recent-action history and aux heads / capacity bump. Held as parked entries so they aren't forgotten; not in the v1 R7.b plan."
     }
   ]
 }
