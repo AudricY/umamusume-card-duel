@@ -183,6 +183,7 @@ def main() -> None:
     assert_resume_continues_training(repo_root, run_dir, examples_path)
     assert_kl_anchor_smoke(repo_root, run_dir, examples_path, anchor_checkpoint=model_dir / "checkpoint.pt")
     assert_multi_teacher_dataset_loader(repo_root, run_dir, examples_path)
+    assert_dpo_smoke(repo_root, run_dir, reference_checkpoint=model_dir / "checkpoint.pt")
 
     print(json.dumps({
         "status": "PASS",
@@ -377,6 +378,149 @@ def assert_multi_teacher_dataset_loader(repo_root: Path, run_dir: Path, baseline
         raise AssertionError(
             f"R7 regression: one-hot soft-CE must equal hard-CE under uniform logits; got "
             f"soft={soft_loss.tolist()} hard={hard_loss.tolist()}"
+        )
+
+
+def assert_dpo_smoke(repo_root: Path, run_dir: Path, *, reference_checkpoint: Path) -> None:
+    """R8 step 1: DPO trainer scaffold smoke.
+
+    Synthetic 5-row preference batch (no JSONL needed — the BC-trained
+    `reference_checkpoint` doubles as both the frozen reference policy
+    AND the warm-start for the trainable model, matching the v1 setup
+    in `docs/ai-research/scoping/r8-dpo.md` § 3.5).
+
+    Asserts the four contracts from the brief:
+      (a) loss is finite
+      (b) gradients flow on policy params
+      (c) reference params have NO grad
+      (d) loss strictly decreases over 10 SGD steps on the same batch
+
+    Imports happen inside the function so the smoke does not perturb the
+    earlier ONNX server / serve_onnx tests if a DPO-side import is
+    accidentally heavy.
+    """
+
+    # Inline imports keep the DPO-only deps out of the top-level smoke
+    # module's import graph; everything below is already on sys.path
+    # because smoke_e2e.py is invoked from the training/ directory.
+    from train_dpo import dpo_loss_components, load_reference_policy
+    from uma_ai.features import ACTION_DIM, STATE_DIM
+    from uma_ai.model import CandidatePolicyNet, ModelConfig
+    from train_bc import load_init_from_checkpoint
+
+    torch.manual_seed(1234)
+    payload = torch.load(
+        reference_checkpoint, map_location="cpu", weights_only=False
+    )
+    config = ModelConfig.from_dict(payload.get("model_config"))
+    device = torch.device("cpu")
+
+    # Build the trainable policy (warm-started from the same checkpoint
+    # as the reference, per scoping § 3.5) and a frozen reference.
+    # Disable dropout so the strict-decrease assertion in (d) is a clean
+    # signal about the optimizer/loss wiring rather than dropout noise on
+    # a tiny synthetic batch. The dropout path is exercised by the BC
+    # smoke earlier in this file.
+    model = CandidatePolicyNet(config).to(device)
+    load_init_from_checkpoint(reference_checkpoint, model)
+    model.eval()
+    reference = load_reference_policy(str(reference_checkpoint), config, device)
+
+    # Synthetic 5-row preference batch with 4 actions per row. Random
+    # state/action features keep the batch independent of the BC corpus
+    # so this smoke is a pure DPO contract test, not a coupled regression.
+    batch_size = 5
+    num_actions = 4
+    rng = torch.Generator().manual_seed(99)
+    state_features = torch.randn(batch_size, STATE_DIM, generator=rng)
+    action_features = torch.randn(
+        batch_size, num_actions, ACTION_DIM, generator=rng
+    )
+    action_mask = torch.ones(batch_size, num_actions, dtype=torch.bool)
+    # y_w/y_l: deterministic non-equal indices per row.
+    y_w = torch.tensor([0, 1, 2, 3, 0], dtype=torch.int64)
+    y_l = torch.tensor([1, 2, 3, 0, 2], dtype=torch.int64)
+    sample_weights = torch.ones(batch_size, dtype=torch.float32)
+    batch = {
+        "state_features": state_features,
+        "action_features": action_features,
+        "action_mask": action_mask,
+        "y_w_index": y_w,
+        "y_l_index": y_l,
+        "sample_weights": sample_weights,
+    }
+
+    # (a) loss finite + (c) reference has no grad.
+    components = dpo_loss_components(model, reference, batch, beta=0.1)
+    loss0 = float(components["loss"].item())
+    if not np.isfinite(loss0):
+        raise AssertionError(f"DPO smoke (a): initial loss not finite: {loss0}")
+    if any(p.requires_grad for p in reference.parameters()):
+        raise AssertionError(
+            "DPO smoke (c): reference policy has parameters with requires_grad=True; "
+            "load_reference_policy must freeze every parameter (§ 3.5)."
+        )
+
+    # (b) gradients flow on policy params: do one backward and check
+    # that at least one parameter has a non-zero gradient.
+    components["loss"].backward()
+    grad_norm = sum(
+        float(p.grad.detach().norm().item())
+        for p in model.parameters()
+        if p.grad is not None
+    )
+    has_any_grad = any(
+        p.grad is not None and p.grad.abs().sum().item() > 0.0
+        for p in model.parameters()
+    )
+    if not has_any_grad:
+        raise AssertionError(
+            "DPO smoke (b): no policy parameter received a non-zero gradient; "
+            "check that the loss reaches the policy via masked_log_softmax."
+        )
+    # Also verify that NO reference parameter received a grad — even a
+    # nonzero grad attribute would mean the reference snuck into the
+    # autograd graph (e.g. forgot the `with torch.no_grad():` block).
+    for name, p in reference.named_parameters():
+        if p.grad is not None and p.grad.abs().sum().item() > 0.0:
+            raise AssertionError(
+                f"DPO smoke (c): reference param {name!r} accumulated grad — "
+                "reference forward must be wrapped in torch.no_grad()."
+            )
+
+    # (d) loss strictly decreases over 10 SGD steps on the *same* batch.
+    # Re-init the optimizer with a moderate LR; the loss should not be
+    # numerically constrained to monotone-decreasing for general DPO, but
+    # on a single fixed 5-row batch with no regularization it should drop
+    # at every step within float noise. We assert strict monotonicity to
+    # surface optimizer-wiring bugs (e.g. zero_grad placement).
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
+    losses: list[float] = []
+    for _ in range(10):
+        optimizer.zero_grad(set_to_none=True)
+        components = dpo_loss_components(model, reference, batch, beta=0.1)
+        loss = components["loss"]
+        if not np.isfinite(float(loss.item())):
+            raise AssertionError(
+                f"DPO smoke (a)/SGD: loss became non-finite mid-train: "
+                f"history={losses + [float(loss.item())]}"
+            )
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+        optimizer.step()
+        losses.append(float(loss.item()))
+    for i in range(1, len(losses)):
+        if losses[i] >= losses[i - 1]:
+            raise AssertionError(
+                f"DPO smoke (d): loss did not strictly decrease at step {i}: "
+                f"prev={losses[i - 1]} curr={losses[i]} history={losses}"
+            )
+
+    # Sanity: 10 steps should drop loss meaningfully on a fixed batch.
+    if losses[-1] >= losses[0]:
+        raise AssertionError(
+            f"DPO smoke (d): loss did not decrease overall: "
+            f"start={losses[0]} end={losses[-1]}"
         )
 
 
