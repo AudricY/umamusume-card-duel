@@ -16,11 +16,11 @@
       "next_action": "See docs/ai-agent-state/notes.md '## F1 self-play readiness — scoping (2026-05-14)' for full config. Briefly: build opponent-pool.json with runs/R13-W6-phase-d/iter-{0,1,2}/checkpoint.pt as entries 0/1/2; run ppo_orchestrator with --init-from runs/R13-W6-phase-d/iter-2/checkpoint.pt --rollout-vs-pool --pool-path <that file> --iterations 3 --games-per-update 800, aggressive HPs mirroring F1 phase H. Gate: Wilson lower >= 0.40."
     },
     {
-      "id": "f1-followup-warmstart-scoping",
+      "id": "f1-warmstart-sweep",
       "priority": "P2",
       "status": "ready",
-      "summary": "Scope item from F1 post-mortem #1: a 'better warm-start' (more games, more epochs, possibly entropy-regularized BC during the BC stage) might give PPO room to move. Pre-R12 evidence suggested entropy intervention alone didn't break the cap; this is specifically the SL-scaling angle, not entropy alone.",
-      "next_action": "Draft a 1-page scoping doc (under docs/ai-research-backlog.md as a new tier-2 item or under docs/ai-agent-state/notes.md): pre-register hypothesis (SL@hidden=64,depth=2 is compute-starved, not capacity-starved), concrete training config (3x data, 3x epochs), exit criterion (warm-start Wilson lower >= 0.45 before any PPO is run), expected cost."
+      "summary": "Compute-scaled DAgger warm-start sweep at fixed hidden=64/depth=2 to test the 'compute-starved, not capacity-starved' hypothesis. 3x games (90) and 3x epochs (75) over item17-2026-05-11 take-2 baseline, same teacher (rollout-CRN x3), same KL anchor schedule (0.0/0.1/0.5). Pre-registered exit: iter-2 Wilson lower >= 0.45 at n>=500 side-balanced. Distinct from R3 (entropy axis), R4 (value-head axis), R6 (capacity axis) — this run isolates the SL-compute axis at fixed capacity.",
+      "next_action": "See docs/ai-agent-state/notes.md '## F1 better warm-start — scoping (2026-05-14)' for full config and decision gate; launch dagger_orchestrator.py with the config block on a human green-light. ~1.5h compute. NOT autonomous (warn-before-launch)."
     },
     {
       "id": "side-asymmetry-confirmation-gate",
