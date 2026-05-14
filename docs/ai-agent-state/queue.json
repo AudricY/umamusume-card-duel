@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T07:40Z",
+  "updated": "2026-05-14T15:50Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -74,10 +74,9 @@
     {
       "id": "r8-step-2b-gate-eval",
       "priority": "P2",
-      "status": "ready",
-      "autonomous_launch_eligible": true,
-      "summary": "R8 step 2b: gate eval the trained DPO checkpoint at runs/R8-dpo/iter-000/model/checkpoint.pt against rule-bot at n=500 side-balanced, then write the verdict result block. Standalone driver needed — primitives (`export_checkpoint_to_onnx`, `serve_onnx_context`, `run_eval_gate`) live in training/dagger_orchestrator.py:846,884 and training/uma_ai/node_bridge.py:157 but no top-level driver yet.",
-      "next_action": "Implementer: (1) write a small `training/r8_gate_eval.py` driver that imports the three primitives, exports runs/R8-dpo/iter-000/model/checkpoint.pt → runs/R8-dpo/iter-000/policy.gate.onnx, spins up serve_onnx_context, calls run_eval_gate(selection='model', games=500, seed_start=<R7 step 4 seed>, min_games=500, min_ci_lower=0.40, manifest_out=runs/R8-dpo/iter-000/gate.manifest.json, rollout_crn_samples=1, planner_crn_samples=3). (2) Inspect gate.manifest.json, capture summary.wilson95.{lower,upper}, summary.modelWinRate, summary.byModelSide.{player,opponent}. (3) Write result block to docs/ai-research/progress/r15.md § R8 — DPO with: Wilson interval, β=0.1, τ=0.3005, kept-pairs 568/4094, reference-policy anchor (item17 Wilson 0.311), comparison table vs R7 (0.2921) and R15.S3 ceiling (0.3677). PASS = Wilson lower ≥ 0.40; FAIL ≤ 0.37 closes branch + scopes R7.b.2 promotion; FAIL 0.37-0.39 flags β=0.3 one-shot follow-up per scoping § 5(b). (4) Demote backlog § R8 to one-line pointer + add escalations.md `## Resolved` bullet describing the verdict and next pick."
+      "status": "done",
+      "run_dir": "runs/R8-dpo/iter-000",
+      "summary": "DONE / FAIL 2026-05-14T15:43Z. Iter-0 Wilson lower **0.3318** (n=1000 side-balanced — note: --games 500 gave 1000 total, 2× R7's n=500; verdict direction unchanged). modelWinRate 36.1%; player 31.8% Wilson [0.279, 0.360], opponent 40.4% Wilson [0.362, 0.448] (opp-side clears 0.40 lower). +3.97pp over R7 (0.2921), +2.08pp over item17 (0.311), +0.49pp over R15.S1 iter-2 (0.3269), -3.59pp vs R15.S3 ceiling (0.3677), -6.82pp vs pre-reg ≥0.40 gate. **Wilson < 0.37 → branch closes** per scoping § 5(b); marginal-band β=0.3 follow-up NOT triggered (would need 0.37 ≤ Wilson < 0.40). Real objective-family lift over labels (R7) + reference (item17) but didn't break R15.S3 reward-shape ceiling. Driver `training/r8_gate_eval.py` (~150 LOC) wraps export_checkpoint_to_onnx + serve_onnx_context + run_eval_gate. Gate wall-clock 1m 18s. Result block at `docs/ai-research/progress/r15.md` § R8 (lines 143-278). Next pick: R7.b.2 (card-embedding feature pass)."
     },
     {
       "id": "r7-backlog-shrink-to-pointer",
@@ -109,10 +108,10 @@
     },
     {
       "id": "r7b-card-embedding-pass",
-      "priority": "P3",
-      "status": "parked-pending-r8",
-      "summary": "R7.b.2 headline pass (per scoping § 4 #1 + #2): card embedding table (108×32) replacing slots 32-47 with per-zone sum-pool over 8 zones, BUNDLED with action-target/source embedding lookup on the same table. Schema bump v3; new int input tensor in ONNX. ~1.5 days + half day. Targets audit categories 1, 2, 5, 8. Full design + ONNX plumbing + risks: docs/ai-research/scoping/r7b-feature-representation.md § 4 #1 + #2. R7 closed FAIL 2026-05-14 (teacher-target axis cannot move SL warm-start). Cheaper-to-falsify rule fires R8 (~3h + ~10min) before this (~2 days). Promote to P2 ready only if R8 also closes negative; R7.b.0 trace re-encodability is YES so schema bump v3 is feature-re-extraction only, not multi-hour DAgger regen.",
-      "next_action": "Wait for R8 outcome. Promote to P2 ready when R8 closes (either negative on F1 gate, or positive but capped below 0.40). If R8 passes ≥0.40, R7.b.2 stays parked — production line is unblocked."
+      "priority": "P2",
+      "status": "ready",
+      "summary": "R7.b.2 PROMOTED 2026-05-14 by R8 closeout (R8 v1 Wilson 0.3318 < 0.37 → branch closed; both labels axis (R7) and objective axis (R8) now exhausted on the F1 line). Headline pass per scoping § 4 #1 + #2: card embedding table (108×32) replacing slots 32-47 with per-zone sum-pool over 8 zones, BUNDLED with action-target/source embedding lookup on the same table. Schema bump v3; new int input tensor in ONNX. Targets audit categories 1, 2, 5, 8. Full design + ONNX plumbing + risks: docs/ai-research/scoping/r7b-feature-representation.md § 4 #1 + #2. R7.b.0 trace-reencodability YES (digest slot 36) so schema bump v3 is feature-re-extraction only, not multi-hour DAgger regen. Cost ~1.5 days code + ½ day eval.",
+      "next_action": "Implementer: (1) author scoping doc § 6 step-by-step execution plan if not already present; surface concrete pre-flight cost-cutters (e.g. fits-in-existing-trainer? new ONNX input tensor cost?). (2) Step 1 schema bump v3 in TS-side feature builder (backend/src/sim/featureBuilder.ts or equivalent — locate via grep) emitting (108-card-id, per-zone) int tensor. (3) Step 2 Python-side encoder change: nn.Embedding(108, 32) + per-zone sum-pool + action-target/source embedding lookup on same table. (4) Step 3 retrain from item17 corpus via R7's same orchestrator (no DAgger regen — re-extract features from existing trace JSONLs). (5) Step 4 gate at n=500 side-balanced (use new training/r8_gate_eval.py driver, generalised). Pre-reg exit: Wilson lower ≥ 0.40 (clears 0.40 gate) → PASS, ship; ≥ 0.37 + < 0.40 → R7.b.3 attention/set-encoder one-shot follow-up; < 0.37 → close R7.b family, escalate to user for next direction."
     },
     {
       "id": "r7b-attention-set-encoder",

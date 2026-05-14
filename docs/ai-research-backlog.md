@@ -31,9 +31,13 @@ As of 2026-05-14, after R12 / R13 / R14 / R15.S1–S4:
    reward shaping breaks the iter-2 Wilson 0.368 ± 0.001 ceiling from the
    item17 warm-start. R15.S3 axis 1 (observation-delta signals) saturated;
    axis 2 (value-head-delta tempo signal) regressed at both magnitudes.
-4. **Surviving F1-line candidates (human-rank, not autonomous-launch):**
-   R7 (multi-teacher SL warm-start rebuild) and R8 (DPO objective replacement).
-   Both require a directional decision before launch; both are >½-day pivots.
+4. **Surviving F1-line candidates.** R7 closed FAIL (Wilson 0.2921, labels
+   axis exhausted). R8 closed FAIL (Wilson 0.3318 — real lift over R7 / item17
+   but below the 0.40 gate and below the R15.S3 0.368 ceiling; objective axis
+   exhausted). **R7.b.2 (card-embedding feature representation pass)** is the
+   surviving family — feature-axis lever distinct from labels (R7) and
+   objective (R8). ~1.5d code + ½d eval. R7.b.0 trace-reencodability spike
+   already YES.
 5. **Side asymmetry is real, not a determinism bug.** Engine determinism
    (R14.B AsyncLocalStorage) closed the parallel-worker non-determinism, but
    the player-vs-opponent gap (+0.11–0.30pp Wilson) replicates across four
@@ -54,9 +58,9 @@ star is now a directional choice, not a measurement target:
 - **Ship the existing strength.** Finish the R14.E manual UI exercise; route
   cheap-inference traffic by the empirical 0.39–0.45 envelope; pick a
   rollout-leaf vs value-head deployment policy.
-- **Or commit to one more F1-line pivot.** R7 (multi-teacher SL rebuild) or
-  R8 (DPO) — both require human rank before launch. R15.S3 closeout
-  filed an escalation; no autonomous start.
+- **Or commit to one more F1-line pivot.** R7 (labels) and R8 (objective)
+  both closed FAIL (2026-05-14). R7.b.2 (card-embedding feature pass) is
+  the surviving F1-line lever; promotion fired by R8 closeout.
 
 The Tier-1/Tier-2/Tier-3 framework below is preserved as historical context
 for early-2026-05 reasoning; most entries are resolved and reduced to pointers.
@@ -95,31 +99,19 @@ results (2026-05-11)".
   pre-registered ≥0.35 SL gate not met; no PPO sweep run. Scoping doc:
   `docs/ai-research/scoping/r7-multi-teacher-warmstart.md`; result block:
   `docs/ai-research/progress/r15.md` § "R7 — multi-teacher BC blend".
-- **R8.** Direct preference optimization (DPO) — **DEFERRED.** Same trajectory
-  as R7: obsoleted post-R12, re-listed post-R15.S3. Forward brief preserved
-  below.
+- **R8.** Direct preference optimization (DPO) — **DONE / FAIL (2026-05-14).**
+  Iter-0 Wilson lower **0.3318** (n=1000 side-balanced, β=0.1, item17 ref);
+  +3.97pp over R7 / +2.08pp over item17 / -3.59pp vs R15.S3 ceiling. Did not
+  clear the pre-reg ≥0.40 gate. Result block: `docs/ai-research/progress/r15.md`
+  § "R8 — DPO"; pointer below.
 
 ### R7. Multi-teacher BC blend (running)
 
 Full design + pre-flight teacher-agreement probe (GO) + step-by-step execution: `docs/ai-research/scoping/r7-multi-teacher-warmstart.md`. Status: step 4 mixed-teacher SL train running (2026-05-14, PID 3211541, ETA ~15–25 min from 06:45Z). SL/PPO gates at scoping § 4.
 
-### R8. DPO (Direct Preference Optimization) (forward, human-rank, escalation open)
+### R8. DPO (Direct Preference Optimization) (DONE / FAIL, 2026-05-14)
 
-- **Q:** Given rollout-CRN gives us (state, top-1-action, runner-up-action)
-  tuples with score margins, can DPO push past the F1 cap on pairs alone
-  without per-step reward shaping (which R15.S3 saturated)?
-- **Hypothesis:** Dense pairwise preference signal is more learnable than
-  sparse ±1 terminal reward; doesn't depend on the per-step shape signal
-  family that R15.S3 closed.
-- **Design:** New trainer `train_dpo.py` reading the outcome-export's
-  per-candidate reward records (already include selected vs runner-up
-  margin). Bradley-Terry loss against the warm-start as the reference
-  policy.
-- **Cost:** ~3 h code + ~10 min training.
-- **Pre-register exit:** Wilson lower ≥ 0.40 from the item17 warm-start
-  on the rule-bot gate, or document the new ceiling and close.
-- **Status:** Surviving R15.S3 closeout candidate. Human rank required;
-  bigger pivot than R7 (replaces PPO entirely).
+DONE / FAIL v1. Iter-0 Wilson lower **0.3318** (n=1000 side-balanced, β=0.1, item17 ref, 568 kept pairs at τ=0.3005). +3.97pp over R7, +2.08pp over item17, +0.49pp over R15.S1 iter-2 — real objective-family lift but ~3.6pp below R15.S3 ceiling 0.3677 and ~6.8pp below the pre-reg gate ≥0.40. Marginal-band β=0.3 follow-up (scoping § 5(b)) NOT triggered (Wilson < 0.37). Full design + closeout: `docs/ai-research/scoping/r8-dpo.md`, result block at `docs/ai-research/progress/r15.md` § R8. Next pick: R7.b.2 (card-embedding pass) per § R7.b below.
 
 ### R7.b. Feature representation expansion (forward, family, parked behind R7)
 
