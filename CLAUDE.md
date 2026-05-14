@@ -16,18 +16,11 @@ Do not create a new orchestration framework unless the user explicitly asks. Pre
 
 Use `/work` as the default operating command.
 
-The main Claude session should stay small:
+The main Claude session should stay small. It owns judgment and synthesis: choose the highest-leverage bounded job, use the general `worker` subagent when the work would otherwise bloat context, then persist the useful result.
 
-1. Read only enough repo state to choose a bounded next job.
-2. Spawn one general `worker` subagent with a precise brief.
-3. Wait for the worker.
-4. Read the worker's concise summary and any changed files.
-5. Persist only useful conclusions in `docs/ai-agent-state/`.
-6. Continue with the next immediately actionable step if the worker surfaced one and it is still within the same bounded objective.
+The worker is for context-heavy exploration, implementation, run analysis, validation, and planning. The point is context isolation, not parallelism. Small direct edits and simple state updates can stay in the main session. Do not fan out multiple workers unless the tasks are independent, low-resource, and have disjoint write scopes.
 
-The worker is the default way to handle context-heavy exploration. The point is context isolation, not parallelism. Do not fan out multiple workers unless the tasks are independent, low-resource, and have disjoint write scopes.
-
-Backlog refinement and big-picture planning are normal `/work` jobs. The loop should not only debug and implement. Choose a planning/refinement worker task when the queue is stale, run evidence changes priorities, escalations block the current path, sprint/backlog/progress docs disagree, or local work is no longer clearly moving the AI objective forward.
+Backlog refinement and big-picture planning are normal `/work` jobs. The loop should not only debug and implement. Choose planning/refinement when the queue is stale, run evidence changes priorities, escalations block the current path, sprint/backlog/progress docs disagree, or local work is no longer clearly moving the AI objective forward.
 
 Do not use `/loop` or a timed wakeup just to continue ordinary work. Use a timeout/wakeup only when the next useful action is blocked on wall-clock time or an external dependency, such as:
 

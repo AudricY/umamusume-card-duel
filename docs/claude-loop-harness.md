@@ -13,21 +13,11 @@ There is no Python harness, no hooks, and no separate command mode per task type
 
 ## Operating Model
 
-The main Claude session is an orchestrator. It reads enough state to choose one bounded job, then delegates the context-heavy part to the general worker subagent.
+The main Claude session is an orchestrator. It owns judgment, prioritization, and synthesis. It delegates context-heavy work to the general worker subagent when that keeps the main context cleaner.
 
-The worker can handle any task type:
+The worker can handle investigation, implementation, docs updates, run analysis, validation, backlog refinement, or big-picture planning. The category matters less than the outcome: each run should make the next useful action clearer.
 
-- Investigation.
-- Implementation.
-- Docs update.
-- Run analysis.
-- Validation.
-- Backlog refinement.
-- Big-picture planning.
-
-The worker returns a concise summary. The orchestrator then persists only the useful result and either continues with the next immediate step or stops when the bounded objective is complete.
-
-This keeps the main context from filling with logs, long file reads, failed exploration paths, and intermediate command output.
+The worker returns a concise summary. The orchestrator persists the useful result and either continues with the next immediate step or stops when the bounded objective is complete, cost/risk rises, or context budget is better preserved for a fresh worker.
 
 ## Looping And Wakeups
 
@@ -46,7 +36,7 @@ The default loop is therefore synchronous: worker returns, orchestrator synthesi
 
 The single `/work` command still owns backlog refinement and strategic planning. These are job types inside `/work`, not separate modes.
 
-Choose a planning/refinement worker task when:
+Examples of good times to choose a planning/refinement worker task:
 
 - `docs/ai-agent-state/queue.json` is stale, empty, vague, or contradicted by recent evidence.
 - A run result, smoke failure, or implementation finding changes priorities.
@@ -59,7 +49,7 @@ Planning output should be small: update the queue, escalations, digest, or exist
 
 ## Parallelism
 
-Default to one worker per `/work` run.
+Use a worker when it protects the main context from bulky exploration, logs, broad file reads, or implementation detail.
 
 The worker exists for context isolation, not parallel throughput. Parallel fan-out is usually the wrong default here because training/eval jobs, run directories, checkpoints, and planning docs are shared resources.
 

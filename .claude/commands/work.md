@@ -1,91 +1,54 @@
 ---
-description: Pick one useful AI research job, delegate it to the general worker, then persist the result.
+description: Advance the AI research loop by choosing the highest-leverage next job and delegating context-heavy work to one general worker.
 argument-hint: "[optional objective]"
 ---
 
-You are the thin orchestrator for this repo's Claude Code loop. Keep your own context small. Your default behavior is to spawn exactly one `worker` subagent to do the context-heavy work.
+You are the orchestrator for this repo's Claude Code research loop. Your job is to keep momentum toward stronger, more reliable game AI while keeping the main context small.
 
 Requested objective: $ARGUMENTS
 
-## Read State
+## Outcome
 
-Read only enough to choose and brief one bounded job:
+End each `/work` run with the repo in a sharper state than you found it:
 
-- `git status --short`
-- `docs/ai-agent-state/queue.json`
-- `docs/ai-agent-state/escalations.md`
-- `docs/ai-agent-state/notes.md`
-- Tail of `docs/ai-performance-research-progress.md`
-- Current sprint/backlog docs when relevant
-- Recent run state only when relevant: `runs/*/orchestrator-state.json`, `runs/*/events.jsonl`
+- A concrete task completed, or a real blocker surfaced.
+- The next action clearer than before.
+- Any useful evidence captured in the right place.
+- The main session kept free of bulky logs and exploratory dead ends.
 
-Do not deep-dive in the main context. If a file/log/run needs real inspection, put that in the worker brief.
+## How To Choose Work
 
-## Pick One Job
+Use judgment. Inspect the state needed to choose safely and explain the priority; do not turn state-reading into a checklist ritual.
 
-If the user supplied an objective, use it unless it is unsafe or impossible.
+Prefer the user-supplied objective when present. Otherwise pick the highest-leverage job from the queue or from fresh evidence.
 
-Otherwise choose the queue head unless current repo state makes another job clearly higher value.
+Good `/work` jobs include implementation, debugging, run analysis, validation, backlog refinement, and big-picture planning. Do not let the loop collapse into only coding/debugging: if the queue is stale, evidence changes priorities, docs disagree, or the path no longer clearly advances model quality, throughput, determinism, or UI integration, choose a planning/refinement job.
 
-Good jobs are bounded:
+Avoid launching long training/eval work unless the user or queue clearly calls for it.
 
-- Diagnose one failing smoke.
-- Inspect one run directory.
-- Make one small code/doc fix.
-- Update backlog/progress docs from one accepted result.
-- Refine `docs/ai-agent-state/queue.json` when recent evidence changes priorities.
-- Do a big-picture planning pass when local work is not clearly moving model quality, throughput, determinism, or UI integration forward.
-- Run or inspect one appropriate validation tier.
-- Identify the next concrete step when the queue is stale.
+## Delegation
 
-Avoid starting long training/eval work unless the queue or user explicitly calls for it.
+Use one `worker` subagent when the task would otherwise bloat the main context with exploration, logs, broad file reads, or implementation detail. Small direct edits or simple state updates can stay in the main session.
 
-Do not let the loop become only implementation/debugging. Choose a planning/refinement worker task when any of these are true:
+Give the worker a bounded brief with the objective, relevant context, write scope, notable constraints, and expected output. Let the worker decide the detailed procedure.
 
-- `queue.json` is stale, empty, vague, or contradicted by recent docs/run evidence.
-- `escalations.md` has open blockers that should change the next job.
-- A run result or smoke failure invalidates the current plan.
-- Several completed jobs have accumulated without a queue refresh.
-- The current workstream is making local progress but the big-picture AI objective is unclear.
-- The sprint/backlog/progress docs disagree about the next priority.
+Use multiple workers only for genuinely independent, low-resource tasks with disjoint write scopes.
 
-## Brief The Worker
+## Synthesis
 
-Spawn the `worker` subagent with:
+When the worker returns, spot-check outputs, inspect changed files, and reconcile inconsistencies. Do not replay the whole exploration without a concrete reason.
 
-- Objective.
-- Why this job is next.
-- Files, docs, or run directories to inspect.
-- Allowed write scope.
-- Commands allowed and commands to avoid.
-- Validation expectations.
-- Required final response shape.
+Persist useful state where it belongs:
 
-Use one worker by default. Do not fan out multiple workers unless the tasks are independent, low-resource, and have disjoint write scopes.
+- Claude operating priorities: `docs/ai-agent-state/queue.json`
+- Blockers or human decisions: `docs/ai-agent-state/escalations.md`
+- Short run summaries: `docs/ai-agent-state/digests/YYYY-MM-DD.md`
+- Durable research evidence: existing AI sprint/backlog/progress docs
 
-## After The Worker Returns
+Continue immediately when the next step is clearly still the same bounded objective and cost, risk, and context budget remain reasonable. Spawn another single worker if that next step would otherwise bloat the main context.
 
-Read the worker summary and inspect any changed files. Do not redo the worker's exploratory work unless something is clearly inconsistent.
+Use `/loop`, a timeout, or a timed wakeup only for genuine waits: running training/eval jobs, future logs/checkpoints, human input, or deliberate resource cool-downs.
 
-Persist only useful state:
+## Response
 
-- Append a short note to `docs/ai-agent-state/digests/YYYY-MM-DD.md` for meaningful results.
-- Update `docs/ai-agent-state/queue.json` only when the next action changed.
-- Update `docs/ai-agent-state/escalations.md` only for blockers, missing artifacts, unsafe stop lines, or human decisions.
-- Update canonical AI docs only when the worker produced evidence that belongs there.
-- Continue immediately if the worker identified a clear next step that is still inside the same bounded objective.
-- Spawn another single worker only when that next step would otherwise bloat the main context and does not require waiting.
-
-Do not schedule `/loop`, a timeout, or a timed wakeup just to continue ordinary work. Use a timeout/wakeup only when the next useful action is blocked on wall-clock time or an external dependency: a still-running training/eval process, a future log/checkpoint, human input, or a deliberate cool-down after resource-heavy work.
-
-## Wrap
-
-Print a concise summary:
-
-- Job chosen.
-- Worker result.
-- Files changed.
-- Validation run or skipped.
-- Next recommended action.
-
-Stop only when there is no immediate actionable next step within the current bounded objective, or when the next step requires waiting.
+Close with a concise summary of the job chosen, result, files changed, validation, and next action. Stop when the bounded objective is complete, the next step requires waiting, or continuing would exceed sensible cost/risk/context budget.
