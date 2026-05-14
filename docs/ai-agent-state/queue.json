@@ -9,18 +9,18 @@
       "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section."
     },
     {
-      "id": "f1-followup-self-play-readiness",
+      "id": "f1-self-play-sweep",
       "priority": "P2",
       "status": "ready",
-      "summary": "Scope item from F1 post-mortem 'recommended next moves' #2: confirm opponent-pool infra is ready to feed PPO rollouts (item-12 pool + --opponent-model-url plumbing already exists). Decide whether self-play vs PFSP pool is worth one cheap PPO sweep before paying for a larger SL warm-start.",
-      "next_action": "Skim training/opponent_pool.py + ppo_orchestrator.py to confirm --rollout-vs-pool / --opponent-model-url wiring; document gap (if any) and one-paragraph go/no-go for a single self-play PPO sweep against the W6 iter-2 checkpoint as both rollout opp and reference."
+      "summary": "Run one cheap PPO sweep with --rollout-vs-pool against a hand-built pool of W6/iter-{0,1,2} promoted checkpoints. Materially different from R5 (which used the item17 DAgger pool ~30pp weaker). Plumbing caveat: today's _select_pool_opponent picks one opponent per run uniformly, not per-game PFSP — accept that as the v1 experiment.",
+      "next_action": "See docs/ai-agent-state/notes.md '## F1 self-play readiness — scoping (2026-05-14)' for full config. Briefly: build opponent-pool.json with runs/R13-W6-phase-d/iter-{0,1,2}/checkpoint.pt as entries 0/1/2; run ppo_orchestrator with --init-from runs/R13-W6-phase-d/iter-2/checkpoint.pt --rollout-vs-pool --pool-path <that file> --iterations 3 --games-per-update 800, aggressive HPs mirroring F1 phase H. Gate: Wilson lower >= 0.40."
     },
     {
       "id": "f1-followup-warmstart-scoping",
       "priority": "P2",
       "status": "ready",
       "summary": "Scope item from F1 post-mortem #1: a 'better warm-start' (more games, more epochs, possibly entropy-regularized BC during the BC stage) might give PPO room to move. Pre-R12 evidence suggested entropy intervention alone didn't break the cap; this is specifically the SL-scaling angle, not entropy alone.",
-      "next_action": "Draft a 1-page scoping doc (under docs/ai-research-backlog.md as a new tier-2 item or under docs/ai-agent-state/notes.md): pre-register hypothesis (SL@hidden=64,depth=2 is compute-starved, not capacity-starved), concrete training config (3x data, 3x epochs), exit criterion (warm-start Wilson lower ≥ 0.45 before any PPO is run), expected cost."
+      "next_action": "Draft a 1-page scoping doc (under docs/ai-research-backlog.md as a new tier-2 item or under docs/ai-agent-state/notes.md): pre-register hypothesis (SL@hidden=64,depth=2 is compute-starved, not capacity-starved), concrete training config (3x data, 3x epochs), exit criterion (warm-start Wilson lower >= 0.45 before any PPO is run), expected cost."
     },
     {
       "id": "side-asymmetry-confirmation-gate",
