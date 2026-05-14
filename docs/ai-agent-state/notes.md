@@ -170,3 +170,16 @@ isolates the compute axis at fixed capacity; (b) the ~1.5h compute budget is ava
 falsification path (Wilson lower stays at 0.31 ± 2pp) is acceptable as a research outcome and
 will close the branch rather than spawn further SL ablations. On green light, launch with the
 command in the "Proposed config" section; on red light, demote to R15.S3 / R15.S4 instead.
+
+**Closeout (2026-05-14).** **FALSIFIED.** Run `runs/R15-S1-warmstart-sweep/` finished iter-2 at
+Wilson lower **0.3269** (WR 36.8%, n=500 side-balanced) — inside the pre-registered band
+0.311 ± 2pp = [0.291, 0.331] (line 141). The +1.6pp lift vs item17 take-2's 0.311 is below Wilson
+half-width at n=500 and an order of magnitude below the predicted +14pp. The **secondary check
+(line 138-140) also fired**: per-epoch val_acc reached 99% of its peak by epoch 2-3 in every iter
+(best @ ep7 / ep2 / ep3 for iter-0/1/2) then *declined* over the remaining 70+ epochs while
+train_acc climbed to 0.91-0.97 — plateau-then-overfit replicated across all three DAgger iters,
+not just iter-0. Wall-clock 11m 51s (~8x faster than the ~1.5h estimate; rollout-CRN×3 teacher
+dominated, eval budget was not the bottleneck). The compute-starved branch is closed; attention
+routes to R15.S3 (reward shaping), R15.S4 (sampling-temperature gate, diagnostic), R7
+(multi-teacher labels), or R8 (DPO). Full writeup:
+`docs/ai-performance-research-progress.md` § "Phase K — F1 DAgger compute-scaled warm-start".

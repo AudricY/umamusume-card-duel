@@ -813,3 +813,77 @@ unfalsified candidates. R15.S4 (sampling-temperature gate) remains diagnostic-on
 
 Artifacts: `runs/R14-f1-self-play-sweep/` — `events.jsonl` (92 lines, full minibatch detail),
 `orchestrator-state.json`, per-iter `iteration-manifest.json` + `gate.manifest.json`.
+
+### Phase K — F1 DAgger compute-scaled warm-start (R15.S1 closeout, 2026-05-14)
+
+Tests whether the DAgger warm-start that bottoms F1 PPO at Wilson 0.31 is **compute-starved** rather
+than capacity-starved. Pre-registered in `docs/ai-agent-state/notes.md:68-172` ("F1 better
+warm-start — scoping"): hold `hidden_dim=64 / depth=2` fixed, scale games 3× (90 vs item17 take-2's
+30) and epochs 3× (75 vs 25), keep the rollout-CRN×3 teacher, KL anchor schedule 0.0/0.1/0.5, n=500
+side-balanced eval per iter. Predicted lift: iter-2 Wilson lower ≥ 0.45 (i.e. **+14pp over item17's
+0.311**). Pre-registered falsification: iter-2 Wilson lower in 0.311 ± 2pp (0.29–0.33).
+`runs/R15-S1-warmstart-sweep/` ran the canonical command unchanged.
+
+| Iter | Selection | Gate WR | Wilson lower | n | Opponent | Promoted floor | Decision |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | rollout | 32.4% | 0.2845 | 500 | rule-bot | 0.0000 | promoted (baseline) |
+| 1 | policy | 32.8% | 0.2883 | 500 | rule-bot | 0.2845 | promoted (+0.4pp) |
+| 2 | policy | 36.8% | **0.3269** | 500 | rule-bot | 0.2883 | promoted (+3.9pp) |
+
+**Verdict: FAIL — pre-registered falsification confirmed.** Iter-2 Wilson lower **0.3269** lands
+inside the falsification band 0.311 ± 2pp (= [0.291, 0.331]). The +1.6pp lift over item17's 0.311
+baseline is within Wilson half-width (~4.2pp at n=500) and an order of magnitude below the
+predicted +14pp. Per-iter side asymmetry on iter-2: player WR 32.4% (Wilson [0.269, 0.384]),
+opponent WR 41.2% (Wilson [0.353, 0.474]) — same player-side gap that's haunted every F1 phase.
+
+**Falsification mechanism — pre-registered secondary check fired.** `notes.md:138-140` flagged
+"if the loss plateaus by epoch ~25 (matching take-2), that itself confirms compute is saturated
+at the current size." Per-epoch val_accuracy from `events.jsonl` (75 epochs × 3 iters): iter-0
+best val_acc **0.7676 @ ep7**, first-99%-of-best @ **ep3**, final ep75 **0.7382**. Iter-1 best
+**0.7574 @ ep2**, first-99%-of-best @ **ep2**, final ep75 **0.7212**. Iter-2 best **0.7656 @ ep3**,
+first-99%-of-best @ **ep2**, final ep75 **0.7503**. In every iter, val_acc reaches 99% of its peak
+by epoch 2-3, then **declines** over the remaining 70+ epochs while train_acc climbs to 0.91-0.97
+(textbook overfit). The secondary diagnostic did not just trigger in iter-0 — it replicated
+identically across all three DAgger iterations. The plateau-then-overfit signature converts the
+gate-level falsification from "an arbitrary number landed in the band" into "the predicted
+falsification mechanism fired in train-time diagnostics first, then validated at eval time."
+
+**Comparison to references.** Iter-2 Wilson 0.3269 vs item17 take-2 iter-2 Wilson **0.311**
+(`progress.md:582`), R5 PPO iter-2 0.3109, phase G/H iter-2 0.3109, phase J iter-2 0.2188. The
+warm-start sweep sits at the **same Wilson cap** as every other F1-era experiment at this codebase
+config, regardless of whether the axis moved is PPO HPs (phases 2/G/H), opponent pool (R5, phase
+J), or SL compute (this run). Three distinct axes, one ceiling.
+
+**Wall-clock vs scoping estimate.** Scoping forecast **~1.5h** (`notes.md:146-150`,
+`backlog.md:638`). Actual end-to-end **11m 51s** (run_started → run_completed delta:
+`1778728116.85 → 1778728828.37 = 711.5s`). Per-iter: iter-0 4m 33s, iter-1 3m 35s, iter-2 3m 42s.
+That is ~8× faster than the scoping estimate. The dominant cost was the rollout-CRN×3 teacher
+loop (~3.5 min/iter at 90 games) — n=500 eval added <30s/iter. Implication for future scoping:
+the eval-games budget was NOT the bottleneck at this scale; rollout-CRN was.
+
+| Phase | Axis | Best iter Wilson lower | Final iter Wilson lower | Compute |
+| --- | --- | --- | --- | --- |
+| 2 | PPO spec HPs (rule-bot) | 0.3109 | 0.3109 | ~10 min |
+| H | PPO aggressive HPs (rule-bot) | 0.3109 | 0.3109 | ~10 min |
+| J | PPO aggressive + strong-pool self-play | 0.2993 (iter-1) | 0.2188 | 5m 32s |
+| **K** | **DAgger 3× compute, fixed 64/2** | **0.3269 (iter-2)** | **0.3269** | **11m 51s** |
+
+**What this closes.** The "compute-starved at fixed capacity" branch of the F1 next-moves
+(R15.S1). Combined with R15.S2 (strong-pool self-play, closed FAIL via Phase J this morning), the
+two highest-ranked F1 post-mortem moves have both falsified. The cap is **not** compute (Phase K),
+**not** PPO HP tuning (phases 2/G/H), **not** weak-pool self-play (R5), and **not** strong-pool
+self-play with v1 plumbing (phase J). Surviving F1 candidates: R15.S3 (richer reward shaping) and
+R15.S4 (sampling-temperature gate, diagnostic-only), plus the deeper SL-label-quality branches
+the falsification opens up: R7 (multi-teacher labels) and R8 (DPO).
+
+**No-action implication.** F1's "Wilson lower ≥ 0.40 from the current pipeline" is now empirically
+out of reach without a *different* axis. PPO can match the SL cap but cannot exceed it; the SL cap
+does not move with compute at fixed capacity; the SL cap does not move with capacity at fixed
+compute (R6); self-play vs the strong pool regresses through co-adaptation. Three of the four F1
+post-mortem next moves are now closed. Continued work on F1 should pre-register a different
+mechanism axis (reward shape, label quality, or gate distribution) before paying further compute.
+
+Artifacts: `runs/R15-S1-warmstart-sweep/` — `events.jsonl` (276 lines, per-epoch val/train acc for
+all 3 iters), `orchestrator-state.json`, per-iter `iteration-manifest.json` + `gate.manifest.json`.
+Pool-eval matchups (n=40 each): iter-2 vs iter-0 Wilson 0.2422 (WR 37.5%), iter-2 vs iter-1 Wilson
+0.2635 (WR 40%) — confirms iter-2 is not materially stronger than its own predecessors.

@@ -624,7 +624,7 @@ below capture those moves plus the only outstanding R14 acceptance step.
 - **Exit / gate:** fallback rate < 5%, median decisionMs < 3s. Append result to
   `docs/r14-sprint-plan.md` Progress section as the E closure.
 
-### R15.S1 — Better SL warm-start (F1 next-move #1)
+### R15.S1 — Better SL warm-start (F1 next-move #1) — DONE / FAIL
 
 - **Motivation:** F1 PPO post-mortem ranked "better warm-start" first. The DAgger sweep at this
   codebase config plateaued at WR 37.5% with low-entropy. Larger SL run (more games, more epochs,
@@ -638,6 +638,27 @@ below capture those moves plus the only outstanding R14 acceptance step.
 - **Cost:** ~1–2 h compute (item-17 take-2 was ~30 games × 25 epochs in <10 min; 3× scale ≤ 1.5h).
 - **Exit / gate:** warm-start Wilson lower ≥ 0.45 *or* document the new SL ceiling and close the
   branch.
+- **Result (2026-05-14):** **FAIL — pre-registered falsification confirmed.** Run
+  `runs/R15-S1-warmstart-sweep/` — 3 DAgger iters × 90 trace games × 75 epochs at fixed
+  hidden=64/depth=2, rollout-CRN×3 teacher, KL anchor 0.0/0.1/0.5, n=500 side-balanced gate per
+  iter. Wilson lower per iter: iter-0 **0.2845** (WR 32.4%) → iter-1 **0.2883** (WR 32.8%) →
+  iter-2 **0.3269** (WR 36.8%). Iter-2 Wilson 0.3269 lands inside the pre-registered falsification
+  band 0.311 ± 2pp (= [0.291, 0.331]) — the +1.6pp lift over item17 take-2's 0.311 is within
+  Wilson half-width at n=500 and an order of magnitude below the predicted +14pp. The
+  pre-registered **secondary check fired**: per-epoch val_accuracy reached 99% of peak by epoch
+  2-3 in every iter (best: iter-0 0.7676 @ ep7, iter-1 0.7574 @ ep2, iter-2 0.7656 @ ep3), then
+  *declined* over the remaining 70+ epochs while train_acc climbed to 0.91-0.97. Classic
+  plateau-then-overfit at this size — the predicted falsification mechanism fired in train-time
+  diagnostics first, then validated at eval time. Wall-clock 11m 51s, ~8× faster than the
+  ~1.5h scoping estimate (the rollout-CRN×3 teacher dominated; n=500 eval was not the
+  bottleneck). Full writeup + per-iter trajectory + comparison table in
+  `docs/ai-performance-research-progress.md` § "Phase K — F1 DAgger compute-scaled warm-start".
+  Combined with R15.S2 (closed FAIL this morning), the two highest-ranked F1 post-mortem next
+  moves have both falsified. The F1 cap is **not** compute at fixed capacity (this run), **not**
+  PPO HPs (phases 2/G/H), **not** weak-pool self-play (R5), and **not** strong-pool self-play
+  with v1 plumbing (phase J). Surviving F1 candidates: R15.S3 (richer reward shaping), R15.S4
+  (sampling-temperature gate, diagnostic), and the deeper SL-label-quality branches the
+  falsification opens up (R7 multi-teacher labels, R8 DPO).
 
 ### R15.S2 — PFSP self-play PPO (F1 next-move #2) — DONE / FAIL
 
