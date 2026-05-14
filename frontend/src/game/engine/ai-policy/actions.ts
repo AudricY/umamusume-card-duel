@@ -1,4 +1,5 @@
 import { MAX_BENCH } from "../../../../../shared/src/gameData";
+import { cardVocabIndex } from "../../../../../shared/src/cardVocab";
 import type { Card, EnergyType, GameState, SideId, SideState, TrainerCard, UmamusumeInstance } from "../../../../../shared/src/types";
 import { getCard, getPrimaryAttack, getUmamusumeCard } from "../core/catalog";
 import { attachedEnergyCount, getAllUmamusume } from "../core/umamusume";
@@ -85,6 +86,8 @@ function enumerateSetupActions(state: GameState, sideId: SideId): LegalAiAction[
       sourceCardId: active.cardId,
       amount: benchHandIndexes.length,
     }),
+    actionSourceCardIdx: cardVocabIndex(active.cardId),
+    actionTargetCardIdx: null,
   }];
 }
 
@@ -104,6 +107,8 @@ function enumeratePendingChoiceActions(state: GameState, sideId: SideId): LegalA
       target,
       targetSlot: slot,
     }),
+    actionSourceCardIdx: null,
+    actionTargetCardIdx: cardVocabIndex(target.cardId),
   }));
   return actions.length > 0 ? actions : [passAction("pendingChoice")];
 }
@@ -126,6 +131,8 @@ function enumerateBenchActions(state: GameState, side: SideState): LegalAiAction
         sourceCardId: cardId,
         sourceHandIndex: handIndex,
       }),
+      actionSourceCardIdx: cardVocabIndex(cardId),
+      actionTargetCardIdx: null,
     }];
   });
 }
@@ -164,6 +171,8 @@ function enumerateTrainerActions(state: GameState, side: SideState, phase: Extra
           ...(choiceCardId ? { choiceCardId } : {}),
           ...(target ? { target } : {}),
         }),
+        actionSourceCardIdx: cardVocabIndex(cardId),
+        actionTargetCardIdx: target ? cardVocabIndex(target.cardId) : null,
       };
     });
   });
@@ -188,6 +197,8 @@ function enumerateEvolutionActions(state: GameState, side: SideState): LegalAiAc
         sourceHandIndex: handIndex,
         target,
       }),
+      actionSourceCardIdx: cardVocabIndex(cardId),
+      actionTargetCardIdx: cardVocabIndex(target.cardId),
     }];
   });
 }
@@ -210,6 +221,8 @@ function enumerateAttachActions(state: GameState, side: SideState): LegalAiActio
         targetSlot: slot,
         amount: attachedEnergyCount(target),
       }),
+      actionSourceCardIdx: null,
+      actionTargetCardIdx: cardVocabIndex(target.cardId),
     }];
   });
 }
@@ -242,6 +255,8 @@ function enumerateAbilityActions(state: GameState, side: SideState): LegalAiActi
             target: energySource,
             targetSlot: slot,
           }),
+          actionSourceCardIdx: cardVocabIndex(source.cardId),
+          actionTargetCardIdx: cardVocabIndex(energySource.cardId),
         })));
     }
     if (ability.damageOpponent && ability.damageOpponentTarget === "any") {
@@ -258,6 +273,8 @@ function enumerateAbilityActions(state: GameState, side: SideState): LegalAiActi
           target,
           targetSlot,
         }),
+        actionSourceCardIdx: cardVocabIndex(source.cardId),
+        actionTargetCardIdx: cardVocabIndex(target.cardId),
       }));
     }
     if (ability.discardToDraw) {
@@ -275,6 +292,8 @@ function enumerateAbilityActions(state: GameState, side: SideState): LegalAiActi
           target: source,
           targetSlot: slot,
         }),
+        actionSourceCardIdx: cardVocabIndex(source.cardId),
+        actionTargetCardIdx: cardVocabIndex(source.cardId),
       }));
     }
     return [{
@@ -283,6 +302,8 @@ function enumerateAbilityActions(state: GameState, side: SideState): LegalAiActi
       kind: "useAbility",
       payload: { sourceUid: source.uid, abilityName: ability.name },
       features: features({ score, phase: "ability", kind: "useAbility", sourceCardId: source.cardId, target: source, targetSlot: slot }),
+      actionSourceCardIdx: cardVocabIndex(source.cardId),
+      actionTargetCardIdx: cardVocabIndex(source.cardId),
     }];
   });
 }
@@ -401,6 +422,8 @@ function enumerateCombatActions(state: GameState, side: SideState): LegalAiActio
           ...(sourceCardId ? { sourceCardId } : {}),
           ...(target ? { target } : {}),
         }),
+        actionSourceCardIdx: sourceCardId ? cardVocabIndex(sourceCardId) : null,
+        actionTargetCardIdx: target ? cardVocabIndex(target.cardId) : null,
       });
     });
   }
@@ -424,6 +447,8 @@ function enumerateStadiumOrEndActions(state: GameState, side: SideState): LegalA
       kind: "useStadium",
       payload: {},
       features: features({ score: 35, phase: "stadiumOrEnd", kind: "useStadium", endsTurn: true }),
+      actionSourceCardIdx: null,
+      actionTargetCardIdx: null,
     });
   }
   actions.push({
@@ -432,6 +457,8 @@ function enumerateStadiumOrEndActions(state: GameState, side: SideState): LegalA
     kind: "endTurn",
     payload: {},
     features: features({ score: 1, phase: "stadiumOrEnd", kind: "endTurn", endsTurn: true }),
+    actionSourceCardIdx: null,
+    actionTargetCardIdx: null,
   });
   return actions;
 }
@@ -447,9 +474,16 @@ function passAction(phase: AiPhase): LegalAiAction {
     kind: "pass",
     payload: {},
     features: features({ score: 0, phase, kind: "pass" }),
+    actionSourceCardIdx: null,
+    actionTargetCardIdx: null,
   };
 }
 
+// R7.b.2 Phase 1: each call site sets `actionSourceCardIdx` and
+// `actionTargetCardIdx` on its `LegalAiAction` literal alongside the
+// `features` array. `null` is the sentinel for "no clear source/target"
+// (endTurn / pass / useStadium / setup). Phase 2 Python collator maps
+// `null` → 0 (the shared padding_idx of the embedding table).
 function features(input: {
   score: number;
   phase: AiPhase;

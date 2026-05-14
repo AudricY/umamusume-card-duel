@@ -1,24 +1,45 @@
 import { MAX_BENCH } from "../../../../../shared/src/gameData";
+import { cardVocabIndex } from "../../../../../shared/src/cardVocab";
 import type { GameState, SideId, SideState, UmamusumeInstance } from "../../../../../shared/src/types";
 import { getAiPhase } from "./phase";
-import type { PublicObservation, PublicSideObservation, PublicUmaObservation } from "./types";
+import type { PublicObservation, PublicSideObservation, PublicUmaObservation, ZoneKey } from "./types";
 
 export function buildPublicObservation(state: GameState, sideId: SideId): PublicObservation {
   const opponentId: SideId = sideId === "player" ? "opponent" : "player";
+  const own = state.sides[sideId];
+  const opp = state.sides[opponentId];
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sideToAct: sideId,
     phase: getAiPhase(state, sideId),
     turnNumber: state.turnNumber,
     firstPlayer: state.firstPlayer,
     pendingChoiceKind: state.pendingPlayerChoice?.kind ?? null,
-    own: toPublicSideObservation(state.sides[sideId], true),
-    opponent: toPublicSideObservation(state.sides[opponentId], false),
+    own: toPublicSideObservation(own, true),
+    opponent: toPublicSideObservation(opp, false),
     shared: {
       stadiumCardId: state.stadium?.cardId ?? null,
       currentSide: state.currentSide,
       gameOver: state.gameOver,
     },
+    cardIdsByZone: buildCardIdsByZone(own, opp, state.stadium?.cardId ?? null),
+  };
+}
+
+function buildCardIdsByZone(own: SideState, opp: SideState, stadiumCardId: string | null): Record<ZoneKey, number[]> {
+  const benchIdxs = (side: SideState): number[] => side.bench.map((uma) => cardVocabIndex(uma.cardId));
+  // Opponent hand is hidden — emit an empty array. The Phase 2 Python collator
+  // pads to the fixed hand-cap shape and the embedding's padding_idx=0 keeps
+  // hidden info out of the gradient.
+  return {
+    ownActive: own.active ? [cardVocabIndex(own.active.cardId)] : [],
+    oppActive: opp.active ? [cardVocabIndex(opp.active.cardId)] : [],
+    ownBench: benchIdxs(own),
+    oppBench: benchIdxs(opp),
+    ownHand: own.hand.map((cardId) => cardVocabIndex(cardId)),
+    ownDiscard: own.discard.map((cardId) => cardVocabIndex(cardId)),
+    oppDiscard: opp.discard.map((cardId) => cardVocabIndex(cardId)),
+    stadium: stadiumCardId ? [cardVocabIndex(stadiumCardId)] : [],
   };
 }
 

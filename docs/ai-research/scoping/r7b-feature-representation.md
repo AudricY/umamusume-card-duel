@@ -237,3 +237,23 @@ python training/r8_gate_eval.py \
 - **After Phase 4:** re-extractor produces JSONL with `schemaVersion: 3`, expected row count, all card-id arrays non-empty.
 - **After Phase 5:** SL training completes ~30 min, val_acc not catastrophically below R7's plateau peak (0.7855 @ ep16).
 - **After Phase 6:** Wilson lower at n=500. Exit per § 7: ≥ 0.40 PASS, ≥ 0.37 ∧ < 0.40 → R7.b.3 attention follow-up, < 0.37 → close R7.b family + escalate.
+
+## 12. Result: R7.b.2 Phase 1 — TS-side schema bump LANDED (2026-05-14)
+
+**Verdict: LANDED.** `PublicObservation.schemaVersion 1 → 2`; new `ZoneKey` 8-member union; new `cardIdsByZone: Record<ZoneKey, number[]>` field on the observation; new `actionSourceCardIdx: number | null` and `actionTargetCardIdx: number | null` on every `LegalAiAction`. `null` is the sentinel for "no clear source/target" (endTurn / pass / useStadium / setup / pendingChoice has-no-source / attachEnergy has-no-source); Phase 2 Python collator maps `null` → 0 (the shared `padding_idx=0` of the embedding table, doubling as `unknownIndex`). Variable-length zones TS-side; Phase 2 collator pads to fixed shapes.
+
+**Helper.** Step 4 added a new TS helper `shared/src/cardVocab.ts` (50 LOC) — no prior TS-side `cardVocabIndex` consumer existed (the only TS reference was `backend/src/sim/buildCardVocab.ts` which writes the JSON). The helper imports `cardVocab.json` via `resolveJsonModule` and mirrors Python's `card_vocab_index` (`training/uma_ai/features.py:459-471`) line-for-line: empty → 0; direct hit → integer; suffix fallback in order `FullArtGold > FullArt > UncommonPlus > Ex` (FullArtGold first because FullArt is a strict suffix); unknown → `unknownIndex` (0).
+
+**Files changed (LOC delta).**
+- `frontend/src/game/engine/ai-policy/types.ts` +28 / -2 (ZoneKey union, schemaVersion bump, two new action fields, cardIdsByZone field, doc comments).
+- `frontend/src/game/engine/ai-policy/observation.ts` +28 / -3 (buildCardIdsByZone helper, opp-hand-hidden empty-array per zone rule, imports).
+- `frontend/src/game/engine/ai-policy/actions.ts` +34 / -0 (per-call-site `actionSourceCardIdx` / `actionTargetCardIdx` resolution; comment block replaced unused `actionCardIdxs` helper draft).
+- `shared/src/cardVocab.ts` +50 (new — TS-side parity helper).
+- `backend/src/tests/cardVocabIndexSmoke.ts` +50 (new — TS-side unit smoke; wired into `test:train`).
+- `backend/package.json` +1 / -1 (smoke registration).
+
+Total delta ~93 modified LOC + 100 new LOC. The +13 LOC over scoping's ~80 LOC estimate comes from per-call-site source/target idx (12 LegalAiAction literals) + the parity smoke.
+
+**Smokes (TMPDIR=/tmp).** `npm run build` PASS; `npm run test:train` PASS (7/7 TS smokes including new `cardVocabIndexSmoke`); `npm run test:dagger-orchestrator` PASS — observation → relabel pipeline unaffected by the additive schema bump (Python row-schemaVersion is the relabel row's own version, independent of the nested `observation.schemaVersion`).
+
+**Out of scope (deferred to Phase 2).** Python encoder change (`model.py`, `features.py` per-zone int extraction, `dataset.py` collation); ONNX export; feature re-extractor; SL retrain; gate eval. `STATE_FEATURE_SCHEMA_VERSION` Python-side bump waits for Phase 2 (no Python consumer yet reads `cardIdsByZone`).
