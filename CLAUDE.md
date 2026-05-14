@@ -23,7 +23,20 @@ Two subagents are available:
 - `investigator` — read-only. Use for deep code exploration, run analysis, log triage, and validation-as-evidence. Returns findings.
 - `implementer` — write-capable. Use for code edits, doc updates (sprint/backlog/progress, queue, escalations, digests), and validation cycles after changes.
 
-Pick by whether the job ends in evidence or in a change. The point is context isolation, not parallelism. Small direct edits and simple state updates can stay in the main session. Do not fan out multiple subagents unless the tasks are independent, low-resource, and have disjoint write scopes.
+Pick by whether the job ends in evidence or in a change. Small direct edits and simple state updates can stay in the main session.
+
+Fan-out policy. Before delegating, classify each picked job:
+
+- Mode: read-only (investigator) vs write (implementer).
+- Resource: cpu-light / cpu-heavy / GPU-or-training / external-blocking.
+- Write scope: which files/dirs it touches. Treat shared state (`queue.json`, `escalations.md`, `notes.md`, sprint/backlog/progress docs, `digests/`) as one shared scope.
+
+Then:
+
+- Investigators parallelize freely — multiple read-only subagents at once is the default for surveys.
+- Implementers parallelize only when write scopes are disjoint. Never two implementers writing into shared state at the same time.
+- Never run two GPU-or-training jobs concurrently; at most one cpu-heavy job alongside light work.
+- If a scope or resource class is uncertain, run serially.
 
 Backlog refinement and big-picture planning are normal `/work` jobs. The loop should not only debug and implement. Choose planning/refinement when the queue is stale, run evidence changes priorities, escalations block the current path, sprint/backlog/progress docs disagree, or local work is no longer clearly moving the AI objective forward.
 
