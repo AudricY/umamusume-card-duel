@@ -182,6 +182,7 @@ def main() -> None:
     assert_dataset_rejects_bad_schema(repo_root, run_dir, examples_path)
     assert_resume_continues_training(repo_root, run_dir, examples_path)
     assert_kl_anchor_smoke(repo_root, run_dir, examples_path, anchor_checkpoint=model_dir / "checkpoint.pt")
+    assert_multi_teacher_dataset_loader(repo_root, run_dir, examples_path)
 
     print(json.dumps({
         "status": "PASS",
@@ -192,6 +193,191 @@ def main() -> None:
         "servedSelectedIndex": served_prediction["selectedIndex"][0],
         "servedSelectedActionId": served_prediction.get("selectedActionId", [None])[0],
     }, indent=2))
+
+
+def assert_multi_teacher_dataset_loader(repo_root: Path, run_dir: Path, baseline_jsonl: Path) -> None:
+    """R7 step 3: end-to-end smoke for the multi-teacher dataset loader.
+
+    Generates a multi-teacher decision trace via the TS evaluator, relabels
+    it (producing rows with a `policyTargets` array per scoping doc § 3),
+    loads it through `JsonlPolicyDataset`, and asserts that:
+
+    - Every loaded `PolicySample.policy_target` is a length-`numActions`
+      ndarray that sums to 1 with mass on multiple teacher choices on at
+      least one row (i.e. the mixture is genuinely soft, not collapsed).
+    - `collate_policy_batch` emits a `policy_targets` tensor of shape
+      `(B, max_actions)`, padded parallel to `action_features` /
+      `action_mask`, with masked positions zeroed.
+    - The trainer's soft-CE branch (`train_bc.py:361-369`) will fire,
+      since `batch.get("policy_targets") is not None`.
+    - REGRESSION GUARD: legacy rows without `policyTargets` still produce a
+      batch that omits `policy_targets`, so the trainer's hard-CE branch
+      fires for them. We use the pre-existing `baseline_jsonl` corpus
+      (produced by `sim:export-training`, which does not write
+      `policyTargets`) as the negative control.
+    """
+
+    import numpy as np
+    import torch
+
+    from uma_ai.dataset import JsonlPolicyDataset, collate_policy_batch
+    from uma_ai.node_bridge import relabel_decision_trace, run_evaluator
+
+    out_dir = run_dir / "r7-multi-teacher"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = out_dir / "trace.multi.jsonl"
+    relabeled_path = out_dir / "relabeled.multi.jsonl"
+
+    run_evaluator(
+        repo_root,
+        selection="baseline",
+        games=1,
+        seed_start=8200,
+        model_side="player",
+        max_steps=120,
+        rollout_steps=20,
+        decision_trace_out=trace_path,
+        trace_teacher="rollout,search,planner",
+        extra=("--planner-max-sequences", "8", "--planner-max-depth", "4"),
+    )
+    relabel_decision_trace(
+        repo_root,
+        trace_in=trace_path,
+        relabeled_out=relabeled_path,
+        source="model-visited-multi-teacher",
+        label_source="multi-teacher",
+    )
+
+    dataset = JsonlPolicyDataset(relabeled_path, min_actions=2)
+    # Every relabeled row carries `policyTargets` per the TS contract
+    # (relabelDecisionTrace.ts:148). The loader must surface that on every
+    # sample as a finite ndarray summing to 1.
+    soft_count = 0
+    multi_mass_rows = 0
+    for sample in dataset.samples:
+        if sample.policy_target is None:
+            raise AssertionError(
+                f"R7: relabeled multi-teacher row must carry policy_target, got None on sample with "
+                f"selectedActionIndex={sample.target_index}"
+            )
+        soft_count += 1
+        arr = sample.policy_target
+        if arr.shape != (sample.action_features.shape[0],):
+            raise AssertionError(
+                f"R7: policy_target shape {arr.shape} must match num_actions {sample.action_features.shape[0]}"
+            )
+        total = float(arr.sum())
+        if abs(total - 1.0) > 1e-5:
+            raise AssertionError(f"R7: policy_target must sum to 1.0 ± 1e-5; got {total}")
+        # "Genuinely soft" means at least two teachers disagreed on this
+        # state. A mixture where all three teachers agree is a one-hot and
+        # is structurally identical to hard-CE — fine, but it doesn't
+        # exercise the soft path. We need at least one row with mass on
+        # 2+ action indices to claim the multi-teacher path is wired.
+        if (arr > 0).sum() >= 2:
+            multi_mass_rows += 1
+    if soft_count == 0:
+        raise AssertionError("R7: relabeled corpus had zero rows; cannot validate loader")
+    if multi_mass_rows == 0:
+        raise AssertionError(
+            f"R7: every multi-teacher row collapsed to one-hot — soft target not exercised "
+            f"(soft_count={soft_count}, multi_mass_rows=0). Increase trace breadth or check that "
+            f"all three teachers ran."
+        )
+
+    # Collate a batch and verify the trainer's soft-CE branch will fire.
+    batch = collate_policy_batch(list(dataset.samples))
+    if "policy_targets" not in batch:
+        raise AssertionError(
+            "R7: collate_policy_batch must emit `policy_targets` when every sample carries one; "
+            "trainer's soft-CE branch at train_bc.py:361-369 keys off `batch.get(\"policy_targets\")`"
+        )
+    pt = batch["policy_targets"]
+    bsz = len(dataset.samples)
+    max_actions = int(batch["action_features"].shape[1])
+    if pt.shape != (bsz, max_actions):
+        raise AssertionError(
+            f"R7: policy_targets must be shape ({bsz}, {max_actions}), got {tuple(pt.shape)}"
+        )
+    # Each row's policy_targets must sum to ~1 (mass on legal positions only)
+    # and masked positions must be zero (padding parallels action_mask).
+    row_sums = pt.sum(dim=1)
+    if not torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-5):
+        raise AssertionError(f"R7: per-row policy_targets must sum to 1; got {row_sums.tolist()}")
+    masked_positions = ~batch["action_mask"]
+    if pt[masked_positions].abs().max().item() > 0.0:
+        raise AssertionError(
+            "R7: policy_targets at masked positions must be exactly zero; padding does not parallel action_mask"
+        )
+
+    # Regression guard: the legacy baseline corpus has no `policyTargets`
+    # field — `policy_target` must be None on every sample, and
+    # `collate_policy_batch` must omit `policy_targets` from the batch so
+    # the trainer's hard-CE branch fires unchanged.
+    baseline_dataset = JsonlPolicyDataset(baseline_jsonl, min_actions=2)
+    if any(s.policy_target is not None for s in baseline_dataset.samples):
+        raise AssertionError(
+            "R7 regression: baseline `sim:export-training` corpus must not produce policy_target; "
+            "got at least one sample with a soft target — the parser is misreading legacy rows"
+        )
+    baseline_batch = collate_policy_batch(list(baseline_dataset.samples[: min(8, len(baseline_dataset.samples))]))
+    if "policy_targets" in baseline_batch:
+        raise AssertionError(
+            "R7 regression: legacy batch (no `policyTargets`) must omit `policy_targets` so the "
+            "trainer takes the hard-CE branch on `targets`. The mixed-batch fallback in "
+            "collate_policy_batch is broken."
+        )
+    # Also confirm a mixed batch (one soft + one hard sample) falls back to
+    # the hard path (no `policy_targets` emitted). This is the `mix-sources`
+    # contract: a batch with any legacy row uses hard-CE.
+    mixed_samples = [dataset.samples[0], baseline_dataset.samples[0]]
+    mixed_batch = collate_policy_batch(mixed_samples)
+    if "policy_targets" in mixed_batch:
+        raise AssertionError(
+            "R7 regression: a mixed soft+hard batch must omit `policy_targets` (hard-CE for the "
+            "whole batch). Synthesising a one-hot for the legacy row would silently change loss."
+        )
+
+    # Numerical equivalence: a soft target that happens to be one-hot must
+    # produce a soft-CE loss numerically equal to hard-CE on the same
+    # selectedActionIndex. We construct a synthetic one-hot soft target on
+    # the legacy baseline samples and verify the loss matches the hard-CE
+    # value to within float32 noise.
+    from uma_ai.dataset import PolicySample
+    from train_bc import masked_log_softmax_logits  # type: ignore[import-not-found]
+
+    sample = baseline_dataset.samples[0]
+    one_hot = np.zeros((sample.action_features.shape[0],), dtype=np.float32)
+    one_hot[sample.target_index] = 1.0
+    synthetic = PolicySample(
+        state_features=sample.state_features,
+        action_features=sample.action_features,
+        target_index=sample.target_index,
+        value_target=sample.value_target,
+        sample_weight=sample.sample_weight,
+        example=sample.example,
+        policy_target=one_hot,
+    )
+    soft_batch = collate_policy_batch([synthetic])
+    hard_batch = collate_policy_batch([sample])
+    if "policy_targets" not in soft_batch or "policy_targets" in hard_batch:
+        raise AssertionError("R7: synthetic one-hot soft-vs-hard batches did not partition as expected")
+    # Loss numbers — we don't have a model handy, but we can simulate the
+    # log-softmax over uniform logits (all zeros): hard-CE = -log p[i],
+    # soft-CE with one-hot at i = -log p[i]. Equality is guaranteed by
+    # construction; this assert just exercises the kernel and the masked
+    # log_softmax helper to make sure the wiring is real.
+    logits = torch.zeros_like(soft_batch["action_features"][:, :, 0])
+    log_probs = masked_log_softmax_logits(logits, soft_batch["action_mask"])
+    soft_loss = -(soft_batch["policy_targets"] * log_probs).sum(dim=1)
+    hard_loss = torch.nn.functional.cross_entropy(
+        logits, hard_batch["targets"], reduction="none"
+    )
+    if not torch.allclose(soft_loss, hard_loss, atol=1e-5):
+        raise AssertionError(
+            f"R7 regression: one-hot soft-CE must equal hard-CE under uniform logits; got "
+            f"soft={soft_loss.tolist()} hard={hard_loss.tolist()}"
+        )
 
 
 def assert_kl_anchor_smoke(repo_root: Path, run_dir: Path, source_jsonl: Path, *, anchor_checkpoint: Path) -> None:

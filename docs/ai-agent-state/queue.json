@@ -36,10 +36,16 @@
     {
       "id": "r7-step-3-python-dataset-loader",
       "priority": "P2",
+      "status": "done",
+      "summary": "Python dataset loader plumbing landed. `PolicySample.policy_target: np.ndarray | None` added; `collate_policy_batch` emits padded `(B, max_actions)` `policy_targets` tensor when every sample in batch is soft (homogeneous-batch policy — mixed batches drop back to hard-CE; the parent corpus mixer is responsible for batch homogeneity, as scoping § 3 commits to skipping mix-sources for v1). Legacy traces without `policyTargets` → `policy_target is None` → trainer's hard-CE branch (`train_bc.py:361-369`) fires unchanged. Smoke at `training/smoke_e2e.py::assert_multi_teacher_dataset_loader` covers: all-soft batch, all-hard batch, mixed batch, one-hot-equals-hard-CE numerical equivalence. Validation: `test:python-train` PASS ~6 min, `test:train` PASS ~2 min."
+    },
+    {
+      "id": "r7-step-4-trace-gen-and-sl-train",
+      "priority": "P2",
       "status": "ready",
       "autonomous_launch_eligible": true,
-      "summary": "R7 step 3 (per scoping § 6): plumb `policyTargets` through the Python SL dataset loader. `training/train_bc.py:361-369` already routes `policy_targets`-bearing batches to soft-CE — the missing piece is the loader. Mirror the MCTS-visits pattern at `training/uma_ai/selfplay_dataset.py:125-135`. Adapter must pad to `max_actions` consistent with `collate_policy_batch` (around `training/uma_ai/dataset.py:82-109`).",
-      "next_action": "Implementer: extend `training/uma_ai/dataset.py` to read `policyTargets` from trace rows when present, pipe through `collate_policy_batch` with padding parallel to `target_index`. Add a Python smoke (or extend an existing training smoke) confirming a multi-teacher trace mini-corpus trains with soft-CE loss. Single-teacher (one-hot) input must still take the existing hard-CE path with no regression. Treat absent `policyTargets` rows the same as absent `teachers` (they exist where `legalActions.length === 1` — single-action rows that selectors short-circuit on)."
+      "summary": "R7 step 4 (per scoping § 6): generate one mixed-teacher trace corpus + train one SL warm-start + evaluate against SL gate (Wilson ≥ 0.35). Skip `mix-sources` for v1 per scoping § 3. Row budget: match R15.S1 iter-1 (so SL-compute comparison is honest). Wall-clock budget: ~30 min trace-gen (planner is ~14× slower per state) + ~30 min SL train.",
+      "next_action": "Implementer: invoke `training/dagger_orchestrator.py` (or call the trace-gen + relabel + SL-train scripts directly) with `--trace-teacher rollout,search,planner`, R15.S1 iter-1 row budget, single iteration, output to `runs/R7-multi-teacher-warmstart/`. After SL train, run `npm run sim:eval-gate` at same n / seed range / opponent set as R15.S1's iter-1 SL gate. Report Wilson interval. If Wilson lower ≥ 0.35 → proceed to step 5 (one PPO sweep from new warm-start). If < 0.35 → close R7 with new SL ceiling per scoping § 4 close-out condition."
     },
     {
       "id": "r7-backlog-shrink-to-pointer",

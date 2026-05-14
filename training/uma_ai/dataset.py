@@ -26,6 +26,12 @@ class PolicySample:
     value_target: float
     sample_weight: float
     example: dict[str, Any]
+    # R7 step 3: per-state mixture target from `relabelDecisionTrace.ts`. When
+    # present, shape is (num_actions,) with mass on each teacher's chosen
+    # action; otherwise None and the trainer takes the hard-CE branch on
+    # `target_index`. Mirrors the same field on `MctsSelfPlaySample` so
+    # collation can emit a padded `policy_targets` tensor uniformly.
+    policy_target: np.ndarray | None = None
 
 
 class JsonlPolicyDataset(Dataset[PolicySample]):
@@ -69,6 +75,7 @@ def load_policy_samples(path: str | Path, *, min_actions: int = 2, ablations: se
                 raise ValueError(f"Bad state feature shape at line {line_number}: {state_features.shape}")
             if action_features.shape[1:] != (ACTION_DIM,):
                 raise ValueError(f"Bad action feature shape at line {line_number}: {action_features.shape}")
+            policy_target = _policy_target(example, num_actions=len(actions), line_number=line_number)
             yield PolicySample(
                 state_features=state_features,
                 action_features=action_features,
@@ -76,6 +83,7 @@ def load_policy_samples(path: str | Path, *, min_actions: int = 2, ablations: se
                 value_target=_value_target(example),
                 sample_weight=_sample_weight(example),
                 example=example,
+                policy_target=policy_target,
             )
 
 
@@ -90,6 +98,17 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
     value_targets = np.zeros((batch_size,), dtype=np.float32)
     sample_weights = np.ones((batch_size,), dtype=np.float32)
 
+    # R7 step 3: emit a padded `policy_targets` tensor only when *every*
+    # sample in the batch carries a soft target. Mixed batches (some rows
+    # from a single-teacher / legacy trace, some from a multi-teacher trace
+    # via `mix-sources`) deliberately fall back to the hard-CE branch in
+    # `train_bc.py:361-369`: the trainer's branch is per-batch
+    # (`policy_targets is not None`), and synthesising a one-hot for legacy
+    # rows would change the loss surface — the brief forbids that. The
+    # parent corpus mixer can keep batches homogeneous by source-tagging.
+    all_soft = all(sample.policy_target is not None for sample in samples)
+    policy_targets = np.zeros((batch_size, max_actions), dtype=np.float32) if all_soft else None
+
     for row, sample in enumerate(samples):
         count = sample.action_features.shape[0]
         state_features[row] = sample.state_features
@@ -98,8 +117,11 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
         targets[row] = sample.target_index
         value_targets[row] = sample.value_target
         sample_weights[row] = sample.sample_weight
+        if policy_targets is not None:
+            # Pad parallel to action_features (above) — same `:count` slice.
+            policy_targets[row, :count] = sample.policy_target  # type: ignore[index]
 
-    return {
+    batch: dict[str, torch.Tensor] = {
         "state_features": torch.from_numpy(state_features),
         "action_features": torch.from_numpy(action_features),
         "action_mask": torch.from_numpy(action_mask),
@@ -107,6 +129,46 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
         "value_targets": torch.from_numpy(value_targets),
         "sample_weights": torch.from_numpy(sample_weights),
     }
+    if policy_targets is not None:
+        batch["policy_targets"] = torch.from_numpy(policy_targets)
+    return batch
+
+
+def _policy_target(example: dict[str, Any], *, num_actions: int, line_number: int) -> np.ndarray | None:
+    """Parse the R7 multi-teacher mixture target (TS `policyTargets` →
+    Python `policy_target`).
+
+    Returns None for legacy rows that do not carry the field (the trainer
+    will take the hard-CE path on `selectedActionIndex` instead — see
+    `train_bc.py:361-369`). Raises on a present-but-malformed field so
+    silent corpus corruption surfaces immediately rather than as a
+    mysterious training-loss bug.
+    """
+
+    raw = example.get("policyTargets")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError(f"policyTargets at line {line_number} must be a list, got {type(raw).__name__}")
+    if len(raw) != num_actions:
+        raise ValueError(
+            f"policyTargets at line {line_number} has length {len(raw)} but legalActions has {num_actions}"
+        )
+    arr = np.asarray(raw, dtype=np.float32)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"policyTargets at line {line_number} contains non-finite values: {raw}")
+    if np.any(arr < 0):
+        raise ValueError(f"policyTargets at line {line_number} contains negative values: {raw}")
+    total = float(arr.sum())
+    # `relabelDecisionTrace.ts` builds these as `1/K` per teacher with K
+    # teachers, so the sum is exact for K in {1,2,3} under float64 but may
+    # drift by ~1e-7 once we cast to float32. Tolerate that; reject anything
+    # that signals a real bug upstream.
+    if not np.isfinite(total) or abs(total - 1.0) > 1e-5:
+        raise ValueError(
+            f"policyTargets at line {line_number} must sum to 1.0 ± 1e-5; got {total}"
+        )
+    return arr
 
 
 def _value_target(example: dict[str, Any]) -> float:
