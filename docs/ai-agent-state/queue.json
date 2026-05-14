@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14",
+  "updated": "2026-05-14T20",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -18,9 +18,12 @@
     {
       "id": "r15-s3-signal-mix-or-schedule",
       "priority": "P3",
-      "status": "ready",
-      "summary": "R15.S3 next single-axis move after Phase M (1.75x coef-scaling) closed SATURATED at iter-2 Wilson 0.3580 (within +0.002 noise of Phase L 0.3560). Coef-magnitude axis is closed; surviving sub-axes are signal-mix change or shaping-schedule change. Three candidates pre-scoped in notes.md follow-up block: (1) constant-shaping schedule [recommended v1, one CLI flag flip --reward-shape-end 1.0, ~6 min compute]; (2) drop weak signals + scale strong ones based on Phase M shape_attribution (throughput dominates 2x over active-energy; bench-energy and retreat near-zero; hp-diff net-negative); (3) value-head-derived strategic-tempo signal (most ambitious, ~2-3h code).",
-      "next_action": "Launch v1 first: same Phase L baseline coefs (active 0.02 / bench 0.02 / retreat 0.03 / throughput 0.02 / hp-diff 0.05), same warm-start runs/item17-2026-05-11/iter-002/model/checkpoint.pt, same opponent (rule-bot), same HPs (--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4 --reward-alpha 0.333 --reward-beta 1.0 --eval-games 250 --iterations 3 --games-per-update 800), only change is --reward-shape-start 1.0 --reward-shape-end 1.0 (constant shape, no decay). Out-dir runs/R15-S3-constant-shape. Pre-register: success if any iter Wilson lower >= 0.40; partial if 0.36 < iter-2 < 0.40; saturation if iter-2 <= 0.36 (then pivot to signal-mix change next, candidate v2). Expected ~6 min compute. Autonomous-launch eligible under user's blanket AI-launch permission."
+      "status": "in_progress",
+      "started_at": "2026-05-14T20:00Z",
+      "run_dir": "runs/R15-S3-constant-shape",
+      "pid": 2663413,
+      "summary": "R15.S3 v1 LAUNCHED — constant-shaping schedule (only flag diff vs Phase L: --reward-shape-end 0.0 -> 1.0). Same warm-start (item17/iter-002/model), same opponent (rule-bot), same HPs (Phase H aggressive), same 1.0x coefs as Phase L (NOT Phase M's 1.75x). Tests whether linear-decay-to-zero was the reason iter-2 capped at ~0.36 in Phase L+M.",
+      "next_action": "Wait for run to finish (~6 min wall-clock per Phase L/M precedent). Read iter-{0,1,2} gate.manifest.json from runs/R15-S3-constant-shape/. Exit gate: any iter Wilson >= 0.40 (first F1 success on record); partial if 0.36 < iter-2 < 0.40 (constant-shape moved past Phase L/M ceiling but not enough); reward-hacking if iter-2 > iter-0 by >= +5pp Wilson but WR drops vs heuristic gate (policy gamed the constant shape but lost games — quote WR alongside Wilson); saturation if iter-2 ~= 0.36 (then pivot to candidate v2: drop weak signals + scale strong ones per Phase M shape_attribution)."
     }
   ]
 }
