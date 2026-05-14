@@ -68,10 +68,9 @@
     {
       "id": "r7b-trace-reencodability-spike",
       "priority": "P3",
-      "status": "ready",
+      "status": "done",
       "autonomous_launch_eligible": true,
-      "summary": "R7.b.0 precondition spike (per scoping § 6 step 0): ~30-min check that existing R12/R13/R14 trace JSONLs can be re-extracted under a new feature schema without resimulating. Gates the cost of every R7.b structural intervention — if NO, every schema bump = full DAgger regen. Full context: docs/ai-research/scoping/r7b-feature-representation.md § 5 risk (a).",
-      "next_action": "Investigator: read one R14-vintage trace JSONL (under runs/), confirm whether observation_to_features can be re-run on the stored rows to produce a fresh feature vector under a new STATE_DIM/schema_version, or whether the stored rows only carry already-encoded features and the raw game state is lost. Report YES/NO + which fields would be missing if NO. Append the result to scoping doc § 5 risk (a) and flip this queue item done."
+      "summary": "R7.b.0 precondition spike CLOSED — VERDICT YES. Sampled runs/R14-f1-self-play-sweep/iter-000/trace.jsonl (row1=2051B) and runs/R15-S1-warmstart-sweep/iter-000/trace.jsonl (row1=2025B); both schemaVersion=1 carry raw `observation` (full PublicObservation: own/opponent active+bench per-card detail, handCardIds, energyZone, discard, shared.stadiumCardId, firstPlayer, pendingChoiceKind) plus `legalActions[i].{id,kind,phase,payload,features}` where payload retains targetUid/handIndex/attackIndex for action-target embedding (#2) recompute. Encoder inputs FULLY recoverable — every R7.b schema bump (v2.1 hygiene → v3 embedding → v3.x set-encoder) costs only feature re-extraction (tens of seconds per corpus, not multi-hour DAgger regen). Exception: intervention #4 (recent-action history) needs cross-row state — separate offline-reconstruction check when R7.b.4 promotes. Result block appended to docs/ai-research/scoping/r7b-feature-representation.md § 9. Unblocks R7.b.2 cost estimate."
     },
     {
       "id": "r7b-hygiene-wire-unused-fields",

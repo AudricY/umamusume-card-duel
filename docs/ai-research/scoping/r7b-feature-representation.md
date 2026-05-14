@@ -129,3 +129,26 @@ Verbatim from `docs/ai-research-backlog.md` § R7.b:
 - Capacity bump (#5) and aux heads (#6) — gated on #1 outcome.
 - Recent-action history (#4) — separate branch, gated on the trace-reencodability spike.
 - Q-head replacement (R9), structural self-supervised aux (R11) — historical, deprecated by R12 GO.
+
+## 9. Result: R7.b.0 trace-reencodability spike (2026-05-14)
+
+**Verdict: YES.** Existing R12/R13/R14/R15.S1-vintage trace JSONLs can be re-extracted under a new feature schema without resimulating. Every R7.b schema-bumping intervention costs only feature re-extraction (CPU-bound JSON read + numpy pass over rows), not a full DAgger regeneration.
+
+**Evidence.** Sampled `runs/R14-f1-self-play-sweep/iter-000/trace.jsonl` (row1 = 2051 bytes, 228MB file) and `runs/R15-S1-warmstart-sweep/iter-000/trace.jsonl` (row1 = 2025 bytes, 27MB file). Both rows carry `schemaVersion: 1` and identical top-level shape. Each row stores the **raw `PublicObservation` snapshot** under `observation`, not just the encoded vector. Field-by-field check against `observation_to_features` (`training/uma_ai/features.py:34-65`):
+
+| Encoder input | Trace row field | Present? |
+|---------------|-----------------|----------|
+| `phase`, `sideToAct`, `turnNumber` | `observation.{phase, sideToAct, turnNumber}` | yes |
+| `own/opponent.{points, handCount, deckCount, energyZone, discard, usedSupporterThisTurn, usedRetreatThisTurn, usedStadiumThisTurn}` | identical paths | yes |
+| `own/opponent.active.{cardId, species, stage, hp, maxHp, energyTotal, energies{10 types}, specialConditions, toolCardId, uid, usedAbilityThisTurn}` | identical paths | yes (full per-card detail on every bench slot too) |
+| `own/opponent.bench[i]` (4 slots) | identical, null-padded | yes |
+| `own.handCardIds` (true ids) | present on own only | yes |
+| `shared.stadiumCardId` | identical | yes |
+| `firstPlayer`, `pendingChoiceKind` (unused today, hygiene-pick targets) | `observation.{firstPlayer, pendingChoiceKind}` | yes (free for R7.b.1 to wire offline) |
+| `legalActions[i].{features, id, kind, phase, payload}` | identical | yes (`payload` carries `targetUid` / `handIndex` / `attackIndex` / retreat target — enough to recompute action-target embeddings for #2 over the stored observation) |
+
+**Surprise (mild).** Rows carry *more* than encoder-inputs need: `selectedActionId`, `heuristicSelectedActionId`, `behaviorPolicy`, `teacher` (R15.S1 only, post-R7 step 2), `result`, `seed`, `sideId`, `modelSide`, `source` — i.e. the corpus also retains label provenance for R7-style teacher relabeling. Only opponent-side hidden info absent (`opponent.handCardIds`) — but encoder already doesn't read this (slot 12 uses discard-mean-hash only), so its absence does not constrain R7.b interventions #1, #2, #3, #5 over the public-info policy assumption.
+
+**Cost implication.** Every R7.b schema bump (v2.1 hygiene → v3 embedding → v3.x set-encoder) re-extracts features by a Python script that reads each `trace.jsonl` line, calls a new `observation_to_features_vN(row['observation'])` + recomputes action vectors from `row['legalActions'][i].payload`, and writes a new feature-cache file alongside the trace. Order-of-magnitude wall-clock at ~2KB/row, ~50k rows/sweep: tens of seconds per corpus, not multi-hour. **DAgger regen is NOT required for any schema-change-only intervention in the v1 R7.b plan.** Exception: intervention #4 (recent action history) needs cross-row state that is not in any single trace row — confirm row-stream offline reconstruction works for that one separately when R7.b.4 promotes.
+
+**One-line digest pointer.** R7.b.0 verdict YES: R14/R15.S1 trace rows carry raw `PublicObservation` + legalAction payloads, so schema bumps re-extract from JSONL (~tens of sec) instead of regenerating DAgger (~hours).
