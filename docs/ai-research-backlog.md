@@ -90,32 +90,18 @@ results (2026-05-11)".
 - **R6.** Larger model capacity — **DONE / FAIL.** hidden=128/depth=3,
   50ep, value_weight=1.0: best imitator (83% argmax-match) AND weakest player
   (gate WR 33.0%). The cap is imitation-target-quality, not capacity.
-- **R7.** Multi-teacher BC blend — **DEFERRED.** Marked obsolete on 2026-05-11
-  post-R12 (label-quality fixes inherit the same noise floor), then re-listed
-  as a surviving F1-line candidate after R15.S3 closeout. Still unfunded; no
-  autonomous launch. Forward brief preserved below.
+- **R7.** Multi-teacher BC blend — **RUNNING (2026-05-14).** Picked over R8
+  post-R15.S3 closeout (self-directed). Scoping + step-by-step execution
+  in `docs/ai-research/scoping/r7-multi-teacher-warmstart.md`. Step 4
+  (mixed-teacher SL train) launched at 06:45Z. Forward brief below
+  collapsed to one-line pointer.
 - **R8.** Direct preference optimization (DPO) — **DEFERRED.** Same trajectory
   as R7: obsoleted post-R12, re-listed post-R15.S3. Forward brief preserved
   below.
 
-### R7. Multi-teacher BC blend (forward, human-rank, escalation open)
+### R7. Multi-teacher BC blend (running)
 
-- **Q:** Does mixing rollout + planner + search teacher labels per state
-  produce a warm-start with broader competence and a different gradient
-  landscape than the rollout-CRN-only fit that R3/R4/R6/R15.S1 saturated?
-- **Hypothesis:** Teacher diversity breaks the rollout-CRN-noise inheritance
-  pattern that R6 made dispositive. PPO from a multi-teacher warm-start may
-  see different (non-saturating) gradient direction than the six R15.S3
-  phases observed.
-- **Design:** Extend `relabel_decision_trace` to attach multiple `labelSource`
-  rows per trace row (rollout, planner, search). Train on the mixed corpus;
-  use label-smoothing or top-K objective so the policy targets a mixture
-  rather than an argmax. Reuses item-5 trace-teacher infrastructure.
-- **Cost:** ~2 h code (planner relabel + multi-label dataset) + ~30 min
-  training + 1 PPO sweep at phase-H scale (5 min). ~3 h total.
-- **Pre-register exit:** warm-start Wilson lower ≥ 0.35 *and* one PPO sweep
-  Wilson lower ≥ 0.40, or close the branch with the new SL ceiling number.
-- **Status:** Surviving R15.S3 closeout candidate. Human rank required.
+Full design + pre-flight teacher-agreement probe (GO) + step-by-step execution: `docs/ai-research/scoping/r7-multi-teacher-warmstart.md`. Status: step 4 mixed-teacher SL train running (2026-05-14, PID 3211541, ETA ~15–25 min from 06:45Z). SL/PPO gates at scoping § 4.
 
 ### R8. DPO (Direct Preference Optimization) (forward, human-rank, escalation open)
 

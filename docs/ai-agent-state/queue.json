@@ -62,9 +62,8 @@
     {
       "id": "r7-backlog-shrink-to-pointer",
       "priority": "P3",
-      "status": "ready",
-      "summary": "Doc-hygiene followup: per new CLAUDE.md 'one canonical home', backlog § R7 (lines 101-118) duplicates content now in docs/ai-research/scoping/r7-multi-teacher-warmstart.md. Shrink backlog entry to one-line pointer.",
-      "next_action": "Direct edit: replace docs/ai-research-backlog.md § R7 body (lines 101-118) with a one-line pointer to the scoping doc. Pair with the parallel R8 entry: leave that one expanded for now since no scoping doc exists yet."
+      "status": "done",
+      "summary": "Backlog § R7 collapsed to one-line pointer mirroring R7.b's compact form; summary line at L93-97 also updated (R7 status RUNNING with launch-time and PID). R8 entry left expanded (no scoping doc yet)."
     },
     {
       "id": "r7b-trace-reencodability-spike",
