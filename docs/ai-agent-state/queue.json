@@ -18,9 +18,12 @@
     {
       "id": "r15-s3-followup-tune-shaping",
       "priority": "P3",
-      "status": "ready",
-      "summary": "R15.S3 promoted to a partial-success: iter-2 Wilson 0.356 lifted the F1 rule-bot ceiling by +4.5pp but missed the 0.40 bar by 4.4pp. Pre-registered branch-1 diagnostic fired (ratios moved off 1.0 across all iters, ratio_max 19.1/32.6/11.1 vs phase H ~1.00), confirming reward shape moves the gradient. Branch alive, not closed.",
-      "next_action": "Next attempt: hold the same 5 signals; scale all five coefficients 1.5x-2x (currently summing to ~0.13/game shape budget; scope target was +/-0.3); rerun the 3-iter sweep. Expected ~10-15 min compute. Same warm-start (runs/item17-2026-05-11/iter-002/checkpoint.pt), same opponent (rule-bot, no pool), same HPs (--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4). If iter-2 crosses 0.40 -> first F1 success on record. If iter-2 stalls at ~0.36 -> coef scaling is saturated and next move is signal-mix change or more iterations."
+      "status": "in_progress",
+      "started_at": "2026-05-14T12:18:00Z",
+      "run_dir": "runs/R15-S3-followup-tune",
+      "pid": 2543462,
+      "summary": "R15.S3 follow-up: same 5 shaping signals, all coefs scaled 1.75x (midpoint of queued 1.5-2x range). Warm-start, opponent, HPs identical to R15.S3 baseline. Aims to close the 4.4pp gap from iter-2 Wilson 0.356 to the 0.40 bar.",
+      "next_action": "Wait for run to finish (~6 min wall-clock per R15.S3 precedent). Read runs/R15-S3-followup-tune/{events.jsonl,iter-NNN/gate.manifest.json}. Exit gate: any iter Wilson lower >= 0.40 (success) or iter-2 in [0.291, 0.331] (falsification, closes coef-scaling axis). Partial = stalled ~0.36 -> pivot to signal-mix change."
     }
   ]
 }
