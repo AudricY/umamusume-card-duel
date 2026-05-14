@@ -603,8 +603,88 @@ R2 (multi-temperature gate matrix) is repurposed as a deployment-tuning task, no
 
 R-WILD's side-imbalance portion is largely resolved by R12 (gap inverted: player 58%, opponent 67%). Simulator determinism + rule-bot mistake catalog remain as low-urgency follow-ups.
 
+## Post-R14 / post-F1 follow-ups (2026-05-14)
+
+R14 closed on 2026-05-14. The code-side workstreams all landed and the production picks are:
+rollout-leaf MCTS at iter-2 (Wilson 0.6479) for max strength, value-head-leaf iter-2 + adaptive
+ratio=1.5 (Wilson 0.452, ~0.5s/decision) for cheap-inference deployment. F1 PPO post-mortem
+(see `docs/ai-performance-research-progress.md` § "F1 Phase summary") declared the 0.40 target
+**unreachable from the current item17 warm-start** and listed four ranked next moves. The items
+below capture those moves plus the only outstanding R14 acceptance step.
+
+### R14.E.followup — Manual 20-game UI exercise
+
+- **Motivation:** R14.E's plumbing is verified (headless `/ai/decide` smoke PASS, extrapolated
+  decisionMs ~0.5s at ratio=1.5, 100 sims) but the in-browser fallback-rate and median latency
+  numbers can only come from real play. This is the only R14 acceptance criterion still open.
+- **Next action:** Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play
+  20 full games end-to-end at value-head leaf + adaptive-ratio=1.5, capture devtools console
+  log for `decisionMs` per turn and fallback events.
+- **Cost:** ~30-45 min of actual play.
+- **Exit / gate:** fallback rate < 5%, median decisionMs < 3s. Append result to
+  `docs/r14-sprint-plan.md` Progress section as the E closure.
+
+### R15.S1 — Better SL warm-start (F1 next-move #1)
+
+- **Motivation:** F1 PPO post-mortem ranked "better warm-start" first. The DAgger sweep at this
+  codebase config plateaued at WR 37.5% with low-entropy. Larger SL run (more games, more epochs,
+  possibly explicit entropy regularization during BC) might give PPO an actually-movable starting
+  point. Distinct from R3's β=0.05 entropy-bonus probe, which already showed entropy alone is not
+  the issue — this is the *SL-scaling* angle.
+- **Next action:** Scope a single full-scale DAgger run: ~3× the games (≥200 trace games per iter),
+  ≥50 epochs, hidden_dim=64/depth=2 unchanged; capture warm-start Wilson lower at greedy + a stretch
+  PPO sweep from that checkpoint. Pre-register: SL warm-start Wilson lower ≥ 0.45 before any PPO
+  is run; otherwise PPO has the same gradient-signal problem as F1 phases 2/G/H.
+- **Cost:** ~1–2 h compute (item-17 take-2 was ~30 games × 25 epochs in <10 min; 3× scale ≤ 1.5h).
+- **Exit / gate:** warm-start Wilson lower ≥ 0.45 *or* document the new SL ceiling and close the
+  branch.
+
+### R15.S2 — PFSP self-play PPO (F1 next-move #2)
+
+- **Motivation:** F1 PPO post-mortem ranked self-play second. Item-12 opponent pool already exists;
+  `ppo_orchestrator` currently uses `--opponent-model-url` unset (rule-bot default). Rollouts against
+  PFSP-sampled prior promoted checkpoints would change the reward distribution from
+  single-opponent-shape to diversity-shape. R5 (a prior tier-2 attempt against the item17 pool)
+  did NOT break the cap, but the W6/I.2 pool is a much stronger opponent set; worth one cheap
+  re-attempt with the new pool.
+- **Next action:** Confirm `--rollout-vs-pool` plumbing is intact in `ppo_orchestrator.py` (or add it
+  if missing). Run one PPO sweep with PFSP-sampled rollout opponents drawn from
+  `runs/R13-W6-phase-d/iter-{0,1,2}/checkpoint.pt`, aggressive HPs, 800 games/update, 3 iters.
+- **Cost:** ~10–15 min compute + any plumbing patches.
+- **Exit / gate:** Wilson lower ≥ 0.40 on the rule-bot eval gate. Otherwise close the branch.
+
+### R15.S3 — Richer reward shaping (F1 next-move #3)
+
+- **Motivation:** F1 PPO post-mortem ranked richer reward shaping third. Current reward is
+  Δpoints × 1/3 + terminal ±1. Strategic depth around attachment / retreat / energy cycles is not
+  rewarded per-step. PPO might exploit a denser signal even if the existing gradient mechanism
+  stays argmax-ratio-bound.
+- **Next action:** Catalog 3–5 candidate intermediate rewards from the existing turn-goal /
+  candidate-ranker telemetry (e.g. successful attach, retreat survival, KO threat resolution).
+  Pre-register one shaping schedule (decay-to-terminal weight), implement in `ppo_orchestrator.py`'s
+  reward computation hook, smoke at f1 phase H scale.
+- **Cost:** ~3–4 h code + ~20 min compute.
+- **Exit / gate:** Wilson lower ≥ 0.40 on the rule-bot eval gate. Diagnostic regardless: if it
+  doesn't move WR but does change `mean_advantage` distribution, that itself is publishable.
+
+### R15.S4 — Sampling-temperature gate (F1 next-move #4)
+
+- **Motivation:** F1 PPO post-mortem ranked this fourth (diagnostic, not solution). All five F1
+  phases were scored on greedy argmax behavior. If PPO is shaping the policy distribution but not
+  flipping argmax, an alternative gate that samples at e.g. T=0.5 might reveal latent improvement.
+  Repurposes the R2 multi-temperature gate matrix idea against the F1 phase-H promoted checkpoint
+  rather than the original DAgger artifacts.
+- **Next action:** Confirm the `sampling=stochastic&temperature=T` body is wired through
+  `serve_onnx` and `evaluateModelVsHeuristic`. Run a 5-temperature × 2-checkpoint matrix
+  (T ∈ {0, 0.3, 0.5, 1.0, 1.5}, F1 phase-H iter-2 + DAgger iter-2 warm-start) at n=100.
+- **Cost:** ~30 min plumbing check + 5 min × 10 cells = ~1.5h compute.
+- **Exit / gate:** Either a non-greedy temperature lifts F1 phase-H above the DAgger warm-start
+  by ≥3pp Wilson lower (proves PPO was making *some* signal we couldn't see), or all temperatures
+  match → confirms PPO produced nothing the gate could measure, closes this hypothesis.
+
 ## Open / wild
 
 - **Side-imbalance verification.** Gate manifests record player/opponent splits inconsistently across phases. Worth a one-off script to extract the side-WR delta and check whether the model is offensively weak or defensively weak.
 - **Simulator determinism audit.** Replay 100 identical seeds end-to-end; measure full-state divergence rate. Silent non-determinism in CRN would invalidate every advantage estimate.
 - **Rule-bot mistake catalog.** The 80% aspirational target requires exploiting rule-bot weaknesses; we don't have a catalog of those weaknesses. Hand-construct ~50 states + a careful audit.
+- **Side-asymmetry confirmation gate (R14.A footnote).** R14.A noted the player-side gap may be partly seed-clustered; one independent seed range (n=100) at value-head leaf + ratio=1.5 against the iter-2 checkpoint would tighten the production claim. Cheap, ~15 min.

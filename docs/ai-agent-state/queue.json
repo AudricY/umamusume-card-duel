@@ -2,11 +2,32 @@
   "updated": "2026-05-14",
   "items": [
     {
-      "id": "bootstrap-claude-loop",
+      "id": "r14-e-manual-ui-exercise",
       "priority": "P1",
       "status": "ready",
-      "summary": "Exercise the new lightweight Claude Code loop once and confirm /work can choose and brief a bounded worker task.",
-      "next_action": "Run /work without arguments after reviewing current git status and AI research state."
+      "summary": "R14.E acceptance: play 20 full UI games with aiBackend=mcts, value-head leaf + adaptive-ratio=1.5, capture fallback rate (<5%) and median decision time (<3s). Only remaining R14 sprint acceptance step.",
+      "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section."
+    },
+    {
+      "id": "f1-followup-self-play-readiness",
+      "priority": "P2",
+      "status": "ready",
+      "summary": "Scope item from F1 post-mortem 'recommended next moves' #2: confirm opponent-pool infra is ready to feed PPO rollouts (item-12 pool + --opponent-model-url plumbing already exists). Decide whether self-play vs PFSP pool is worth one cheap PPO sweep before paying for a larger SL warm-start.",
+      "next_action": "Skim training/opponent_pool.py + ppo_orchestrator.py to confirm --rollout-vs-pool / --opponent-model-url wiring; document gap (if any) and one-paragraph go/no-go for a single self-play PPO sweep against the W6 iter-2 checkpoint as both rollout opp and reference."
+    },
+    {
+      "id": "f1-followup-warmstart-scoping",
+      "priority": "P2",
+      "status": "ready",
+      "summary": "Scope item from F1 post-mortem #1: a 'better warm-start' (more games, more epochs, possibly entropy-regularized BC during the BC stage) might give PPO room to move. Pre-R12 evidence suggested entropy intervention alone didn't break the cap; this is specifically the SL-scaling angle, not entropy alone.",
+      "next_action": "Draft a 1-page scoping doc (under docs/ai-research-backlog.md as a new tier-2 item or under docs/ai-agent-state/notes.md): pre-register hypothesis (SL@hidden=64,depth=2 is compute-starved, not capacity-starved), concrete training config (3x data, 3x epochs), exit criterion (warm-start Wilson lower ≥ 0.45 before any PPO is run), expected cost."
+    },
+    {
+      "id": "side-asymmetry-confirmation-gate",
+      "priority": "P3",
+      "status": "ready",
+      "summary": "R14.A flagged that the player-vs-opponent gap (player Wilson 0.31, opponent 0.42-0.63) is partly seed-clustered. A.followup suggests one independent seed range would confirm. Cheap diagnostic, sticks the production claim.",
+      "next_action": "Run training/r14_ood_gate.py (or sim:eval-gate equivalent) at a third seed range (e.g. 900000+) against runs/R13-W6-phase-d/iter-2/checkpoint.pt + value-head leaf + ratio=1.5, n=100, record per-side Wilson; append to R14 progress as an A footnote."
     }
   ]
 }
