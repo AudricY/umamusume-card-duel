@@ -47,11 +47,24 @@ assert.ok(relabeled.length > 0, "relabel must keep at least some rows");
 relabeled.forEach((row) => {
   assert.equal(row.source, "model-visited-rollout-relabeled");
   assert.equal(row.labelSource, "rollout-teacher");
-  assert.equal(row.teacherSelection, "rollout");
+  // R7 step 2: teacherSelections is the new (list-shaped) field. For the
+  // single-teacher recipe we hit here, it must be ["rollout"].
+  assert.ok(Array.isArray(row.teacherSelections), "relabeled row must carry teacherSelections list");
+  assert.deepEqual(row.teacherSelections, ["rollout"], "single-teacher recipe must emit length-1 teacherSelections");
+  assert.ok(Array.isArray(row.teachers), "relabeled row must forward teachers list");
+  assert.equal(row.teachers.length, 1);
+  assert.equal(row.teachers[0].selection, "rollout");
   assert.ok(row.legalActions.length > 0);
   assert.ok(row.selectedActionIndex >= 0 && row.selectedActionIndex < row.legalActions.length);
   const targetLabel = row.legalActions[row.selectedActionIndex];
   assert.equal(row.selectedActionId, targetLabel.id, "selectedActionId must match teacher's chosen action");
+  // R7 step 2: policyTargets is the per-state mixture distribution. With one
+  // teacher it collapses to a one-hot at selectedActionIndex.
+  assert.ok(Array.isArray(row.policyTargets), "relabeled row must carry policyTargets");
+  assert.equal(row.policyTargets.length, row.legalActions.length, "policyTargets length must match legalActions");
+  const sum = row.policyTargets.reduce((acc: number, v: number) => acc + v, 0);
+  assert.ok(Math.abs(sum - 1.0) < 1e-6, `policyTargets should sum to 1, got ${sum}`);
+  assert.equal(row.policyTargets[row.selectedActionIndex], 1.0, "single-teacher policyTargets must be one-hot on selectedActionIndex");
 });
 assertHiddenInfoSafe(relabeled);
 

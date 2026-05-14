@@ -11,6 +11,16 @@ type BehaviorPolicySnapshot = {
   valueEstimate?: number;
 };
 
+// R7 step 2: teacher labels on a trace row are now a *list* (length 1–3). The
+// singular `teacher` field is gone — single-teacher recipes emit a length-1
+// `teachers` array so back-compat is structural rather than flag-driven.
+type TeacherEntry = {
+  selection: "rollout" | "search" | "planner";
+  selectedActionId: string;
+  selectedActionIndex: number;
+  selectedOriginalRank?: number;
+};
+
 type DecisionTraceRow = {
   schemaVersion: 1;
   source: "model-visited";
@@ -28,12 +38,7 @@ type DecisionTraceRow = {
   heuristicSelectedActionIndex: number;
   fallback: boolean;
   behaviorPolicy?: BehaviorPolicySnapshot;
-  teacher?: {
-    selection: "rollout" | "search" | "planner";
-    selectedActionId: string;
-    selectedActionIndex: number;
-    selectedOriginalRank?: number;
-  };
+  teachers?: TeacherEntry[];
   result: { winner: "player" | "opponent" | null; modelWon: boolean; points: Record<string, number>; terminalReason: string } | null;
 };
 
@@ -55,12 +60,17 @@ function main() {
   let outOfRange = 0;
   let leakDetected = 0;
   const teacherByName: Record<string, number> = {};
+  // R7 step 2 telemetry: count rows by their per-row teacher-count so the
+  // operator can confirm at a glance whether a corpus is single-teacher
+  // (length-1 back-compat) or multi-teacher (length 2–3).
+  const teachersPerRowHistogram: Record<string, number> = {};
 
   mkdirSync(dirname(args.out), { recursive: true });
   const out = [] as string[];
 
   for (const row of rows) {
-    if (!row.teacher) {
+    const teachers = row.teachers ?? [];
+    if (teachers.length === 0) {
       skippedNoTeacher += 1;
       continue;
     }
@@ -68,8 +78,12 @@ function main() {
       skippedFallback += 1;
       continue;
     }
-    const targetIndex = row.teacher.selectedActionIndex;
-    if (targetIndex < 0 || targetIndex >= row.legalActions.length) {
+    const numActions = row.legalActions.length;
+    // Validate every teacher's chosen index lies inside legalActions. A single
+    // bad teacher invalidates the entire row — the mixture target is only
+    // well-defined when all teachers vote in-range.
+    const anyOutOfRange = teachers.some((t) => t.selectedActionIndex < 0 || t.selectedActionIndex >= numActions);
+    if (anyOutOfRange) {
       outOfRange += 1;
       continue;
     }
@@ -78,14 +92,46 @@ function main() {
       leakDetected += 1;
       throw new Error(`Hidden-info leak in row seed=${row.seed} step=${row.step}: ${leakFields.join(",")}`);
     }
-    teacherByName[row.teacher.selection] = (teacherByName[row.teacher.selection] ?? 0) + 1;
+    teachers.forEach((t) => {
+      teacherByName[t.selection] = (teacherByName[t.selection] ?? 0) + 1;
+    });
+    const key = String(teachers.length);
+    teachersPerRowHistogram[key] = (teachersPerRowHistogram[key] ?? 0) + 1;
+    // R7 step 2: build the per-state mixture target. Uniform 1/K weights for
+    // v1 (matches scoping doc § 3 "Trace-schema change"). Each teacher
+    // contributes 1/K to its chosen action's bucket; ties on the same action
+    // sum correctly, so a length-3 list where two teachers agree puts 2/3 on
+    // one action and 1/3 on the other.
+    const policyTargets = new Array<number>(numActions).fill(0);
+    const weight = 1 / teachers.length;
+    for (const t of teachers) {
+      policyTargets[t.selectedActionIndex]! += weight;
+    }
+    // Argmax of the mixture distribution is the hard label kept for telemetry
+    // and for downstream consumers that only want a single action (the
+    // existing accuracy accumulator path). Ties broken by lowest index, which
+    // matches numpy.argmax's deterministic behavior in selfplay_dataset.py.
+    let argmaxIndex = 0;
+    let argmaxValue = policyTargets[0]!;
+    for (let i = 1; i < policyTargets.length; i += 1) {
+      if (policyTargets[i]! > argmaxValue) {
+        argmaxValue = policyTargets[i]!;
+        argmaxIndex = i;
+      }
+    }
+    const argmaxAction = row.legalActions[argmaxIndex]!;
     const result = row.result ?? { winner: null, modelWon: false, points: { player: 0, opponent: 0 }, terminalReason: "unknown" };
     const trainingRow: Record<string, unknown> = {
       schemaVersion: 1,
       source: args.source,
       labelSource: args.labelSource,
       relabeledFrom: { source: row.source, selection: row.selection },
-      teacherSelection: row.teacher.selection,
+      // R7 step 2: forward the full teacher list and the per-row mixture
+      // selections so the dataset loader (step 3 of the execution plan) can
+      // build padded policy_targets tensors and so the trainer reporting can
+      // break down loss by teacher.
+      teachers,
+      teacherSelections: teachers.map((t) => t.selection),
       episodeId: `${row.seed}:${row.modelSide}`,
       seed: row.seed,
       modelSide: row.modelSide,
@@ -93,9 +139,13 @@ function main() {
       sideId: row.sideId,
       observation: row.observation,
       legalActions: row.legalActions,
-      selectedActionId: row.teacher.selectedActionId,
-      selectedActionIndex: targetIndex,
-      selectedOriginalRank: row.teacher.selectedOriginalRank,
+      // selectedActionId / selectedActionIndex point at the *argmax of the
+      // mixture distribution* so legacy consumers that only read the hard
+      // label still get a sensible target. The soft target is in
+      // policyTargets below.
+      selectedActionId: argmaxAction.id,
+      selectedActionIndex: argmaxIndex,
+      policyTargets,
       heuristicSelectedActionId: row.heuristicSelectedActionId,
       heuristicSelectedActionIndex: row.heuristicSelectedActionIndex,
       modelChoseActionId: row.selectedActionId,
@@ -122,6 +172,7 @@ function main() {
     outOfRange,
     leakDetected,
     teacherSelections: teacherByName,
+    teachersPerRowHistogram,
     inputPath: args.in,
     outputPath: args.out,
   };

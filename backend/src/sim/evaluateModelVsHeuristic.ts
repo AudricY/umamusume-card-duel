@@ -46,6 +46,12 @@ import { rankLegalActions, type CandidateRankerMode } from "./candidateRanker";
 import { withGitMetadata } from "./manifest";
 import { runMcts, defaultMctsConfig, type MctsConfig } from "./mcts";
 
+// R7 step 2: the three trace-teacher selectors a row can carry. The full set
+// is fixed by the three selector functions exported below
+// (chooseRolloutAction / chooseSearchAction / choosePlannerAction); changing
+// the set requires a co-located change in chooseTraceTeacher's switch.
+export type TraceTeacherSelection = "rollout" | "search" | "planner";
+
 export type EvaluateModelArgs = {
   modelUrl: string;
   games: number;
@@ -92,7 +98,11 @@ export type EvaluateModelArgs = {
   ranker: CandidateRankerMode;
   decisionTraceOut: string | null;
   manifestOut: string | null;
-  traceTeacher: "none" | "rollout" | "search" | "planner";
+  // R7 step 2: trace-teacher accepts a list of 0–3 teachers. Empty list is the
+  // back-compat equivalent of the old "none" sentinel; a length-1 list is
+  // back-compat for the single-teacher recipe R3/R4/R6/R15.S1 used; a length-3
+  // list is the multi-teacher mixture target that R7 step 2 introduces.
+  traceTeacher: TraceTeacherSelection[];
   plannerTopK: number;
   plannerMaxSequences: number;
   plannerMaxDepth: number;
@@ -168,12 +178,17 @@ type DecisionTraceRow = {
   // / value); rule/heuristic/rollout/planner selections leave this field
   // off because there is no parametric behavior policy to log.
   behaviorPolicy?: BehaviorPolicySnapshot;
-  teacher?: {
-    selection: "rollout" | "search" | "planner";
+  // R7 step 2: per-row mixture target. Each entry is one teacher's argmax on
+  // this state; the relabel pass converts the list into a `policyTargets`
+  // distribution over `legalActions`. Length is always 1–3 when present;
+  // single-teacher runs (back-compat for R3/R4/R6/R15.S1) emit a length-1
+  // array so downstream consumers can branch on shape rather than on a flag.
+  teachers?: Array<{
+    selection: TraceTeacherSelection;
     selectedActionId: string;
     selectedActionIndex: number;
     selectedOriginalRank?: number;
-  };
+  }>;
   result: {
     winner: SideId | null;
     modelWon: boolean;
@@ -305,7 +320,7 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
       const next = advanceModeledTurnStep(state, sideId, decision.action, forcedCoinResults, rng);
       const fallback = stateHash(next) === beforeHash;
       if (args.decisionTraceOut) {
-        const teacher = chooseTraceTeacher(args, state, sideId, `${seed}:${modelSide}:${step}:trace-teacher`);
+        const teachers = chooseTraceTeacher(args, state, sideId, `${seed}:${modelSide}:${step}:trace-teacher`);
         const trace: DecisionTraceRow = {
           schemaVersion: 1,
           source: "model-visited",
@@ -324,7 +339,7 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
           result: null,
         };
         if (decision.selectedOriginalRank !== undefined) trace.selectedOriginalRank = decision.selectedOriginalRank;
-        if (teacher) trace.teacher = teacher;
+        if (teachers.length > 0) trace.teachers = teachers;
         const behavior = (decision as { behavior?: BehaviorPolicySnapshot }).behavior;
         if (behavior) trace.behaviorPolicy = behavior;
         decisionTraces.push(trace);
@@ -425,25 +440,40 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
   return result;
 }
 
+// R7 step 2: evaluate every requested teacher on the same (state, legalActions,
+// seed) triple and emit one entry per teacher. Each teacher gets a distinct
+// sub-seed suffix (`:rollout` / `:search` / `:planner`) so its stochastic
+// search is reproducible *and* independent of the other teachers — matches the
+// per-teacher seed recipe documented in r7TeacherAgreementProbe.ts. The
+// returned array is empty when no teacher is requested (back-compat for the
+// pre-R7 "none" sentinel) and length-1 when a single teacher is requested
+// (back-compat for the R3/R4/R6/R15.S1 single-teacher recipe).
+type TeacherEntry = NonNullable<DecisionTraceRow["teachers"]>[number];
+
 function chooseTraceTeacher(
   args: EvaluateModelArgs,
   state: GameState,
   sideId: SideId,
-  seed: string,
-): DecisionTraceRow["teacher"] | undefined {
-  if (args.traceTeacher === "none") return undefined;
-  const decision = args.traceTeacher === "rollout"
-    ? chooseRolloutAction(args, state, sideId, seed, createSeededRng(seed, "trace-teacher-rollout"))
-    : args.traceTeacher === "search"
-      ? chooseSearchAction(args, state, sideId, seed)
-      : choosePlannerAction(args, state, sideId, seed);
-  const teacher: DecisionTraceRow["teacher"] = {
-    selection: args.traceTeacher,
-    selectedActionId: decision.action.id,
-    selectedActionIndex: decision.selectedIndex,
-  };
-  if (decision.selectedOriginalRank !== undefined) teacher.selectedOriginalRank = decision.selectedOriginalRank;
-  return teacher;
+  baseSeed: string,
+): TeacherEntry[] {
+  if (args.traceTeacher.length === 0) return [];
+  const entries: TeacherEntry[] = [];
+  for (const selection of args.traceTeacher) {
+    const teacherSeed = `${baseSeed}:${selection}`;
+    const decision = selection === "rollout"
+      ? chooseRolloutAction(args, state, sideId, teacherSeed, createSeededRng(`${teacherSeed}:fallback`, "trace-teacher-rollout-fallback"))
+      : selection === "search"
+        ? chooseSearchAction(args, state, sideId, teacherSeed)
+        : choosePlannerAction(args, state, sideId, teacherSeed);
+    const entry: TeacherEntry = {
+      selection,
+      selectedActionId: decision.action.id,
+      selectedActionIndex: decision.selectedIndex,
+    };
+    if (decision.selectedOriginalRank !== undefined) entry.selectedOriginalRank = decision.selectedOriginalRank;
+    entries.push(entry);
+  }
+  return entries;
 }
 
 async function chooseOpponentModelAction(
@@ -1415,8 +1445,33 @@ function parseRanker(raw: string): CandidateRankerMode {
 }
 
 function parseTraceTeacher(raw: string): EvaluateModelArgs["traceTeacher"] {
-  if (raw === "rollout" || raw === "search" || raw === "planner") return raw;
-  return "none";
+  return parseTraceTeacherList(raw);
+}
+
+// Shared parser so evalGate.ts and evaluateModelVsHeuristic.ts agree on the
+// CLI surface. Accepts:
+//   - "" / "none"                       -> [] (back-compat for the old sentinel)
+//   - "rollout"                         -> ["rollout"]
+//   - "rollout,search,planner"          -> ["planner", "rollout", "search"]
+// Sorting + de-duplication makes the output canonical so callers can rely on
+// ordering for things like manifest tags.
+export function parseTraceTeacherList(raw: string): TraceTeacherSelection[] {
+  if (!raw || raw === "none") return [];
+  const tokens = raw.split(",").map((t) => t.trim()).filter(Boolean);
+  const valid: TraceTeacherSelection[] = [];
+  for (const token of tokens) {
+    if (token === "rollout" || token === "search" || token === "planner") {
+      if (!valid.includes(token)) valid.push(token);
+    } else if (token === "none") {
+      // ignore "none" inside a comma list — back-compat: a stray "none" token
+      // alongside real teachers is dropped, not promoted to a sentinel.
+      continue;
+    } else {
+      throw new Error(`--trace-teacher: unknown token "${token}"; expected one of rollout|search|planner (comma-separated for multi-teacher)`);
+    }
+  }
+  valid.sort();
+  return valid;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

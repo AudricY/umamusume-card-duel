@@ -1,4 +1,4 @@
-import { runModelVsHeuristicGame, type EvaluateModelArgs } from "./evaluateModelVsHeuristic";
+import { parseTraceTeacherList, runModelVsHeuristicGame, type EvaluateModelArgs } from "./evaluateModelVsHeuristic";
 import type { SideId } from "../../../shared/src/types";
 import type { CandidateRankerMode } from "./candidateRanker";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -390,9 +390,13 @@ function parsePlannerFirstActionAggregate(raw: string): "max" | "mean" {
   return "max";
 }
 
+// R7 step 2: accept either a single teacher (back-compat with R3/R4/R6/R15.S1)
+// or a comma-separated list ("rollout,search,planner") that fans out into a
+// multi-teacher mixture target on each trace row. Delegates to the shared
+// parser in evaluateModelVsHeuristic.ts so the CLI surface stays consistent
+// across the two entry points.
 function parseTraceTeacher(raw: string): EvaluateModelArgs["traceTeacher"] {
-  if (raw === "rollout" || raw === "search" || raw === "planner") return raw;
-  return "none";
+  return parseTraceTeacherList(raw);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

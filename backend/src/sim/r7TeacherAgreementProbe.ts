@@ -117,7 +117,7 @@ function buildSelectorArgs(): EvaluateModelArgs {
     ranker: "heuristic",
     decisionTraceOut: null,
     manifestOut: null,
-    traceTeacher: "none",
+    traceTeacher: [],
     plannerTopK: 4,
     plannerMaxSequences: 64,
     plannerMaxDepth: 8,

@@ -144,7 +144,7 @@ function makePlannerArgs(args: ProbeArgs): EvaluateModelArgs {
     ranker: "heuristic",
     decisionTraceOut: null,
     manifestOut: null,
-    traceTeacher: "none",
+    traceTeacher: [],
     plannerTopK: args.plannerTopK,
     plannerMaxSequences: args.plannerMaxSequences,
     plannerMaxDepth: args.plannerMaxDepth,

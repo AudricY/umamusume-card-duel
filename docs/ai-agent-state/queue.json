@@ -30,9 +30,16 @@
     {
       "id": "r7-step-2-schema-change",
       "priority": "P2",
+      "status": "done",
+      "summary": "TS schema change landed + back-compat preserved. `DecisionTraceRow.teacher` → `teachers: Array<...>` (length 1-3); `chooseTraceTeacher` calls all requested selectors with per-teacher sub-seeds; `parseTraceTeacher` accepts comma-separated CLI; relabel emits `policyTargets: number[]` with uniform 1/K weights. New smoke `backend/src/tests/multiTeacherTraceSmoke.ts` asserts mixed + single paths. All 6 train smokes PASS (~60s)."
+    },
+    {
+      "id": "r7-step-3-python-dataset-loader",
+      "priority": "P2",
       "status": "ready",
-      "summary": "R7 step 2 (per scoping § 6): schema change. Extend DecisionTraceRow.teacher → teachers: Array<{selection,selectedActionId,selectedActionIndex,selectedOriginalRank?}> (length 1-3). Update chooseTraceTeacher (`backend/src/sim/evaluateModelVsHeuristic.ts:428`) to call all three selectors when a multi-teacher flag is set, with per-teacher sub-seeds (`...:rollout`, `...:search`, `...:planner`). Update parseTraceTeacher (`backend/src/sim/evalGate.ts:393`) to accept comma-separated input. Update relabelDecisionTrace.ts to consume row.teachers and emit policyTargets: number[] (uniform 1/3 weights v1). NO dataset/trainer change needed yet — that is step 3.",
-      "next_action": "Implementer: edit backend/src/sim/evaluateModelVsHeuristic.ts (DecisionTraceRow teacher field + chooseTraceTeacher multi-teacher branch), backend/src/sim/evalGate.ts (parseTraceTeacher comma-separated), backend/src/sim/dagger/relabelDecisionTrace.ts (DecisionTraceRow type + policyTargets construction). Add a smoke test exercising the multi-teacher path. Keep back-compat: single-teacher --trace-teacher rollout still works."
+      "autonomous_launch_eligible": true,
+      "summary": "R7 step 3 (per scoping § 6): plumb `policyTargets` through the Python SL dataset loader. `training/train_bc.py:361-369` already routes `policy_targets`-bearing batches to soft-CE — the missing piece is the loader. Mirror the MCTS-visits pattern at `training/uma_ai/selfplay_dataset.py:125-135`. Adapter must pad to `max_actions` consistent with `collate_policy_batch` (around `training/uma_ai/dataset.py:82-109`).",
+      "next_action": "Implementer: extend `training/uma_ai/dataset.py` to read `policyTargets` from trace rows when present, pipe through `collate_policy_batch` with padding parallel to `target_index`. Add a Python smoke (or extend an existing training smoke) confirming a multi-teacher trace mini-corpus trains with soft-CE loss. Single-teacher (one-hot) input must still take the existing hard-CE path with no regression. Treat absent `policyTargets` rows the same as absent `teachers` (they exist where `legalActions.length === 1` — single-action rows that selectors short-circuit on)."
     },
     {
       "id": "r7-backlog-shrink-to-pointer",

@@ -176,8 +176,12 @@ try {
     assert.equal(row.source, "model-visited");
     assert.equal(row.observation.opponent.handCardIds, undefined, "trace observation must not leak opponent hand IDs");
     assert.ok(row.result?.winner === "player" || row.result?.winner === "opponent" || row.result?.winner === null, "trace rows should include final result");
-    assert.equal(row.teacher?.selection, "rollout", "trace rows should include requested teacher labels");
-    assert.ok(typeof row.teacher?.selectedActionId === "string", "trace teacher should include selected action ID");
+    // R7 step 2: single-teacher CLI emits a length-1 `teachers` array (the old
+    // singular `teacher` field is gone). Back-compat shape check.
+    assert.ok(Array.isArray(row.teachers), "trace rows should carry a teachers list");
+    assert.equal(row.teachers.length, 1, "single-teacher CLI must emit length-1 teachers list");
+    assert.equal(row.teachers[0]?.selection, "rollout", "trace rows should include requested teacher labels");
+    assert.ok(typeof row.teachers[0]?.selectedActionId === "string", "trace teacher should include selected action ID");
     // Item 18 negative test: rollout selection does not consult the model
     // server, so behaviorPolicy must be absent on these trace rows.
     assert.equal(row.behaviorPolicy, undefined, "rollout-source trace must not carry behaviorPolicy");
