@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T17:30Z",
+  "updated": "2026-05-14T18:00Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -11,9 +11,15 @@
     {
       "id": "mcts-distill-scoping",
       "priority": "P2",
+      "status": "done",
+      "summary": "Scoping doc landed at docs/ai-research/scoping/mcts-distill.md (2026-05-14). Pre-existing evidence: W6/iter-2 search-wrapped Wilson 0.6479; raw-policy Wilson 0.1455 at n=20 (Phase J anchor, not a ceiling). Unknown to resolve: raw-policy Wilson at n=1000 from a fresh BC retrain on the existing R13-W6-phase-d corpora (~6216 rows). State-coverage mismatch (mcts-selfplay vs rule-bot gate) flagged as the largest risk."
+    },
+    {
+      "id": "mcts-distill-v1-run",
+      "priority": "P2",
       "status": "ready",
-      "summary": "Scope MCTS-distillation as the next F1 lever after R7/R8/R7.b.2 closed FAIL. Rollout-leaf MCTS at R12 iter-2 hits Wilson 0.6479 with inference-time search; distill that visit-count distribution as the SL target. train_bc.py:887 already wires --data-mode mcts-distill. Pre-reg gate consistent with prior F1 family: Wilson lower ≥ 0.40 at iter-0 SL gate from a phase-H-scale retrain.",
-      "next_action": "Step 1 (investigator): locate where --data-mode mcts-distill labels come from — likely a sibling of rollout/search/planner trace teachers; trace the data path from train_bc.py:29 (data_mode branch) to the dataset loader and to whatever generates the mcts-selfplay rows; identify whether R12/R13/R14 already produced compatible corpora or whether a fresh MCTS-trace pass is needed. Step 2 (implementer): author scoping doc at docs/ai-research/scoping/mcts-distill.md (hypothesis + corpus source + sweep config + exit gate) following the r7-multi-teacher-warmstart.md / r8-dpo.md / r7b-feature-representation.md template."
+      "summary": "Run mcts-distill v1 SL retrain + gate per scoping § 1 falsifiable proposition. Combined corpus runs/R13-W6-phase-d/iter-{0,1,2}/selfplay.jsonl (~6216 rows). Init from runs/item17-2026-05-11/iter-002/model/checkpoint.pt. Exit gate per scoping § 6: PASS ≥0.40, MARGINAL [0.37,0.40), FAIL <0.37.",
+      "next_action": "Concatenate the three selfplay.jsonl files into a single training input (or pass via comma-separated --data if train_bc.py supports it — check first). Launch chained train+gate: train_bc.py --data <combined> --init-from-checkpoint runs/item17-2026-05-11/iter-002/model/checkpoint.pt --data-mode mcts-distill --epochs 75 --hidden-dim 64 --depth 2 --kl-anchor-checkpoint runs/item17-2026-05-11/iter-002/model/checkpoint.pt --kl-anchor-weight 0.05 --out-dir runs/mcts-distill-v1/iter-000/model/ --device auto (NO --amp until model-py-amp-overflow-fix lands). Then r8_gate_eval.py --checkpoint .../checkpoint.pt --out-dir runs/mcts-distill-v1/iter-000/ --games 500 --seed-start 9000 --min-ci-lower 0.40. Surface verdict + close-out per scoping § 6."
     },
     {
       "id": "r7b-card-embedding-pass",
