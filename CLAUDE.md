@@ -23,9 +23,16 @@ The main Claude session should stay small:
 3. Wait for the worker.
 4. Read the worker's concise summary and any changed files.
 5. Persist only useful conclusions in `docs/ai-agent-state/`.
-6. Stop unless the user explicitly asks to keep going.
+6. Continue with the next immediately actionable step if the worker surfaced one and it is still within the same bounded objective.
 
 The worker is the default way to handle context-heavy exploration. The point is context isolation, not parallelism. Do not fan out multiple workers unless the tasks are independent, low-resource, and have disjoint write scopes.
+
+Do not use `/loop` or a timed wakeup just to continue ordinary work. Use a timeout/wakeup only when the next useful action is blocked on wall-clock time or an external dependency, such as:
+
+- A training/eval/background process that is still running.
+- A scheduled checkpoint or log file that will exist later.
+- Human input or approval.
+- A deliberate cool-down after a resource-heavy run.
 
 ## Claude Harness State
 

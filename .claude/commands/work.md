@@ -62,6 +62,10 @@ Persist only useful state:
 - Update `docs/ai-agent-state/queue.json` only when the next action changed.
 - Update `docs/ai-agent-state/escalations.md` only for blockers, missing artifacts, unsafe stop lines, or human decisions.
 - Update canonical AI docs only when the worker produced evidence that belongs there.
+- Continue immediately if the worker identified a clear next step that is still inside the same bounded objective.
+- Spawn another single worker only when that next step would otherwise bloat the main context and does not require waiting.
+
+Do not schedule `/loop`, a timeout, or a timed wakeup just to continue ordinary work. Use a timeout/wakeup only when the next useful action is blocked on wall-clock time or an external dependency: a still-running training/eval process, a future log/checkpoint, human input, or a deliberate cool-down after resource-heavy work.
 
 ## Wrap
 
@@ -73,4 +77,4 @@ Print a concise summary:
 - Validation run or skipped.
 - Next recommended action.
 
-Then stop. Do not schedule another wake in the first version of this harness.
+Stop only when there is no immediate actionable next step within the current bounded objective, or when the next step requires waiting.

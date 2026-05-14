@@ -24,7 +24,7 @@ Do not build a general Codex/Codex-compatible harness unless there is a later re
 
 Transfer these ideas from the existing Claude harness:
 
-- A `/work` command that reads current repo state, picks the next useful job, runs it, summarizes what changed, and stops.
+- A `/work` command that reads current repo state, picks the next useful job, runs it, summarizes what changed, and continues immediately while the next step is available now.
 - One general worker subagent that executes the selected job while the main Claude session stays small.
 - Durable state over chat memory: queue, escalations, progress notes, run summaries.
 - A concise operating contract so future Claude sessions know how to work in this repo.
@@ -149,7 +149,11 @@ After the worker returns, `/work` should:
 - Update `docs/ai-agent-state/digests/YYYY-MM-DD.md` if the result is meaningful.
 - Update `queue.json` or `escalations.md` only when the result changes the next action.
 - Report what changed and what remains.
-- Stop. Do not schedule another wake in the first version.
+- Continue immediately if the worker identified a clear next step inside the same bounded objective.
+- Stop when the bounded objective is complete or the next step requires waiting.
+- Do not schedule a timed wakeup just to continue ordinary work.
+
+Use a timeout/wakeup only when the next useful action is blocked on wall-clock time or an external dependency: a still-running training/eval process, a future checkpoint/log/manifest, human input, or a deliberate cool-down after resource-heavy work.
 
 The worker's task can be any type:
 
@@ -274,7 +278,7 @@ It should not execute experiments.
 
 Only after the manual Claude loop is useful, consider scheduled wakeups.
 
-Scheduling should be independent from the state files. A failed wakeup should not corrupt the harness.
+Scheduling should be independent from the state files. A failed wakeup should not corrupt the harness. Do not use automation to create idle polling; only schedule a wakeup when there is a concrete time-blocked reason to resume later.
 
 ## Validation
 
@@ -306,6 +310,8 @@ The harness should feel like a thin operating discipline for Claude Code:
 2. Pick one useful job.
 3. Spawn one general worker to do the context-heavy part.
 4. Wait, synthesize, and persist the result.
-5. Update the queue only when evidence changes.
+5. Continue immediately while the next step is available now.
+6. Use timed looping only for genuine waits.
+7. Update the queue only when evidence changes.
 
 Keep it boring. The existing training code is already complex enough; the Claude layer should reduce operator drift, not add another system to maintain.

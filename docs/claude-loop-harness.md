@@ -23,9 +23,22 @@ The worker can handle any task type:
 - Run analysis.
 - Validation.
 
-The worker returns a concise summary. The orchestrator then persists only the useful result and stops.
+The worker returns a concise summary. The orchestrator then persists only the useful result and either continues with the next immediate step or stops when the bounded objective is complete.
 
 This keeps the main context from filling with logs, long file reads, failed exploration paths, and intermediate command output.
+
+## Looping And Wakeups
+
+Do not use a timed `/loop` just to continue ordinary work. If the next useful step is available now, continue in the same `/work` run.
+
+Use a timeout or wakeup only when progress is blocked by wall-clock time or an external dependency:
+
+- A training, evaluation, or background process is still running.
+- A checkpoint, manifest, or log file is expected later.
+- Human input or approval is required.
+- A deliberate cool-down is needed after resource-heavy work.
+
+The default loop is therefore synchronous: worker returns, orchestrator synthesizes, and work continues immediately when appropriate.
 
 ## Parallelism
 
