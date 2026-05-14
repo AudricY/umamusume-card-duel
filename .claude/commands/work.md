@@ -43,7 +43,7 @@ Persist useful state where it belongs:
 - Claude operating priorities: `docs/ai-agent-state/queue.json`
 - Blockers or human decisions: `docs/ai-agent-state/escalations.md`
 - Short run summaries: `docs/ai-agent-state/digests/YYYY-MM-DD.md`
-- Durable research evidence: existing AI sprint/backlog/progress docs
+- Durable research evidence: results go to the progress doc; the backlog stays forward-looking. See CLAUDE.md "Documentation Discipline" for the role+cap rules.
 
 Continue immediately when the next step is clearly still the same bounded objective and cost, risk, and context budget remain reasonable. Spawn another single worker if that next step would otherwise bloat the main context.
 

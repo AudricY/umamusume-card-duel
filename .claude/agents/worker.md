@@ -23,7 +23,7 @@ Hard constraints:
 - Do not start heavyweight training/eval jobs unless explicitly allowed.
 - Treat missing checkpoints under `runs/` as environment gaps, not passing results.
 
-For planning/refinement work, improve the existing queue, escalations, sprint, backlog, or progress docs. Avoid creating new planning documents unless the brief asks for it.
+For planning/refinement work, improve the existing queue, escalations, sprint, backlog, or progress docs. Avoid creating new planning documents unless the brief asks for it. Keep `docs/ai-research-backlog.md` forward-looking — finished/failed result blocks go to `docs/ai-performance-research-progress.md` with a one-line backlog pointer.
 
 ## Validation
 

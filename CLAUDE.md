@@ -106,3 +106,5 @@ Keep docs close to the evidence.
 - Use `docs/ai-agent-state/digests/` for short Claude run summaries.
 - Keep queue entries concise and actionable.
 - Add escalations when useful work is blocked by missing artifacts, ambiguous direction, or unsafe next steps.
+- `docs/ai-research-backlog.md` is forward-looking only (target ≤300 lines). Finished/failed sprint phases and dated result blocks belong in `docs/ai-performance-research-progress.md`; the backlog entry shrinks to a one-line pointer.
+- Daily digests target ≤150 lines. If a doc is already past its target, roll older blocks forward before appending new content.
