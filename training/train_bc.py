@@ -300,37 +300,135 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
     state = torch.zeros((1, STATE_DIM), dtype=torch.float32)
     actions = torch.zeros((1, 4, ACTION_DIM), dtype=torch.float32)
     mask = torch.ones((1, 4), dtype=torch.bool)
+    # R7.b.2 Phase 3: embedding-pass tensors. Use the same fixed
+    # per-zone width the production exporter uses
+    # (`training/export_onnx.py:MAX_CARDS_PER_ZONE`). We re-import here
+    # rather than at module scope to keep this smoke independent of
+    # export-side import order.
+    from uma_ai.features import CARD_ID_SHAPES
+    from uma_ai.model import NUM_ZONES
+    max_cards_per_zone = max(CARD_ID_SHAPES.values())
+    card_ids_by_zone = torch.zeros((1, NUM_ZONES, max_cards_per_zone), dtype=torch.int64)
+    action_card_idx = torch.zeros((1, 4, 2), dtype=torch.int64)
     torch.onnx.export(
         cpu_model,
-        (state, actions, mask),
+        (state, actions, mask, card_ids_by_zone, action_card_idx),
         onnx_path,
-        input_names=["state_features", "action_features", "action_mask"],
+        input_names=[
+            "state_features",
+            "action_features",
+            "action_mask",
+            "card_ids_by_zone",
+            "action_card_idx",
+        ],
         output_names=["logits", "value"],
         dynamic_axes={
             "state_features": {0: "batch"},
             "action_features": {0: "batch", 1: "actions"},
             "action_mask": {0: "batch", 1: "actions"},
+            "card_ids_by_zone": {0: "batch"},
+            "action_card_idx": {0: "batch", 1: "actions"},
             "logits": {0: "batch", 1: "actions"},
             "value": {0: "batch"},
         },
         opset_version=17,
     )
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    # (a) Populated inputs: random non-zero card ids in every zone +
+    # random non-zero action idx. This exercises the embedding `Gather`
+    # path inside ONNX (vs. the all-zero short-circuit). Reproducible
+    # via torch.manual_seed so the roundtrip is deterministic across
+    # CI runs.
+    gen = torch.Generator().manual_seed(0)
+    populated_czi = torch.randint(
+        low=1,
+        high=cpu_model.card_embed.num_embeddings,
+        size=(1, NUM_ZONES, max_cards_per_zone),
+        dtype=torch.int64,
+        generator=gen,
+    )
+    populated_aci = torch.randint(
+        low=1,
+        high=cpu_model.card_embed.num_embeddings,
+        size=(1, 4, 2),
+        dtype=torch.int64,
+        generator=gen,
+    )
     onnx_logits, onnx_value = session.run(None, {
         "state_features": state.numpy(),
         "action_features": actions.numpy(),
         "action_mask": mask.numpy(),
+        "card_ids_by_zone": populated_czi.numpy(),
+        "action_card_idx": populated_aci.numpy(),
     })
     with torch.no_grad():
-        torch_logits, torch_value = cpu_model(state, actions, mask)
+        torch_logits, torch_value = cpu_model(
+            state,
+            actions,
+            mask,
+            card_ids_by_zone=populated_czi,
+            action_card_idx=populated_aci,
+        )
     max_logit_diff = float((torch.from_numpy(onnx_logits) - torch_logits).abs().max())
     max_value_diff = float((torch.from_numpy(onnx_value) - torch_value).abs().max())
-    onnx_path.unlink(missing_ok=True)
     if max_logit_diff > 1e-3 or max_value_diff > 1e-3:
+        onnx_path.unlink(missing_ok=True)
         raise RuntimeError(
-            f"ONNX roundtrip mismatch: logits {max_logit_diff} value {max_value_diff}"
+            f"ONNX roundtrip mismatch (populated): logits {max_logit_diff} value {max_value_diff}"
         )
-    return {"status": "PASS", "max_logit_diff": max_logit_diff, "max_value_diff": max_value_diff}
+
+    # (b) Padding semantics survive ONNX export: all-zero card-id inputs
+    # must produce outputs that agree between PyTorch and ORT AND match
+    # the omitted-kwarg PyTorch forward (Phase 2 smoke contract (4)
+    # promoted into the ONNX graph). This is the critical
+    # `padding_idx=0` validation — if the exporter encoded the lookup
+    # table without zero-row semantics, the embedding pass would leak
+    # signal in zero-cards states.
+    zero_czi = torch.zeros_like(card_ids_by_zone)
+    zero_aci = torch.zeros_like(action_card_idx)
+    onnx_logits_z, onnx_value_z = session.run(None, {
+        "state_features": state.numpy(),
+        "action_features": actions.numpy(),
+        "action_mask": mask.numpy(),
+        "card_ids_by_zone": zero_czi.numpy(),
+        "action_card_idx": zero_aci.numpy(),
+    })
+    with torch.no_grad():
+        torch_logits_z, torch_value_z = cpu_model(
+            state,
+            actions,
+            mask,
+            card_ids_by_zone=zero_czi,
+            action_card_idx=zero_aci,
+        )
+        # Reference: forward with the kwargs omitted entirely. Phase 2
+        # `padding_idx=0` + `zone_projection(bias=False)` ensures
+        # `forward(...)` with zero embedding inputs is bit-equivalent
+        # to `forward(...)` with the kwargs omitted.
+        torch_logits_none, torch_value_none = cpu_model(state, actions, mask)
+    max_logit_diff_zero = float((torch.from_numpy(onnx_logits_z) - torch_logits_z).abs().max())
+    max_value_diff_zero = float((torch.from_numpy(onnx_value_z) - torch_value_z).abs().max())
+    max_logit_diff_pad = float((torch_logits_z - torch_logits_none).abs().max())
+    max_value_diff_pad = float((torch_value_z - torch_value_none).abs().max())
+    onnx_path.unlink(missing_ok=True)
+    if max_logit_diff_zero > 1e-3 or max_value_diff_zero > 1e-3:
+        raise RuntimeError(
+            f"ONNX roundtrip mismatch (zero-ids): logits {max_logit_diff_zero} value {max_value_diff_zero}"
+        )
+    if max_logit_diff_pad > 1e-6 or max_value_diff_pad > 1e-6:
+        raise RuntimeError(
+            f"padding_idx=0 broken: zero-id forward != omitted-arg forward; "
+            f"logits {max_logit_diff_pad} value {max_value_diff_pad}"
+        )
+    return {
+        "status": "PASS",
+        "max_logit_diff": max_logit_diff,
+        "max_value_diff": max_value_diff,
+        "max_logit_diff_zero": max_logit_diff_zero,
+        "max_value_diff_zero": max_value_diff_zero,
+        "max_logit_diff_pad": max_logit_diff_pad,
+        "max_value_diff_pad": max_value_diff_pad,
+    }
 
 
 def run_epoch(

@@ -9,7 +9,23 @@ from typing import Any
 import numpy as np
 import onnxruntime as ort
 
-from uma_ai.features import ACTION_DIM, STATE_DIM, card_vocab_metadata, legal_actions_to_features, observation_to_features
+from uma_ai.features import (
+    ACTION_DIM,
+    CARD_ID_SHAPES,
+    STATE_DIM,
+    ZONE_ORDER,
+    action_card_idx_pair,
+    card_vocab_metadata,
+    legal_actions_to_features,
+    observation_to_card_ids,
+    observation_to_features,
+)
+
+# R7.b.2 Phase 3: fixed per-zone width for the embedding inputs — mirrors
+# `training/export_onnx.py`'s MAX_CARDS_PER_ZONE so the ORT input shape is
+# stable across producers.
+MAX_CARDS_PER_ZONE = max(CARD_ID_SHAPES.values())
+NUM_ZONES = len(ZONE_ORDER)
 
 
 class PolicyServer(ThreadingHTTPServer):
@@ -208,15 +224,45 @@ def request_to_arrays(payload: dict[str, Any]) -> tuple[dict[str, np.ndarray], l
         actions = payload["legalActions"]
         if not actions:
             raise ValueError("legalActions must not be empty")
-        state_features = observation_to_features(payload["observation"])[None, :]
+        observation = payload["observation"]
+        state_features = observation_to_features(observation)[None, :]
         action_features = legal_actions_to_features(actions)[None, :, :]
         action_mask = np.ones(action_features.shape[:2], dtype=np.bool_)
         action_ids = [[str(action.get("id", index)) for index, action in enumerate(actions)]]
+        # R7.b.2 Phase 3: build the embedding-pass tensors from the JSON
+        # observation (Phase 1 emits `cardIdsByZone`) and per-action
+        # source/target idx (Phase 1 adds `actionSourceCardIdx` /
+        # `actionTargetCardIdx`). Pack into the same fixed shape the
+        # ONNX graph expects (NUM_ZONES, MAX_CARDS_PER_ZONE) so ORT's
+        # shape inference matches export-time exactly.
+        card_id_zones = observation_to_card_ids(observation)
+        card_ids_by_zone = np.zeros((1, NUM_ZONES, MAX_CARDS_PER_ZONE), dtype=np.int64)
+        for zone_index, zone in enumerate(ZONE_ORDER):
+            zone_arr = card_id_zones[zone]
+            card_ids_by_zone[0, zone_index, : zone_arr.shape[0]] = zone_arr
+        action_card_idx = np.zeros((1, len(actions), 2), dtype=np.int64)
+        for action_index, action in enumerate(actions):
+            action_card_idx[0, action_index, :] = action_card_idx_pair(action)
     else:
         state_features = np.asarray(payload["state_features"], dtype=np.float32)
         action_features = np.asarray(payload["action_features"], dtype=np.float32)
         action_mask = np.asarray(payload["action_mask"], dtype=np.bool_)
         action_ids = None
+        # Raw-arrays callers (training/debug paths) can pre-pack the new
+        # tensors too. Default to zero so the embedding pass collapses to
+        # the additive-residual null path (verified <1e-6 in Phase 2).
+        if "card_ids_by_zone" in payload:
+            card_ids_by_zone = np.asarray(payload["card_ids_by_zone"], dtype=np.int64)
+        else:
+            card_ids_by_zone = np.zeros(
+                (state_features.shape[0], NUM_ZONES, MAX_CARDS_PER_ZONE), dtype=np.int64
+            )
+        if "action_card_idx" in payload:
+            action_card_idx = np.asarray(payload["action_card_idx"], dtype=np.int64)
+        else:
+            action_card_idx = np.zeros(
+                (action_features.shape[0], action_features.shape[1], 2), dtype=np.int64
+            )
     if state_features.ndim != 2:
         raise ValueError("state_features must have shape [batch,state_dim]")
     if state_features.shape[1] != STATE_DIM:
@@ -227,10 +273,22 @@ def request_to_arrays(payload: dict[str, Any]) -> tuple[dict[str, np.ndarray], l
         raise ValueError(f"action_features dimension mismatch: got {action_features.shape[2]}, expected {ACTION_DIM}")
     if action_mask.shape != action_features.shape[:2]:
         raise ValueError("action_mask must have shape [batch,actions]")
+    expected_czi = (state_features.shape[0], NUM_ZONES, MAX_CARDS_PER_ZONE)
+    if card_ids_by_zone.shape != expected_czi:
+        raise ValueError(
+            f"card_ids_by_zone shape mismatch: got {card_ids_by_zone.shape}, expected {expected_czi}"
+        )
+    expected_aci = (action_features.shape[0], action_features.shape[1], 2)
+    if action_card_idx.shape != expected_aci:
+        raise ValueError(
+            f"action_card_idx shape mismatch: got {action_card_idx.shape}, expected {expected_aci}"
+        )
     return {
         "state_features": state_features.astype(np.float32),
         "action_features": action_features.astype(np.float32),
         "action_mask": action_mask.astype(np.bool_),
+        "card_ids_by_zone": card_ids_by_zone.astype(np.int64),
+        "action_card_idx": action_card_idx.astype(np.int64),
     }, action_ids
 
 

@@ -13,7 +13,15 @@ import onnxruntime as ort
 import torch
 
 from uma_ai.dataset import load_policy_samples
-from uma_ai.features import card_vocab_metadata, legal_actions_to_features, observation_to_features
+from uma_ai.features import (
+    CARD_ID_SHAPES,
+    ZONE_ORDER,
+    action_card_idx_pair,
+    card_vocab_metadata,
+    legal_actions_to_features,
+    observation_to_card_ids,
+    observation_to_features,
+)
 from uma_ai.node_bridge import export_training_examples
 
 
@@ -78,6 +86,38 @@ def main() -> None:
         selected = int(served_prediction["selectedIndex"][0])
         if selected < 0 or selected >= len(sample.example["legalActions"]):
             raise AssertionError(f"Server selected invalid index {selected}")
+        # R7.b.2 Phase 3: served-prediction (via `request_to_arrays`)
+        # must match direct-ORT (with manually-built tensors). This
+        # catches `request_to_arrays` packing bugs distinct from any
+        # ONNX-export issue — if the served logits diverge from the
+        # direct ones, `request_to_arrays` is the culprit, because both
+        # paths feed the same ONNX session.
+        served_logits = served_prediction.get("logits")
+        if served_logits is None:
+            raise AssertionError("/predict response missing logits")
+        direct_logits = direct_prediction.get("logits")
+        if direct_logits is None:
+            raise AssertionError("direct ORT prediction missing logits")
+        served_arr = np.asarray(served_logits, dtype=np.float64)
+        direct_arr = np.asarray(direct_logits, dtype=np.float64)
+        if served_arr.shape != direct_arr.shape:
+            raise AssertionError(
+                f"R7.b.2 Phase 3: served/direct logits shape mismatch — "
+                f"served {served_arr.shape} vs direct {direct_arr.shape}"
+            )
+        # Only compare legal positions; ORT padding fills are bumped to
+        # -1e9 by `masked_log_softmax` only on the server side, so the
+        # raw logits there can differ on padded positions.
+        legal_count_first = len(sample.example["legalActions"])
+        served_legal = served_arr[0, :legal_count_first]
+        direct_legal = direct_arr[0, :legal_count_first]
+        max_legal_diff = float(np.abs(served_legal - direct_legal).max())
+        if max_legal_diff > 1e-3:
+            raise AssertionError(
+                f"R7.b.2 Phase 3: served vs direct ORT logits diverge "
+                f"({max_legal_diff:.6f} > 1e-3); request_to_arrays packing "
+                f"likely differs from run_onnx_prediction packing"
+            )
         # Item 18: behavior-policy logging is in the serving path so the
         # warm-start checkpoint's PPO rollouts can recover importance ratios
         # without a serve-side change. /predict must return per-action
@@ -937,18 +977,36 @@ def assert_card_vocab_recorded(manifest: dict) -> None:
 
 def run_onnx_prediction(model_path: Path, example: dict) -> dict[str, int]:
     session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-    state = observation_to_features(example["observation"])[None, :]
-    actions = legal_actions_to_features(example["legalActions"])[None, :, :]
+    observation = example["observation"]
+    legal_actions = example["legalActions"]
+    state = observation_to_features(observation)[None, :]
+    actions = legal_actions_to_features(legal_actions)[None, :, :]
     mask = np.ones(actions.shape[:2], dtype=np.bool_)
+    # R7.b.2 Phase 3: build the embedding-pass tensors with the same
+    # packing convention `request_to_arrays` uses. This is the direct-ORT
+    # path that the served-prediction smoke is compared against — they
+    # must agree byte-for-byte (same packing + same ONNX session).
+    max_cards_per_zone = max(CARD_ID_SHAPES.values())
+    num_zones = len(ZONE_ORDER)
+    card_id_zones = observation_to_card_ids(observation)
+    card_ids_by_zone = np.zeros((1, num_zones, max_cards_per_zone), dtype=np.int64)
+    for zone_index, zone in enumerate(ZONE_ORDER):
+        zone_arr = card_id_zones[zone]
+        card_ids_by_zone[0, zone_index, : zone_arr.shape[0]] = zone_arr
+    action_card_idx = np.zeros((1, len(legal_actions), 2), dtype=np.int64)
+    for action_index, action in enumerate(legal_actions):
+        action_card_idx[0, action_index, :] = action_card_idx_pair(action)
     logits, _value = session.run(None, {
         "state_features": state.astype(np.float32),
         "action_features": actions.astype(np.float32),
         "action_mask": mask,
+        "card_ids_by_zone": card_ids_by_zone,
+        "action_card_idx": action_card_idx,
     })
     selected = int(logits.argmax(axis=1)[0])
-    if selected < 0 or selected >= len(example["legalActions"]):
+    if selected < 0 or selected >= len(legal_actions):
         raise AssertionError(f"ONNX selected invalid index {selected}")
-    return {"selectedIndex": selected}
+    return {"selectedIndex": selected, "logits": logits.tolist()}
 
 
 def wait_for_health(port: int) -> None:

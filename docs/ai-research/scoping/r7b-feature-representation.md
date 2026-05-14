@@ -294,3 +294,26 @@ Total: +556 / -10 inserted/deleted (well above scoping § 11's ~190 LOC estimate
 **Open question for Phase 3.** ONNX `Gather` with `padding_idx=0` `nn.Embedding` at opset 17 needs roundtrip validation. Expected to work per scoping § 11 Phase 3 (opset 17 native). If it fails, the Phase 3 fallback is `F.embedding(idx, weight)`. Phase 2's optional-kwargs design keeps the existing 110-d ONNX export passing (no new graph inputs yet); Phase 3 will add `card_ids_by_zone` + `action_card_idx` to the export dummy inputs, `input_names`, and `dynamic_axes`.
 
 **One-line digest pointer.** R7.b.2 Phase 2 LANDED: card embedding (108×32 padding_idx=0) additive on state, source+target concat on action; STATE_FEATURE_SCHEMA_VERSION 3.0; model kwargs OPTIONAL so Phase 3 ONNX rewire stays decoupled; smokes including new card_embedding_forward PASS.
+
+## 14. Result: R7.b.2 Phase 3 — ONNX export LANDED (2026-05-14)
+
+**Verdict: LANDED.** ONNX export gained two new int64 inputs (`card_ids_by_zone: LongTensor[1, 8, 30]` and `action_card_idx: LongTensor[1, max_actions, 2]`); served `request_to_arrays` builds them from the JSON observation via Phase 2's `observation_to_card_ids` + `action_card_idx_pair`. Opset stayed at **17** (already supports `Gather` + `padding_idx=0` natively — no bump needed, no `F.embedding` fallback required).
+
+**Files changed (LOC delta, `git diff --stat`).**
+- `training/export_onnx.py` +51 / -6 — new dummies, `input_names` / `dynamic_axes` entries, `MAX_CARDS_PER_ZONE` const, vocab→embedding fail-loud assertion, sidecar shape fields.
+- `training/serve_onnx.py` +57 / -5 — `request_to_arrays` packs the new tensors (per-zone fixed width, per-action source/target), shape-validates, adds to ORT input dict; raw-arrays path supports optional pre-packed tensors with zero-default fallback.
+- `training/train_bc.py` +103 / -7 — ONNX roundtrip smoke exports the new graph, exercises populated random ids AND all-zero ids; asserts populated PyTorch↔ORT <1e-3, zero-ids PyTorch↔ORT <1e-3, zero-ids↔omitted-kwarg <1e-6 (padding bit-identical).
+- `training/smoke_e2e.py` +62 / -6 — direct-ORT `run_onnx_prediction` packs the new tensors; new assertion that served-prediction logits match direct-ORT logits per legal action (<1e-3) — catches `request_to_arrays` packing bugs distinct from ONNX-export bugs.
+
+Total: ~273 inserted, ~24 deleted across 4 files — overshoot vs scoping § 11's ~65 LOC estimate is dominated by the extended smoke coverage (populated + zero-ids paths in `train_bc.py` and the served-vs-direct cross-check in `smoke_e2e.py`).
+
+**Roundtrip agreement (observed in `npm run test:python-train`).**
+- Populated random ids: `max_logit_diff = 2.38e-7`, `max_value_diff = 5.96e-8` (well below 1e-3).
+- All-zero ids: `max_logit_diff_zero = 2.26e-6`, `max_value_diff_zero = 5.96e-8`.
+- Zero-id forward vs omitted-kwarg forward: `max_logit_diff_pad = 0.0`, `max_value_diff_pad = 0.0` — **bit-identical**, confirming `nn.Embedding(padding_idx=0)` exports cleanly under opset 17 `Gather`. No `F.embedding` fallback used.
+
+**Smokes (TMPDIR=/tmp).** `npm run build` PASS; `npm run test:train` PASS (7/7 TS smokes); `npm run test:python-train` PASS (extended `run_onnx_roundtrip_smoke` + extended `run_onnx_prediction` + served-vs-direct cross-check); `npm run test:dagger-orchestrator` PASS.
+
+**Open question for Phase 4.** None blocking. Phase 4 (`r7b2_extract_features.py` ~120 LOC) is now fully unblocked and parallelisable with Phase 5 (SL retrain ~30 min CPU) per scoping § 11. The new ONNX inputs accept the all-zero null path bit-identically, so any pre-Phase-4 checkpoint can still export/serve under the v3 graph for ablation comparisons.
+
+**One-line digest pointer.** R7.b.2 Phase 3 LANDED: ONNX export + serve_onnx wired for `card_ids_by_zone` + `action_card_idx`; opset 17, no F.embedding fallback; padding bit-identical (0.0/0.0); populated roundtrip <2.4e-7.
