@@ -446,7 +446,7 @@ Dropped: larger model, more entropy-BC variants, n=400 headline gate (cosmetic),
 
 ### R14 progress checkpoint (started 2026-05-11; finished 2026-05-14)
 
-**Sprint outcome:** code-side workstreams all landed. New production headline at rollout-leaf MCTS: **iter-2 Wilson 0.6479** (R14.I.2). Cheap-inference deployment (value-head leaf), iter-2 + adaptive-ratio=1.5: **Wilson 0.452 at 2.56× speedup** vs ratio=0 baseline (R14.F-iter-2 sweep). The F-iter-1 sweep had earlier shown the 0.42 target was unreachable on iter-1 at the F seed range; re-running on iter-2 PASSes it across all ratios. A's earlier 0.404 number on iter-2 (seeds 800000+) and F-iter-2's 0.443 (seeds 820000+) suggest A's side asymmetry is partly seed-clustered — one more independent seed range would confirm. Engine determinism (R14.B) and orchestrator inspection (R14.I.2 inspector) shipped. UI plumbing (R14.E) verified end-to-end via headless smoke (decisionMs=200 at 16 sims → ~0.5s at 100 sims with ratio=1.5, comfortably under E's <3s target); only the 20-game in-browser exercise remains unautomatable. ORT unpinning (R14.G) showed 1.05× — kept at `--ort-threads 1`. PPO-with-V-trace (D) and predict-batching (H) skipped per the sprint plan's decision points (I succeeded; G negative). After the sprint re-refinement promoted I to top and demoted D to fallback:
+**Sprint outcome:** code-side workstreams all landed. **Primary production claim: rollout-leaf MCTS @ iter-2, Wilson lower 0.6479** (R14.I.2) — max strength, untouched by the side-asymmetry confirmation gate. **Cheap-inference fallback: value-head leaf + adaptive-ratio=1.5 @ iter-2, Wilson lower 0.39–0.45 across three independent seed ranges** (F-iter-2 0.443 at 820000+ / A 0.404 at 800000+ / A.footnote 0.394 at 900000+), 1-of-3 below the 0.40 production bar at 2.56× speedup vs ratio=0. The 0.452 reading originally headlined from F-iter-2 was the upper end of that empirical range at the F seed range, not a stable point estimate (resolved 2026-05-14 after R14.A.footnote — see `docs/ai-agent-state/escalations.md` `## Resolved`). The F-iter-1 sweep had earlier shown the 0.42 target was unreachable on iter-1 at the F seed range; re-running on iter-2 PASSes it across all ratios at the F seed range. The original A "side asymmetry is partly seed-clustered" caveat was refuted by A.footnote — the player/opponent gap (+0.11–0.30pp Wilson) replicates across four gates and two independent seed ranges. Engine determinism (R14.B) and orchestrator inspection (R14.I.2 inspector) shipped. UI plumbing (R14.E) verified end-to-end via headless smoke (decisionMs=200 at 16 sims → ~0.5s at 100 sims with ratio=1.5, comfortably under E's <3s target); only the 20-game in-browser exercise remains unautomatable. ORT unpinning (R14.G) showed 1.05× — kept at `--ort-threads 1`. PPO-with-V-trace (D) and predict-batching (H) skipped per the sprint plan's decision points (I succeeded; G negative). After the sprint re-refinement promoted I to top and demoted D to fallback:
 
 - **B DONE.** AsyncLocalStorage installed via `installRngStorageProvider` + side-effect `backend/.../rngAsyncStore.ts`. The frontend keeps its sync-module fallback so the browser bundle stays clean of `node:async_hooks`. `training/r14_determinism_smoke.py` now passes bit-exact 12/12 between --workers 1 and --workers 4 at value-head MCTS, n=12, seeds 141414+. Pre-fix: divergent. R-WILD #34 closed.
 - **I.1 DONE.** `training/r14_value_crossover_probe.py` measures (val_mse, pearson_r) between a checkpoint's value head and the rollout-CRN K=3 means in `rootValue`. crossed = (val_mse <= 1.10 × W3-floor) AND (pearson_r >= 0.7). Wired into `r12_orchestrator.run_iteration` between distill and gate, against the **previous** iter's selfplay (held-out). Baseline at W6 iter-1 vs its own iter-1 selfplay (in-distribution): val_mse 0.659, pearson 0.535, ratio 1.158, crossed=false — explains the W8 regression (cheap-leaf selfplay distillation failed because the value head hadn't caught up).
@@ -495,11 +495,11 @@ Re-ran the F sweep on the I.2-promoted checkpoint `runs/R13-W6-phase-d/iter-2/ch
 **Status: PASS** (script's rule auto-picks ratio=5.0 as highest-passing ratio).
 
 **Pareto frontier on iter-2:**
-- **ratio=1.5** (max speed, recommended W5/E production pick): Wilson 0.452 + 2.56× speedup. Decision time at 100 sims extrapolates to ~0.5s — well under E's <3s target with margin to spare.
+- **ratio=1.5** (max speed, recommended W5/E cheap-inference fallback pick): Wilson 0.452 at the F seed range + 2.56× speedup. Decision time at 100 sims extrapolates to ~0.5s — well under E's <3s target with margin to spare. The 0.452 reading here is the R14.A canonical-seed-range upper end; the empirical range across three independent seed ranges (F-iter-2 / A / A.footnote) is **Wilson lower 0.39–0.45** with 1-of-3 below the 0.40 bar (R14.A.footnote 2026-05-14). Primary production claim is rollout-leaf MCTS @ iter-2 Wilson 0.6479.
 - **ratio=5.0** (max strength): Wilson 0.472 + 1.53× speedup. Worth +2pp Wilson if compute is cheap, but loses 1.7× of the speedup.
 - **ratio=2.0** is strictly dominated by 1.5 on iter-2 (same Wilson, slower) — different from the iter-1 sweep where 2.0 was the Pareto pick. iter-2's value head produces a different halt-rule firing pattern.
 
-**Headline:** value-head-leaf iter-2 production at ratio=1.5 has **Wilson lower 0.452 at ~0.5s/decision** vs R13.W6's reported iter-1 at ~1.25s/decision. The W6 → I.2 training translates to ~2.5× speed-equivalent strength gain at the cheap-inference deployment point.
+**Headline (qualified post-A.footnote, 2026-05-14):** value-head-leaf iter-2 at ratio=1.5 reads **Wilson lower 0.452 at the F seed range (820000+)** at ~0.5s/decision vs R13.W6's reported iter-1 at ~1.25s/decision; across three independent seed ranges (F-iter-2 / A / A.footnote) the empirical range is **Wilson lower 0.39–0.45** with 1-of-3 below the 0.40 production bar — the 0.452 number is the upper end, not a stable point estimate. The W6 → I.2 training translates to a ~2.5× speed-equivalent strength gain at the cheap-inference fallback deployment point. Primary production claim is rollout-leaf MCTS @ iter-2 Wilson 0.6479 (R14.I.2).
 
 **Implication for the A side-asymmetry caveat:** F-iter-2's seeds 820000+ show iter-2 at 0.443 Wilson (n=100), but A's seeds 800000+ showed 0.404 Wilson (also n=100). The 4pp swing across overlapping seed ranges suggests the side-asymmetry from A is partly seed-clustered. Worth a confirmation gate at a third seed range before deployment.
 
@@ -636,9 +636,13 @@ R-WILD's side-imbalance portion is largely resolved by R12 (gap inverted: player
 
 ## Post-R14 / post-F1 follow-ups (2026-05-14)
 
-R14 closed on 2026-05-14. The code-side workstreams all landed and the production picks are:
-rollout-leaf MCTS at iter-2 (Wilson 0.6479) for max strength, value-head-leaf iter-2 + adaptive
-ratio=1.5 (Wilson 0.452, ~0.5s/decision) for cheap-inference deployment. F1 PPO post-mortem
+R14 closed on 2026-05-14. The code-side workstreams all landed. **Primary production pick:**
+rollout-leaf MCTS at iter-2 (Wilson lower 0.6479, R14.I.2) — max strength, untouched by the
+side-asymmetry confirmation gate. **Cheap-inference fallback:** value-head-leaf iter-2 + adaptive
+ratio=1.5 at **Wilson lower 0.39–0.45 across three independent seed ranges**, ~0.5s/decision,
+with 1-of-3 runs failing the 0.40 bar (R14.A.footnote 2026-05-14 resolved this — the originally
+headlined 0.452 was the upper end of the empirical range, not a stable point estimate).
+F1 PPO post-mortem
 (see `docs/ai-performance-research-progress.md` § "F1 Phase summary") declared the 0.40 target
 **unreachable from the current item17 warm-start** and listed four ranked next moves. The items
 below capture those moves plus the only outstanding R14 acceptance step.
