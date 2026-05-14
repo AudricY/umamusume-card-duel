@@ -16,14 +16,11 @@
       "next_action": "Use /work to brief the worker for a planning/refinement task: read docs/r14-sprint-plan.md, docs/ai-research-backlog.md, docs/ai-performance-research-progress.md, docs/ai-agent-state/escalations.md, and recent relevant run state; update queue and existing docs only where evidence changes the next action."
     },
     {
-      "id": "r15-s3-followup-tune-shaping",
+      "id": "r15-s3-signal-mix-or-schedule",
       "priority": "P3",
-      "status": "in_progress",
-      "started_at": "2026-05-14T12:18:00Z",
-      "run_dir": "runs/R15-S3-followup-tune",
-      "pid": 2543462,
-      "summary": "R15.S3 follow-up: same 5 shaping signals, all coefs scaled 1.75x (midpoint of queued 1.5-2x range). Warm-start, opponent, HPs identical to R15.S3 baseline. Aims to close the 4.4pp gap from iter-2 Wilson 0.356 to the 0.40 bar.",
-      "next_action": "Wait for run to finish (~6 min wall-clock per R15.S3 precedent). Read runs/R15-S3-followup-tune/{events.jsonl,iter-NNN/gate.manifest.json}. Exit gate: any iter Wilson lower >= 0.40 (success) or iter-2 in [0.291, 0.331] (falsification, closes coef-scaling axis). Partial = stalled ~0.36 -> pivot to signal-mix change."
+      "status": "ready",
+      "summary": "R15.S3 next single-axis move after Phase M (1.75x coef-scaling) closed SATURATED at iter-2 Wilson 0.3580 (within +0.002 noise of Phase L 0.3560). Coef-magnitude axis is closed; surviving sub-axes are signal-mix change or shaping-schedule change. Three candidates pre-scoped in notes.md follow-up block: (1) constant-shaping schedule [recommended v1, one CLI flag flip --reward-shape-end 1.0, ~6 min compute]; (2) drop weak signals + scale strong ones based on Phase M shape_attribution (throughput dominates 2x over active-energy; bench-energy and retreat near-zero; hp-diff net-negative); (3) value-head-derived strategic-tempo signal (most ambitious, ~2-3h code).",
+      "next_action": "Launch v1 first: same Phase L baseline coefs (active 0.02 / bench 0.02 / retreat 0.03 / throughput 0.02 / hp-diff 0.05), same warm-start runs/item17-2026-05-11/iter-002/model/checkpoint.pt, same opponent (rule-bot), same HPs (--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4 --reward-alpha 0.333 --reward-beta 1.0 --eval-games 250 --iterations 3 --games-per-update 800), only change is --reward-shape-start 1.0 --reward-shape-end 1.0 (constant shape, no decay). Out-dir runs/R15-S3-constant-shape. Pre-register: success if any iter Wilson lower >= 0.40; partial if 0.36 < iter-2 < 0.40; saturation if iter-2 <= 0.36 (then pivot to signal-mix change next, candidate v2). Expected ~6 min compute. Autonomous-launch eligible under user's blanket AI-launch permission."
     }
   ]
 }

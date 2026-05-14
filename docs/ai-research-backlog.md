@@ -762,6 +762,25 @@ below capture those moves plus the only outstanding R14 acceptance step.
   ~0.13/game shape sum is at the low end of the scoping ±0.3 target), rerun the 3-iter sweep.
   Expected ~10-15 min compute. If iter-2 crosses 0.40 → first F1 success on record; if iter-2
   stalls at ~0.36 → coef scaling is saturated and the next move is signal-mix change.
+- **Follow-up Result (R15.S3 1.75× coef-scaling, 2026-05-14):** **DONE / SATURATED.** Run
+  `runs/R15-S3-followup-tune/` — same 5 signals, all coefs scaled 1.75× (midpoint of queued
+  1.5–2× range), same warm-start / opponent / HPs / code as Phase L. Wilson lower per iter:
+  iter-0 **0.2960** (WR 33.6%, +2.3pp vs Phase L iter-0 0.2730, promoted) → iter-1 **0.2825**
+  (WR 32.2%, **rejected** — first F1 sweep-internal regression on record, `wilson_lower 0.2825
+  < floor 0.2960`) → iter-2 **0.3580** (WR 39.8%, rolled forward from iter-0 parent after iter-1
+  reject, promoted). Iter-2 0.3580 lands within Wilson noise of Phase L iter-2 0.3560
+  (**Δ +0.002**); the iter-0 lift did not compound. Pre-registered "coef saturation" outcome
+  fired cleanly — the (warm-start, opponent, 5-signal set, linear-decay schedule) tuple has a
+  true ceiling at ~0.358. Importance ratios still moved decisively off ~1.00 (ratio_max
+  15.86 / 12.50 / 18.82 across iters — gradient still active, comparable to Phase L's
+  19.06 / 32.59 / 11.12); entropy stable (0.171 → 0.164 → 0.164); `numerical_anomalies = 0`;
+  approx_kl_max < 0.02. Wall-clock **6m 22.3s**. Next single-axis move is signal-mix or
+  shaping-schedule change, not further coef scaling. Three candidates ranked in
+  `docs/ai-agent-state/notes.md` follow-up block: (1) constant-shaping schedule
+  (`--reward-shape-end 1.0`, smallest single-axis change, recommended v1), (2) drop
+  low-attribution signals + scale survivors, (3) add value-head-derived strategic-tempo signal.
+  Queued as P3 `r15-s3-signal-mix-or-schedule`. Full writeup: `docs/ai-performance-research-progress.md`
+  § "Phase M — F1 PPO + reward-shape coef-scaling follow-up".
 
 ### R15.S4 — Sampling-temperature gate (F1 next-move #4)
 

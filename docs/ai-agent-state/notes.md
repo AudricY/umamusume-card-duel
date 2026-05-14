@@ -386,3 +386,68 @@ same warm-start / opponent / HPs. Expected ~10-15 min compute. If iter-2 crosses
 success on record. If iter-2 stalls at ~0.36 → coef scaling is saturated; next move is signal-mix
 change. Full writeup: `docs/ai-performance-research-progress.md` § "Phase L — F1 PPO + reward
 shaping".
+
+**Follow-up Closeout — Phase M (R15.S3 1.75× coef-scaling, 2026-05-14).** **SATURATION as
+pre-registered.** Run `runs/R15-S3-followup-tune/` — same 5 signals, all coefs scaled 1.75×
+(active 0.035 / bench 0.035 / retreat 0.0525 / throughput 0.035 / hp-diff 0.0875), same
+warm-start / opponent / HPs / code as Phase L; per-game shape budget ~0.23 (vs Phase L ~0.13,
+scoping target ±0.3). Wilson lower per iter: iter-0 **0.2960** (WR 33.6%, **+2.3pp vs Phase L
+iter-0 0.2730**, promoted) → iter-1 **0.2825** (WR 32.2%, **REJECTED**, `wilson_lower 0.2825 <
+floor 0.2960` — **first F1 sweep-internal regression on record**) → iter-2 **0.3580** (WR
+39.8%, rolled forward from iter-0 parent after iter-1 reject, promoted). iter-2 0.3580 vs
+Phase L iter-2 0.3560: **Δ +0.002, within Wilson noise**. The pre-registered "iter-2 stalls
+at ~0.36 → coef scaling is saturated" outcome fired cleanly. The 1.75× scale is the saturation
+point of the existing 5-signal mix under linear-decay shaping; further coef scaling will not
+move iter-2 closer to 0.40 from this warm-start. Mechanism check (still healthy, not a
+PPO-stopped-working outcome): ratio_max 15.86 / 12.50 / 18.82 across iters — gradient still
+decisively off ~1.00, comparable to Phase L's 19.06 / 32.59 / 11.12 range; entropy stable
+(0.171 → 0.164 → 0.164, no collapse); `numerical_anomalies = 0` across all 48 minibatches;
+approx_kl_max < 0.02. Wall-clock **6m 22.3s** (run_started → run_completed delta:
+`1778732302.62 → 1778732684.93 = 382.31s`); coef scaling added zero runtime cost. Full
+writeup: `docs/ai-performance-research-progress.md` § "Phase M — F1 PPO + reward-shape
+coef-scaling follow-up".
+
+**Pre-scoping for the next single-axis move (queued as P3 `r15-s3-signal-mix-or-schedule`).**
+Phase M closed the coef-magnitude axis at the existing 5-signal / linear-decay tuple. Three
+plausible next single-axis moves, ranked least-to-most ambitious:
+
+1. **Constant-shaping schedule (recommended v1).** Hold the 5 signals and original Phase L
+   1.0× coefs fixed; change only the schedule by setting `--reward-shape-end 1.0` (instead of
+   0.0) to disable the linear decay. Rationale: the iter-1 rejection in Phase M is evidence
+   that decaying shape mid-sweep is *itself* destabilizing — iter-1 over-corrects toward shape
+   at scale 0.5×, gets rejected, iter-2 retreats. Holding shape constant across iters lets the
+   policy keep climbing on the shaped signal instead of being asked to converge to a
+   deterministic terminal-only optimum. Risk: reward hacking at iter-2 (policy learns to
+   maximize shape at expense of winning). Mitigation: ratio_max / entropy / shape_attribution
+   diagnostics already in place; falsifier is iter-2 Wilson < 0.30 with shape_attribution
+   dominating a single component. **Smallest possible change** (one CLI flag flip from R15.S3
+   baseline), same warm-start / opponent / HPs / code. Expected ~6 min compute. Pre-register:
+   success if iter-2 ≥ 0.40; partial if 0.36 < iter-2 < 0.40; saturation if iter-2 ≤ 0.36 (then
+   pivot to signal-mix change next).
+
+2. **Signal-mix change (drop weak + scale strong).** Audit per-signal contribution from
+   Phase L/M `events.jsonl` `trajectory-parse/completed.data.shape_attribution`. Phase M iter-0
+   attribution: active-energy 147.6, bench-energy 8.5, retreat 0.0, throughput 299.6, hp-diff
+   -14.0 (sums over 1600 episodes). throughput dominates by 2× over active-energy; bench-energy
+   and retreat contribute nearly nothing; hp-diff is net-negative (the policy is taking damage
+   on the way to its shaped reward). A v2 mix would drop bench-energy + retreat (sparse / near-
+   zero), keep throughput + active-energy at ~0.10-0.15 each, and either drop hp-diff or flip
+   its sign (a net-negative contribution suggests the signal is rewarding the wrong direction).
+   Requires re-pre-registering coefs but no code change. Expected ~6 min compute. **Larger
+   change than v1** — touches the signal axis directly.
+
+3. **Value-head-derived strategic-tempo signal (most ambitious).** Replace one shaped signal
+   with a per-turn "win-probability-delta" computed from the model's own value head: shape =
+   `value(s_{t+1}) - value(s_t)`. Conceptually closer to "shape towards what the value head
+   thinks is winning" than "shape towards in-game observables". Magnitude small (probability
+   delta, not raw score) so the per-step rew sum stays sub-dominant. Requires plumbing the
+   value-head output through the orchestrator's trace stream (currently the orchestrator only
+   sees `PublicObservation` row data, not model outputs at trace time). **Code work ~2-3h**;
+   compute identical. Defer until v1 or v2 has been tried.
+
+**Recommendation: try v1 first** (constant-shaping). It is one CLI flag away from the R15.S3
+baseline, isolates the schedule axis cleanly from the signal axis, and the falsification outcome
+("iter-2 still stalls at ~0.36 with constant shape") is informative — it would point definitively
+at the signal mix being the bottleneck rather than the schedule. Queued as P3
+`r15-s3-signal-mix-or-schedule` `ready` (autonomous-launch eligible under user's blanket
+AI-launch permission).
