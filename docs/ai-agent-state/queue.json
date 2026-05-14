@@ -17,10 +17,23 @@
     {
       "id": "r7-multi-teacher-warmstart-scoping",
       "priority": "P2",
+      "status": "done",
+      "summary": "Scoping doc landed at docs/ai-research/scoping/r7-multi-teacher-warmstart.md (113 lines). Key wins: train_bc.py:361-369 already implements soft-target CE (R12 phase C) so no trainer change; three teachers already wired (rollout/search/planner). Pre-flight pairwise-teacher-agreement probe built into step 1 as cheap go/no-go."
+    },
+    {
+      "id": "r7-pre-flight-teacher-agreement-probe",
+      "priority": "P2",
       "status": "ready",
       "autonomous_launch_eligible": true,
-      "summary": "R7 multi-teacher BC blend scoping → execution. Forward brief: docs/ai-research-backlog.md § R7. Pre-reg exit: warm-start Wilson ≥ 0.35 AND PPO sweep Wilson ≥ 0.40 (else close branch with new SL ceiling).",
-      "next_action": "Author docs/ai-research/scoping/r7-multi-teacher-warmstart.md per new CLAUDE.md docs structure: hypothesis, pre-reg exit, code-touch list (planner-relabel call site, multi-`labelSource` row schema, mixed-corpus dataset, label-smoothing or top-K objective), ordered exec plan. Then implementer builds + runs."
+      "summary": "R7 step 1: cheap pairwise-teacher-agreement probe before committing to full trace-gen. If agreement < ~30% across rollout/search/planner OR all three converge tightly, the diversity hypothesis is empty. Full scope: docs/ai-research/scoping/r7-multi-teacher-warmstart.md § 5 risk (b), § 6 step 1.",
+      "next_action": "Implementer writes a small probe script that runs all three trace teachers on N=200-500 states, reports pairwise argmax-agreement + entropy of the mixture. Reuses existing `chooseTraceTeacher` machinery. If GO, proceed to step 2 (schema change). If NO-GO, close R7 with the probe data as evidence."
+    },
+    {
+      "id": "r7-backlog-shrink-to-pointer",
+      "priority": "P3",
+      "status": "ready",
+      "summary": "Doc-hygiene followup: per new CLAUDE.md 'one canonical home', backlog § R7 (lines 101-118) duplicates content now in docs/ai-research/scoping/r7-multi-teacher-warmstart.md. Shrink backlog entry to one-line pointer.",
+      "next_action": "Direct edit: replace docs/ai-research-backlog.md § R7 body (lines 101-118) with a one-line pointer to the scoping doc. Pair with the parallel R8 entry: leave that one expanded for now since no scoping doc exists yet."
     },
     {
       "id": "planning-refresh-after-r14-e",
