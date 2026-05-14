@@ -639,7 +639,7 @@ below capture those moves plus the only outstanding R14 acceptance step.
 - **Exit / gate:** warm-start Wilson lower ≥ 0.45 *or* document the new SL ceiling and close the
   branch.
 
-### R15.S2 — PFSP self-play PPO (F1 next-move #2)
+### R15.S2 — PFSP self-play PPO (F1 next-move #2) — DONE / FAIL
 
 - **Motivation:** F1 PPO post-mortem ranked self-play second. Item-12 opponent pool already exists;
   `ppo_orchestrator` currently uses `--opponent-model-url` unset (rule-bot default). Rollouts against
@@ -652,6 +652,20 @@ below capture those moves plus the only outstanding R14 acceptance step.
   `runs/R13-W6-phase-d/iter-{0,1,2}/checkpoint.pt`, aggressive HPs, 800 games/update, 3 iters.
 - **Cost:** ~10–15 min compute + any plumbing patches.
 - **Exit / gate:** Wilson lower ≥ 0.40 on the rule-bot eval gate. Otherwise close the branch.
+- **Result (2026-05-14):** **FAIL.** Run `runs/R14-f1-self-play-sweep/` — 3 iters × 800 games at
+  aggressive HPs from W6/iter-2 warm-start against the W6/iter-{0,1,2} pool. Wilson lower per iter:
+  warm-start eval **0.1455** (WR 30%, n=20) → iter-1 **0.2993** (WR 50%, n=20, opponent W6/iter-1)
+  → iter-2 **0.2188** (WR 40%, n=20, opponent the *just-promoted iter-1 from this run*). Iter-1's
+  +14.5pp lift is the largest single PPO step recorded in any F1 phase — confirming the stronger
+  pool does break the "ratios ≈ 1.0" stasis that hobbled phases 2/G/H — but iter-2 regressed when
+  the v1 one-opponent-per-run sampler rolled a self-promotion, creating co-adaptation. Final
+  promoted Wilson **0.2188** missed the 0.40 gate by 18pp; iter-1 best missed by 10pp. Both
+  numbers are *worse* than R5's iter-2 (0.3109) and phase H's iter-2 (0.3109) despite materially
+  different mechanism (the policy actually moved). Full writeup +
+  per-iter mean_return / entropy / KL trace in
+  `docs/ai-performance-research-progress.md` § "Phase J — F1 PPO + strong-pool self-play".
+  Closes the strong-pool branch of the self-play hypothesis. R15.S1 (better warm-start) and
+  R15.S3 (richer reward shaping) remain the only unfalsified F1 next moves.
 
 ### R15.S3 — Richer reward shaping (F1 next-move #3)
 

@@ -742,3 +742,74 @@ iter-2 promoted at Wilson lower **0.3109 — exactly the DAgger iter-2 Wilson lo
 4. **Change the gate.** All five phases are scored on greedy argmax behavior. If PPO is shaping the policy distribution but not flipping argmax, an alternative gate that samples (e.g. temperature 0.5) might reveal latent improvement. Diagnostic, not solution.
 
 Five phases of artifacts under `runs/f1-2026-05-11-*` with full event streams, manifests, TB scalars for forensics. Live dashboard: `http://127.0.0.1:5000/run/f1-2026-05-11-phaseH-big-aggressive`.
+
+### Phase J — F1 PPO + strong-pool self-play (post-R14 retry, 2026-05-14)
+
+Re-attempts F1's "self-play instead of vs-rule-bot" next move with a fundamentally stronger
+opponent pool than R5. R5 (`docs/ai-research-backlog.md:250-260`) ran PPO from the DAgger iter-2
+warm-start against the **item17 DAgger pool** whose strongest member was Wilson 0.3109 — the same
+caliber as the warm-start itself. Phase J ran the same shape against the **R13-W6-phase-d pool**
+(`runs/R13-W6-phase-d/iter-{0,1,2}/checkpoint.pt`), whose iter-2 sits at Wilson 0.6479 under
+rollout-leaf MCTS — a ~30pp stronger pool. Warm-start was also W6/iter-2 rather than item17/iter-2,
+so this run is both a different opponent distribution *and* a different starting point. Config:
+`--rollout-vs-pool` (the v1 plumbing picks **one opponent per run uniformly** via
+`_select_pool_opponent`, not per-game PFSP — `notes.md` "F1 self-play readiness" called this gap
+explicitly), 3 iters × 800 games/update × aggressive HPs (lr=3e-4, clip=0.3, entropy=0.01,
+ppo-epochs=4). Wall-clock 5m32s end-to-end.
+
+| Iter | Wilson lower | WR | n | Opponent sampled | mean_return | entropy | KL/mb avg | Decision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 (warm-start eval) | 0.1455 | 30.0% | 20 | R13-W6-phase-d/iter-1 | -0.236 | 0.293 | 0.0100 | promoted (baseline marker) |
+| 1 | 0.2993 | 50.0% | 20 | R13-W6-phase-d/iter-1 | -0.173 | 0.273 | 0.0092 | promoted (+14.5pp) |
+| 2 | 0.2188 | 40.0% | 20 | **own iter-1 from pool** | -0.153 | 0.267 | 0.0116 | promoted (-8.1pp regression) |
+
+**Mechanism — did PPO move the policy?** Yes, materially. mean_return marched -0.236 → -0.173 →
+-0.153 (less-negative reward distribution every iter), entropy contracted 0.293 → 0.267 (policy
+sharpened), and iter-1 lifted Wilson +14.5pp over the warm-start eval. This is the *largest single
+PPO step recorded in any F1 phase* and the first to materially move the gate. The mechanism that
+unlocked it: the pool opponent was ~30pp stronger than rule-bot, so warm-start argmax was no longer
+near-optimal — importance ratios actually diverged from 1.0 (ratio min/max ranges 0.04-7.6 at iter-0
+vs phase H's ~1.00) and the surrogate gradient (ratio - 1) × advantage was non-zero. **iter-2
+regressed.** The most plausible mechanism: the pool sampler picked W6/iter-1 (Wilson ~0.45-class)
+for the first two iters but rolled `pool/iter-001/checkpoint.pt` — the just-promoted iter-1 from
+this very run — at iter-2. That switched the opponent from a stable external prior to a
+co-adapting policy one step removed; the iter-1 gradient direction overfit to W6/iter-1's argmax,
+and iter-2 found it had nothing left to learn against itself. The iter-2 ratio max also spiked to
+**21.3** (vs 7.6 at iter-0), a numerical-instability signal consistent with running PPO against an
+opponent the policy was already correlated with. Secondary contributor: the v1 "one opponent per
+run" plumbing means there's no per-game opponent diversity — the gradient signal each iter is
+opponent-shaped, not pool-shaped.
+
+**Comparison to references.** Phase J iter-1 (Wilson 0.2993) is the *highest* PPO-iter-1 number on
+record but iter-2 falls back to 0.2188 — **worse than R5 (0.3109) and worse than phase H iter-2
+(0.3109)**. A stronger pool produced a bigger transient lift and a worse final number than the
+weak-pool R5 and the no-pool aggressive phase H. The 0.40 R15.S2 gate is missed by **18pp** at
+final and 10pp at the best mid-run iter.
+
+**Pre-registered prediction check.** `notes.md` "F1 self-play readiness — scoping" recommended GO
+on the basis that the W6 pool is ~30pp stronger than R5's. The prediction was that this materially
+different experiment could break the cap; the empirical result is **NO**. The mechanism narrative
+(stronger pool → bigger PPO step, but co-adaptation when the sampler hits a recent self-checkpoint
+→ regression) is consistent with the predicted direction (PPO does move) but not the predicted
+magnitude (move was transient, not sustained).
+
+| Phase | Buffer | HP profile | KL/mb avg | Weight max-diff | Best WR | Best Wilson lower |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 30 | spec | 0.011 | 0.0002 | 37.5% | 0.3109 |
+| 3a | 30 | aggressive | 0.017 | 0.003 | 34.5% | 0.2826 |
+| 3b | 60 | extreme | 0.018 | 0.027 | 33.5% | 0.2732 |
+| G | 800 | spec | 0.009 | 0.0002 | 38.0% | 0.3156 |
+| H | 800 | aggressive | 0.008 | 0.003 | 37.5% | 0.3109 |
+| **J** | **800** | **aggressive + strong-pool self-play** | **0.010** | **n/a** | **50.0% (iter-1)** | **0.2993 (iter-1) / 0.2188 (final)** |
+
+**What this closes.** The "strong-pool self-play unlocks PPO" hypothesis is closed FAIL. R5 closed
+the weak-pool variant; phase J closes the strong-pool variant; both miss the 0.40 gate, and phase
+J adds the new finding that the v1 one-opponent-per-run sampler creates a co-adaptation failure
+mode at iter-2 once a self-promotion lands in the pool. A future PFSP retry would need (a) per-game
+opponent re-sampling and (b) PFSP weight enforcement to avoid sampling the most-recent self at
+all; the lift is real, the regression is what needs fixing. **What's still load-bearing among the
+F1 next moves:** R15.S1 (better warm-start) and R15.S3 (richer reward shaping) are now the only
+unfalsified candidates. R15.S4 (sampling-temperature gate) remains diagnostic-only.
+
+Artifacts: `runs/R14-f1-self-play-sweep/` — `events.jsonl` (92 lines, full minibatch detail),
+`orchestrator-state.json`, per-iter `iteration-manifest.json` + `gate.manifest.json`.

@@ -9,28 +9,18 @@
       "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section."
     },
     {
-      "id": "f1-self-play-sweep",
-      "priority": "P2",
-      "status": "in_progress",
-      "started_at": "2026-05-14",
-      "run_dir": "runs/R14-f1-self-play-sweep/",
-      "pid": 1755515,
-      "summary": "Run one cheap PPO sweep with --rollout-vs-pool against a hand-built pool of W6/iter-{0,1,2} promoted checkpoints. Materially different from R5 (which used the item17 DAgger pool ~30pp weaker). Plumbing caveat: today's _select_pool_opponent picks one opponent per run uniformly, not per-game PFSP — accept that as the v1 experiment.",
-      "next_action": "See docs/ai-agent-state/notes.md '## F1 self-play readiness — scoping (2026-05-14)' for full config. Briefly: build opponent-pool.json with runs/R13-W6-phase-d/iter-{0,1,2}/checkpoint.pt as entries 0/1/2; run ppo_orchestrator with --init-from runs/R13-W6-phase-d/iter-2/checkpoint.pt --rollout-vs-pool --pool-path <that file> --iterations 3 --games-per-update 800, aggressive HPs mirroring F1 phase H. Gate: Wilson lower >= 0.40."
-    },
-    {
       "id": "f1-warmstart-sweep",
       "priority": "P2",
       "status": "ready",
-      "summary": "Compute-scaled DAgger warm-start sweep at fixed hidden=64/depth=2 to test the 'compute-starved, not capacity-starved' hypothesis. 3x games (90) and 3x epochs (75) over item17-2026-05-11 take-2 baseline, same teacher (rollout-CRN x3), same KL anchor schedule (0.0/0.1/0.5). Pre-registered exit: iter-2 Wilson lower >= 0.45 at n>=500 side-balanced. Distinct from R3 (entropy axis), R4 (value-head axis), R6 (capacity axis) — this run isolates the SL-compute axis at fixed capacity.",
-      "next_action": "See docs/ai-agent-state/notes.md '## F1 better warm-start — scoping (2026-05-14)' for full config and decision gate; launch dagger_orchestrator.py with the config block on a human green-light. ~1.5h compute. NOT autonomous (warn-before-launch)."
+      "summary": "Compute-scaled DAgger warm-start sweep at fixed hidden=64/depth=2 to test the 'compute-starved, not capacity-starved' hypothesis. 3x games (90) and 3x epochs (75) over item17-2026-05-11 take-2 baseline, same teacher (rollout-CRN x3), same KL anchor schedule (0.0/0.1/0.5). Pre-registered exit: iter-2 Wilson lower >= 0.45 at n>=500 side-balanced. Distinct from R3 (entropy axis), R4 (value-head axis), R6 (capacity axis) — this run isolates the SL-compute axis at fixed capacity. Now the head F1 next-move after R15.S2 (self-play) closed FAIL on 2026-05-14.",
+      "next_action": "See docs/ai-agent-state/notes.md '## F1 better warm-start — scoping (2026-05-14)' for full config and decision gate; launch dagger_orchestrator.py with the config block. ~1.5h compute. User gave blanket green-light on AI training runs (overrides warn-before-launch); safe to auto-launch."
     },
     {
       "id": "side-asymmetry-confirmation-gate",
-      "priority": "P3",
+      "priority": "P2",
       "status": "ready",
-      "summary": "R14.A flagged that the player-vs-opponent gap (player Wilson 0.31, opponent 0.42-0.63) is partly seed-clustered. A.followup suggests one independent seed range would confirm. Cheap diagnostic, sticks the production claim.",
-      "next_action": "Run training/r14_ood_gate.py (or sim:eval-gate equivalent) at a third seed range (e.g. 900000+) against runs/R13-W6-phase-d/iter-2/checkpoint.pt + value-head leaf + ratio=1.5, n=100, record per-side Wilson; append to R14 progress as an A footnote."
+      "summary": "R14.A flagged that the player-vs-opponent gap (player Wilson 0.31, opponent 0.42-0.63) is partly seed-clustered. A.followup suggests one independent seed range would confirm. Cheap diagnostic, sticks the production claim. Promoted from P3 on 2026-05-14: user's blanket AI-launch permission makes this an autonomous-launch candidate.",
+      "next_action": "Run training/r14_ood_gate.py (or sim:eval-gate equivalent) at a third seed range (e.g. 900000+) against runs/R13-W6-phase-d/iter-2/checkpoint.pt + value-head leaf + ratio=1.5, n=100, record per-side Wilson; append to R14 progress as an A footnote. ~15 min compute."
     }
   ]
 }
