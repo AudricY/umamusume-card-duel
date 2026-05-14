@@ -183,7 +183,7 @@ def main() -> None:
             print(f"[r14-ood-gate] {label} checkpoint not found: {ckpt}", file=sys.stderr)
             sys.exit(2)
 
-    out_dir = Path(args.out_dir) if args.out_dir else (repo_root / "runs" / "R14-ood-gate")
+    out_dir = (Path(args.out_dir) if args.out_dir else (repo_root / "runs" / "R14-ood-gate")).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     iter1_onnx = export_onnx_if_needed(repo_root, iter1)

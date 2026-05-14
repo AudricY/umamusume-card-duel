@@ -444,17 +444,71 @@ R14 workstreams:
 
 Dropped: larger model, more entropy-BC variants, n=400 headline gate (cosmetic), temperature-ramp-only PPO (R3 already settled peakedness-alone).
 
-### R14 progress checkpoint (2026-05-11)
+### R14 progress checkpoint (started 2026-05-11; finished 2026-05-14)
 
-After the sprint re-refinement promoted I (W6 extension + crossover telemetry) to top and demoted D to fallback:
+**Sprint outcome:** code-side workstreams all landed. New production headline at rollout-leaf MCTS: **iter-2 Wilson 0.6479** (R14.I.2). Cheap-inference deployment (value-head leaf): **iter-2 Wilson 0.404** (R14.A) — OOD-robust but flat vs iter-1's number; the +18pp rollout-leaf gain does not transfer to value-head leaf. Production speed pick for the cheap config: **adaptive-ratio 2.0** (R14.F, 2.19× speedup, no strength regression). Engine determinism (R14.B) and orchestrator inspection (R14.I.2 inspector) shipped. UI plumbing (R14.E) verified end-to-end via headless smoke; the only remaining unautomatable item is a 20-game in-browser exercise. ORT unpinning (R14.G) showed 1.05× — kept at `--ort-threads 1`. PPO-with-V-trace (D) and predict-batching (H) skipped per the sprint plan's decision points (I succeeded; G negative). After the sprint re-refinement promoted I to top and demoted D to fallback:
 
 - **B DONE.** AsyncLocalStorage installed via `installRngStorageProvider` + side-effect `backend/.../rngAsyncStore.ts`. The frontend keeps its sync-module fallback so the browser bundle stays clean of `node:async_hooks`. `training/r14_determinism_smoke.py` now passes bit-exact 12/12 between --workers 1 and --workers 4 at value-head MCTS, n=12, seeds 141414+. Pre-fix: divergent. R-WILD #34 closed.
 - **I.1 DONE.** `training/r14_value_crossover_probe.py` measures (val_mse, pearson_r) between a checkpoint's value head and the rollout-CRN K=3 means in `rootValue`. crossed = (val_mse <= 1.10 × W3-floor) AND (pearson_r >= 0.7). Wired into `r12_orchestrator.run_iteration` between distill and gate, against the **previous** iter's selfplay (held-out). Baseline at W6 iter-1 vs its own iter-1 selfplay (in-distribution): val_mse 0.659, pearson 0.535, ratio 1.158, crossed=false — explains the W8 regression (cheap-leaf selfplay distillation failed because the value head hadn't caught up).
-- **I.2 IN FLIGHT.** Resumed W6 phase-d for iter-2/3/4. First attempt crashed at the distill step (orchestrator default --hidden-dim 128 vs iter-1's 64/2 ckpt); restarted with correct dims AND added auto-inference of hidden_dim/depth from the init checkpoint to prevent recurrence. Currently ~halfway through iter-2 selfplay (1036/2138 rows at 5 min in).
-- **E PARTIAL.** `/ai/decide` now applies the chosen action server-side and returns `nextState`. Frontend swaps state on success, falls back to `advanceOpponentTurnStep` on timeout/error/engine-fallback. `aiBackend` toggle in MainMenuScreen + `localStorage` key `umamusume-card-duel-ai-backend`. End-to-end smoke `training/r14_ai_decide_e2e_smoke.py` ready, run deferred until W6 frees up serve_onnx.
-- **G CODE READY.** `serve_onnx.py --ort-threads` flag, default `1` preserves R13.W1 legacy single-threaded pinning. `training/r14_ort_throughput_smoke.py` validates `auto` mode >=1.5x faster + bit-exact engine state. Deferred.
-- **F CODE READY.** `training/r14_adaptive_ratio_sweep.py` (ratios {0, 1.5, 2.0, 3.0, 5.0} at value-head leaf). Deferred.
-- **A CODE READY.** `training/r14_ood_gate.py` (Gate 1 fresh seeds + Gate 2 MCTS-vs-R4). Deferred.
+- **I.2 DONE (halted at iter-4).** W6 phase-d extended through iter-4. iter-2 promoted at Wilson **0.6479** (WR 0.7333, n=120), clearing the sprint's ≥0.60 north star. iter-3 dropped to 0.5783 and iter-4 to 0.5612 — two consecutive promotion failures triggered the orchestrator's auto-halt. Crossover probe never satisfied both gates: pearson_r stayed ~0.50 (target ≥0.7), ratio stayed 1.18–1.29 (target ≤1.10). So I.3 (cheap-selfplay retry after two `crossed=true` events) never fired and is dropped from the sprint. Strongest checkpoint: `runs/R13-W6-phase-d/iter-2/checkpoint.pt`. (Note: the earlier orchestrator dim-mismatch crash was fixed by auto-inferring hidden_dim/depth from the init checkpoint — commit `1c47146`.)
+- **E DONE (plumbing); 20-game manual UI exercise pending.** Visible MainMenuScreen toggle in (commit `0371892`). `training/r14_ai_decide_e2e_smoke.py` PASS (2026-05-14): real mid-game state via headlessAiVsAi → /ai/decide → returns valid action + nextState (fingerprint advances). decisionMs=200 at 16 sims → extrapolates to ~1.25s at 100 sims (under E's <3s target). Only the in-browser 20-game fallback-rate exercise remains; not headless-automatable.
+- **G DONE (NEGATIVE; 2026-05-14).** Smoke: pinned 13.4s vs auto 12.8s, speedup **1.05×** vs 1.5× target → FAIL on speedup, PASS on determinism (12/12 winner+turnNumber match). At this model size, per-call /predict overhead dominates compute, so ORT thread parallelism doesn't help. Decision: keep `--ort-threads 1` default (R13.W1 legacy preserved), skip H predict-batching (same overhead ceiling).
+- **F DONE (Pareto pick = ratio 2.0; 2026-05-14).** Sweep on iter-1 + value-head leaf, n=100 each. Stated FAIL (0.42 Wilson target unreachable at fresh seeds 820000+; ratio=0 baseline only 0.366) but ratio=2.0 Pareto-dominates baseline: +4pp WR (0.50 vs 0.46), 2.19× speedup (118s vs 258s). Higher ratios over-prune. Production pick for W5 default: ratio=2.0. See dedicated R14.F section below.
+- **A DONE (PASS on iter-2; 2026-05-14).** Re-targeted to iter-2 (newly-promoted production candidate) — see the dedicated A result section below. Both gates pass at 0.40 floor; iter-2 beats R4 head-to-head MCTS by 11pp Wilson lower; side asymmetry persists; +18pp rollout-leaf gain does not transfer to value-head-leaf inference.
+
+### R14.F — Adaptive-ratio Pareto sweep on W6 iter-1 (2026-05-14)
+
+Ran `training/r14_adaptive_ratio_sweep.py` on iter-1 + value-head leaf, 100 sims, n=100 per ratio, seeds 820000+, 4 workers, single shared serve_onnx. Sweep complete:
+
+| ratio | WR | Wilson lower | Wilson upper | elapsed (s) | speedup vs baseline | wallclock cut |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.0 | 0.46 | 0.366 | 0.557 | 258.0 | 1.00× | 0% |
+| 1.5 | 0.46 | 0.366 | 0.557 | 123.0 | 2.10× | 52% |
+| **2.0** | **0.50** | **0.404** | **0.596** | **117.6** | **2.19×** | **54%** |
+| 3.0 | 0.45 | 0.356 | 0.548 | 155.0 | 1.66× | 40% |
+| 5.0 | 0.49 | 0.394 | 0.587 | 181.3 | 1.42× | 30% |
+
+**Stated verdict: FAIL** (no ratio satisfies the original exit criterion `Wilson lower >= 0.42`). But that target was set against the W6 paper baseline of 0.452 at seeds 700000+. On the fresh seeds used here, even ratio=0 baseline is only 0.366 — the 0.42 target is unreachable for any ratio. The exit criterion did not anticipate the seed-distribution variance later confirmed by R14.A.
+
+**Real verdict:** ratio=2.0 **Pareto-dominates baseline** on both axes — +4pp WR (0.50 vs 0.46), 2.19× speedup. Wilson CIs at n=100 overlap heavily ([0.366, 0.557] vs [0.404, 0.596]) so the strength gain is within sample noise; the **safe claim is "no strength regression at 2.19× speedup"**. Above ratio=2.0 the curve is concave: 3.0 over-prunes (-1pp WR, slower because of bookkeeping), 5.0 partial recovery in WR but slower still.
+
+ratio=1.5 is bit-identical strength to baseline (same wins on the same seeds — same Wilson) at 2.10× speedup — confirms adaptive halts only fire when they don't change the chosen action; below ratio=2.0 the halt rule never triggers cases where it could disagree with full search.
+
+**Production pick:** ratio=2.0 for W5 UI / E default config. The 2.19× speedup roughly halves median decision wall-clock — directly relevant to E's "<3s decision time" exit criterion.
+
+**Followup before locking:** re-run the sweep on iter-2 (the new I.2 production candidate). iter-2 may shift the optimum (different value-head profile → different halt-rule firing pattern). Cheap (~25 min) but only do this once iter-2 deployment is closer to landing.
+
+Output: `runs/R14-adaptive-sweep/{ratio-*.{log,manifest.json,progress.jsonl},summary.json}`.
+
+### R14.A — OOD gate result on W6 iter-2 (2026-05-14)
+
+Ran `training/r14_ood_gate.py` against the I.2-promoted checkpoint `runs/R13-W6-phase-d/iter-2/checkpoint.pt`. Re-targeted from the originally-specified iter-1 because iter-2 is the newly-promoted production candidate (and had no value-head-leaf number yet). Two 100-game gates, value-head leaf, 100 sims, 4 workers, seeds 800000+ / 850000+.
+
+| Gate | n | WR | Wilson lower | Wilson upper | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 1: fresh seeds, vs rule-bot | 100 | 0.50 | **0.404** | 0.596 | passes 0.40 marginally |
+| 2: iter-2 vs R4, MCTS-vs-MCTS | 100 | 0.61 | **0.512** | 0.700 | passes 0.40 by 11pp |
+
+Per-side breakdown reveals severe asymmetry on both gates:
+
+| Gate | Player WR | Player Wilson lower | Opponent WR | Opponent Wilson lower |
+| --- | --- | --- | --- | --- |
+| 1 (vs rule-bot) | 0.44 | 0.312 | 0.56 | 0.423 |
+| 2 (vs R4 MCTS) | 0.46 | 0.330 | 0.76 | 0.626 |
+
+**Interpretation.**
+
+1. **Both gates pass — iter-2 is OOD-robust.** Strength claim is not seed-distribution-specific.
+2. **iter-2 dominates R4 head-to-head MCTS** (gate 2 Wilson lower 0.512). Gate 2 stronger than gate 1 by ~11pp: iter-2 is a genuine model improvement over R4, not a rule-bot artifact.
+3. **iter-2's value-head-leaf strength is statistically indistinguishable from iter-1's.** Wilson lower 0.404 (iter-2) vs 0.452 (iter-1's R13.W6 reported number). The +18pp Wilson gain from iter-1 → iter-2 at rollout-leaf MCTS (0.452 → 0.6479) does **not** transfer to value-head-leaf inference. iter-2's added training improved the policy/rollout combination, not the value head's ability to score leaves directly.
+4. **Side asymmetry persists post-B.** AsyncLocalStorage closed the parallel-determinism gap, but iter-2 is materially weaker as player (Wilson lower 0.31–0.33 across both gates) than as opponent (0.42 vs rule-bot, 0.63 vs R4). This is not a determinism bug — both sides are bit-exact reproducible — but a real *strategic* asymmetry in the iter-2 policy at value-head-leaf inference. Likely tied to first-move/initiative dynamics: the model handles defending better than initiating. The production claim should disclose the side gap.
+5. **Cheap-inference production config:** rollout-leaf iter-2 at Wilson 0.6479 remains the headline. Value-head-leaf iter-2 at Wilson 0.404 is the cheap-inference fallback — defensible but the side asymmetry caveat sticks.
+
+Followups (low priority):
+- Side-asymmetry-specific gate (player-only n=200) to tighten the per-side Wilson CI before any deployment claim.
+- Repeat at a third seed range to confirm the asymmetry isn't seed-clustered.
+
+Bug fix landed in this run: `r14_ood_gate.py` was passing a relative `--out-dir` to `npm --workspace backend run sim:eval-gate`, which resolves against `backend/` workspace cwd → manifest landed at `backend/runs/...` and the orchestrator failed to read it. Fixed by resolving `out_dir` to absolute at parse time.
 
 ### R13 PPO probe on iter-1 — still doesn't move (2026-05-11)
 
