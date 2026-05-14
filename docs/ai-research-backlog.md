@@ -781,6 +781,35 @@ below capture those moves plus the only outstanding R14 acceptance step.
   low-attribution signals + scale survivors, (3) add value-head-derived strategic-tempo signal.
   Queued as P3 `r15-s3-signal-mix-or-schedule`. Full writeup: `docs/ai-performance-research-progress.md`
   § "Phase M — F1 PPO + reward-shape coef-scaling follow-up".
+- **Follow-up Result (R15.S3 constant-shape schedule axis, 2026-05-14):** **DONE / PARTIAL —
+  new F1 ceiling on record.** Run `runs/R15-S3-constant-shape/` — same five signals at Phase L
+  1.0× coefs, same warm-start / opponent / HPs / code; only diff vs Phase L is
+  `--reward-shape-end 0.0` → `1.0` (constant full-strength shaping across all iters, no linear
+  decay). Wilson lower per iter: iter-0 **0.2787** (WR 31.8%, +0.6pp vs Phase L iter-0 0.2730,
+  promoted) → iter-1 **0.2883** (WR 32.8%, +1.0pp vs iter-0, **promoted — no rejection**, in
+  contrast to Phase M's iter-1 reject under linear-decay shape at 0.5×) → iter-2 **0.3677**
+  (WR 41.0%, +7.9pp vs iter-1, promoted). All three iters promoted, monotone trajectory,
+  `run_completed clean, halted=false`. **Iter-2 0.3677 is +1.2pp over Phase L 0.3560 and
+  +1.0pp over Phase M 0.3580 — the new F1 rule-bot ceiling on record across every sweep.**
+  Still 3.2pp short of the 0.40 success bar. The schedule-axis lift is real but small
+  (~1.5σ Wilson noise at n=500); crossed with Phase M's Δ +0.002 from coef scaling, the joint
+  message is that both single-axis follow-ups on the existing 5-signal mix moved iter-2 by
+  ≤+1pp. **The binding constraint is the signal set itself, not magnitude or schedule.**
+  Mechanism check (healthy): ratio_max 11.82 / 7.97 / 32.78 across iters — gradient still
+  decisively off ~1.00; entropy stable (0.173 → 0.160 → 0.155, no collapse);
+  `numerical_anomalies = 0` across all 48 minibatches; approx_kl_max < 0.015. **Reward-hacking
+  check (passes):** WR tracks Wilson in lockstep (31.8% → 32.8% → 41.0%); no iter where Wilson
+  rises while WR falls; the +7.9pp Wilson lift at iter-2 is mirrored by +8.2pp WR. Wall-clock
+  **5m 25.4s** (fastest of L / M / N); zero LOC diff vs Phase L (one CLI flag flip). Next
+  single-axis move is **signal-set change**, not further schedule or magnitude tuning. The
+  recommended candidate is option (3) from the prior scoping — add a value-head-derived
+  strategic-tempo signal (per-step delta in own-win-probability from the trained value head's
+  output) as a 6th additive signal at coef ~0.05; keep the existing 5 signals; same constant
+  schedule established by Phase N; same Phase H HPs; same warm-start. Implementation cost
+  ~20-40 LOC additive to `training/ppo_orchestrator.py:parse_trace_to_trajectories` (value head
+  output is already in the trajectory inference stream). Queued as P3
+  `r15-s3-value-head-tempo-signal`. Full writeup:
+  `docs/ai-performance-research-progress.md` § "Phase N — F1 PPO + constant reward shaping".
 
 ### R15.S4 — Sampling-temperature gate (F1 next-move #4)
 

@@ -451,3 +451,55 @@ baseline, isolates the schedule axis cleanly from the signal axis, and the falsi
 at the signal mix being the bottleneck rather than the schedule. Queued as P3
 `r15-s3-signal-mix-or-schedule` `ready` (autonomous-launch eligible under user's blanket
 AI-launch permission).
+
+**Phase N Closeout — R15.S3 constant-shape schedule axis (2026-05-14).** **PARTIAL — new F1
+ceiling on record at iter-2 Wilson 0.3677.** Run `runs/R15-S3-constant-shape/` — same 5 signals
+at Phase L 1.0× coefs (active 0.02 / bench 0.02 / retreat 0.03 / throughput 0.02 / hp-diff
+0.05), same warm-start (`runs/item17-2026-05-11/iter-002/model/checkpoint.pt`), same opponent
+(rule-bot, no pool), same HPs (`--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4`),
+**only diff vs Phase L: `--reward-shape-end 0.0` → `1.0`** (constant full-strength shaping, no
+linear decay). Wilson lower per iter: iter-0 **0.2787** (WR 31.8%, +0.6pp vs Phase L iter-0
+0.2730, promoted) → iter-1 **0.2883** (WR 32.8%, +1.0pp vs iter-0, **promoted — no rejection**
+vs Phase M's iter-1 reject under decaying shape) → iter-2 **0.3677** (WR 41.0%, +7.9pp vs
+iter-1, promoted). All three iters promoted, monotone, no halts. Iter-2 0.3677 vs Phase L
+0.3560: **Δ +0.012**; vs Phase M 0.3580: **Δ +0.010**. **The new F1 rule-bot ceiling on
+record across every sweep.** Still 3.2pp short of 0.40 — schedule-axis lift is real but small
+(~1.5σ Wilson noise at n=500). Mechanism healthy: ratio_max 11.82 / 7.97 / 32.78 (gradient
+strongly active, comparable to Phase L 19.06 / 32.59 / 11.12 and Phase M 15.86 / 12.50 /
+18.82); entropy stable 0.173 → 0.160 → 0.155 (no collapse); `numerical_anomalies = 0` across
+48 minibatches; approx_kl_max < 0.015 each iter. Reward-hacking check passes: WR tracks Wilson
+in lockstep (31.8% → 32.8% → 41.0%); the +7.9pp Wilson lift at iter-2 is mirrored by +8.2pp
+WR. Wall-clock **5m 25.4s** (fastest of the L/M/N trio, zero runtime cost from constant shape);
+zero LOC diff vs Phase L. Full writeup: `docs/ai-performance-research-progress.md` § "Phase N
+— F1 PPO + constant reward shaping".
+
+**Cross-phase summary (L / M / N) — the binding constraint is the signal set.** Three
+configurations of the same 5-signal mix have now landed iter-2 at 0.3560 (L, 1.0× linear-decay)
+/ 0.3580 (M, 1.75× linear-decay) / 0.3677 (N, 1.0× constant) — a 1.2pp spread across two
+single-axis moves (coef magnitude and schedule). PPO is healthy and moving the policy in all
+three (ratio_max well off 1.00, KL bounded, entropy stable, no anomalies); the reward-shape
+axis encodes strategic information worth ~+5pp Wilson over the unshaped Phase H baseline
+(0.3109 → 0.3677); but **scaling magnitude (M) or schedule (N) on the existing 5-signal mix
+does not produce the +9pp needed to clear 0.40**. The next move on this branch is
+**signal-set change, not further schedule or magnitude tuning**.
+
+**Pre-scoping for the next single-axis move (queued as P3 `r15-s3-value-head-tempo-signal`).**
+The highest-leverage candidate from the original three-option scoping is option (3) — add a
+strategic-tempo signal computed from the trained value head's per-step delta in own-win-
+probability. Concrete design: append a 6th additive signal to the existing 5, computed as
+`value(s_{t+1}) - value(s_t)` from the value head output already present in the trajectory
+inference stream. Coef scale **~0.05** (similar magnitude to the existing hp-diff signal, the
+strongest existing component). Keep the existing 5 signals at Phase L 1.0× coefs. Same
+**constant** schedule established as winning by Phase N (`--reward-shape-start 1.0
+--reward-shape-end 1.0`). Same Phase H aggressive HPs. Same warm-start. Implementation cost
+~**20-40 LOC additive** to `training/ppo_orchestrator.py:parse_trace_to_trajectories` — read
+the existing 5-signal computation pattern at ~lines 715-739 and add a 6th component. Pre-
+register: success if any iter Wilson ≥ 0.40 (first F1 success on record); partial if iter-2
+in (0.37, 0.40) — moved past Phase N ceiling but not enough; saturation if iter-2 ≈ 0.37 (then
+the entire 6-signal mix has saturated and the next move is either a different architectural
+axis or accepting that the warm-start neighborhood does not contain a 0.40 policy under our
+current eval gate); reward-hacking if iter-2 Wilson rises ≥+5pp over iter-0 but WR drops (the
+value-head-delta signal can be self-referentially gamed if the policy learns to inflate its
+own value estimates — important to quote WR alongside Wilson). Run as new Phase O. Smoke
+(`TMPDIR=/tmp npm run test:ppo-smoke`) before launching. Expected ~6 min wall-clock per L/M/N
+precedent.

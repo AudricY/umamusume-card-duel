@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T20",
+  "updated": "2026-05-14T21",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -18,12 +18,16 @@
     {
       "id": "r15-s3-signal-mix-or-schedule",
       "priority": "P3",
-      "status": "in_progress",
-      "started_at": "2026-05-14T20:00Z",
+      "status": "done",
       "run_dir": "runs/R15-S3-constant-shape",
-      "pid": 2663413,
-      "summary": "R15.S3 v1 LAUNCHED — constant-shaping schedule (only flag diff vs Phase L: --reward-shape-end 0.0 -> 1.0). Same warm-start (item17/iter-002/model), same opponent (rule-bot), same HPs (Phase H aggressive), same 1.0x coefs as Phase L (NOT Phase M's 1.75x). Tests whether linear-decay-to-zero was the reason iter-2 capped at ~0.36 in Phase L+M.",
-      "next_action": "Wait for run to finish (~6 min wall-clock per Phase L/M precedent). Read iter-{0,1,2} gate.manifest.json from runs/R15-S3-constant-shape/. Exit gate: any iter Wilson >= 0.40 (first F1 success on record); partial if 0.36 < iter-2 < 0.40 (constant-shape moved past Phase L/M ceiling but not enough); reward-hacking if iter-2 > iter-0 by >= +5pp Wilson but WR drops vs heuristic gate (policy gamed the constant shape but lost games — quote WR alongside Wilson); saturation if iter-2 ~= 0.36 (then pivot to candidate v2: drop weak signals + scale strong ones per Phase M shape_attribution)."
+      "summary": "Schedule axis explored; constant beat linear-decay by ~+1pp (Phase N 0.368 vs Phase L 0.356) but signal-set is the binding constraint. Next move: signal-mix change (drop weak signals; add value-head-delta tempo signal per scoping notes option (1))."
+    },
+    {
+      "id": "r15-s3-value-head-tempo-signal",
+      "priority": "P3",
+      "status": "ready",
+      "summary": "Add a 6th reward shaping signal: per-step value-head probability delta (model's own assessment of own-win probability between consecutive states). Phase N established the constant-shape schedule as winning over linear-decay; this is the next single-axis move — signal-set change. Recommended over the alternative (drop low-attribution + scale survivors) because it taps a different information source (model's own probabilistic assessment) rather than just hand-engineered observation deltas.",
+      "next_action": "Read training/ppo_orchestrator.py:715-739 and the existing 5 signals' computation pattern; the value head is in the trajectory inference output. Coef scale ~0.05 (similar to hp-diff which was the strongest existing signal). Keep the same 5 existing signals; this is additive. Same constant schedule (--reward-shape-start 1.0 --reward-shape-end 1.0). Same Phase H HPs (--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4). Same warm-start (runs/item17-2026-05-11/iter-002/model/checkpoint.pt). Implementation diff ~20-40 LOC orchestrator-only; smoke first (TMPDIR=/tmp npm run test:ppo-smoke); then launch as new Phase O. Exit gate: success if any iter Wilson >= 0.40 (first F1 success on record); partial if iter-2 in (0.37, 0.40); saturation if iter-2 ~= 0.37 (entire 6-signal mix saturated, next move is different architectural axis); reward-hacking if iter-2 Wilson rises >= +5pp over iter-0 but WR drops (value-head-delta is self-referentially gameable if policy inflates its own value estimates — quote WR alongside Wilson)."
     }
   ]
 }

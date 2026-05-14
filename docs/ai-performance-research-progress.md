@@ -733,7 +733,7 @@ iter-2 promoted at Wilson lower **0.3109 — exactly the DAgger iter-2 Wilson lo
 4. The entropy bonus widens *probabilities* but doesn't *flip argmax decisions*, which is what the gate measures.
 5. With the current ±1 terminal + Δpoints×1/3 reward shape, the local optimum at WR ≈ 35–38% is the highest-return policy in the neighborhood of the warm-start.
 
-**F1 target 0.40 not yet reached from the item17-2026-05-11 warm-start** under the PPO mechanism active at the time of this post-mortem. PPO can match the SL cap (phase H iter-2) but cannot exceed it under the existing reward shape. [Update 2026-05-14: R15.S3 (Phase L) lifted the rule-bot Wilson lower from 0.3109 (phase H) to **0.3560** by adding five per-step shaped signals — +4.5pp absolute over the prior F1 ceiling, missing the 0.40 bar by only 4.4pp and landing above the falsification band. The "NOT REACHABLE" framing was correct under the *unshaped* reward mechanism but is qualified once the reward axis is allowed to move; the branch is alive and the next attempt is a coefficient-scaling follow-up on the same axis. See "Phase L — F1 PPO + reward shaping" below. Phase M follow-up (1.75× coefs) landed iter-2 at **0.3580**, within Wilson noise of Phase L (Δ +0.002) — the pre-registered "coef saturation" outcome fired; next single-axis move is signal-mix or shaping-schedule change. See "Phase M — F1 PPO + reward-shape coef-scaling follow-up" below.]
+**F1 target 0.40 not yet reached from the item17-2026-05-11 warm-start** under the PPO mechanism active at the time of this post-mortem. PPO can match the SL cap (phase H iter-2) but cannot exceed it under the existing reward shape. [Update 2026-05-14: R15.S3 (Phase L) lifted the rule-bot Wilson lower from 0.3109 (phase H) to **0.3560** by adding five per-step shaped signals — +4.5pp absolute over the prior F1 ceiling, missing the 0.40 bar by only 4.4pp and landing above the falsification band. The "NOT REACHABLE" framing was correct under the *unshaped* reward mechanism but is qualified once the reward axis is allowed to move; the branch is alive and the next attempt is a coefficient-scaling follow-up on the same axis. See "Phase L — F1 PPO + reward shaping" below. Phase M follow-up (1.75× coefs) landed iter-2 at **0.3580**, within Wilson noise of Phase L (Δ +0.002) — the pre-registered "coef saturation" outcome fired; next single-axis move is signal-mix or shaping-schedule change. See "Phase M — F1 PPO + reward-shape coef-scaling follow-up" below. Phase N follow-up (constant schedule, 1.0× coefs) landed iter-2 at **0.3677** (WR 41.0%, n=500) — **+1.2pp over Phase L, the new F1 rule-bot ceiling on record**, but still 3.2pp short of 0.40. With three configurations of the same 5-signal mix now landing 0.356 / 0.358 / 0.368 at iter-2, coef magnitude and schedule axes both moved iter-2 by ≤+1pp — **the binding constraint is the signal set itself**, not magnitude or schedule. See "Phase N — F1 PPO + constant reward shaping" below.]
 
 **Recommended next moves, in order of plausibility:**
 
@@ -965,6 +965,7 @@ PASS pre-launch.
 | K | DAgger 3× compute, fixed 64/2 | 0.3269 (iter-2) | 0.3269 | 11m 51s |
 | **L** | **PPO aggressive + 5-signal reward shaping** | **0.3560 (iter-2)** | **0.3560** | **5m 54s** |
 | **M** | **Phase L + all 5 coefs scaled 1.75×** | **0.3580 (iter-2)** | **0.3580** | **6m 22s** |
+| **N** | **Phase L + constant schedule (no decay)** | **0.3677 (iter-2)** | **0.3677** | **5m 25s** |
 
 **What this opens.** A coefficient-scaling follow-up sweep on the same axis: hold the five signals
 fixed, scale all five coefs 1.5–2× (the current ~0.13/step per-game sum is at the low end of the
@@ -1054,3 +1055,108 @@ reward-shape axis is open and producing the strongest F1 numbers on record.
 Artifacts: `runs/R15-S3-reward-shaping-sweep/` — `events.jsonl` (per-iter ppo-update minibatch
 detail with ratio/KL/entropy/anomaly counts), `orchestrator-state.json` (promoted_wilson_lower
 0.35602922648461244), per-iter `iteration-manifest.json` + `gate.manifest.json`.
+
+### Phase N — F1 PPO + constant reward shaping (R15.S3 schedule axis, 2026-05-14)
+
+Third F1 reward-shaping data point and **the new F1 rule-bot ceiling on record**. Phase L closed
+the parent R15.S3 question (does shaped reward move PPO past 0.31? yes, to 0.3560). Phase M closed
+the coef-magnitude axis at SATURATION (1.75× coefs landed iter-2 at 0.3580, Δ +0.002 vs L).
+Phase N closes the **shaping-schedule axis**: same five signals, same Phase L 1.0× coefs (active
+0.02 / bench 0.02 / retreat 0.03 / throughput 0.02 / hp-diff 0.05), same warm-start
+(`runs/item17-2026-05-11/iter-002/model/checkpoint.pt`), same opponent (rule-bot, no pool), same
+HPs (`--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4`), **only diff vs Phase L:
+`--reward-shape-end 0.0` → `--reward-shape-end 1.0`** (constant full-strength shaping across all
+iters, no linear decay). Run `runs/R15-S3-constant-shape/`. Pre-registered: success if any iter
+Wilson lower ≥ **0.40** (first F1 success on record), partial if 0.36 < iter-2 < 0.40,
+reward-hacking if iter-2 ≥ iter-0 by ≥ +5pp Wilson while WR drops vs heuristic gate (constant
+shape gamed but games lost), saturation if iter-2 ≈ 0.36 → pivot to v2 signal-mix change.
+
+| Iter | Shape scale | Selection | Gate WR | Wilson lower | n | ratio_max | entropy_mean | Numerical anomalies | Decision |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 1.0 | rollout | 31.8% | **0.2787** | 500 | 11.82 | 0.173 | 0 | **promoted** (baseline, +0.6pp vs Phase L iter-0 0.2730) |
+| 1 | 1.0 | policy | 32.8% | **0.2883** | 500 | 7.97 | 0.160 | 0 | **promoted** (+1.0pp vs iter-0; vs Phase M iter-1 0.2825 rejected, **no rejection under constant shape**) |
+| 2 | 1.0 | policy | 41.0% | **0.3677** | 500 | 32.78 | 0.155 | 0 | **promoted** (+7.9pp vs iter-1; **new F1 ceiling**) |
+
+**Verdict: PARTIAL — new F1 ceiling at iter-2 Wilson 0.3677.** Constant shaping cleared Phase L
+by **+1.2pp** (0.3677 vs 0.3560) and Phase M by **+1.0pp** (0.3677 vs 0.3580). Trajectory
+monotone 0.2787 → 0.2883 → 0.3677 (+8.9pp end-to-end), all three iters promoted, **no
+rejections** (in contrast to Phase M's iter-1 reject), `run_completed clean, halted=false`. Still
+short of the 0.40 success bar by **3.2pp** — does not clear, but is the smallest gap to date and
+the best F1 rule-bot result on record across every sweep. The schedule-axis change is real but
+small: +0.012 absolute at iter-2 sits within roughly 1.5σ Wilson noise at n=500, trending
+positive but not significant in isolation. Crossed with Phase M (Δ +0.002 from coef scaling), the
+joint message is that both single-axis follow-ups on the existing 5-signal mix moved iter-2 by
+≤+1pp — the ceiling at 0.356–0.368 is the binding constraint.
+
+**Comparison to Phases L and M (cross-axis table).**
+
+| Phase | Schedule | Coefs | iter-0 Wilson | iter-1 Wilson | iter-2 Wilson | iter-2 Δ vs L | iter-1 rejected? |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| L (R15.S3 parent) | linear-decay (full→zero) | 1.0× | 0.2730 | 0.2787 | **0.3560** | — | no |
+| M (1.75× follow-up) | linear-decay (full→zero) | 1.75× | 0.2960 | 0.2825 (rejected) | **0.3580** | +0.002 | **yes** |
+| **N (constant follow-up)** | **constant (full→full)** | **1.0×** | **0.2787** | **0.2883** | **0.3677** | **+0.012** | **no** |
+
+Phase L → Phase N Δ iter-2 = **+0.0117** (round to +1.2pp). Phase L → Phase M Δ iter-2 = +0.0020
+(+0.2pp). The schedule axis moved iter-2 by ~5× more than the coef-magnitude axis, but both are
+small. The iter-1 picture is more striking: constant shape's iter-1 (0.2883, promoted, +1.0pp
+over iter-0) cleanly beats Phase M's iter-1 (0.2825, rejected, -1.3pp under iter-0) — supporting
+the pre-scoping hypothesis that decaying shape mid-sweep is itself destabilizing, and that the
+policy keeps climbing on shaped signal when shape is held constant instead of being asked to
+converge to a deterministic terminal-only optimum mid-run.
+
+**Mechanism check.** Importance ratios moved decisively off ~1.00 in every iter (ratio_max
+**11.82 / 7.97 / 32.78** — gradient strongly active in every iter, comparable to Phase L's
+19.06 / 32.59 / 11.12 and Phase M's 15.86 / 12.50 / 18.82 ranges; iter-2's 32.78 is the highest
+ratio_max of any iter across the three runs but did not cause any numerical anomaly). Entropy
+stable across iters (0.173 → 0.160 → 0.155, no collapse). `approx_kl_max < 0.015` every iter
+(0.0147 / 0.0116 / 0.0150). `numerical_anomalies = 0` across all 48 minibatches. PPO is doing
+exactly the same work it did in Phases L and M — moving the policy hard from the warm-start —
+and landing in the same neighborhood. **Reward-hacking check.** Gate WR tracks Wilson lower in
+lockstep across iters (31.8% → 32.8% → 41.0%, monotone increasing, matches Wilson trajectory
+0.2787 → 0.2883 → 0.3677). No iter where Wilson rises while WR falls; no iter where Wilson
+exceeds WR by more than the expected Wilson-from-n=500 lower-bound gap. The +7.9pp Wilson lift
+from iter-1 to iter-2 is mirrored by a +8.2pp WR lift. The policy is winning more games under
+constant shape, not gaming a shape signal at the expense of winning.
+
+**What this implies for the binding constraint.** Three configurations of the same 5-signal mix
+(L 1.0× linear-decay, M 1.75× linear-decay, N 1.0× constant) have now landed iter-2 at
+0.3560 / 0.3580 / 0.3677 — a 1.2pp spread. The mechanism (importance ratios off 1.0, gradient
+active, KL bounded, entropy stable) has fired correctly in all three; PPO is healthy and
+moving the policy in every case. The reward-shape axis (Δactive-energy, Δbench-energy, retreat
+indicator, Δcard-throughput, Δactive-hp-relative) encodes strategic information worth ~+5pp
+Wilson over the unshaped Phase H baseline (0.3109 → 0.3677), but **scaling its magnitude or
+its schedule does not get us the +9pp needed to clear 0.40**. The next move on this branch is
+therefore **signal-set change**, not further schedule or magnitude tuning. The highest-leverage
+candidate is option (3) from the scoping notes — add a strategic-tempo signal derived from the
+trained value head's own per-step delta in own-win-probability, which taps a different
+information source (the model's own probabilistic assessment of game state) rather than just
+hand-engineered observation deltas. Implementation cost ~20-40 LOC additive to
+`parse_trace_to_trajectories` (see `training/ppo_orchestrator.py:715-739` for the existing
+5-signal computation pattern); the value head output is already in the trajectory inference
+stream.
+
+**Wall-clock.** Phase N end-to-end **5m 25.4s** (run_started → run_completed delta:
+`1778733032.80 → 1778733358.24 = 325.44s`). Phase L was 5m 53.7s; Phase M 6m 22.3s. Schedule
+change adds zero runtime cost; this run is the *fastest* of the three (~30s under Phase L,
+~60s under Phase M, within iter-level rollout variance). Implementation cost: **zero LOC**
+(one CLI flag flip from the Phase L baseline, no code diff).
+
+**What this closes and opens.** Closes: the shaping-schedule axis at the existing 5-signal /
+1.0× coef tuple. Constant beats linear-decay by ~+1pp at iter-2 — real but small relative to
+the 3.2pp remaining gap to 0.40. The queued `r15-s3-signal-mix-or-schedule` item is resolved as
+PARTIAL with the schedule axis explored. Opens: signal-set change. The recommended next single-
+axis move is **value-head-delta as a 6th additive signal** (coef ~0.05, scale similar to the
+existing hp-diff signal which was the strongest existing component; keep the same 5 existing
+signals, this is additive; same constant schedule established by Phase N; same Phase H HPs;
+same warm-start). Pre-register: success if iter-2 Wilson ≥ 0.40 (first F1 success on record),
+partial if 0.37 < iter-2 < 0.40, saturation if iter-2 ≈ 0.37 (then the entire 6-signal mix has
+saturated and the next move is either a different architectural axis or accepting that the
+warm-start neighborhood does not contain a 0.40 policy under our current eval gate). Queued as
+P3 `r15-s3-value-head-tempo-signal`.
+
+Artifacts: `runs/R15-S3-constant-shape/` — `events.jsonl` (per-iter ppo-update minibatch detail
+with ratio/KL/entropy/anomaly counts; per-iter `trajectory-parse/completed.data.shape_attribution`
+showing all five components active at full scale across all three iters with no decay),
+`orchestrator-state.json` (promoted_wilson_lower 0.3677343110002554), per-iter
+`iteration-manifest.json` + `gate.manifest.json`, `launch.log` (banner shows
+`--reward-shape-start 1.0 --reward-shape-end 1.0` confirmed).
