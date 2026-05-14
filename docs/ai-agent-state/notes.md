@@ -183,3 +183,178 @@ dominated, eval budget was not the bottleneck). The compute-starved branch is cl
 routes to R15.S3 (reward shaping), R15.S4 (sampling-temperature gate, diagnostic), R7
 (multi-teacher labels), or R8 (DPO). Full writeup:
 `docs/ai-performance-research-progress.md` § "Phase K — F1 DAgger compute-scaled warm-start".
+
+## F1 reward shaping — scoping (2026-05-14)
+
+**Hypothesis (pre-registered).** Augmenting PPO's per-step reward with shaped intermediate
+signals derived from already-traced `PublicObservation` fields (Δactive-energy-attachment,
+Δbench-development, retreat-event indicator, Δcard-throughput, Δactive-hp-relative) at
+aggregate per-game shaped magnitudes ≈ ±0.3 (sub-dominant to ±1 terminal, comparable order
+to current α·Δpoints) will lift iter-2 greedy-eval Wilson lower from the F1 cap of **0.3109**
+(item17 iter-2, `docs/ai-performance-research-progress.md:582`; matched within ±0.5pp by phase
+H, phase J/R5, R15.S1) to **≥ 0.40** at n=500 side-balanced vs rule-bot, holding warm-start
+(`runs/item17-2026-05-11/iter-002/checkpoint.pt`) and opponent (rule-bot, no pool) fixed.
+**Falsification:** iter-2 Wilson lower lands in 0.311 ± 2pp (= [0.291, 0.331]); closes the
+reward-shape branch of the F1 post-mortem and re-ranks R7 (multi-teacher labels) and R8 (DPO).
+
+**What we know (current reward shape).** Per-step reward is constructed in
+`training/ppo_orchestrator.py:parse_trace_to_trajectories` at lines **715-739**: episode-level
+loop over trace rows, computing
+`delta = (own_points - opp_points) - (prev_own - prev_opp)` (line 724), then
+`reward = alpha * delta` (line 725) with default `alpha = 1/3` (line 811). On the terminal row,
+`reward = reward + beta * win_indicator` (line 739) with default `beta = 1.0` (line 813) and
+`win_indicator ∈ {+1, 0, -1}` (lines 733-738). This is **pure orchestrator-side trace
+post-processing** — no sim-side reward emission. Every shaped reward at training time is
+computed from fields already on each `row.observation` snapshot.
+
+Empirical mean_return magnitudes (the per-episode reward sum the surrogate gradient gets):
+R14-f1-self-play-sweep `stage=gae` events show `mean_return = -0.236 / -0.173 / -0.153` for
+iter-0/1/2 (`runs/R14-f1-self-play-sweep/events.jsonl`); R15-S1's reward shape is identical so
+the gradient floor is comparable. **Design constraint** for new shaping: per-game shaped sum
+should target ±0.3 — same order as Δpoints sums, sub-dominant to the ±1.0 terminal so the
+policy does not chase shaping at expense of winning. Naive coefs (e.g. 0.05/step × 60
+decisions = 3.0) overwhelm the terminal and trigger reward-hacking.
+
+**What has already been tried (so this run is genuinely new).**
+- **R3 (BC entropy bonus β ∈ {0.05, 0.2}, FAIL).** Gate WR 38.5%
+  (`docs/ai-research-backlog.md:147`). SL-loss change; did not touch PPO reward.
+- **R4 (value-head retrain, FAIL).** Gate WR 34.5% (`docs/ai-research-backlog.md:233-235`).
+  Did not touch PPO reward.
+- **R6 (capacity 128/3, FAIL).** Gate WR 33.0% (`docs/ai-research-backlog.md:227-236`). Did
+  not touch PPO reward.
+- **R15.S1 (compute 3× games + 3× epochs at 64/2, FAIL).** Iter-2 Wilson 0.3269 inside
+  falsification band (notes.md "F1 better warm-start — scoping" closeout). Did not touch PPO
+  reward.
+- **R15.S2 (strong-pool self-play, FAIL).** Iter-2 Wilson 0.2188; regressed via
+  co-adaptation (digest slot 8). Did not touch PPO reward. **Load-bearing for this scoping:**
+  R15.S2's ratio range exploded from phase H's ~1.00 to 0.05-4.6 (digest slot 8) — proving
+  PPO *can* move when the gradient is non-zero; the cap is the reward shape, not PPO itself.
+- **R7 (multi-teacher labels)** and **R8 (DPO)** sit upstream of PPO (different SL labels /
+  different loss class); neither subsumes the per-step reward-shape axis.
+
+Net: no prior R-line touched `parse_trace_to_trajectories`'s per-step reward. This is a clean
+new axis.
+
+**Proposed reward signals (5 candidates, all from `PublicObservation` already on every trace
+row — see `frontend/src/game/engine/ai-policy/observation.ts:6-60`).**
+
+1. **Δactive-energy-total** — `own.active.energyTotal - prev_own.active.energyTotal`. Captures
+   "develop active uma" strategic axis. Source: `observation.own.active.energyTotal`
+   (`observation.ts:46, 54`: `energyTotal = Σ Object.values(umamusume.energies)`). Expected
+   per-step magnitude: +1/turn → recommended coef ≈ 0.02 → ~0.02/step shaped contribution.
+2. **Δbench-development (sum-of-bench-energyTotal)** — `Σ(b.energyTotal for b in own.bench if
+   b) - prev`. Captures battery-bench strategy distinct from face-active. Source:
+   `observation.own.bench[i].energyTotal` (`observation.ts:26, 35, 46`). Recommended coef ≈
+   0.02; ~0.02/step.
+3. **Retreat-event indicator** — `1.0 if (own.usedRetreatThisTurn && !prev_own
+   .usedRetreatThisTurn) else 0.0` per row. Source: `observation.own.usedRetreatThisTurn`
+   (`observation.ts:38`). Captures defensive recoveries (sparse, ~0-3 per game). Recommended
+   coef ≈ 0.03; sub-game total ~0.0-0.1.
+4. **Δcard-throughput** — `(own.handCount + len(own.discard)) - prev`. Captures cycling tempo
+   (discard grows monotonically; together with hand they index "cards seen"). Source:
+   `observation.own.handCount`, `observation.own.discard` (`observation.ts:31, 33`).
+   Recommended coef ≈ 0.02; ~0.02/step.
+5. **Δactive-hp-relative** — `(own.active.hp/own.active.maxHp) - (opp.active.hp/opp.active
+   .maxHp)` delta. Captures chip damage trade efficiency at the active-vs-active interface
+   that Δpoints marginalizes over (Δpoints fires only on KO). Source: `observation.own
+   .active.hp/maxHp`, `observation.opponent.active.hp/maxHp` (`observation.ts:52-53`).
+   Recommended coef ≈ 0.05 (the largest of the five — direct damage proxy); ~0.05/step on
+   active turns.
+
+Aggregate target per game (≈60 model decisions × combined per-step magnitude ≈ 0.13 ×
+average |delta| 0.4) ≈ ±0.3 — sub-dominant to ±1 terminal, comparable to existing Δpoints
+sum. **No sim-side emission required.**
+
+**Proposed shaping schedule (pre-registered).** **Linear decay to zero across the 3 iters:**
+iter-0 full shaping (coefs as above), iter-1 0.5× shaping, iter-2 0× shaping. Rationale: the
+policy must converge to optimize the *unshaped* terminal+Δpoints signal; shaping only exists
+to provide non-zero gradient at the start of training where importance ratios sit at ~1.0
+(phase H, phase J-iter-0 ratios near 1.0). Pre-registered backup: if iter-0/1 promote but
+iter-2 regresses, follow up with constant-throughout shaping (NOT done in this sweep — that's
+a separate experiment).
+
+**Implementation site (orchestrator-only — load-bearing for human work-size).**
+`training/ppo_orchestrator.py:parse_trace_to_trajectories` lines **715-740**. Add five new
+coefficient args mirroring `--reward-alpha`/`--reward-beta` at lines 811-814 (e.g.
+`--reward-active-energy-coef 0.02`, `--reward-bench-energy-coef 0.02`,
+`--reward-retreat-coef 0.03`, `--reward-throughput-coef 0.02`, `--reward-hp-diff-coef 0.05`),
+plus `--reward-shaping-schedule {linear-decay,constant}` consumed by the iteration loop to
+scale all five per iter. Inside the row loop, parse the five new fields from `observation`
+and accumulate into `reward` after line 725 and before line 739.
+
+**Estimated diff:** ~50-80 lines added in `training/ppo_orchestrator.py`, zero lines in
+`training/train_ppo.py` (the trajectories.jsonl schema carries an opaque `reward` float —
+line 753), zero lines in any TS/sim file. **No sim-side change required.** Human work: ~1h
+to implement + ~30 min for `TMPDIR=/tmp npm run test:ppo-smoke` verification ≈ 1.5h before
+launch. This is NOT a launch-and-watch decision like R15.S1/S2 — code lands first.
+
+**Proposed experiment config (first attempt).**
+- Warm-start: `runs/item17-2026-05-11/iter-002/checkpoint.pt` (same as every F1 phase —
+  preserves the comparison axis to phase H 0.3109 and R15.S1 0.3269).
+- Opponent: rule-bot only (no `--rollout-vs-pool` — R15.S2 closed the strong-pool branch).
+- HPs: mirror phase H aggressive (`docs/ai-performance-research-progress.md:725-735`):
+  `--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4`.
+- Sweep shape: `--iterations 3 --games-per-update 800`.
+- Reward args (existing preserved): `--reward-alpha 0.333 --reward-beta 1.0`; plus the five
+  new coefs at the magnitudes in the signal catalog above; plus
+  `--reward-shaping-schedule linear-decay`.
+- Eval: in-orchestrator gate at n=500 side-balanced (`--eval-games 250` × 2 sides — matches
+  R15.S1).
+- Diagnostics required: per-iter `mean_return` (already emitted via `stage=gae`); per-iter
+  shaped-component attribution (NEW event: sum of each component across episodes — needed for
+  the branch-1 vs branch-2 falsification split below).
+
+**Exit criteria.**
+- *Primary success:* any iter's gate Wilson lower **≥ 0.40** at n=500 side-balanced.
+- *Falsification (branch 1, "reward-shape branch closed"):* iter-2 Wilson lower in
+  [0.291, 0.331] AND importance ratios moved off 1.0 (per-iter ratio range > [0.5, 2.0],
+  matching R15.S2's gradient-active signature, digest slot 8). Says "PPO moved the policy
+  toward the shaped reward, but the shaped reward did not encode winning" — imitation cap is
+  downstream of any orchestrator-side reward.
+- *Falsification (branch 2, "even shaping didn't move PPO"):* iter-2 Wilson in same band AND
+  importance ratios still ≈1.00 (matching phase H stasis). Says the issue is upstream of
+  reward — behavior-policy log-probs are sharp enough that no per-step reward changes the
+  surrogate gradient. Re-ranks R8 (DPO) over R7.
+- *Secondary diagnostic:* shaped-component attribution per iter. If one component dominates
+  by >5× the others, future shaping work drops the small contributors.
+
+**Expected cost.** Phase H 3 iters × 800 games ran in ~340s (~5-6 min) for the PPO loop
+itself (notes.md "F1 self-play readiness — scoping" line 63). Reward shaping adds zero
+runtime cost (a few extra float adds per trace row parsed from already-loaded JSON).
+**Total compute: ~10-15 min for sweep + gates.** Implementation: ~1.5h human work before
+launch.
+
+**Risk register.**
+- *Reward hacking.* Policy maximizes shaped signal at expense of winning (e.g. piles energy
+  on active uma instead of attacking). **Mitigation:** linear-decay schedule guarantees iter-2
+  evaluates on the clean terminal+Δpoints reward; shaped-component attribution exposes a
+  stuck-on-shaping policy at iter-1 before it locks in. Coefs sized to keep per-game shaped
+  sum ≈ ±0.3 (sub-dominant to ±1.0 terminal).
+- *Signal redundancy.* The five signals correlate with Δpoints (winning ≈ attaching energy +
+  drawing cards + KOing). **Mitigation:** branch-1 vs branch-2 falsification split
+  distinguishes "reward moved gradient but didn't help" (redundancy) from "reward did not move
+  gradient" (upstream issue). Counter-evidence to full redundancy: R15.S2 showed PPO *can* be
+  moved with a richer opponent (ratios 0.05-4.6 vs 1.00 — digest slot 8); the five fields
+  above span axes (active-development, bench-development, defensive plays, throughput,
+  damage) that the Δpoints aggregate marginalizes over.
+- *Sim-side change creeping in.* If a desired sixth signal turns out to require a field not in
+  `PublicObservation`, the orchestrator-only work-size assumption breaks. **Mitigation:** the
+  five signals above are pre-committed-to and all confirmed present in
+  `observation.ts:6-60`. A sixth signal routes back through human decision gate.
+
+**Decision gate (human-owned, before paying code work + compute).** Three items the human must
+confirm:
+(a) The orchestrator-side diff scope (~50-80 lines in
+`training/ppo_orchestrator.py:parse_trace_to_trajectories` + the five new CLI args; zero
+sim-side; ~1.5h human work) is acceptable. This is NOT a "compute only" decision.
+(b) The falsification outcome (either branch 1 or branch 2) is acceptable as a research
+deliverable. Closing the reward-shape branch routes attention to R7/R8 and re-ranks them per
+which branch fires.
+(c) The pre-registered linear-decay schedule is acceptable as the first attempt vs
+constant-throughout. (Constant-throughout is reserved as a follow-up only if linear-decay
+produces a non-degenerate iter-1 lift that decays at iter-2 — a partial-success signature
+distinct from outright falsification.)
+
+On green light: implement the diff, run `TMPDIR=/tmp npm run test:ppo-smoke` to verify
+trajectories.jsonl still parses end-to-end, then launch the sweep. On red light: demote to
+R15.S4 (sampling-temperature diagnostic) or route directly to R7/R8.
