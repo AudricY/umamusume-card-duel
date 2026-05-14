@@ -11,7 +11,10 @@
     {
       "id": "f1-warmstart-sweep",
       "priority": "P2",
-      "status": "ready",
+      "status": "in_progress",
+      "started_at": "2026-05-14",
+      "run_dir": "runs/R15-S1-warmstart-sweep/",
+      "pid": 1876596,
       "summary": "Compute-scaled DAgger warm-start sweep at fixed hidden=64/depth=2 to test the 'compute-starved, not capacity-starved' hypothesis. 3x games (90) and 3x epochs (75) over item17-2026-05-11 take-2 baseline, same teacher (rollout-CRN x3), same KL anchor schedule (0.0/0.1/0.5). Pre-registered exit: iter-2 Wilson lower >= 0.45 at n>=500 side-balanced. Distinct from R3 (entropy axis), R4 (value-head axis), R6 (capacity axis) — this run isolates the SL-compute axis at fixed capacity. Now the head F1 next-move after R15.S2 (self-play) closed FAIL on 2026-05-14.",
       "next_action": "See docs/ai-agent-state/notes.md '## F1 better warm-start — scoping (2026-05-14)' for full config and decision gate; launch dagger_orchestrator.py with the config block. ~1.5h compute. User gave blanket green-light on AI training runs (overrides warn-before-launch); safe to auto-launch."
     },
