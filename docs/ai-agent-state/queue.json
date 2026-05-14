@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T21",
+  "updated": "2026-05-14T22",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -25,9 +25,24 @@
     {
       "id": "r15-s3-value-head-tempo-signal",
       "priority": "P3",
+      "status": "blocked",
+      "summary": "Implementation blocked: value-head output is not in trace schema; rollout emits placeholder value_pred=0.0 (ppo_orchestrator.py:858), PPO recomputes value at training-time. Adding the signal requires TS-side ONNX call-site instrumentation in backend/src/sim/, schema extension on behaviorPolicy or top-level trace field, and ONNX export verification that the value head is a named output of rollout.onnx / policy.gate.onnx. Separate sprint-slot work — see r15-s3-value-head-trace-instrumentation."
+    },
+    {
+      "id": "r15-s3-value-head-trace-instrumentation",
+      "priority": "P3",
       "status": "ready",
-      "summary": "Add a 6th reward shaping signal: per-step value-head probability delta (model's own assessment of own-win probability between consecutive states). Phase N established the constant-shape schedule as winning over linear-decay; this is the next single-axis move — signal-set change. Recommended over the alternative (drop low-attribution + scale survivors) because it taps a different information source (model's own probabilistic assessment) rather than just hand-engineered observation deltas.",
-      "next_action": "Read training/ppo_orchestrator.py:715-739 and the existing 5 signals' computation pattern; the value head is in the trajectory inference output. Coef scale ~0.05 (similar to hp-diff which was the strongest existing signal). Keep the same 5 existing signals; this is additive. Same constant schedule (--reward-shape-start 1.0 --reward-shape-end 1.0). Same Phase H HPs (--lr 3e-4 --clip-epsilon 0.3 --entropy-coef 0.01 --ppo-epochs 4). Same warm-start (runs/item17-2026-05-11/iter-002/model/checkpoint.pt). Implementation diff ~20-40 LOC orchestrator-only; smoke first (TMPDIR=/tmp npm run test:ppo-smoke); then launch as new Phase O. Exit gate: success if any iter Wilson >= 0.40 (first F1 success on record); partial if iter-2 in (0.37, 0.40); saturation if iter-2 ~= 0.37 (entire 6-signal mix saturated, next move is different architectural axis); reward-hacking if iter-2 Wilson rises >= +5pp over iter-0 but WR drops (value-head-delta is self-referentially gameable if policy inflates its own value estimates — quote WR alongside Wilson)."
+      "summary": "Sim-side prerequisite for Phase O value-head tempo signal. (1) Audit rollout.onnx / policy.gate.onnx output signature for a named value head; if missing, extend the export step. (2) Update the TS-side ONNX inference call site (search backend/src/sim/ for the policy-server client) to capture the value scalar per request. (3) Extend the decision-trace schema (likely `behaviorPolicy.valueEstimate: number` or top-level `valuePred`) and update relabelDecisionTrace.ts to forward it. (4) Regenerate a smoke trace; verify the new field is present. Then unblock r15-s3-value-head-tempo-signal.",
+      "next_action": "Glob backend/src/sim/ for policy/onnx client; read training/ppo_orchestrator.py:840-880 trace parse to confirm value_pred placeholder; check training/export_onnx.py or equivalent for current rollout.onnx outputs; design minimal schema extension; smoke via TMPDIR=/tmp npm run test:train."
+    },
+    {
+      "id": "r15-s3-reduced-mix-sweep",
+      "priority": "P3",
+      "status": "in_progress",
+      "started_at": "2026-05-14T22:46Z",
+      "run_dir": "runs/R15-S3-reduced-mix",
+      "pid": 2782486,
+      "summary": "Phase O' — drop the 2 weakest of the 5 reward shaping signals, scale the strongest 2-3 to ~1.5x. Tests whether signal-MIX composition has further headroom independent of signal-SET. Same constant schedule, same warm-start, same HPs. If iter-2 >= 0.40 -> signal-mix unlocks F1 success. If iter-2 ~= 0.37 -> signal-set is genuinely binding; pivot to value-head instrumentation or R7/R8. Coefs: active-energy 0.03 (was 0.02 x1.5), bench-energy 0.0 (dropped - 2nd weakest non-zero), retreat 0.0 (dropped - zero contribution per Phase N attribution), throughput 0.03 (was 0.02 x1.5 - largest contributor), hp-diff 0.05 (held - anti-correlated per attribution, kept as control). Per-game budget ~0.24, close to Phase M's 0.23."
     }
   ]
 }
