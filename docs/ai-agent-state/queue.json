@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T07:35Z",
+  "updated": "2026-05-14T07:40Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -65,12 +65,19 @@
       "summary": "DONE. Audit: existing training/runs/outcome-crn/examples.jsonl was rollout-outcome-v1 (NO oracle field) — regenerated as training/runs/r8-outcome-crn/examples.jsonl via `sim:export-outcome-training --games 90 --max-examples 10000 --samples 3 --seed-start 50000` (4094 rows, ~2 min, all oracle fields present, missing_counts=0). τ probe (100 rows, seed=0): mean rewardVariance=0.157, sqrt(mean/3)=0.229, tau=0.229 above the 0.02 floor. kept_pairs=568/4094 (13.9%) at τ=0.229; at the 0.02 floor 880/4094 (21.5%). Files (LOC): training/pair_corpus.py 257, training/train_dpo.py 332, training/smoke_e2e.py +151 (`assert_dpo_smoke`). Smoke gated through `test:python-train` (PASS, 22.9s wall-clock); covers (a) finite loss, (b) policy grads flow, (c) reference frozen, (d) loss strictly decreases over 10 SGD steps."
     },
     {
-      "id": "r8-step-2-train-and-gate",
+      "id": "r8-step-2a-train-only",
+      "priority": "P2",
+      "status": "done",
+      "run_dir": "runs/R8-dpo/iter-000",
+      "summary": "DONE 2026-05-14T07:33Z. Background launch via direct python -u (no nohup×npm wrapper, no pidfile race). Wall-clock ~30s on CUDA — much under scoping ~10-min estimate because actual corpus is 568 kept pairs (τ=0.3005 at training time, computed by in-trainer probe with different seed than step-1 audit's 0.229) not the assumed ~10k. Status PASS. Loss 0.683→0.615 monotone over 5 epochs; val_acc 0.628→0.681; policy_margin train 1.47→3.02 / val 2.45→3.27 (model moves away from reference as expected for non-zero β). ONNX roundtrip smoke PASS (max_logit_diff 7e-7, max_value_diff 3e-7). Outputs at runs/R8-dpo/iter-000/model/{checkpoint.pt, manifest.json} + train.log."
+    },
+    {
+      "id": "r8-step-2b-gate-eval",
       "priority": "P2",
       "status": "ready",
       "autonomous_launch_eligible": true,
-      "summary": "R8 step 2 per scoping § 6 steps 5-6: ~10-min DPO training run from item17 warm-start + reference, then n=500 side-balanced gate vs rule-bot. Gate threshold Wilson lower ≥0.40 (vs anchors item17 0.311 / R15.S3 ceiling 0.3677).",
-      "next_action": "Implementer: (1) `training/.venv/bin/python training/train_dpo.py --data training/runs/r8-outcome-crn/examples.jsonl --init-from-checkpoint runs/item17-2026-05-11/iter-002/model/checkpoint.pt --reference-checkpoint runs/item17-2026-05-11/iter-002/model/checkpoint.pt --beta 0.1 --epochs 5 --out-dir runs/R8-dpo/iter-000/model/`. Single epoch likely sufficient; 5 is the safety cap under the 10-min budget. (2) ONNX-export checkpoint via `training/export_onnx.py` then `npm run sim:eval-gate` n=500 side-balanced same seed range as R7 step 4. (3) Result block to `docs/ai-research/progress/r15.md` § R8 — DPO with Wilson interval, kept-pairs fraction, β=0.1, reference-policy anchor + comparison table. PASS = Wilson lower ≥ 0.40; FAIL = document ceiling and either flag β=0.3 follow-up (if 0.37-0.39) or close branch (if ≤0.37)."
+      "summary": "R8 step 2b: gate eval the trained DPO checkpoint at runs/R8-dpo/iter-000/model/checkpoint.pt against rule-bot at n=500 side-balanced, then write the verdict result block. Standalone driver needed — primitives (`export_checkpoint_to_onnx`, `serve_onnx_context`, `run_eval_gate`) live in training/dagger_orchestrator.py:846,884 and training/uma_ai/node_bridge.py:157 but no top-level driver yet.",
+      "next_action": "Implementer: (1) write a small `training/r8_gate_eval.py` driver that imports the three primitives, exports runs/R8-dpo/iter-000/model/checkpoint.pt → runs/R8-dpo/iter-000/policy.gate.onnx, spins up serve_onnx_context, calls run_eval_gate(selection='model', games=500, seed_start=<R7 step 4 seed>, min_games=500, min_ci_lower=0.40, manifest_out=runs/R8-dpo/iter-000/gate.manifest.json, rollout_crn_samples=1, planner_crn_samples=3). (2) Inspect gate.manifest.json, capture summary.wilson95.{lower,upper}, summary.modelWinRate, summary.byModelSide.{player,opponent}. (3) Write result block to docs/ai-research/progress/r15.md § R8 — DPO with: Wilson interval, β=0.1, τ=0.3005, kept-pairs 568/4094, reference-policy anchor (item17 Wilson 0.311), comparison table vs R7 (0.2921) and R15.S3 ceiling (0.3677). PASS = Wilson lower ≥ 0.40; FAIL ≤ 0.37 closes branch + scopes R7.b.2 promotion; FAIL 0.37-0.39 flags β=0.3 one-shot follow-up per scoping § 5(b). (4) Demote backlog § R8 to one-line pointer + add escalations.md `## Resolved` bullet describing the verdict and next pick."
     },
     {
       "id": "r7-backlog-shrink-to-pointer",
