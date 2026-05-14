@@ -49,11 +49,39 @@
       "next_action": "Direct edit: replace docs/ai-research-backlog.md § R7 body (lines 101-118) with a one-line pointer to the scoping doc. Pair with the parallel R8 entry: leave that one expanded for now since no scoping doc exists yet."
     },
     {
-      "id": "r7b-feature-representation-expansion",
+      "id": "r7b-trace-reencodability-spike",
+      "priority": "P3",
+      "status": "ready",
+      "autonomous_launch_eligible": true,
+      "summary": "R7.b.0 precondition spike (per scoping § 6 step 0): ~30-min check that existing R12/R13/R14 trace JSONLs can be re-extracted under a new feature schema without resimulating. Gates the cost of every R7.b structural intervention — if NO, every schema bump = full DAgger regen. Full context: docs/ai-research/scoping/r7b-feature-representation.md § 5 risk (a).",
+      "next_action": "Investigator: read one R14-vintage trace JSONL (under runs/), confirm whether observation_to_features can be re-run on the stored rows to produce a fresh feature vector under a new STATE_DIM/schema_version, or whether the stored rows only carry already-encoded features and the raw game state is lost. Report YES/NO + which fields would be missing if NO. Append the result to scoping doc § 5 risk (a) and flip this queue item done."
+    },
+    {
+      "id": "r7b-hygiene-wire-unused-fields",
+      "priority": "P3",
+      "status": "ready",
+      "autonomous_launch_eligible": true,
+      "summary": "R7.b.1 hygiene quick-win (per scoping § 3, § 6 step 1): wire three JSON fields the encoder currently ignores — `firstPlayer` and `pendingChoiceKind` from PublicObservation, and per-uma `toolCardId` from PublicUmaObservation. Adds ~6–10 scalar slots; schema v2.1 (additive); no regression risk. ~half day. Independent of R7 outcome — can fire now.",
+      "next_action": "Implementer: extend training/uma_ai/features.py observation_to_features to read these three fields; emit additive scalar slots (firstPlayer as own-or-opp bool, pendingChoiceKind as small one-hot, toolCardId as per-uma hash). Bump features schema_version 2 → 2.1. Update PublicUmaObservation toolCardId pass-through in backend/src/sim/ if currently stripped. SL gate eval at unchanged corpus to confirm no Wilson regression. Append result to scoping doc § 4 hygiene line."
+    },
+    {
+      "id": "r7b-card-embedding-pass",
       "priority": "P3",
       "status": "parked-pending-r7",
-      "summary": "Forward, human-rank: feature representation expansion (card embedding table replacing 16 identity hashes at features.py slots 32-47, + 1-2 step recent-action history). Holds MLP trunk fixed; bumps STATE_DIM/schema_version to 3. Queued behind R7 since R7 pre-flight probe landed GO. Fires if R7 closes without breaking the F1 cap, or as a parallel branch if R7 lifts SL ceiling but PPO from new warm-start saturates. Distinct from R11 (aux objectives in trunk) — R7.b changes input, not loss. Full rationale + design + cost + exit gate: docs/ai-research-backlog.md § R7.b.",
-      "next_action": "Wait for R7 step 2/3 outcome. If R7 closes negative on F1 gate, promote R7.b to P2 ready and write a scoping doc at docs/ai-research/scoping/r7b-feature-representation.md before launching."
+      "summary": "R7.b.2 headline pass (per scoping § 4 #1 + #2): card embedding table (108×32) replacing slots 32-47 with per-zone sum-pool over 8 zones, BUNDLED with action-target/source embedding lookup on the same table. Schema bump v3; new int input tensor in ONNX. ~1.5 days + half day. Targets audit categories 1, 2, 5, 8. Full design + ONNX plumbing + risks: docs/ai-research/scoping/r7b-feature-representation.md § 4 #1 + #2.",
+      "next_action": "Wait for R7 step 3 result. Promote to P2 ready when R7 closes (either negative on F1 gate, or positive but PPO still saturates near 0.368). If R7.b.0 spike says trace JSONLs are NOT re-encodable, factor full DAgger regen cost (~hours) into the launch decision."
+    },
+    {
+      "id": "r7b-attention-set-encoder",
+      "priority": "P4",
+      "status": "parked-pending-r7b-2",
+      "summary": "R7.b.3 conditional follow-up (per scoping § 4 #3): set-encoder / 1–2 layer self-attention over per-card tokens; replaces R7.b.2's sum-pool with attention pooling. ~1 day on top of R7.b.2. Launch only if R7.b.2 lifts but caps below 0.40."
+    },
+    {
+      "id": "r7b-history-and-aux-heads",
+      "priority": "P4",
+      "status": "parked-pending-r7b-2",
+      "summary": "R7.b.4 + R7.b.5 deprioritised entries (per scoping § 4 #4–#6): recent-action history (gated on r7b-trace-reencodability-spike) and aux heads / capacity bump (revisit after R7.b.2 outcome). Held as parked entries so they aren't forgotten; not in the v1 R7.b plan."
     },
     {
       "id": "planning-refresh-after-r14-e",

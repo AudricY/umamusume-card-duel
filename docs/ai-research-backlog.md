@@ -135,43 +135,24 @@ results (2026-05-11)".
 - **Status:** Surviving R15.S3 closeout candidate. Human rank required;
   bigger pivot than R7 (replaces PPO entirely).
 
-### R7.b. Feature representation expansion (forward, contingent on R7 probe)
+### R7.b. Feature representation expansion (forward, family, parked behind R7)
 
-- **Q:** Does the current 96-d hand-engineered observation lose information
-  that caps the policy regardless of label source (R7) or objective (R8)?
-  Specifically: card identity collapses to a single hashed float per slot
-  (`features.py` slots 32–47, 16 floats via `cardVocab.json`), there is
-  no recent-action history, and hand/board are flat scalar aggregates with
-  no set/permutation-invariant encoding.
-- **Hypothesis:** A card-embedding table + short opponent/own action history
-  expands the function class along the axes the post-mortem named
-  ("needs a different information source"). Holds the MLP trunk fixed so
-  the lift, if any, is attributable to representation not capacity.
-- **Design (scoped pass, two changes only):**
-  1. Replace the 16 identity-hash floats with a learned embedding table
-     keyed off `cardVocab.json` (embed dim ~16–32, summed/concatenated per
-     slot group: active, bench, hand, discard).
-  2. Append a 1–2 step recent-action history (own + opponent) to state.
-  - Bump `STATE_DIM` and feature `schema_version` to 3. TS-side encoder
-    in `backend/src/sim/` and Python `training/uma_ai/features.py` must
-    move together. Trainer input layer adapts to new dim.
-- **Cost:** ~1 day code (TS encoder + Python schema + model input + retrain
-  pipeline) + ~30 min SL retrain + ~5 min PPO sweep at phase-N scale.
-  Invalidates prior numeric comparisons against the 96-d baseline.
-- **Pre-register exit:** (a) SL warm-start does not regress vs current
-  best (no harm from added dim) AND (b) one PPO sweep Wilson lower ≥ 0.40,
-  OR document the new ceiling at 96-d and close the representation branch.
-- **Status:** **Queued behind R7.** R7 pre-flight teacher-agreement probe
-  landed GO 2026-05-14 (diversity confirmed: rollout↔planner 0.18,
-  search↔planner 0.23, all-three-agree 0.13), so R7 proceeds first.
-  R7.b fires as the surviving structural lever if R7 closes without
-  breaking the F1 cap (or as a parallel pick if R7 lifts the SL ceiling
-  but PPO from the new warm-start still saturates). Distinct from R11
-  (aux objectives in the trunk) — R7.b changes the *input*, not the loss.
-  Catalog rationale: progress doc has unfinished pointers at L362
-  (item 5b: set encoders / recent-action history / embedding model),
-  L1547 (feature-representation gap), L1625 (state-feature gap), L1727
-  (state-feature audit) — none ever landed.
+Full design: `docs/ai-research/scoping/r7b-feature-representation.md` (audit + 6-item intervention menu + ranked picks + cross-cutting deps + exit gates).
+
+**One-liner:** test whether the F1 cap at Wilson 0.368 is binding on *information available to the network* (not labels via R7, not objective via R8) by replacing the 16 hashed-float card-identity slots with a learned embedding table.
+
+**Family (ordered):**
+
+- **R7.b.0 — Trace-JSONL re-encodability spike (precondition, autonomous-eligible).** ~30 min: confirm whether existing R12/R13/R14 trace JSONLs can be re-extracted under a new feature schema without resimulating. Gates the cost of every other entry below.
+- **R7.b.1 — Hygiene quick-win (autonomous-eligible, independent of R7).** Wire the three unread JSON fields — `firstPlayer`, `pendingChoiceKind`, per-uma `toolCardId`. Schema-additive (v2.1), ~half day, no regression risk.
+- **R7.b.2 — Card embedding + action-target embedding (headline pass).** Bundle `nn.Embedding(108, K=32)` per-zone sum-pool replacing slots 32–47 with action-side embedding lookup on source/target ids. ~1.5 days + half day. Schema bump v3. Targets audit categories 1, 2, 5, 8.
+- **R7.b.3 — Set-encoder / attention over per-card tokens (conditional follow-up).** Launch only if R7.b.2 lifts but caps below 0.40. ~1 day on top of R7.b.2.
+- **R7.b.4 — Recent action history (separate branch, deprioritised).** Engine ring-buffer + per-action embedding. Gated on R7.b.0 — if SL JSONLs can't be regenerated cheaply, this branch is much more expensive than its expected lift justifies.
+- **R7.b.5 — Aux heads / capacity bump (revisit-after).** Capacity (hidden 256, depth 4) and aux heads (predict opp action, Δvalue) re-evaluate after R7.b.2 outcome.
+
+**Exit (verbatim from scoping § 7):** (a) SL warm-start does not regress vs current best (within 2pp) AND (b) one PPO sweep Wilson lower ≥ 0.40, OR document the new ceiling at expanded schema and close.
+
+**Status:** Parked behind R7 (R7 step 3 in flight 2026-05-14). R7.b.0 + R7.b.1 are autonomous-launch eligible and can fire independently of R7 outcome (precondition spike + hygiene). R7.b.2+ promote to ready when R7 closes.
 
 ## Tier 3 — structural changes (HISTORICAL)
 
