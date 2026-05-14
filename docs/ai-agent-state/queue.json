@@ -9,16 +9,6 @@
       "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section."
     },
     {
-      "id": "side-asymmetry-confirmation-gate",
-      "priority": "P2",
-      "status": "in_progress",
-      "started_at": "2026-05-14",
-      "run_dir": "runs/R14-A-side-asymmetry-seed900000/",
-      "pid": 1934035,
-      "summary": "R14.A flagged that the player-vs-opponent gap (player Wilson 0.31, opponent 0.42-0.63) is partly seed-clustered. A.followup suggests one independent seed range would confirm. Cheap diagnostic, sticks the production claim. Head P2 after R15.S1 closeout 2026-05-14; autonomous-launch eligible under user's blanket AI-launch permission.",
-      "next_action": "Run training/r14_ood_gate.py (or sim:eval-gate equivalent) at a third seed range (e.g. 900000+) against runs/R13-W6-phase-d/iter-2/checkpoint.pt + value-head leaf + ratio=1.5, n=100, record per-side Wilson; append to R14 progress as an A footnote. ~15 min compute."
-    },
-    {
       "id": "r15-s3-reward-shaping-scoping",
       "priority": "P3",
       "status": "done",

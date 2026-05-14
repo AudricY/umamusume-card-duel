@@ -535,6 +535,37 @@ Followups (low priority):
 
 Bug fix landed in this run: `r14_ood_gate.py` was passing a relative `--out-dir` to `npm --workspace backend run sim:eval-gate`, which resolves against `backend/` workspace cwd → manifest landed at `backend/runs/...` and the orchestrator failed to read it. Fixed by resolving `out_dir` to absolute at parse time.
 
+### R14.A.footnote — Side-asymmetry confirmation gate at independent seeds (2026-05-14) — DONE / gate1 FAIL
+
+- **Motivation:** R14.A's caveat noted the player-vs-opponent gap may be partly seed-clustered (F-iter-2 at 0.443 vs A at 0.404 across overlapping seed ranges). One independent seed range at the same MCTS production config (value-head leaf, 100 sims, c_puct=1.5) would either tighten the production claim or contradict it. Cheap diagnostic, ~15 min.
+- **Result (2026-05-14):** **gate1 FAIL @ Wilson 0.394; gate2 PASS @ Wilson 0.482; side-asymmetry confirmed real, not seed-clustered.** Re-ran `training/r14_ood_gate.py` against `runs/R13-W6-phase-d/iter-2/checkpoint.pt` at independent seeds 900000+ (gate1, vs rule-bot) / 950000+ (gate2, vs R4 MCTS), n=100/gate, same MCTS config as R14.A.
+
+| Gate | n | WR | Wilson lower | Wilson upper | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 1: fresh seeds 900000+, vs rule-bot | 100 | 0.49 | **0.394** | 0.587 | **FAIL** (0.6pp below 0.40 bar) |
+| 2: OOD seeds 950000+, iter-2 vs R4 | 100 | 0.58 | **0.482** | 0.672 | PASS by 8pp |
+
+  Per-side breakdown (all four gates × both seed ranges):
+
+| Seed range | Gate | Player WR | Player Wilson lower | Opponent WR | Opponent Wilson lower | Gap |
+| --- | --- | --- | --- | --- | --- | --- |
+| 800000+ (R14.A) | 1 (vs rule-bot) | 0.44 | 0.312 | 0.56 | 0.423 | +0.111 |
+| 850000+ (R14.A) | 2 (vs R4 MCTS) | 0.46 | 0.330 | 0.76 | 0.626 | +0.296 |
+| 900000+ (footnote) | 1 (vs rule-bot) | 0.42 | **0.294** | 0.56 | **0.423** | +0.129 |
+| 950000+ (footnote) | 2 (vs R4 MCTS) | 0.50 | **0.366** | 0.66 | **0.522** | +0.156 |
+
+  **What this changes about the R14 production claim:** the cheap-inference deployment headline "Wilson 0.452 at value-head leaf + ratio=1.5" (F-iter-2, 2026-05-14, sprint-plan line 121) was **not confirmed at a third independent seed range**. The empirical range across F-iter-2 (0.443 at seeds 820000+), R14.A (0.404 at seeds 800000+), and this footnote (0.394 at seeds 900000+) is **Wilson lower 0.39–0.45**, with one-of-three runs failing the 0.40 bar. Honest framing: report the cheap-inference number as "Wilson lower 0.39–0.45 across three independent seed ranges" rather than as a stable 0.452 point estimate.
+
+  **What this does NOT change:** the R14 max-strength headline — **rollout-leaf MCTS at iter-2 Wilson 0.6479** (I.2) — was NOT tested by this gate and remains the unchanged max-strength deployment claim. The FAIL applies only to the cheap-inference value-head-leaf + ratio=1.5 deployment pick.
+
+  **What this refutes about R14.A:** the original A note "side-asymmetry is partly seed-clustered" (sprint-plan line 113) is contradicted. The player-Wilson < opponent-Wilson gap replicates with the same shape across all four gates and two independent seed ranges; it is a real strategic asymmetry in the iter-2 policy at value-head-leaf inference, not seed-distribution noise.
+
+  **gap_gate1_minus_gate2 = −0.088** (gate2 stronger than gate1). The model is closer to matching its own R4 baseline head-to-head than to beating rule-bot at the production claim level on fresh seeds — suggests rule-bot behavior at seeds 900000+ differs meaningfully from the R14.A / F seed ranges, but not a separate diagnostic this slot.
+
+  Wall-clock 9m 38s total (gate1 275.7s + gate2 302.7s). Output: `runs/R14-A-side-asymmetry-seed900000/{summary.json,gate1-fresh-seeds.manifest.json,gate2-mcts-vs-r4.manifest.json}`.
+
+  **Escalated to harness:** the R14 cheap-inference production claim is materially weakened; the human owns the research-stance decision: (a) re-target to CI phrasing, (b) re-run R14.A at larger n, or (c) accept and route to rollout-leaf MCTS. See `docs/ai-agent-state/escalations.md`.
+
 ### R13 PPO probe on iter-1 — still doesn't move (2026-05-11)
 
 Three iterations of `ppo_orchestrator` from the W6 iter-1 checkpoint (20 games/update, 30-game gate per iter, `--selection policy` for both collection and gate):
@@ -722,4 +753,4 @@ below capture those moves plus the only outstanding R14 acceptance step.
 - **Side-imbalance verification.** Gate manifests record player/opponent splits inconsistently across phases. Worth a one-off script to extract the side-WR delta and check whether the model is offensively weak or defensively weak.
 - **Simulator determinism audit.** Replay 100 identical seeds end-to-end; measure full-state divergence rate. Silent non-determinism in CRN would invalidate every advantage estimate.
 - **Rule-bot mistake catalog.** The 80% aspirational target requires exploiting rule-bot weaknesses; we don't have a catalog of those weaknesses. Hand-construct ~50 states + a careful audit.
-- **Side-asymmetry confirmation gate (R14.A footnote).** R14.A noted the player-side gap may be partly seed-clustered; one independent seed range (n=100) at value-head leaf + ratio=1.5 against the iter-2 checkpoint would tighten the production claim. Cheap, ~15 min.
+- **Side-asymmetry confirmation gate (R14.A footnote).** ~~Open follow-up.~~ **CLOSED 2026-05-14 — gate1 FAIL @ Wilson 0.394; the R14 cheap-inference production claim is contradicted at independent seeds.** See R14.A.footnote Result section above and `docs/ai-agent-state/escalations.md` for the open research-stance decision the human owns.
