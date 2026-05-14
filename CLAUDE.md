@@ -27,6 +27,8 @@ The main Claude session should stay small:
 
 The worker is the default way to handle context-heavy exploration. The point is context isolation, not parallelism. Do not fan out multiple workers unless the tasks are independent, low-resource, and have disjoint write scopes.
 
+Backlog refinement and big-picture planning are normal `/work` jobs. The loop should not only debug and implement. Choose a planning/refinement worker task when the queue is stale, run evidence changes priorities, escalations block the current path, sprint/backlog/progress docs disagree, or local work is no longer clearly moving the AI objective forward.
+
 Do not use `/loop` or a timed wakeup just to continue ordinary work. Use a timeout/wakeup only when the next useful action is blocked on wall-clock time or an external dependency, such as:
 
 - A training/eval/background process that is still running.
@@ -59,6 +61,8 @@ Canonical AI research evidence still belongs in the existing AI docs, especially
 - `docs/ai-performance-research-progress.md`
 - `docs/ai-research-backlog.md`
 - `docs/r14-sprint-plan.md`
+
+Use `docs/ai-agent-state/queue.json` for immediate Claude operating priorities, and update it when planning/refinement work changes the next best action.
 
 ## Safety And Scope
 

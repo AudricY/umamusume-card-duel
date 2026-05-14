@@ -22,6 +22,8 @@ The worker can handle any task type:
 - Docs update.
 - Run analysis.
 - Validation.
+- Backlog refinement.
+- Big-picture planning.
 
 The worker returns a concise summary. The orchestrator then persists only the useful result and either continues with the next immediate step or stops when the bounded objective is complete.
 
@@ -39,6 +41,21 @@ Use a timeout or wakeup only when progress is blocked by wall-clock time or an e
 - A deliberate cool-down is needed after resource-heavy work.
 
 The default loop is therefore synchronous: worker returns, orchestrator synthesizes, and work continues immediately when appropriate.
+
+## Planning And Refinement
+
+The single `/work` command still owns backlog refinement and strategic planning. These are job types inside `/work`, not separate modes.
+
+Choose a planning/refinement worker task when:
+
+- `docs/ai-agent-state/queue.json` is stale, empty, vague, or contradicted by recent evidence.
+- A run result, smoke failure, or implementation finding changes priorities.
+- `docs/ai-agent-state/escalations.md` has blockers that should redirect work.
+- Sprint, backlog, and progress docs disagree.
+- Several implementation/debugging jobs have landed without a queue refresh.
+- Local work is no longer clearly connected to the model-quality, throughput, determinism, or UI-integration goal.
+
+Planning output should be small: update the queue, escalations, digest, or existing AI docs. Do not create new planning documents unless the user asks.
 
 ## Parallelism
 

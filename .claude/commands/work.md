@@ -33,10 +33,21 @@ Good jobs are bounded:
 - Inspect one run directory.
 - Make one small code/doc fix.
 - Update backlog/progress docs from one accepted result.
+- Refine `docs/ai-agent-state/queue.json` when recent evidence changes priorities.
+- Do a big-picture planning pass when local work is not clearly moving model quality, throughput, determinism, or UI integration forward.
 - Run or inspect one appropriate validation tier.
 - Identify the next concrete step when the queue is stale.
 
 Avoid starting long training/eval work unless the queue or user explicitly calls for it.
+
+Do not let the loop become only implementation/debugging. Choose a planning/refinement worker task when any of these are true:
+
+- `queue.json` is stale, empty, vague, or contradicted by recent docs/run evidence.
+- `escalations.md` has open blockers that should change the next job.
+- A run result or smoke failure invalidates the current plan.
+- Several completed jobs have accumulated without a queue refresh.
+- The current workstream is making local progress but the big-picture AI objective is unclear.
+- The sprint/backlog/progress docs disagree about the next priority.
 
 ## Brief The Worker
 

@@ -52,7 +52,9 @@ The main reason to use a subagent here is context control, not parallelism. The 
 4. Read the worker's concise result.
 5. Persist the summary and update queue/escalations if needed.
 
-The worker can handle any task type: investigation, implementation, docs update, run analysis, or verification. This avoids bloating the orchestrator context with full logs, long file reads, and exploratory dead ends.
+The worker can handle any task type: investigation, implementation, docs update, run analysis, verification, backlog refinement, or big-picture planning. This avoids bloating the orchestrator context with full logs, long file reads, failed planning branches, and exploratory dead ends.
+
+Removing separate `/refine` and `/survey` commands must not remove those behaviors. `/work` should deliberately choose a planning/refinement worker when the queue is stale, evidence changes priorities, or the big picture is unclear.
 
 Default to no parallel fan-out. Resource contention is real:
 
@@ -163,6 +165,8 @@ The worker's task can be any type:
 - Test one hypothesis with a tiny run.
 - Analyze one training regression.
 - Update backlog/progress docs from accepted evidence.
+- Refine the Claude queue and escalations from recent evidence.
+- Do a strategic planning pass across backlog, sprint plan, progress, and recent run state.
 - Run or inspect the right validation subset.
 
 For verification tasks, the worker should know the common tiers:
