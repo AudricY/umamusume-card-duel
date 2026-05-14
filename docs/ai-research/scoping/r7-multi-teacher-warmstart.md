@@ -142,3 +142,25 @@ Concrete steps the next implementer slot will follow:
 
 **Next step:** R7 step 2 (schema change — extend `DecisionTraceRow.teacher` → `teachers: []`, build `policyTargets` in relabel pass).
 
+## 9. Step 4 launch: mixed-teacher trace-gen + SL warm-start (in flight)
+
+- **Date:** 2026-05-14, 14:45 +08 (06:45Z).
+- **Run dir:** `runs/R7-multi-teacher-warmstart/`.
+- **PID:** 3211541 (orchestrator; `nohup ... &` captured the real Python PID — no pidfile race this slot).
+- **ETA:** ~15-25 min wall-clock (trace-gen ~9 min with planner ~14× slower per state per § 8 probe; SL train ~3.5 min at 75 epochs; SL gate 250-game ~3 min).
+- **Orchestrator diff to enable launch:** added `--trace-teachers` flag (separate from `--teacher`) on `training/dagger_orchestrator.py` so comma-separated trace teachers bypass the `choices=[rollout,search,planner]` validator that gates `--teacher`. `--teacher` still controls `selection` (the playing agent in iter-0 = rollout, matching R15.S1). The new flag flows through `IterationConfig.trace_teachers` and replaces `cfg.teacher` only at the two `trace_teacher=` call sites in `run_iteration` / `run_evaluator_with_model`. TS-side `parseTraceTeacherList` (`backend/src/sim/evaluateModelVsHeuristic.ts:1458`) already accepts comma-separated per R7 step 2 — no TS change needed.
+- **R15.S1-matched config:** `--games 90 --epochs 75 --hidden-dim 64 --depth 2 --rollout-steps 500 --rollout-crn-samples 3 --max-steps 500 --replay-games 100 --eval-games 250`. Rule-bot replay produced 4432 examples (exact byte-for-byte match with R15.S1's `rule-bot-replay.jsonl`). KL-anchor weights irrelevant (iter-0 has no parent checkpoint).
+- **R7-specific override:** `--iterations 1` (per § 7 out-of-scope: no multi-iter DAgger from the new warm-start in v1), `--trace-teachers rollout,search,planner`.
+- **Exact command (one-liner):**
+  ```
+  nohup training/.venv/bin/python -u training/dagger_orchestrator.py \
+    --out-dir runs/R7-multi-teacher-warmstart \
+    --teacher rollout --trace-teachers rollout,search,planner \
+    --iterations 1 --games 90 --epochs 75 --hidden-dim 64 --depth 2 \
+    --rollout-steps 500 --rollout-crn-samples 3 \
+    --max-steps 500 --replay-games 100 --eval-games 250 \
+    > runs/R7-multi-teacher-warmstart/launch.log 2>&1 &
+  ```
+- **30-second sanity check:** orchestrator process alive (PID 3211541), rule-bot replay completed at 4432 rows (1.2s), iter-0 trace-gen `evaluateModelVsHeuristic.ts` running with `--trace-teacher rollout,search,planner --max-steps 500 --rollout-steps 500 --rollout-crn-samples 3 --planner-crn-samples 3`. First eval games progressing ETA 6-15 min for the 180-game (90 games × 2 model_sides) trace pass — planner per-state cost matches the § 8 probe projection.
+- **Result block writes to `docs/ai-performance-research-progress.md`** in the next /loop slot once `orchestrator-state.json` reports a completed run with `wilson_lower` from iter-0/gate.manifest.json. Verdict gate: ≥ 0.35 → step 5 PPO sweep; < 0.35 → close R7 with new SL ceiling.
+

@@ -51,6 +51,12 @@ class IterationConfig:
     iteration: int
     games: int
     teacher: str
+    # R7: optional comma-separated multi-teacher override for the TS-side
+    # `--trace-teacher` flag. Empty string => fall back to `teacher`. Does
+    # NOT change `selection` (the playing agent in iter-0); only changes
+    # which teachers get applied to each visited state when emitting the
+    # trace rows. Validated downstream by parseTraceTeacherList.
+    trace_teachers: str
     rule_bot_weight: float
     relabeled_weight: float
     rule_bot_replay_weight: float
@@ -105,6 +111,7 @@ def main() -> None:
         iteration=0,
         games=args.games,
         teacher=args.teacher,
+        trace_teachers=args.trace_teachers,
         rule_bot_weight=args.rule_bot_weight,
         relabeled_weight=args.relabeled_weight,
         rule_bot_replay_weight=args.replay_weight,
@@ -231,7 +238,7 @@ def run_iteration(
             max_steps=args.max_steps,
             rollout_steps=cfg.rollout_steps,
             decision_trace_out=trace_path,
-            trace_teacher=cfg.teacher,
+            trace_teacher=cfg.trace_teachers or cfg.teacher,
             rollout_crn_samples=cfg.rollout_crn_samples,
             manifest_out=trace_manifest,
         )
@@ -802,7 +809,7 @@ def run_evaluator_with_model(
             max_steps=args.max_steps,
             rollout_steps=cfg.rollout_steps,
             decision_trace_out=trace_path,
-            trace_teacher=cfg.teacher,
+            trace_teacher=cfg.trace_teachers or cfg.teacher,
             rollout_crn_samples=cfg.rollout_crn_samples,
             model_url=model_url,
             manifest_out=manifest_out,
@@ -1025,6 +1032,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--games", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=400)
     parser.add_argument("--teacher", choices=["rollout", "search", "planner"], default="rollout")
+    # R7: comma-separated trace-teacher override (e.g. "rollout,search,planner").
+    # When non-empty, takes precedence over `--teacher` for the TS-side
+    # `--trace-teacher` flag only — `--selection` (the playing agent in iter-0)
+    # still comes from `--teacher`. TS-side validation in parseTraceTeacherList.
+    parser.add_argument("--trace-teachers", default="",
+                        help="Comma-separated trace teachers for multi-teacher BC (R7). Empty => single-teacher via --teacher.")
     parser.add_argument("--rollout-steps", type=int, default=200)
     parser.add_argument("--rollout-crn-samples", type=int, default=3)
     parser.add_argument("--rule-bot-weight", type=float, default=0.0)

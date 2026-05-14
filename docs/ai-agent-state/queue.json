@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14",
+  "updated": "2026-05-14T06:45Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -42,10 +42,22 @@
     {
       "id": "r7-step-4-trace-gen-and-sl-train",
       "priority": "P2",
-      "status": "ready",
+      "status": "running",
       "autonomous_launch_eligible": true,
-      "summary": "R7 step 4 (per scoping § 6): generate one mixed-teacher trace corpus + train one SL warm-start + evaluate against SL gate (Wilson ≥ 0.35). Skip `mix-sources` for v1 per scoping § 3. Row budget: match R15.S1 iter-1 (so SL-compute comparison is honest). Wall-clock budget: ~30 min trace-gen (planner is ~14× slower per state) + ~30 min SL train.",
-      "next_action": "Implementer: invoke `training/dagger_orchestrator.py` (or call the trace-gen + relabel + SL-train scripts directly) with `--trace-teacher rollout,search,planner`, R15.S1 iter-1 row budget, single iteration, output to `runs/R7-multi-teacher-warmstart/`. After SL train, run `npm run sim:eval-gate` at same n / seed range / opponent set as R15.S1's iter-1 SL gate. Report Wilson interval. If Wilson lower ≥ 0.35 → proceed to step 5 (one PPO sweep from new warm-start). If < 0.35 → close R7 with new SL ceiling per scoping § 4 close-out condition."
+      "run_dir": "runs/R7-multi-teacher-warmstart",
+      "pid": 3211541,
+      "start_utc": "2026-05-14T06:45:23Z",
+      "eta_minutes": 30,
+      "command": "training/.venv/bin/python -u training/dagger_orchestrator.py --out-dir runs/R7-multi-teacher-warmstart --teacher rollout --trace-teachers rollout,search,planner --iterations 1 --games 90 --epochs 75 --hidden-dim 64 --depth 2 --rollout-steps 500 --rollout-crn-samples 3 --max-steps 500 --replay-games 100 --eval-games 250",
+      "summary": "LAUNCHED. Mirrors R15.S1's iter-0 SL-compute budget exactly (games=90, epochs=75, hidden=64/depth=2, rule-bot replay 100 games → 4432 examples, max-steps=500, rollout-steps=500, rollout-crn=3, eval-games=250) on a single iter so any Δ vs R15.S1 iter-1 isolates the teacher-mix axis. Orchestrator change: added `--trace-teachers` (separate from `--teacher`) so comma-separated value bypasses the existing `choices=[rollout,search,planner]` validator while still feeding TS-side `--trace-teacher rollout,search,planner` (parseTraceTeacherList already accepts comma-separated per R7 step 2). KL-anchor weights irrelevant for iter-0 (no parent checkpoint).",
+      "next_action": "Monitor: `tail /home/audric/work/umamusume-card-duel/runs/R7-multi-teacher-warmstart/launch.log`; on completion read `orchestrator-state.json` for promoted_wilson_lower. SL gate result writes to `iter-000/gate.manifest.json`. If Wilson lower ≥ 0.35 → proceed to step 5 (one PPO sweep from new warm-start at phase-H scale). If < 0.35 → close R7 with new SL ceiling number, write result block to docs/ai-performance-research-progress.md, demote R7 in backlog per scoping § 4 close-out."
+    },
+    {
+      "id": "r7-step-4-monitor",
+      "priority": "P2",
+      "status": "ready",
+      "summary": "Follow-up monitor slot for the R7 step 4 background launch. Trace-gen ETA ~9 min (planner ~14× slower per state vs rollout-only baseline), SL train ~3.5 min, eval gate ~3 min, total ~15-25 min wall-clock.",
+      "next_action": "Check `ps -p 3211541` (orchestrator alive?), `tail runs/R7-multi-teacher-warmstart/launch.log`, then `cat runs/R7-multi-teacher-warmstart/orchestrator-state.json` once run_completed event fires in events.jsonl. Read iter-000/gate.manifest.json for wilson_lower. Flip r7-step-4-trace-gen-and-sl-train to done with the verdict (PASS ≥ 0.35 → step 5 PPO sweep; FAIL → close R7)."
     },
     {
       "id": "r7-backlog-shrink-to-pointer",
