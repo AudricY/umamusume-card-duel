@@ -39,9 +39,9 @@
     {
       "id": "harness-pidfile-race-fix",
       "priority": "P4",
-      "status": "ready",
-      "summary": "Pidfile race observed across digest slots 18/20/22/25/26 when launching orchestrator via `nohup npm run … &`: captured PID is the wrapper, not the orchestrator's real Python PID. Slot 34's direct `nohup training/.venv/bin/python -u … &` did NOT trigger the race. Working hypothesis: `nohup` × `npm run` wrapper interaction. Direct-python invocation already works as workaround.",
-      "next_action": "When this becomes the highest-leverage open item: investigator confirms the hypothesis; if confirmed, implementer adds `pid.txt` write inside `training/dagger_orchestrator.py` startup and updates harness docs to prefer direct-python invocation."
+      "status": "done",
+      "summary": "DONE 2026-05-15. Hypothesis CONFIRMED by throwaway probe: `nohup npm run <s> &`'s `$!` is the npm wrapper PID; real python is a grandchild (npm 18502 -> sh -c 18519 -> python 18520), so kill/alive logic targeted the wrong PID (slots 18/20/22/25/26). Direct-python `nohup training/.venv/bin/python -u … &` makes `$!` the real PID (why slot 34 / R7 scoping launch never tripped it). Fix: dagger_orchestrator.py, r12_orchestrator.py, ppo_orchestrator.py each `(out_dir/'pid.txt').write_text(os.getpid())` immediately after out_dir.mkdir (byte-identical 1-line snippet; all 3 share identical startup so no shared helper). Verified: dagger smoke PASS + standalone run writes pid.txt with correct PID. Harness doc gained an 'Orchestrator launch convention' section: direct-python is canonical, <out-dir>/pid.txt is the live-PID source of truth. Detail: docs/ai-performance-research-harness.md + digests/2026-05-15.md.",
+      "next_action": "None — closed. No autonomous follow-up unblocked."
     }
   ]
 }

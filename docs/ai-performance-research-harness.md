@@ -27,3 +27,8 @@ The concrete v4.1 critical-path sequence to the end goal:
 - Planted fixtures tripping on real data is a finding to report, not a test to fix.
 - v4.1 records confidence carefully: the n=50 trained-policy evidence is overlapping intervals; the v3 "55-65% imitation cap" claim is *not yet falsified* until item 17 lands. Don't write the cap as fact in `progress.md` until then.
 - Code-level deferred fixes from v4.1 reviewer 2 are recorded in the archive's v4.1 section. Land them before item 17's sweep runs at scale, otherwise the orchestrator will hit them.
+
+## Orchestrator launch convention
+
+- **Canonical launch is direct-python, not `npm run`:** `nohup training/.venv/bin/python -u training/<orchestrator>.py … > <out-dir>/launch.log 2>&1 &`. Launching via `nohup npm run <script> &` makes the captured `$!` the **npm wrapper** PID; the real orchestrator is a grandchild (`npm → sh -c → python`), so later "is it alive / kill it" logic targets the wrong PID (pidfile race, digest slots 18/20/22/25/26). Confirmed by probe 2026-05-15.
+- **`<out-dir>/pid.txt` is the source of truth for the live orchestrator PID.** `dagger_orchestrator.py`, `r12_orchestrator.py`, and `ppo_orchestrator.py` each write `os.getpid()` to `<out-dir>/pid.txt` at startup, so monitor/kill logic should `cat <out-dir>/pid.txt` regardless of how the run was launched, rather than trusting a captured `$!`.

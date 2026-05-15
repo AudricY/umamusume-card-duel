@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -102,6 +103,10 @@ def main() -> None:
     repo_root = Path(args.repo_root or Path(__file__).resolve().parents[1])
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Write the orchestrator's own real PID so the harness reads the true
+    # process regardless of launch wrapper. `nohup npm run ... &` captures the
+    # npm wrapper PID (python is a grandchild); pid.txt is the source of truth.
+    (out_dir / "pid.txt").write_text(f"{os.getpid()}\n")
     state = OrchestratorState()
 
     # Pre-promote the warm-start checkpoint so iteration 0 has a parent to
