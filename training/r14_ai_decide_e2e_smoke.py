@@ -16,6 +16,7 @@ setup phase. Tears everything down at the end.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import socket
@@ -106,19 +107,43 @@ writeFileSync("OUT_PATH_PLACEHOLDER", JSON.stringify(captured, null, 2), "utf8")
 
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    ckpt = next((
-        c for c in [
-            repo_root / "runs" / "R13-W6-phase-d" / "iter-1" / "checkpoint.pt",
-            repo_root / "runs" / "R4-value-head-retrain" / "checkpoint.pt",
-        ] if c.exists()
-    ), None)
-    if ckpt is None:
-        print("[r14-e2e-smoke] no checkpoint found", file=sys.stderr)
-        sys.exit(2)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("UMA_E2E_MODEL"),
+        help=(
+            "Opt-in: serve this EXISTING ONNX directly and SKIP the "
+            "checkpoint re-export. Default (unset; env UMA_E2E_MODEL also "
+            "honored) keeps the legacy behavior of picking a checkpoint and "
+            "re-exporting via export_onnx.py. Used to validate the 96-d "
+            "serving pin against runs/R13-W6-phase-d/iter-2/policy.onnx "
+            "without HEAD's export_onnx.py forcing a 110-d graph."
+        ),
+    )
+    args = parser.parse_args()
 
     out_dir = repo_root / "runs" / "R14-ai-decide-e2e-smoke"
     out_dir.mkdir(parents=True, exist_ok=True)
-    onnx = export_onnx_if_needed(repo_root, ckpt)
+
+    if args.model:
+        onnx = Path(args.model)
+        if not onnx.is_absolute():
+            onnx = (repo_root / onnx).resolve()
+        if not onnx.exists():
+            print(f"[r14-e2e-smoke] --model not found: {onnx}", file=sys.stderr)
+            sys.exit(2)
+        print(f"[r14-e2e-smoke] using pinned ONNX (no re-export): {onnx}")
+    else:
+        ckpt = next((
+            c for c in [
+                repo_root / "runs" / "R13-W6-phase-d" / "iter-1" / "checkpoint.pt",
+                repo_root / "runs" / "R4-value-head-retrain" / "checkpoint.pt",
+            ] if c.exists()
+        ), None)
+        if ckpt is None:
+            print("[r14-e2e-smoke] no checkpoint found", file=sys.stderr)
+            sys.exit(2)
+        onnx = export_onnx_if_needed(repo_root, ckpt)
 
     print("[r14-e2e-smoke] building a real mid-game state...")
     captured = build_real_state(repo_root, out_dir)

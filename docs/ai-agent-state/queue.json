@@ -1,12 +1,12 @@
 {
-  "updated": "2026-05-15T20:40Z",
+  "updated": "2026-05-15T22:10Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
       "priority": "P1",
       "status": "done",
       "summary": "DONE 2026-05-15 — user-verified working (qualitative acceptance, no numeric capture). User manually exercised R14.E in-browser at production SHA bc6db85 (96-dim schema matching the 96-dim production model); confirmed BOTH MCTS configs functional end-to-end and the rollout-leaf opponent visibly beats the rule bot. Webapp opponent default now set to the production rollout-leaf config in useAppRuntimeEffects.ts (gate args byte-identical to runs/R13-W6-phase-d/iter-2/gate.manifest.json, Wilson lower 0.6479). Formal numeric exit criterion (median <3s, fallback <5%) NOT captured; closed on user acceptance + prior gate evidence. Open deployment caveat: 96-dim verified stack vs feat/ai HEAD's 110-dim extractor (cannot serve the 96-dim model; no 110-dim production-grade search model exists). Detail: docs/ai-research/progress/r15.md § R14.E closure; docs/r14-sprint-plan.md § E.",
-      "next_action": "None — closed. Remaining real open caveat is the 96-dim/110-dim deployment skew (see escalations.md ## Open)."
+      "next_action": "None — closed. The 96-dim/110-dim deployment skew is now RESOLVED via an explicit serving pin (serve_onnx --feature-schema auto→v2); see docs/ai-research/progress/r15.md § 96-dim serving pin and escalations.md ## Resolved."
     },
     {
       "id": "mcts-determinism-and-side-asymmetry-audit",

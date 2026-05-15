@@ -113,6 +113,77 @@ def observation_to_features(observation: dict[str, Any], ablations: set[FeatureA
     return features
 
 
+# ---------------------------------------------------------------------------
+# FROZEN schema-v2 state builder (vendored verbatim from commit bc6db85).
+#
+# This is the production serving encoding used by the 96-dim model
+# `runs/R13-W6-phase-d/iter-2/policy.onnx` (schema v2). It is pinned here so
+# HEAD (which trains/serves the additive 110-d v2.1/v3 encoding above) can
+# still serve the 96-d production artifact byte-for-byte.
+#
+# DO NOT MODIFY. Slots 0–95 only. Mechanically equal to bc6db85's
+# `observation_to_features` body (bc6db85 features.py lines ~33–65), reusing
+# HEAD's shared helpers (`_side_board_features`, `_identity_features`,
+# `_energy_vector`, `_card_awareness_features`) which are byte-identical
+# between bc6db85 and HEAD (verified). It deliberately omits the v2.1 hygiene
+# slots [96:110] and the v3 embedding inputs.
+#
+# "Promote later" path: load a 110-d model and serve it under
+# `serve_onnx --feature-schema v3` (or `auto`, which selects v3 from the ONNX
+# graph signature). Switching the production model is the ONLY supported way
+# to graduate off this frozen builder — never edit slots 0–95 here.
+STATE_DIM_V2 = 96
+STATE_FEATURE_SCHEMA_VERSION_V2 = 2
+
+
+def observation_to_features_v2(
+    observation: dict[str, Any], ablations: set[FeatureAblation] | None = None
+) -> np.ndarray:
+    """FROZEN bc6db85 schema-v2 builder. Slots 0–95 only. Do not modify.
+
+    Serving (the only caller) passes no ablations. To keep this correct on a
+    96-len array we only apply ablations that are meaningful to slots 0–95;
+    the v2.1 `state_hygiene_v21` branch (which indexes [96:110]) is skipped
+    here by construction because we never pass it the v2.1 ablation.
+    """
+    features = np.zeros(STATE_DIM_V2, dtype=np.float32)
+    phase = observation.get("phase", "stadiumOrEnd")
+    side = observation.get("sideToAct", "player")
+    own = observation.get("own", {})
+    opponent = observation.get("opponent", {})
+    shared = observation.get("shared", {})
+
+    features[0] = PHASES.index(phase) / max(1, len(PHASES) - 1) if phase in PHASES else 0.0
+    features[1] = SIDES.index(side) if side in SIDES else 0.0
+    features[2] = float(observation.get("turnNumber", 0)) / 20.0
+    features[3] = float(own.get("points", 0)) / 3.0
+    features[4] = float(opponent.get("points", 0)) / 3.0
+    features[5] = float(own.get("handCount", 0)) / 10.0
+    features[6] = float(opponent.get("handCount", 0)) / 10.0
+    features[7] = float(own.get("deckCount", 0)) / 50.0
+    features[8] = float(opponent.get("deckCount", 0)) / 50.0
+    features[9] = 1.0 if shared.get("stadiumCardId") else 0.0
+    features[10:18] = _side_board_features(own)
+    features[18:26] = _side_board_features(opponent)
+    features[26] = float(len(own.get("discard", []))) / 50.0
+    features[27] = float(len(opponent.get("discard", []))) / 50.0
+    features[28] = float(len(own.get("energyZone", []))) / 4.0
+    features[29] = 1.0 if own.get("usedSupporterThisTurn") else 0.0
+    features[30] = 1.0 if own.get("usedRetreatThisTurn") else 0.0
+    features[31] = 1.0 if own.get("usedStadiumThisTurn") else 0.0
+    features[32:48] = _identity_features(own, opponent)
+    features[48:58] = _energy_vector((own.get("active") or {}).get("energies", {}))
+    features[58:68] = _energy_vector((opponent.get("active") or {}).get("energies", {}))
+    features[68:96] = _card_awareness_features(own, opponent, shared)
+    # FROZEN: only apply ablations meaningful to slots 0–95. The v2.1
+    # `state_hygiene_v21` branch indexes [96:110] and would raise on this
+    # 96-len array; serving never passes ablations so this is a no-op there.
+    v2_safe = {a for a in (ablations or set()) if a != "state_hygiene_v21"}
+    if v2_safe:
+        apply_state_ablations(features, v2_safe)
+    return features
+
+
 def legal_actions_to_features(actions: list[dict[str, Any]], ablations: set[FeatureAblation] | None = None) -> np.ndarray:
     rows = []
     for action in actions:

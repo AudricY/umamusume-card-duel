@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -13,12 +15,14 @@ from uma_ai.features import (
     ACTION_DIM,
     CARD_ID_SHAPES,
     STATE_DIM,
+    STATE_DIM_V2,
     ZONE_ORDER,
     action_card_idx_pair,
     card_vocab_metadata,
     legal_actions_to_features,
     observation_to_card_ids,
     observation_to_features,
+    observation_to_features_v2,
 )
 
 # R7.b.2 Phase 3: fixed per-zone width for the embedding inputs — mirrors
@@ -39,6 +43,7 @@ class PolicyServer(ThreadingHTTPServer):
         default_sampling: str = "greedy",
         default_temperature: float | None = None,
         ort_threads: int | None = 1,
+        feature_schema: str = "auto",
     ) -> None:
         super().__init__(address, handler)
         preload_cuda_libraries(provider)
@@ -65,6 +70,13 @@ class PolicyServer(ThreadingHTTPServer):
         # sims).
         self.session = ort.InferenceSession(model_path, sess_options=session_options, providers=resolve_providers(provider))
         self.ort_threads = ort_threads
+        # Pin the state-feature encoding to the loaded graph. The 96-d
+        # production model (`runs/R13-W6-phase-d/iter-2/policy.onnx`, schema
+        # v2) has no embedding inputs; the HEAD-trained 110-d v3 graph adds
+        # `card_ids_by_zone` / `action_card_idx`. Serving the wrong encoding
+        # is a silent correctness bug (ORT also hard-rejects unknown feed
+        # keys), so resolve + fail loud at startup rather than per-request.
+        self.feature_schema = _resolve_feature_schema(feature_schema, self.session)
         self.runtime_card_vocab = card_vocab_metadata()
         self.expected_card_vocab = load_meta_card_vocab(model_path)
         if self.expected_card_vocab is not None and self.runtime_card_vocab.get("hash") != "missing":
@@ -82,6 +94,65 @@ class PolicyServer(ThreadingHTTPServer):
             raise ValueError(f"unknown default sampling mode: {default_sampling}")
         self.default_sampling = default_sampling
         self.default_temperature = default_temperature
+
+
+def _graph_signature(session: ort.InferenceSession) -> tuple[int | None, bool]:
+    """Return (state_features last dim or None, has_embedding_inputs).
+
+    `has_embedding_inputs` is True iff the graph declares a
+    `card_ids_by_zone` input (the v3 embedding pass). The state-features
+    last dim distinguishes 96-d (v2) from 110-d (v3).
+    """
+    state_dim: int | None = None
+    has_embedding = False
+    for inp in session.get_inputs():
+        if inp.name == "card_ids_by_zone":
+            has_embedding = True
+        if inp.name == "state_features":
+            shape = inp.shape or []
+            if shape:
+                last = shape[-1]
+                if isinstance(last, int):
+                    state_dim = last
+    return state_dim, has_embedding
+
+
+def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:
+    """Resolve the serving feature schema (v2|v3) and fail loud on mismatch.
+
+    `auto` inspects the ONNX graph signature: v2 iff state_features last
+    dim == 96 AND no `card_ids_by_zone` input; else v3. An explicit
+    `v2`/`v3` is asserted consistent with the graph and exits non-zero at
+    startup if not. Exactly one startup line is logged.
+    """
+    state_dim, has_embedding = _graph_signature(session)
+    graph_is_v2 = state_dim == STATE_DIM_V2 and not has_embedding
+
+    if requested == "auto":
+        schema = "v2" if graph_is_v2 else "v3"
+        source = "auto-graph"
+    elif requested in {"v2", "v3"}:
+        schema = requested
+        source = "--feature-schema/env"
+        graph_schema = "v2" if graph_is_v2 else "v3"
+        if schema != graph_schema:
+            sys.stderr.write(
+                f"[serve_onnx] FATAL: --feature-schema={requested} is "
+                f"inconsistent with the loaded ONNX graph signature "
+                f"(state_dim={state_dim}, card_ids_by_zone input="
+                f"{has_embedding} -> graph is {graph_schema}). Refusing to "
+                f"serve a mismatched encoding.\n"
+            )
+            raise SystemExit(2)
+    else:
+        raise ValueError(f"unknown feature schema: {requested!r}")
+
+    if schema == "v2":
+        detail = "state_dim=96, no embedding inputs"
+    else:
+        detail = f"state_dim={state_dim if state_dim is not None else '?'}, embedding inputs"
+    print(f"[serve_onnx] feature schema = {schema} ({detail}) [source: {source}]")
+    return schema
 
 
 def load_meta_card_vocab(model_path: str) -> dict[str, Any] | None:
@@ -107,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             payload = self.read_json()
-            arrays, action_ids = request_to_arrays(payload)
+            arrays, action_ids = request_to_arrays(payload, self.server.feature_schema)
             logits, value = self.server.session.run(None, arrays)
             mask = arrays["action_mask"]
             # Per-request sampling mode. ``greedy`` is the DAgger gate
@@ -219,77 +290,99 @@ def masked_softmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return probs.astype(np.float32)
 
 
-def request_to_arrays(payload: dict[str, Any]) -> tuple[dict[str, np.ndarray], list[list[str]] | None]:
+def request_to_arrays(
+    payload: dict[str, Any], feature_schema: str = "v3"
+) -> tuple[dict[str, np.ndarray], list[list[str]] | None]:
+    # v2 = the FROZEN 96-d production encoding (no embedding inputs); v3 =
+    # the HEAD-trained 110-d additive embedding encoding. The pinned schema
+    # is resolved once at startup (see _resolve_feature_schema); here it
+    # only selects the encoder + which feed keys are emitted. ORT hard-
+    # rejects unknown feed keys, so v2 MUST omit (not zero) the embedding
+    # inputs.
+    is_v2 = feature_schema == "v2"
+    expected_state_dim = STATE_DIM_V2 if is_v2 else STATE_DIM
     if "observation" in payload and "legalActions" in payload:
         actions = payload["legalActions"]
         if not actions:
             raise ValueError("legalActions must not be empty")
         observation = payload["observation"]
-        state_features = observation_to_features(observation)[None, :]
+        encode_state = observation_to_features_v2 if is_v2 else observation_to_features
+        state_features = encode_state(observation)[None, :]
         action_features = legal_actions_to_features(actions)[None, :, :]
         action_mask = np.ones(action_features.shape[:2], dtype=np.bool_)
         action_ids = [[str(action.get("id", index)) for index, action in enumerate(actions)]]
-        # R7.b.2 Phase 3: build the embedding-pass tensors from the JSON
-        # observation (Phase 1 emits `cardIdsByZone`) and per-action
-        # source/target idx (Phase 1 adds `actionSourceCardIdx` /
-        # `actionTargetCardIdx`). Pack into the same fixed shape the
-        # ONNX graph expects (NUM_ZONES, MAX_CARDS_PER_ZONE) so ORT's
-        # shape inference matches export-time exactly.
-        card_id_zones = observation_to_card_ids(observation)
-        card_ids_by_zone = np.zeros((1, NUM_ZONES, MAX_CARDS_PER_ZONE), dtype=np.int64)
-        for zone_index, zone in enumerate(ZONE_ORDER):
-            zone_arr = card_id_zones[zone]
-            card_ids_by_zone[0, zone_index, : zone_arr.shape[0]] = zone_arr
-        action_card_idx = np.zeros((1, len(actions), 2), dtype=np.int64)
-        for action_index, action in enumerate(actions):
-            action_card_idx[0, action_index, :] = action_card_idx_pair(action)
+        if not is_v2:
+            # R7.b.2 Phase 3: build the embedding-pass tensors from the JSON
+            # observation (Phase 1 emits `cardIdsByZone`) and per-action
+            # source/target idx (Phase 1 adds `actionSourceCardIdx` /
+            # `actionTargetCardIdx`). Pack into the same fixed shape the
+            # ONNX graph expects (NUM_ZONES, MAX_CARDS_PER_ZONE) so ORT's
+            # shape inference matches export-time exactly.
+            card_id_zones = observation_to_card_ids(observation)
+            card_ids_by_zone = np.zeros((1, NUM_ZONES, MAX_CARDS_PER_ZONE), dtype=np.int64)
+            for zone_index, zone in enumerate(ZONE_ORDER):
+                zone_arr = card_id_zones[zone]
+                card_ids_by_zone[0, zone_index, : zone_arr.shape[0]] = zone_arr
+            action_card_idx = np.zeros((1, len(actions), 2), dtype=np.int64)
+            for action_index, action in enumerate(actions):
+                action_card_idx[0, action_index, :] = action_card_idx_pair(action)
     else:
         state_features = np.asarray(payload["state_features"], dtype=np.float32)
         action_features = np.asarray(payload["action_features"], dtype=np.float32)
         action_mask = np.asarray(payload["action_mask"], dtype=np.bool_)
         action_ids = None
-        # Raw-arrays callers (training/debug paths) can pre-pack the new
-        # tensors too. Default to zero so the embedding pass collapses to
-        # the additive-residual null path (verified <1e-6 in Phase 2).
-        if "card_ids_by_zone" in payload:
-            card_ids_by_zone = np.asarray(payload["card_ids_by_zone"], dtype=np.int64)
-        else:
-            card_ids_by_zone = np.zeros(
-                (state_features.shape[0], NUM_ZONES, MAX_CARDS_PER_ZONE), dtype=np.int64
-            )
-        if "action_card_idx" in payload:
-            action_card_idx = np.asarray(payload["action_card_idx"], dtype=np.int64)
-        else:
-            action_card_idx = np.zeros(
-                (action_features.shape[0], action_features.shape[1], 2), dtype=np.int64
-            )
+        if not is_v2:
+            # Raw-arrays callers (training/debug paths) can pre-pack the new
+            # tensors too. Default to zero so the embedding pass collapses to
+            # the additive-residual null path (verified <1e-6 in Phase 2).
+            # Under a v2 pin we never build these — a v2 graph rejects them.
+            if "card_ids_by_zone" in payload:
+                card_ids_by_zone = np.asarray(payload["card_ids_by_zone"], dtype=np.int64)
+            else:
+                card_ids_by_zone = np.zeros(
+                    (state_features.shape[0], NUM_ZONES, MAX_CARDS_PER_ZONE), dtype=np.int64
+                )
+            if "action_card_idx" in payload:
+                action_card_idx = np.asarray(payload["action_card_idx"], dtype=np.int64)
+            else:
+                action_card_idx = np.zeros(
+                    (action_features.shape[0], action_features.shape[1], 2), dtype=np.int64
+                )
     if state_features.ndim != 2:
         raise ValueError("state_features must have shape [batch,state_dim]")
-    if state_features.shape[1] != STATE_DIM:
-        raise ValueError(f"state_features dimension mismatch: got {state_features.shape[1]}, expected {STATE_DIM}")
+    if state_features.shape[1] != expected_state_dim:
+        raise ValueError(
+            f"state_features dimension mismatch: got {state_features.shape[1]}, "
+            f"expected {expected_state_dim} (feature schema {feature_schema})"
+        )
     if action_features.ndim != 3:
         raise ValueError("action_features must have shape [batch,actions,action_dim]")
     if action_features.shape[2] != ACTION_DIM:
         raise ValueError(f"action_features dimension mismatch: got {action_features.shape[2]}, expected {ACTION_DIM}")
     if action_mask.shape != action_features.shape[:2]:
         raise ValueError("action_mask must have shape [batch,actions]")
-    expected_czi = (state_features.shape[0], NUM_ZONES, MAX_CARDS_PER_ZONE)
-    if card_ids_by_zone.shape != expected_czi:
-        raise ValueError(
-            f"card_ids_by_zone shape mismatch: got {card_ids_by_zone.shape}, expected {expected_czi}"
-        )
-    expected_aci = (action_features.shape[0], action_features.shape[1], 2)
-    if action_card_idx.shape != expected_aci:
-        raise ValueError(
-            f"action_card_idx shape mismatch: got {action_card_idx.shape}, expected {expected_aci}"
-        )
-    return {
+    feed: dict[str, np.ndarray] = {
         "state_features": state_features.astype(np.float32),
         "action_features": action_features.astype(np.float32),
         "action_mask": action_mask.astype(np.bool_),
-        "card_ids_by_zone": card_ids_by_zone.astype(np.int64),
-        "action_card_idx": action_card_idx.astype(np.int64),
-    }, action_ids
+    }
+    if not is_v2:
+        expected_czi = (state_features.shape[0], NUM_ZONES, MAX_CARDS_PER_ZONE)
+        if card_ids_by_zone.shape != expected_czi:
+            raise ValueError(
+                f"card_ids_by_zone shape mismatch: got {card_ids_by_zone.shape}, expected {expected_czi}"
+            )
+        expected_aci = (action_features.shape[0], action_features.shape[1], 2)
+        if action_card_idx.shape != expected_aci:
+            raise ValueError(
+                f"action_card_idx shape mismatch: got {action_card_idx.shape}, expected {expected_aci}"
+            )
+        # ORT hard-rejects unknown feed keys, so the v2 (96-d) graph MUST
+        # receive ONLY these three; the embedding inputs are omitted, not
+        # zeroed.
+        feed["card_ids_by_zone"] = card_ids_by_zone.astype(np.int64)
+        feed["action_card_idx"] = action_card_idx.astype(np.int64)
+    return feed, action_ids
 
 
 def main() -> None:
@@ -309,6 +402,7 @@ def main() -> None:
         default_sampling=args.default_sampling,
         default_temperature=args.default_temperature,
         ort_threads=ort_threads,
+        feature_schema=args.feature_schema,
     )
     print(json.dumps({
         "status": "serving",
@@ -320,6 +414,7 @@ def main() -> None:
         "default_sampling": server.default_sampling,
         "default_temperature": server.default_temperature,
         "ort_threads": ort_threads if ort_threads is not None else "auto",
+        "feature_schema": server.feature_schema,
     }))
     server.serve_forever()
 
@@ -381,6 +476,21 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Temperature injected when a /predict body omits ``temperature``. "
             "Defaults to 0.0 under greedy and 1.0 under stochastic when not set."
+        ),
+    )
+    parser.add_argument(
+        "--feature-schema",
+        choices=["auto", "v2", "v3"],
+        default=os.environ.get("UMA_FEATURE_SCHEMA", "auto"),
+        help=(
+            "State-feature encoding pin. 'auto' (default; env "
+            "UMA_FEATURE_SCHEMA overrides the default) selects v2 vs v3 "
+            "from the loaded ONNX graph signature: v2 = the FROZEN 96-d "
+            "production encoding (no embedding inputs, e.g. "
+            "runs/R13-W6-phase-d/iter-2/policy.onnx); v3 = the HEAD 110-d "
+            "additive embedding encoding. An explicit 'v2'/'v3' is asserted "
+            "consistent with the graph and the server exits at startup if "
+            "not. 'Promote later' = serve a 110-d model under v3/auto."
         ),
     )
     parser.add_argument(
