@@ -4,7 +4,7 @@
 
 Use this file for blockers, unsafe stop lines, missing local artifacts, or human decisions needed before useful autonomous work can continue. ≤500 chars per bullet — longer rationale belongs in a scoping doc.
 
-_(none open)_
+- **2026-05-15 autonomous queue exhausted — human input needed to continue.** The F1 raw-policy SL line is closed (4 axes); the search-wrapped production path is consolidated, characterized, and documented (rollout-leaf @ W6 iter-2, Wilson 0.6479, single-worker-reproducible, side-asymmetry disclosed); training-stack + harness footguns fixed (fp16 `--amp` overflow; orchestrator `pid.txt`). Every P2/P3 item is `done`. **No autonomous /work remains.** Two human-gated paths to re-open the loop: (1) run `r14-e-manual-ui-exercise` (P1 — 20 browser games at the value-head fallback config; the last R14 acceptance step), or (2) steer the next research arc (e.g. RL/PPO from the strong search-wrapped checkpoint, or scaling) — a meaningfully-new direction worth a user call. Loop stopped at this milestone; re-run `/loop /work` after either. Detail: `docs/ai-research-backlog.md` § Production-path forward work; digests/2026-05-15.md.
 
 ## Resolved
 
