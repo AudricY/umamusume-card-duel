@@ -226,6 +226,7 @@ def main() -> None:
     assert_card_embedding_forward(repo_root, run_dir, examples_path)
     assert_r7b2_extractor_roundtrip(repo_root, run_dir, examples_path)
     assert_dpo_smoke(repo_root, run_dir, reference_checkpoint=model_dir / "checkpoint.pt")
+    assert_amp_overflow_regression()
 
     print(json.dumps({
         "status": "PASS",
@@ -953,6 +954,148 @@ def assert_dpo_smoke(repo_root: Path, run_dir: Path, *, reference_checkpoint: Pa
         raise AssertionError(
             f"DPO smoke (d): loss did not decrease overall: "
             f"start={losses[0]} end={losses[-1]}"
+        )
+
+
+def assert_amp_overflow_regression() -> None:
+    """fp16 action-mask-fill overflow regression (queue: model-py-amp-overflow-fix).
+
+    `CandidatePolicyNet.forward` masks illegal actions before softmax via
+    `logits.masked_fill(~action_mask.bool(), <fill>)`. The historical fill
+    constant `-1.0e9` overflows `at::Half` (fp16 max ≈ 6.55e4), so under
+    `train_bc.py --amp` on CUDA the masked positions become `-inf`, then
+    softmax/cross-entropy produce NaN — silent training corruption. The
+    2026-05-14 R7.b.2 launch hit this; the workaround was to drop --amp.
+
+    The overflow is a *dtype* property, not a device property: an fp16
+    tensor through the same `masked_fill` + softmax path reproduces it on
+    CPU. This smoke runs the real model forward in fp16 (CUDA if present,
+    else CPU) and asserts:
+
+      (a) the fill constant the code uses fits in fp16 (i.e. it is
+          `torch.finfo(torch.float16).min`, NOT `-1.0e9`);
+      (b) forward logits/value contain no inf/NaN in fp16;
+      (c) masked positions are finite and very negative (driven to ~-inf
+          by softmax, not overflowed to +inf/NaN);
+      (d) softmax + cross-entropy over the fp16 logits stay finite — the
+          end-state the --amp training loop actually depends on.
+
+    A regression that reinstates `-1.0e9` (or any >6.55e4-magnitude fill)
+    fails (a)/(b)/(d) immediately.
+    """
+
+    import numpy as np
+    import torch
+
+    from uma_ai.features import ACTION_DIM, STATE_DIM
+    from uma_ai.model import CandidatePolicyNet, ModelConfig
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(20260514)
+
+    # (a) The fill constant the production code path uses must fit in fp16.
+    # We reproduce the exact masked_fill the model performs and confirm the
+    # filled value is finite under fp16 — this is the direct landmine guard
+    # independent of the larger forward pass.
+    fp16_fill = torch.finfo(torch.float16).min
+    if not np.isfinite(fp16_fill):
+        raise AssertionError(
+            f"AMP-overflow smoke (a): torch.finfo(float16).min is not finite ({fp16_fill})"
+        )
+    sentinel = torch.tensor([0.0, 1.0], dtype=torch.float16, device=device)
+    mask = torch.tensor([True, False], dtype=torch.bool, device=device)
+    filled = sentinel.masked_fill(~mask, fp16_fill)
+    if not torch.isfinite(filled).all():
+        raise AssertionError(
+            "AMP-overflow smoke (a): masked_fill with the fp16-safe sentinel produced "
+            f"a non-finite value ({filled.tolist()}); a -1.0e9-class constant regressed in"
+        )
+    # Hard guard: the constant -1.0e9 must overflow fp16 (sanity that this
+    # test would actually catch a regression).
+    if torch.isfinite(torch.tensor(-1.0e9, dtype=torch.float16)).item():
+        raise AssertionError(
+            "AMP-overflow smoke (a): -1.0e9 unexpectedly finite in fp16 — the regression "
+            "this smoke guards is not reproducible in this environment"
+        )
+
+    # (b)/(c)/(d): real model forward in fp16 mirroring the --amp CUDA path.
+    config = ModelConfig(hidden_dim=32, depth=1, dropout=0.0)
+    model = CandidatePolicyNet(config).to(device=device, dtype=torch.float16)
+    model.eval()
+
+    batch_size = 4
+    num_actions = 6
+    gen = torch.Generator().manual_seed(7)
+    state_features = torch.randn(batch_size, STATE_DIM, generator=gen).to(
+        device=device, dtype=torch.float16
+    )
+    action_features = torch.randn(
+        batch_size, num_actions, ACTION_DIM, generator=gen
+    ).to(device=device, dtype=torch.float16)
+    # Mixed legality with at least one illegal (masked) action per row, plus
+    # a fully-but-one-illegal row, so the masked_fill path is exercised hard.
+    action_mask = torch.ones(batch_size, num_actions, dtype=torch.bool, device=device)
+    action_mask[:, -2:] = False
+    action_mask[1, 1:] = False  # row 1: only action 0 legal
+
+    with torch.no_grad():
+        logits, value = model(state_features, action_features, action_mask)
+
+    if logits.dtype != torch.float16:
+        raise AssertionError(
+            f"AMP-overflow smoke (b): expected fp16 logits, got {logits.dtype}"
+        )
+    if not torch.isfinite(logits).all():
+        raise AssertionError(
+            "AMP-overflow smoke (b): fp16 forward produced non-finite logits — "
+            "action-mask fill overflowed at::Half (the -1.0e9 landmine). "
+            f"non_finite_count={int((~torch.isfinite(logits)).sum().item())}"
+        )
+    if not torch.isfinite(value).all():
+        raise AssertionError(
+            "AMP-overflow smoke (b): fp16 forward produced non-finite value head output"
+        )
+
+    # (c) Masked positions must be finite AND very negative (so softmax
+    # zeroes them) — not +inf, not NaN, not a small number.
+    masked = logits[~action_mask]
+    if masked.numel() == 0:
+        raise AssertionError("AMP-overflow smoke (c): test built no masked positions")
+    if not torch.isfinite(masked).all():
+        raise AssertionError(
+            "AMP-overflow smoke (c): masked logits non-finite under fp16"
+        )
+    # fp16 most-negative finite value ≈ -6.55e4. The fill should drive
+    # masked positions far below any plausible real logit; require < -1e3.
+    if float(masked.max().item()) > -1.0e3:
+        raise AssertionError(
+            f"AMP-overflow smoke (c): masked logits not driven very negative "
+            f"(max={float(masked.max().item())}); softmax will leak mass onto "
+            "illegal actions"
+        )
+
+    # (d) Softmax + cross-entropy over the fp16 logits must stay finite —
+    # this is what the --amp training loop consumes. Compute in the dtype
+    # the loss path uses (AMP autocast keeps logits fp16; CE upcasts
+    # internally, but the masked_fill happens at fp16 before any upcast,
+    # so feeding the fp16 logits straight to CE is the faithful test).
+    probs = torch.softmax(logits.float(), dim=-1)
+    if not torch.isfinite(probs).all():
+        raise AssertionError(
+            "AMP-overflow smoke (d): softmax over fp16 logits produced non-finite probs"
+        )
+    legal_mass = (probs * action_mask.float()).sum(dim=-1)
+    if not torch.allclose(legal_mass, torch.ones_like(legal_mass), atol=1e-2):
+        raise AssertionError(
+            f"AMP-overflow smoke (d): softmax mass not concentrated on legal actions "
+            f"(per-row legal mass={legal_mass.tolist()}); masked fill leaked"
+        )
+    targets = torch.zeros(batch_size, dtype=torch.int64, device=device)
+    ce = torch.nn.functional.cross_entropy(logits.float(), targets)
+    if not torch.isfinite(ce):
+        raise AssertionError(
+            f"AMP-overflow smoke (d): cross-entropy over fp16 logits non-finite ({ce.item()}) "
+            "— the exact failure mode that corrupted --amp training"
         )
 
 

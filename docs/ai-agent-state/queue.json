@@ -25,9 +25,9 @@
     {
       "id": "model-py-amp-overflow-fix",
       "priority": "P3",
-      "status": "ready",
-      "summary": "fp16 overflow at training/uma_ai/model.py:199 — logits.masked_fill(~action_mask.bool(), -1.0e9) overflows at::Half. Triggered when train_bc.py --amp is used on CUDA. Surfaced 2026-05-14 during R7.b.2 first-launch attempt; workaround was to drop --amp. Real fix: replace -1.0e9 with torch.finfo(logits.dtype).min (or -1e4 if simpler). One-line + smoke. Low priority (workaround works).",
-      "next_action": "Implementer: change training/uma_ai/model.py:199 constant from -1.0e9 to torch.finfo(logits.dtype).min (one line), add assert_amp_overflow_regression smoke in training/smoke_e2e.py that loads model in fp16 and runs forward without RuntimeError or NaN logits, wire smoke into test:python-train, commit."
+      "status": "done",
+      "summary": "DONE 2026-05-15. Action-mask fill in training/uma_ai/model.py changed -1.0e9 -> torch.finfo(logits.dtype).min (dtype-safe for fp32+fp16); kills the silent fp16 --amp NaN-logit corruption. Regression smoke assert_amp_overflow_regression added to training/smoke_e2e.py (real model fp16 forward, asserts no inf/NaN + masked positions finite-very-negative + softmax/CE finite), wired into main() which is the test:python-train entry. TMPDIR=/tmp npm run test:python-train EXIT=0, final status PASS. Detail: docs/ai-agent-state/digests/2026-05-15.md Slot 5.",
+      "next_action": "None — closed."
     },
     {
       "id": "mcts-distill-followup-direction",

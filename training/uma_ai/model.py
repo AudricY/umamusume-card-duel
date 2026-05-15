@@ -196,6 +196,11 @@ class CandidatePolicyNet(nn.Module):
         )
         joint = self.joint_blocks(self.joint_projection(joint))
         logits = self.policy_head(joint).squeeze(-1)
-        logits = logits.masked_fill(~action_mask.bool(), -1.0e9)
+        # dtype-safe mask fill: `-1.0e9` overflows at::Half (fp16) under
+        # train_bc.py --amp on CUDA, silently producing inf/NaN logits.
+        # `torch.finfo(logits.dtype).min` is the most-negative finite value
+        # for the actual logits dtype (fp32 or fp16) — masks illegal actions
+        # to ~-inf before softmax without overflowing.
+        logits = logits.masked_fill(~action_mask.bool(), torch.finfo(logits.dtype).min)
         value = self.value_head(state_encoded).squeeze(-1)
         return logits, value
