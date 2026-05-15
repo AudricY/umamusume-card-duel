@@ -271,3 +271,171 @@ lever in the F1 line that hasn't been falsified.
 - Backlog pointer: `docs/ai-research-backlog.md` § Tier 2 R8 line (DONE /
   FAIL, demoted to one-liner).
 
+---
+
+## R7.b.2 — card-embedding feature representation pass (single iter, FAIL) — 2026-05-14
+
+**Verdict: FAIL — closes the R7.b family. Iter-0 Wilson lower 0.3045 (n=1000
+side-balanced, rule-bot, seed-start 9000) on `runs/R7b2-card-embed/iter-000/`.
++1.24pp over R7 baseline (0.2921) — wash within Wilson half-width (~3pp at
+n=1000); -0.65pp vs item17 iter-2 (0.311); -2.24pp vs R15.S1 iter-2 (0.3269);
+-6.32pp vs R15.S3 obs-delta ceiling (0.3677); -9.55pp vs pre-registered gate
+≥0.40 (`scoping § 7`). Wilson < 0.37 fires the close-out path per scoping § 7
+("close-out R7.b family + escalate"); R7.b.3 (set-encoder attention) and
+R7.b.4/5 (history + aux heads) were conditional on R7.b.2 lift and do not
+auto-promote.** F1-line third axis (representation) now exhausted after R7
+(labels) and R8 (objective).
+
+**Run setup.** Phase 5 retrain on the Phase-4 re-extracted corpus
+`runs/R7-multi-teacher-warmstart/iter-000/mixed-v3.jsonl` (12387 rows; same
+mixed-teacher trace + rule-bot replay as R7 baseline, only feature schema
+bumped v2.1 → v3.0 — `cardIdsByZone` + per-action src/tgt idx, embedding
+table `nn.Embedding(108, K=32)` sum-pooled per zone, schema additive on the
+existing 110-d state). `train_bc.py --hidden 64 --depth 2 --epochs 75
+--data-mode bc` matching R7's hyperparameters byte-for-byte. CUDA, ~30s
+wall-clock. Phase 6 gate via `training/r8_gate_eval.py` (`--games 500
+--seed-start 9000 --min-ci-lower 0.40`, side-balanced n=1000); ONNX
+roundtrip PASS (max_logit_diff 7e-7).
+
+**Iter-0 gate result.** From `runs/R7b2-card-embed/iter-000/gate.manifest.json`:
+
+| Metric | Value |
+| --- | --- |
+| games | 1000 (500 player + 500 opponent) |
+| modelWins | 333 |
+| modelWinRate | 33.3% |
+| Wilson 95% | [**0.3045**, 0.3628] |
+| averageModelPoints | 0.874 |
+| averageHeuristicPoints | 1.352 |
+| heuristicFallbacks | 0 |
+| selectedNoOps | 0 |
+| terminalReasons | gameOver: 1000 |
+
+Side split: player WR 27.8% Wilson [0.241, 0.319] (n=500); opponent WR
+38.8% Wilson [0.346, 0.431] (n=500). Same +11pp opponent-side gap that
+replicates across every F1 / R15 / R7 / R8 phase at value-head-leaf
+inference.
+
+**Comparison anchors.**
+
+| Anchor | Wilson lower | Δ vs R7.b.2 | Source |
+| --- | --- | --- | --- |
+| R7.b.2 iter-0 (card-embed v3.0) | **0.3045** | — | this block |
+| R7 iter-0 (mixed-teacher BC, same corpus, v2.1) | 0.2921 | +1.24pp (wash, within Wilson half-width) | § R7 above |
+| item17 take-2 iter-2 (rollout-only DAgger ref) | 0.311 | -0.65pp | `progress.md` L582 |
+| R15.S1 iter-2 (3-iter DAgger from item17) | 0.3269 | -2.24pp | `progress.md` § Phase K |
+| R8 DPO iter-0 (β=0.1, item17 ref) | 0.3318 | -2.73pp | § R8 above |
+| R15.S3 ceiling (Phase N/O', obs-delta saturated) | 0.3677 | -6.32pp | `progress.md` § Phase N / O' |
+| Pre-registered R7.b.2 gate (`scoping § 7`) | ≥ 0.40 | -9.55pp | `r7b-feature-representation.md` § 7 |
+
+**Train trajectory — plateau-then-overfit signature worsened.** From
+`runs/R7b2-card-embed/iter-000/model/manifest.json` (`split_by=episode`,
+seed=7, train_rows 2950 / val_rows 839; dataset filter discards ~70% of
+mixed-corpus rows for single-action / no-target reasons identically to
+the R7 baseline at the same 3789 sample count):
+
+| Run | final_train_acc | final_val_acc | Δ overfit gap |
+| --- | --- | --- | --- |
+| R7 baseline (same corpus, schema v2.1) | 0.965 | 0.747 | 0.218 |
+| **R7.b.2 (schema v3.0, card-embed)** | **0.971** | **0.713** | **0.258** |
+
+Adding 44.4k embedding parameters (3.5% of model) lifted train_acc by
++0.6pp **and** dropped val_acc by **−3.4pp** — the model fit the training
+set marginally better and generalised meaningfully worse. The val-loss
+trajectory (3.41 vs R7's 2.21) replicates R15.S1's and R7's plateau-then-
+overfit signature with a *larger* val-loss climb at the same epoch budget.
+Embedding capacity did not bind on a missing-information axis; if anything
+the extra parameters made the same generalisation failure mode slightly
+worse.
+
+**Mechanism interpretation — F1 line representation axis exhausted.** The
+R7.b hypothesis (`scoping § 1-2`) bet that the binding constraint at the
+SL ceiling was input information content: the 16 hashed-float card-identity
+slots can collide and force the network to learn dense super-positions
+where a learned vocabulary embedding would let it carry per-card affordance
+gradients. The pre-flight R7.b.0 trace-reencodability spike (digest slot
+36) confirmed the schema lift was *possible* without DAgger regen. R7.b.2
+exercised the lift cleanly (Phases 1-4 all green smokes; ONNX roundtrip
+1.9e-6) and the result is unambiguous: the SL labels and the gate-relevant
+signal at this capacity / corpus size budget do **not** bottleneck on
+input-side card identity. Three axes of the F1 line are now exhausted at
+the iter-0 SL gate:
+
+- **Labels** (R7 multi-teacher BC blend) — Wilson 0.2921.
+- **Objective** (R8 DPO from item17 ref) — Wilson 0.3318.
+- **Representation** (R7.b.2 card-embed v3.0) — Wilson 0.3045.
+
+None cleared 0.40, and none cleared the R15.S3 obs-delta reward-shape
+ceiling (0.3677). The post-R8 working hypothesis was that representation
+was the surviving F1 lever; that hypothesis is now falsified.
+
+**Branch close-out per pre-reg § 7.** R7.b.3 (set-encoder / attention
+over per-card tokens) was conditional on R7.b.2 lifting but capping below
+0.40 (scoping § 4 #3 "Launch only if R7.b.2 lifts but caps below 0.40").
+R7.b.2 did not lift at all; R7.b.3 does not auto-promote. R7.b.4 (recent-
+action history) and R7.b.5 (aux heads / capacity bump) were
+deprioritised-revisit-after-R7.b.2 entries and now also do not promote.
+The R7.b family closes here.
+
+**Cost.** Phase 5 train ~30s on CUDA; Phase 6 gate ~1m 18s wall-clock.
+Phase 1-4 plumbing already landed across digest slots 47-50 (~515 LOC over
+TS schema / Python encoder / ONNX / re-extractor). Total R7.b.2 wall-clock
+from Phase 5 start to gate verdict: ~2 min. No DAgger regen needed
+(R7.b.0 spike already confirmed re-encodability).
+
+**Limits of this falsification.** Only `K=32` per-zone sum-pool tested.
+Only the 12387-row R7 mixed-teacher corpus. Only iter-0 SL gate (no
+post-SL PPO sweep, scoping § 7 exit gate (b) does not fire — gate (a)
+SL non-regress passes within 2pp of R7 baseline but gate (b) Wilson lower
+≥ 0.40 fails). R7.b.3 (attention pool) and R7.b.4 (history embedding)
+remain *not falsified*, but the supporting result for any of them would
+need a re-opening hypothesis distinct from "input-side card identity is
+the bottleneck" since that's what R7.b.2 refuted at K=32.
+
+**Surprise during writeup.** Dataset loader filters the 12387-row mixed
+corpus down to 3789 samples (~30% retention) at the trainer entry — same
+filter, same count as the R7 baseline at the v2.1 schema. The comparison
+is therefore apples-to-apples on training data; the schema bump and the
+embedding table are the only axes that change between R7 baseline and
+R7.b.2. The "~0.93" train_acc reference in the brief was an
+approximation; the actual R7 baseline number is 0.965, and R7.b.2's
+0.971 is +0.6pp over that.
+
+**Next direction picked — MCTS-distillation.** Three F1 axes exhausted
+across labels (R7), objective (R8), representation (R7.b.2). R15.S3
+reward-shape closed across both axes (obs-delta saturated 0.368 ± 0.001;
+value-head tempo regressed). Rollout-leaf MCTS at R12 iter-2 reaches
+Wilson **0.6479** with inference-time compute — the network *plays*
+strong when search is bolted on at decision time. The gap is search →
+model distillation, not architecture or representation or labels or
+objective. **Pick: MCTS-distillation from rollout-leaf MCTS visit-count
+targets.** `train_bc.py` already exposes `--data-mode mcts-distill` (line
+887). The surviving structural lever is generating an SL corpus where
+each row's `policyTargets` come from high-depth rollout-leaf MCTS visit
+distributions instead of single-step rollout / search / planner traces.
+Cheaper-to-falsify alternative rejected (pure capacity bump hidden
+128→256 / depth 3→4: R7.b.2 already added 3.5% parameters with no Wilson
+lift, parameter count isn't binding). Pre-reg gate consistent with prior
+F1 family: Wilson lower ≥ 0.40 at iter-0 SL gate from a phase-H-scale
+retrain. Scoping doc next slot (out of scope for this writeup); investigator
+first locates the mcts-distill label source.
+
+**Files & artifacts.**
+
+- `runs/R7b2-card-embed/iter-000/gate.manifest.json` — summary +
+  byModelSide + terminalReasons; git sha `eb5bdfc` clean.
+- `runs/R7b2-card-embed/iter-000/policy.gate.onnx` — exported from
+  `runs/R7b2-card-embed/iter-000/model/checkpoint.pt`.
+- `runs/R7b2-card-embed/iter-000/gate.log` + `train.log` — Phase 5/6
+  stdout.
+- `runs/R7b2-card-embed/iter-000/model/{checkpoint.pt, manifest.json}` —
+  Phase 5 outputs (state_dim=110, schema v3.0, card_vocab hash
+  `e3a35716156494d6`).
+- `runs/R7-multi-teacher-warmstart/iter-000/mixed-v3.jsonl` — Phase 4
+  re-extracted corpus (12387 rows, observation.schemaVersion=2).
+- `docs/ai-research/scoping/r7b-feature-representation.md` §§ 1–15
+  (closed design + pre-reg gates + Phase 1-4 landing records). § 7
+  close-out condition fired by this block.
+- Closeout escalation: `docs/ai-agent-state/escalations.md` `## Resolved`
+  2026-05-14 R7.b.2 bullet.
+

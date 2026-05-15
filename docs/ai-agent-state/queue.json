@@ -4,9 +4,9 @@
     {
       "id": "r14-e-manual-ui-exercise",
       "priority": "P1",
-      "status": "ready-human-gated",
-      "summary": "R14.E acceptance: play 20 full UI games with aiBackend=mcts, value-head leaf + adaptive-ratio=1.5, capture fallback rate (<5%) and median decision time (<3s). Only remaining R14 sprint acceptance step. HUMAN-GATED: requires a person at the browser; not autonomously actionable. The strongest AUTONOMOUS production-path job is mcts-determinism-and-side-asymmetry-audit (P2) below.",
-      "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section as the E closure."
+      "status": "done",
+      "summary": "DONE 2026-05-15 — user-verified working (qualitative acceptance, no numeric capture). User manually exercised R14.E in-browser at production SHA bc6db85 (96-dim schema matching the 96-dim production model); confirmed BOTH MCTS configs functional end-to-end and the rollout-leaf opponent visibly beats the rule bot. Webapp opponent default now set to the production rollout-leaf config in useAppRuntimeEffects.ts (gate args byte-identical to runs/R13-W6-phase-d/iter-2/gate.manifest.json, Wilson lower 0.6479). Formal numeric exit criterion (median <3s, fallback <5%) NOT captured; closed on user acceptance + prior gate evidence. Open deployment caveat: 96-dim verified stack vs feat/ai HEAD's 110-dim extractor (cannot serve the 96-dim model; no 110-dim production-grade search model exists). Detail: docs/ai-research/progress/r15.md § R14.E closure; docs/r14-sprint-plan.md § E.",
+      "next_action": "None — closed. Remaining real open caveat is the 96-dim/110-dim deployment skew (see escalations.md ## Open)."
     },
     {
       "id": "mcts-determinism-and-side-asymmetry-audit",

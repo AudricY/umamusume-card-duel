@@ -285,7 +285,31 @@ export function useAppRuntimeEffects({
       if (aiBackend === "mcts" && !mctsInFlightRef.current) {
         mctsInFlightRef.current = true;
         const legalActions = enumerateLegalAiActions(game, "opponent");
-        void requestMctsDecision(game, "opponent", legalActions, { mctsConfig: { leaf: "value-head", adaptiveRatio: 1.5 } })
+        // Production rollout-leaf MCTS config: these mcts.* values are
+        // byte-for-byte the gate args from runs/R13-W6-phase-d/iter-2 that
+        // produced the deployment-policy verdict (Wilson lower 0.6479,
+        // ~73% WR vs rule bot, n=120). This is the slow-but-strong product
+        // pick; deep states take seconds→tens-of-seconds and it is NOT
+        // expected to meet a <3s median — that is by design. timeoutMs:60000
+        // is a tunable latency knob (covers most states without a
+        // pathological multi-minute hang; deeper states hit the graceful
+        // rule-bot fallback below). The documented fast latency fallback is
+        // { leaf: "value-head", adaptiveRatio: 1.5 }.
+        void requestMctsDecision(game, "opponent", legalActions, {
+          timeoutMs: 60000,
+          mctsConfig: {
+            leaf: "rollout",
+            simulations: 100,
+            cPuct: 1.5,
+            prior: "policy",
+            rolloutCrnSamples: 3,
+            rolloutSteps: 200,
+            collapseMaxSteps: 64,
+            maxNodes: 5000,
+            adaptiveRatio: 0,
+            adaptiveMinSims: 20,
+          },
+        })
           .then((result) => {
             if (!result.ok) {
               console.warn("[mcts] decision failed, falling back to rule-bot:", result.reason, result.message);
