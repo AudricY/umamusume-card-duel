@@ -9,7 +9,9 @@ remaining work is experimental science.
 **Scope discipline.** This file is forward-looking only (target ≤300 lines).
 Finished/failed phases and dated result blocks live in
 `docs/ai-performance-research-progress.md`; closed entries here shrink to
-one-line pointers. See CLAUDE.md "Documentation Discipline" for the rule.
+one-line pointers. Feature-engineering / UX / eval-tooling work lives in
+`docs/ai-feature-engineering-backlog.md`. See CLAUDE.md "Documentation
+Discipline" for the rule.
 
 ## Current state (anchor; refreshed 2026-05-15)
 
