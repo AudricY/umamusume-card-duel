@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-15T22:10Z",
+  "updated": "2026-05-15T23:30Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -28,6 +28,20 @@
       "status": "done",
       "summary": "DONE 2026-05-15. Action-mask fill in training/uma_ai/model.py changed -1.0e9 -> torch.finfo(logits.dtype).min (dtype-safe for fp32+fp16); kills the silent fp16 --amp NaN-logit corruption. Regression smoke assert_amp_overflow_regression added to training/smoke_e2e.py (real model fp16 forward, asserts no inf/NaN + masked positions finite-very-negative + softmax/CE finite), wired into main() which is the test:python-train entry. TMPDIR=/tmp npm run test:python-train EXIT=0, final status PASS. Detail: docs/ai-agent-state/digests/2026-05-15.md Slot 5.",
       "next_action": "None — closed."
+    },
+    {
+      "id": "training-data-coverage-audit",
+      "priority": "P1",
+      "status": "ready",
+      "summary": "NEW 2026-05-15 user-steered backlog refinement. Hypothesis: the current training-data bottleneck is state coverage / retention, not generic row count. Evidence: R7/R7.b.2 retained only 3789/12387 mixed rows (~30%); mcts-distill v1 self-play-only corpus failed at Wilson lower 0.1470 and explicitly pinned the miss to state-coverage mismatch; raw-policy SL axes are otherwise closed. This item is diagnostic-only: compare raw exported rows, loader-retained samples, and gate/eval traces by source, side, seed range, phase, action kind, turn bucket, legal-action count, points/board/energy/hand/deck features, terminal distance, and schema/card-id availability.",
+      "next_action": "Implement a reproducible corpus audit command/report. Required outputs: filter-reason counts, retained-vs-dropped slices, train-vs-gate state-overlap buckets, coverage-vs-error/loss buckets, top 5 missing or overrepresented slices, and a proposed source-mix target. Do not train or regenerate data until this report identifies the missing slices. Detail: docs/ai-research-backlog.md § Training-data/state-coverage backlog."
+    },
+    {
+      "id": "r110-w6-reproduction",
+      "priority": "P2",
+      "status": "ready",
+      "summary": "SCOPED 2026-05-15 (user-commissioned next-arc). Reproduce the W6 Phase D rollout-leaf MCTS self-play + mcts-distill loop (that produced the pinned 96-d search-wrapped Wilson 0.6479 model) at the current 110-d / schema-v3.0 representation, to yield a 110-d model non-inferior to the pinned 96-d under the same search wrap and unlock the serve_onnx --feature-schema v3 promote path. The SL route is explicitly ruled OUT: R7.b.2 (110-d card-embed SL) already falsified it at Wilson 0.3045 and mcts-distill v1 single-pass at 0.1470 — both single SL passes, raw-policy. This arc is the iterated loop, search-wrapped. Pipeline audited READY 110-d end-to-end (features.py STATE_DIM=110, export_onnx v3 5-input graph, serve_onnx --feature-schema v3 auto-resolve, TS selfplay/gate schema-agnostic via /predict); the only delta vs W6 is config (no cross-schema warm-start — which also sidesteps the mcts-distill-v1 item17 arch-incompat). Cost ~19-23 min/iter, ~1-2h for 3-5 iters + one final gate (real compute job, flag before launch).",
+      "next_action": "Per docs/ai-research/scoping/r110-w6-reproduction.md: warn user before launch (real ~1-2h GPU job), run training/r12_orchestrator.py --mcts-leaf rollout from a 110-d init at the §4 W6 iter-2 hyper-config for >=3 iters, then export v3 + final gate at the §6 iter-2 protocol (n>=120, rule-bot, side-balanced, rollout-leaf). Exit gate: search-wrapped aggregate Wilson lower >= 0.6479 -> PASS = promote via serve_onnx --feature-schema v3 + re-point webapp. Detail/recipe/risks: docs/ai-research/scoping/r110-w6-reproduction.md."
     },
     {
       "id": "mcts-distill-followup-direction",

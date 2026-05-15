@@ -11,9 +11,9 @@ Finished/failed phases and dated result blocks live in
 `docs/ai-performance-research-progress.md`; closed entries here shrink to
 one-line pointers. See CLAUDE.md "Documentation Discipline" for the rule.
 
-## Current state (anchor; refreshed 2026-05-14)
+## Current state (anchor; refreshed 2026-05-15)
 
-As of 2026-05-14, after R12 / R13 / R14 / R15.S1–S4:
+As of 2026-05-15, after R12 / R13 / R14 / R15.S1–S4:
 
 1. **Primary production claim — rollout-leaf MCTS @ W6 iter-2: Wilson lower
    0.6479** (R14.I.2, n=120, vs rule-bot). Strongest single config on record;
@@ -117,16 +117,77 @@ working search-wrapped path. Ranked by leverage:
 consolidated** — F1 raw-policy SL closed across all 4 axes; rollout-leaf @
 W6 iter-2 decided, characterized (determinism + side-asymmetry), UI-
 integrated, user-verified, and deployment-pinned (96-d). No autonomous
-forward research job remains. The next-arc frontier (all require a user
-steer — meaningfully-new directions, not loop-actionable):
+forward research job remains. The next-arc frontier ((a) is now scoped +
+loop-actionable; (b)–(d) still require a user steer):
 - **(a) A 110-d production-grade model** would unlock the `--feature-schema
-  v3` promote path, but the 110-d F1 line closed ~0.30 — needs a
-  genuinely new approach, not a re-run of a closed axis.
+  v3` promote path. The *SL* route is closed (R7.b.2 110-d card-embed SL
+  Wilson 0.3045; mcts-distill v1 single-pass 0.1470 — both single SL passes,
+  raw-policy). **Now SCOPED with a concrete non-SL approach (user-
+  commissioned):** reproduce the W6 rollout-leaf MCTS self-play + distill
+  *loop* at 110-d/v3.0, evaluated **search-wrapped** — the pipeline that
+  produced the pinned 0.6479 96-d model; pipeline audited 110-d-ready.
+  Exit gate = search-wrapped Wilson lower ≥ 0.6479 → promote v3. Scoping:
+  `docs/ai-research/scoping/r110-w6-reproduction.md`. Queue:
+  `r110-w6-reproduction` (P2, ready).
 - **(b) Side-conditioned sim budget** — the logged non-blocking bet; gated
   on a larger-n rollout-leaf side-split that separates the player/opponent
   CIs (currently overlap at n=60/side). Not a deployment blocker.
 - **(c) RL/PPO from the strong search-wrapped checkpoint, or scaling** —
   the natural "next big bet" beyond SL; a strategic call for the user.
+- **(d) Training-data/state-coverage program** — user-steered 2026-05-15.
+  Treat the current data evidence as a *coverage bottleneck*, not a generic
+  "more rows" ask: R7 retained only 3789/12387 mixed rows, mcts-distill v1
+  failed at Wilson 0.1470 on self-play-only state coverage, and search-wrapped
+  MCTS remains strong. Work below is diagnostic-first and must not silently
+  re-open the closed raw-policy SL line.
+
+## Training-data/state-coverage backlog (user-steered 2026-05-15)
+
+1. **P1 — Corpus retention + state-overlap audit
+   (`training-data-coverage-audit`).** No training. Build a report that
+   compares raw exported rows, loader-retained samples, and gate/eval traces
+   by source, side, seed range, phase, action kind, turn bucket, legal-action
+   count, points, board stage, energy, hand/deck size, terminal distance, and
+   schema/card-id availability. Explain why ~70% of the R7 mixed corpus is
+   dropped, whether the retained set covers failing gate states, and where
+   eval losses cluster in low-coverage buckets. Acceptance: one reproducible
+   command + JSON/markdown report, with filter-reason counts, top 5 missing or
+   overrepresented slices, coverage-vs-error buckets, and an explicit proposed
+   source-mix target.
+2. **P2 — Rule-bot-covered state corpus recipe.** Generate states from the
+   deployment-relevant distribution (raw/search policy vs rule-bot, rule-bot
+   mirror, side-balanced), then relabel those exact states with rollout-leaf
+   MCTS or the strongest feasible oracle. This is the only plausible
+   `mcts-distill` revisit shape: it changes the state distribution, not the
+   label shape alone. Acceptance: retained-row rate >=80%, slice floors for
+   rare phases/actions, and a closed-loop gate reported as diagnostic only
+   unless it beats the best raw-policy SL baseline by a pre-registered margin.
+3. **P2 — Preference pairs on rule-bot-covered states.** If the coverage audit
+   shows enough contested states, create DPO/BT pairs from the same state set
+   using MCTS top action vs legal alternatives / rule-bot action, including
+   hard-negative top-K alternatives when candidate reward vectors exist. This
+   avoids another self-play-only soft-label corpus and extracts more signal
+   from contested states. Acceptance: pair manifest with source-state coverage,
+   kept-pair count, margin/variance filters, held-out pair/ranking accuracy,
+   and an n=1000 side-balanced gate only after pair quality clears a
+   pre-registered floor.
+4. **P2 — Side-conditioned retained-data balancing.** If the audit confirms
+   the measured player-side weakness is also a data issue, oversample or
+   separately label player-side decision states, especially setup / first-
+   mover branches. Acceptance: retained rows are side-balanced within each
+   major phase/action bucket, the gate reports side split, and player-side
+   Wilson lower improves without aggregate regression.
+5. **P3 — Rule-bot mistake catalog + forced-state suite.** Replace the vague
+   "exploit rule-bot weaknesses" idea with ~50 hand-audited states grouped by
+   tactical failure mode. Use them as forced-start probes for data generation
+   and for explaining why MCTS beats the rule bot. Acceptance: fixtures,
+   expected oracle/rule-bot divergence, and coverage mapping back to corpus
+   slices.
+
+**Guardrail.** Do not schedule self-play-only data regen, capacity bumps, or
+representation work from this section until the coverage audit shows which
+state slices are missing. Raw-policy SL remains closed unless new evidence is
+strong enough to explicitly re-open it.
 
 The Tier-1/Tier-2/Tier-3 framework below is preserved as historical context
 for early-2026-05 reasoning; most entries are resolved and reduced to pointers.
@@ -136,20 +197,14 @@ for early-2026-05 reasoning; most entries are resolved and reduced to pointers.
 ## Tier 1 — discriminating experiments (HISTORICAL)
 
 All four resolved by 2026-05-11; full result blocks in progress doc § "Tier 1
-results (2026-05-11)".
+results (2026-05-11)". One-line pointers:
 
-- **R1.** Perfect-oracle WR ceiling — **DONE / Q1 REFUTED.** rollout-CRN×3
-  itself hits WR 58.5% (Wilson [0.516, 0.651]) vs rule-bot. The cap is not a
-  teacher-strength cap.
-- **R2.** Multi-temperature gate matrix — **REPURPOSED.** Not a research
-  diagnostic; deployment-tuning task only (R15.S4 reuses the harness).
-- **R3.** Entropy-regularized BC warm-start — **DONE / DIAGNOSIS WRONG.**
-  β=0.05 gave entropy 0.527 nats, gate WR 38.5%; later direct-measurement
-  showed warm-start entropy was already 0.532. The "peakedness mechanism"
-  R3 attacked did not exist.
-- **R4.** Value-head ablation — **DONE / Q3 PARTIAL.** 50ep + value_weight=1.0
-  gave value_brier 0.084 (calibrate_value PASS) but gate WR dropped to 34.5%.
-  Calibration alone does not move the gate.
+- **R1** perfect-oracle ceiling — DONE / Q1 REFUTED (rollout-CRN×3 itself
+  58.5% vs rule-bot; not a teacher-strength cap). **R2** multi-temp gate —
+  REPURPOSED (deployment tuning, R15.S4). **R3** entropy-BC — DONE / DIAGNOSIS
+  WRONG (warm-start entropy already 0.532; the peakedness mechanism R3 attacked
+  did not exist). **R4** value-head ablation — DONE / Q3 PARTIAL (value_brier
+  0.084 PASS but gate WR 34.5%; calibration alone does not move the gate).
 
 ## Tier 2 — directional experiments (HISTORICAL)
 
@@ -233,40 +288,11 @@ All four are now executed or queued:
   priority than R7/R8 if any pivot is being commissioned, but cheap enough to
   queue ad-hoc when the next slot opens.
 
-## R14 outstanding follow-ups
-
-- **R14.E.followup — Manual 20-game UI exercise.**
-  - **Motivation:** R14.E's plumbing is verified (headless `/ai/decide` smoke
-    PASS, extrapolated decisionMs ~0.5s at ratio=1.5, 100 sims) but the
-    in-browser fallback-rate and median latency numbers can only come from
-    real play. This is the only R14 acceptance criterion still open.
-  - **Next action:** Start backend + frontend dev servers, toggle
-    MainMenuScreen AI=MCTS, play 20 full games end-to-end at value-head leaf
-    + adaptive-ratio=1.5, capture devtools console log for `decisionMs` per
-    turn and fallback events.
-  - **Cost:** ~30-45 min of actual play.
-  - **Exit / gate:** fallback rate < 5%, median decisionMs < 3s. Append
-    result to `docs/r14-sprint-plan.md` Progress section as the E closure.
-
 ## Open / wild
 
-- **Side-imbalance verification.** *MEASURED 2026-05-15 at rollout-leaf:
-  player WR 0.6833 [0.5577,0.7869] vs opponent 0.7833 [0.6638,0.8688],
-  +10.0pp directional gap (same direction as value-head-leaf R14.A
-  footnote), CIs overlap at n=60/side; player-side Wilson floor 0.5577 <
-  0.6479 aggregate. See `docs/ai-research/progress/r15.md` § "MCTS
-  production-claim audit".*
-- **Simulator determinism audit.** *CLOSED 2026-05-15: single-worker CRN
-  self-consistency PASS, 0.0 full-outcome divergence over 16 (seed,side)
-  keys × 2–3 replays at the production rollout-leaf config (run vs the
-  production-era SHA bc6db85, 96-dim schema). R14.B parallel-worker case
-  already closed (R-WILD #34). See `docs/ai-research/progress/r15.md` §
-  "MCTS production-claim audit".*
-- **Rule-bot mistake catalog.** The 80% aspirational target requires
-  exploiting rule-bot weaknesses; we don't have a catalog of those
-  weaknesses. Hand-construct ~50 states + a careful audit.
-- **Side-asymmetry confirmation gate (R14.A footnote).** *CLOSED 2026-05-14
-  — gate1 FAIL @ Wilson 0.394; the R14 cheap-inference production claim is
-  contradicted at independent seeds. See progress doc § "R14.A.footnote"
-  and `docs/ai-agent-state/escalations.md` for the open research-stance
-  decision the human owns.*
+- **Side imbalance / determinism.** Measured and closed 2026-05-15; see
+  `docs/ai-research/progress/r15.md` § "MCTS production-claim audit".
+- **Rule-bot mistake catalog.** Refined into the training-data/state-coverage
+  backlog above.
+- **Side-asymmetry confirmation gate (R14.A footnote).** Closed 2026-05-14;
+  cheap-inference production claim contradicted at independent seeds.
