@@ -28,7 +28,8 @@ export default defineConfig(({ command }) => ({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://127.0.0.1:8787"
+      "/api": "http://127.0.0.1:8787",
+      "/ai": "http://127.0.0.1:8787"
     }
   }
 }));

@@ -285,7 +285,7 @@ export function useAppRuntimeEffects({
       if (aiBackend === "mcts" && !mctsInFlightRef.current) {
         mctsInFlightRef.current = true;
         const legalActions = enumerateLegalAiActions(game, "opponent");
-        void requestMctsDecision(game, "opponent", legalActions)
+        void requestMctsDecision(game, "opponent", legalActions, { mctsConfig: { leaf: "value-head", adaptiveRatio: 1.5 } })
           .then((result) => {
             if (!result.ok) {
               console.warn("[mcts] decision failed, falling back to rule-bot:", result.reason, result.message);
