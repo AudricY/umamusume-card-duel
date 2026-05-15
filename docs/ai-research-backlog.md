@@ -84,23 +84,20 @@ working search-wrapped path. Ranked by leverage:
    fallback <5%, median decisionMs <3s. Cannot be done autonomously (needs
    a human at the browser). Detail: R14 follow-ups below + `docs/r14-sprint-
    plan.md` § E. Queue: `r14-e-manual-ui-exercise` P1.
-2. **MCTS search determinism + side-asymmetry shape — strongest forward
-   AUTONOMOUS production-path job (P2).** Two coupled unknowns that gate how
-   honestly we can state the production claim: (a) **single-worker
-   determinism audit** — R14.B's AsyncLocalStorage closed the parallel-worker
-   case (R-WILD #34) but single-worker CRN drift is unaudited; silent
-   non-determinism there would invalidate every advantage/Wilson estimate
-   underpinning the 0.6479 claim. (b) **side-asymmetry at rollout-leaf** —
-   the +0.11–0.30pp player/opponent gap is confirmed real at value-head-leaf
-   (R14.A.footnote) but its *shape at rollout-leaf* (where the 0.6479 claim
-   lives) is unmeasured; any deployment claim must disclose it correctly.
-   Both are read/measure/script tasks against existing checkpoints — no new
-   training, no orchestration framework. Detail: "Open / wild" below. Queue:
-   `mcts-determinism-and-side-asymmetry-audit` P2.
-3. **Deployment-policy decision (rollout-leaf vs value-head).** Downstream
-   of (2): once determinism + side shape are known, pick the production
-   inference config against the 0.39–0.45 cheap-inference envelope. Not yet
-   a discrete queue job — unblocked by (2)'s findings.
+2. **MCTS search determinism + side-asymmetry shape — RESOLVED 2026-05-15.**
+   (a) single-worker CRN determinism PASS (0.0 divergence); (b) rollout-leaf
+   side gap measured: opponent 0.7833 vs player 0.6833 (+10.0pp directional,
+   CIs overlap, player floor 0.5577). 0.6479 is a sound *aggregate
+   side-balanced reproducible* claim, not a per-side guarantee. Detail:
+   `docs/ai-research/progress/r15.md` § "MCTS production-claim audit".
+   Queue: `mcts-determinism-and-side-asymmetry-audit` → done.
+3. **Deployment-policy decision (rollout-leaf vs value-head) — now the top
+   forward production job.** Unblocked by (2): determinism is clean, the
+   side gap (not non-determinism) is the open risk. Pick the production
+   inference config against the 0.39–0.45 cheap-inference envelope, and
+   decide how the ~10pp player/opponent asymmetry is handled (disclose vs
+   side-conditioned policy vs accept). Queue: `deployment-policy-rollout-vs-
+   valuehead`.
 
 The Tier-1/Tier-2/Tier-3 framework below is preserved as historical context
 for early-2026-05 reasoning; most entries are resolved and reduced to pointers.
@@ -224,16 +221,18 @@ All four are now executed or queued:
 
 ## Open / wild
 
-- **Side-imbalance verification.** Gate manifests record player/opponent
-  splits inconsistently across phases. Worth a one-off script to extract
-  the side-WR delta and check whether the model is offensively weak or
-  defensively weak. R14.A.footnote confirmed the gap is real and not
-  seed-clustered at value-head-leaf inference; question is whether it shows
-  the same shape at rollout-leaf (where R14.I.2 already passes by 25pp).
-- **Simulator determinism audit.** Replay 100 identical seeds end-to-end;
-  measure full-state divergence rate. Silent non-determinism in CRN would
-  invalidate every advantage estimate. R14.B AsyncLocalStorage closed the
-  parallel-worker case (R-WILD #34); single-worker drift remains unaudited.
+- **Side-imbalance verification.** *MEASURED 2026-05-15 at rollout-leaf:
+  player WR 0.6833 [0.5577,0.7869] vs opponent 0.7833 [0.6638,0.8688],
+  +10.0pp directional gap (same direction as value-head-leaf R14.A
+  footnote), CIs overlap at n=60/side; player-side Wilson floor 0.5577 <
+  0.6479 aggregate. See `docs/ai-research/progress/r15.md` § "MCTS
+  production-claim audit".*
+- **Simulator determinism audit.** *CLOSED 2026-05-15: single-worker CRN
+  self-consistency PASS, 0.0 full-outcome divergence over 16 (seed,side)
+  keys × 2–3 replays at the production rollout-leaf config (run vs the
+  production-era SHA bc6db85, 96-dim schema). R14.B parallel-worker case
+  already closed (R-WILD #34). See `docs/ai-research/progress/r15.md` §
+  "MCTS production-claim audit".*
 - **Rule-bot mistake catalog.** The 80% aspirational target requires
   exploiting rule-bot weaknesses; we don't have a catalog of those
   weaknesses. Hand-construct ~50 states + a careful audit.

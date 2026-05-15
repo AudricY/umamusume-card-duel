@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-15T16:10Z",
+  "updated": "2026-05-15T20:40Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -11,9 +11,16 @@
     {
       "id": "mcts-determinism-and-side-asymmetry-audit",
       "priority": "P2",
+      "status": "done",
+      "summary": "DONE 2026-05-15. (a) Single-worker CRN determinism PASS: 0.0 full-outcome divergence over 16 (seed,side) keys x 2-3 single-worker replays at the exact production rollout-leaf config; thin wrapper training/r15_single_worker_determinism_replay.py run against an isolated git-worktree at production SHA bc6db85 (96-dim feature schema; current feat/ai HEAD is 110-dim v3.0 so the frozen artifact cannot serve against HEAD — version skew documented, not a bug). (b) Side-asymmetry at rollout-leaf extracted from the EXISTING iter-2 gate.manifest.json byModelSide (NO re-gate): player WR 0.6833 [0.5577,0.7869] vs opponent 0.7833 [0.6638,0.8688], +10.0pp directional gap (same direction as value-head-leaf), CIs overlap at n=60/side, player-side Wilson floor 0.5577 < 0.6479 aggregate. Conclusion: 0.6479 is a sound aggregate side-balanced reproducible Wilson-lower claim, NOT a per-side guarantee; side gap (not determinism) is the open deployment risk. No gate-rerun stop hit. Detail: docs/ai-research/progress/r15.md § 'MCTS production-claim audit'.",
+      "next_action": "None — closed. Downstream now-unblocked job: deployment-policy-rollout-vs-valuehead (added below)."
+    },
+    {
+      "id": "deployment-policy-rollout-vs-valuehead",
+      "priority": "P2",
       "status": "ready",
-      "summary": "STRONGEST FORWARD AUTONOMOUS PRODUCTION-PATH JOB (post-F1-closure, 2026-05-15). Two coupled unknowns that gate how honestly the production claim (search-wrapped rollout-leaf MCTS @ W6 iter-2, Wilson 0.6479) can be stated: (a) single-worker CRN determinism is UNAUDITED — R14.B's AsyncLocalStorage closed only the parallel-worker case (R-WILD #34); silent single-worker non-determinism would invalidate every advantage/Wilson estimate behind 0.6479. (b) side-asymmetry shape AT ROLLOUT-LEAF is unmeasured — the +0.11-0.30pp player/opponent gap is confirmed real at value-head-leaf (R14.A.footnote) but the 0.6479 claim lives at rollout-leaf, where the gap shape is unknown and must be disclosed correctly in any deployment claim. Both are read/measure/script tasks against existing runs/R13-W6-phase-d/iter-2/checkpoint.pt — NO new training, NO orchestration framework. Scoping/backlog: docs/ai-research-backlog.md § 'Production-path forward work' #2 + § 'Open / wild' (simulator-determinism-audit + side-imbalance-verification bullets).",
-      "next_action": "Investigator first: scope the smallest determinism + side-shape probe. (a) Replay N (>=50) identical seeds end-to-end single-worker via existing training/r14_determinism_smoke.py-style harness (or a thin variant) and measure full-state divergence rate; treat missing checkpoints as an environment gap, not a pass. (b) Extract per-side (player vs opponent) Wilson split at ROLLOUT-leaf from an existing rollout-leaf gate manifest under runs/R13-W6-phase-d/iter-2/ (no re-gate if a manifest with per-side splits exists; only re-run a gate if none does and it is cheap). Write findings + the resulting honest production-claim phrasing to docs/ai-research/progress/r15.md (new section) and update the backlog § 'Open / wild' bullets to pointers. If a gate re-run is required, return to the orchestrator with the cost estimate before launching."
+      "summary": "UNBLOCKED 2026-05-15 by mcts-determinism-and-side-asymmetry-audit. Determinism is clean and the rollout-leaf side gap is quantified (~10pp player<opponent, player Wilson floor 0.5577 vs 0.6479 aggregate). Now the top forward production-path decision: pick the production inference config (rollout-leaf vs value-head leaf) against the 0.39-0.45 cheap-inference envelope, and decide how the ~10pp player/opponent asymmetry is handled (disclose-as-aggregate vs side-conditioned policy vs accept). Backlog: docs/ai-research-backlog.md § 'Production-path forward work' #3. Inputs: r15.md § 'MCTS production-claim audit' (rollout-leaf side split) + R14.A footnote (value-head-leaf side shape) + R14 cheap-inference envelope.",
+      "next_action": "Investigator: assemble the rollout-leaf vs value-head-leaf comparison (aggregate + per-side Wilson, decision latency, fallback rate) from existing manifests only — no new gate unless a needed datapoint is genuinely absent and cheap. Recommend a production config + an honest claim string; escalate the asymmetry-handling policy choice if it needs a human research-stance call."
     },
     {
       "id": "model-py-amp-overflow-fix",
