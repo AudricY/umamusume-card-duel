@@ -79,11 +79,15 @@ remaining "one more pivot" option there. The post-R14 north star is the
 With the raw-policy SL line closed, all forward research leverage is on the
 working search-wrapped path. Ranked by leverage:
 
-1. **R14.E manual UI exercise — P1, human-gated, last R14 acceptance step.**
-   20 full browser games at value-head leaf + adaptive-ratio=1.5; exit:
-   fallback <5%, median decisionMs <3s. Cannot be done autonomously (needs
-   a human at the browser). Detail: R14 follow-ups below + `docs/r14-sprint-
-   plan.md` § E. Queue: `r14-e-manual-ui-exercise` P1.
+1. **R14.E UI integration — RESOLVED 2026-05-15 (user-verified).** User
+   manually exercised it in-browser; webapp opponent defaults to the
+   production rollout-leaf config (Wilson 0.6479). Qualitative acceptance
+   (no numeric latency capture — see honest scope in r14-sprint-plan § E).
+   The 96-dim/110-dim deployment skew is RESOLVED by an explicit serving
+   pin (`serve_onnx --feature-schema auto`→v2 for the 96-d production
+   model; commit `f658ad9`). Detail: `docs/ai-research/progress/r15.md`
+   §§ "R14.E closure", "96-dim serving pin"; `docs/r14-sprint-plan.md` § E.
+   Queue: `r14-e-manual-ui-exercise` → done.
 2. **MCTS search determinism + side-asymmetry shape — RESOLVED 2026-05-15.**
    (a) single-worker CRN determinism PASS (0.0 divergence); (b) rollout-leaf
    side gap measured: opponent 0.7833 vs player 0.6833 (+10.0pp directional,
@@ -108,6 +112,21 @@ working search-wrapped path. Ranked by leverage:
    honest claim string: `docs/ai-research/progress/r15.md` § "Deployment-
    policy decision — rollout-leaf vs value-head-leaf". Queue:
    `deployment-policy-rollout-vs-valuehead` → done.
+
+**Program state (2026-05-15): the search-wrapped production path is fully
+consolidated** — F1 raw-policy SL closed across all 4 axes; rollout-leaf @
+W6 iter-2 decided, characterized (determinism + side-asymmetry), UI-
+integrated, user-verified, and deployment-pinned (96-d). No autonomous
+forward research job remains. The next-arc frontier (all require a user
+steer — meaningfully-new directions, not loop-actionable):
+- **(a) A 110-d production-grade model** would unlock the `--feature-schema
+  v3` promote path, but the 110-d F1 line closed ~0.30 — needs a
+  genuinely new approach, not a re-run of a closed axis.
+- **(b) Side-conditioned sim budget** — the logged non-blocking bet; gated
+  on a larger-n rollout-leaf side-split that separates the player/opponent
+  CIs (currently overlap at n=60/side). Not a deployment blocker.
+- **(c) RL/PPO from the strong search-wrapped checkpoint, or scaling** —
+  the natural "next big bet" beyond SL; a strategic call for the user.
 
 The Tier-1/Tier-2/Tier-3 framework below is preserved as historical context
 for early-2026-05 reasoning; most entries are resolved and reduced to pointers.
