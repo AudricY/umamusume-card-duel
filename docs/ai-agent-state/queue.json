@@ -1,49 +1,19 @@
 {
-  "updated": "2026-05-15T14:30Z",
+  "updated": "2026-05-15T16:10Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
       "priority": "P1",
+      "status": "ready-human-gated",
+      "summary": "R14.E acceptance: play 20 full UI games with aiBackend=mcts, value-head leaf + adaptive-ratio=1.5, capture fallback rate (<5%) and median decision time (<3s). Only remaining R14 sprint acceptance step. HUMAN-GATED: requires a person at the browser; not autonomously actionable. The strongest AUTONOMOUS production-path job is mcts-determinism-and-side-asymmetry-audit (P2) below.",
+      "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section as the E closure."
+    },
+    {
+      "id": "mcts-determinism-and-side-asymmetry-audit",
+      "priority": "P2",
       "status": "ready",
-      "summary": "R14.E acceptance: play 20 full UI games with aiBackend=mcts, value-head leaf + adaptive-ratio=1.5, capture fallback rate (<5%) and median decision time (<3s). Only remaining R14 sprint acceptance step.",
-      "next_action": "Start backend + frontend dev servers, toggle MainMenuScreen AI=MCTS, play 20 games end-to-end, record fallback rate + median decisionMs from devtools console, append result to docs/r14-sprint-plan.md progress section."
-    },
-    {
-      "id": "mcts-distill-scoping",
-      "priority": "P2",
-      "status": "done",
-      "summary": "Scoping doc landed at docs/ai-research/scoping/mcts-distill.md (2026-05-14). Pre-existing evidence: W6/iter-2 search-wrapped Wilson 0.6479; raw-policy Wilson 0.1455 at n=20 (Phase J anchor, not a ceiling). Unknown to resolve: raw-policy Wilson at n=1000 from a fresh BC retrain on the existing R13-W6-phase-d corpora (~6216 rows). State-coverage mismatch (mcts-selfplay vs rule-bot gate) flagged as the largest risk."
-    },
-    {
-      "id": "mcts-distill-v1-run",
-      "priority": "P2",
-      "status": "done",
-      "summary": "CLOSEOUT FAIL (2026-05-15): iter-0 SL gate Wilson lower 0.1470 (n=1000 side-balanced, rule-bot, seed-start 9000), point 0.169, on runs/mcts-distill-v1/iter-000/. Below 0.30 → scoping § 6 FAIL + § 5(c) state-coverage mismatch is the binding constraint (the pre-registered biggest risk). Soft-visit MCTS-distill BC is the worst F1 iter-0 axis (-15 to -18pp vs R7/R8/R7.b.2). MCTS-distill SL branch closed. Result: docs/ai-research/progress/r15.md § MCTS-distill v1. Reproduction-from-item17 blocked by post-R7.b.2 arch incompat (see run README); canonical gate verdict was produced at scoping commit 73c2d8c and is intact."
-    },
-    {
-      "id": "mcts-distill-followup-direction",
-      "priority": "P4",
-      "status": "deferred-revisit",
-      "summary": "DEFERRED 2026-05-15 self-directed (escalations.md `## Resolved` F1-line-closed bullet). Raw-policy SL line is closed across 4 axes (R7 0.2921 / R8 0.3318 / R7.b.2 0.3045 / mcts-distill 0.1470); best-ever 0.3318 never approached the 0.40 gate. Both followup variants face a ~25pp gap no SL axis has reached → low prior; not worth compute now. Production strength is search-wrapped MCTS (0.6479). IF ever revisited: §5(c) indicates the rule-bot-mixed-corpus supervision variant (not the warm-start variant); item17 warm-start is also arch-blocked (predates R7.b.2 card-vocab embedding; train_bc.py strict load) so any revisit would init from W6/iter-2 (current-arch). Superseded as next-action by the strategic refinement below.",
-      "next_action": "Do not action until the strategic refinement (planning-refresh-after-r14-e) explicitly re-opens raw-policy SL investment. If re-opened: scope the rule-bot-mixed-corpus variant only."
-    },
-    {
-      "id": "r7b-card-embedding-pass",
-      "priority": "P2",
-      "status": "done",
-      "summary": "R7.b.2 CLOSEOUT FAIL (2026-05-14): iter-0 Wilson 0.3045 (n=1000 side-balanced) < 0.37 pre-reg close-out threshold; +1.24pp wash vs R7 baseline; -2.24pp vs R15.S1; -6.32pp vs R15.S3 ceiling. Branch closed per scoping § 7. Result: docs/ai-research/progress/r15.md § R7.b.2."
-    },
-    {
-      "id": "r7b-attention-set-encoder",
-      "priority": "P4",
-      "status": "superseded",
-      "summary": "R7.b.3 was conditional on R7.b.2 lifting but capping below 0.40 (scoping § 4 #3). R7.b.2 did not lift (Wilson 0.3045 = wash vs R7 0.2921). R7.b family closed; superseded by mcts-distill-scoping."
-    },
-    {
-      "id": "r7b-history-and-aux-heads",
-      "priority": "P4",
-      "status": "superseded",
-      "summary": "R7.b.4 + R7.b.5 were deprioritised-revisit-after-R7.b.2 entries (scoping § 4 #4-#6). R7.b family closed 2026-05-14; superseded by mcts-distill-scoping."
+      "summary": "STRONGEST FORWARD AUTONOMOUS PRODUCTION-PATH JOB (post-F1-closure, 2026-05-15). Two coupled unknowns that gate how honestly the production claim (search-wrapped rollout-leaf MCTS @ W6 iter-2, Wilson 0.6479) can be stated: (a) single-worker CRN determinism is UNAUDITED — R14.B's AsyncLocalStorage closed only the parallel-worker case (R-WILD #34); silent single-worker non-determinism would invalidate every advantage/Wilson estimate behind 0.6479. (b) side-asymmetry shape AT ROLLOUT-LEAF is unmeasured — the +0.11-0.30pp player/opponent gap is confirmed real at value-head-leaf (R14.A.footnote) but the 0.6479 claim lives at rollout-leaf, where the gap shape is unknown and must be disclosed correctly in any deployment claim. Both are read/measure/script tasks against existing runs/R13-W6-phase-d/iter-2/checkpoint.pt — NO new training, NO orchestration framework. Scoping/backlog: docs/ai-research-backlog.md § 'Production-path forward work' #2 + § 'Open / wild' (simulator-determinism-audit + side-imbalance-verification bullets).",
+      "next_action": "Investigator first: scope the smallest determinism + side-shape probe. (a) Replay N (>=50) identical seeds end-to-end single-worker via existing training/r14_determinism_smoke.py-style harness (or a thin variant) and measure full-state divergence rate; treat missing checkpoints as an environment gap, not a pass. (b) Extract per-side (player vs opponent) Wilson split at ROLLOUT-leaf from an existing rollout-leaf gate manifest under runs/R13-W6-phase-d/iter-2/ (no re-gate if a manifest with per-side splits exists; only re-run a gate if none does and it is cheap). Write findings + the resulting honest production-claim phrasing to docs/ai-research/progress/r15.md (new section) and update the backlog § 'Open / wild' bullets to pointers. If a gate re-run is required, return to the orchestrator with the cost estimate before launching."
     },
     {
       "id": "model-py-amp-overflow-fix",
@@ -53,11 +23,11 @@
       "next_action": "Implementer: change training/uma_ai/model.py:199 constant from -1.0e9 to torch.finfo(logits.dtype).min (one line), add assert_amp_overflow_regression smoke in training/smoke_e2e.py that loads model in fp16 and runs forward without RuntimeError or NaN logits, wire smoke into test:python-train, commit."
     },
     {
-      "id": "planning-refresh-after-r14-e",
-      "priority": "P2",
-      "status": "ready",
-      "summary": "STRATEGIC REFINEMENT (next autonomous-actionable job; R14.E is P1 but human-gated). Trigger: F1 raw-policy SL line closed across 4 axes (self-directed call 2026-05-15, escalations.md). Reconcile the backlog around the working search-wrapped path: the production claim is search-wrapped rollout-leaf MCTS (Wilson 0.6479), not raw-policy. Reframe ai-research-backlog forward items toward MCTS robustness / R14 acceptance and away from raw-policy SL axes; record the 4-axis closure as a one-line pointer (not a re-litigation). Decide whether any raw-policy SL revisit is justified (default: no, keep mcts-distill-followup-direction P4-deferred).",
-      "next_action": "Brief the implementer for a planning/refinement pass: read docs/ai-research-backlog.md, docs/r14-sprint-plan.md, docs/ai-research/progress/r15.md (recent §§), docs/ai-agent-state/escalations.md (`## Resolved` 2026-05-15 self-directed bullet). Update ai-research-backlog.md + queue.json only where evidence changes the next action; collapse the 4 closed F1 axes to one pointer; surface the strongest forward MCTS-robustness candidate as a scoped P2. Do NOT re-open raw-policy SL without explicit new evidence. Respect doc caps."
+      "id": "mcts-distill-followup-direction",
+      "priority": "P4",
+      "status": "deferred-revisit",
+      "summary": "DEFERRED 2026-05-15 self-directed (escalations.md `## Resolved` F1-line-closed bullet; reaffirmed by planning-refresh-after-r14-e 2026-05-15). Raw-policy SL line is closed across all 4 axes (R7 0.2921 / R8 0.3318 / R7.b.2 0.3045 / mcts-distill 0.1470); best-ever 0.3318 never approached the 0.40 gate. Both followup variants face a ~25pp gap no SL axis has reached -> low prior; not worth compute. Production strength is search-wrapped MCTS (0.6479). NOT a forward line. IF ever revisited: §5(c) indicates the rule-bot-mixed-corpus supervision variant (not the warm-start variant); item17 warm-start is arch-blocked (predates R7.b.2 card-vocab embedding; train_bc.py strict load) so any revisit would init from W6/iter-2 (current-arch).",
+      "next_action": "Do NOT action. Only re-open raw-policy SL on explicit NEW evidence (not a planning pass). If re-opened: scope the rule-bot-mixed-corpus variant only. Detail: docs/ai-research/progress/r15.md § MCTS-distill v1."
     },
     {
       "id": "harness-pidfile-race-fix",

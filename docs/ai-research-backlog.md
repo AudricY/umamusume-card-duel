@@ -31,15 +31,19 @@ As of 2026-05-14, after R12 / R13 / R14 / R15.S1–S4:
    reward shaping breaks the iter-2 Wilson 0.368 ± 0.001 ceiling from the
    item17 warm-start. R15.S3 axis 1 (observation-delta signals) saturated;
    axis 2 (value-head-delta tempo signal) regressed at both magnitudes.
-4. **F1-line three structural axes exhausted (2026-05-14).** R7 closed FAIL
-   (Wilson 0.2921, labels axis). R8 closed FAIL (Wilson 0.3318, objective
-   axis — real lift over R7/item17 but below the 0.40 gate and the R15.S3
-   0.368 ceiling). R7.b.2 closed FAIL (Wilson 0.3045, representation axis —
-   card-embedding v3.0 added 3.5% parameters with no Wilson lift). Surviving
-   structural lever: **MCTS-distillation** — rollout-leaf MCTS at R12 iter-2
-   reaches Wilson 0.6479 with inference-time search, so the gap is
-   search→model distillation, not labels/objective/representation.
-   `train_bc.py --data-mode mcts-distill` already wired. Scoping next.
+4. **F1 raw-policy SL line CLOSED across all four axes (2026-05-15).** Every
+   structural lever for lifting a *search-free* policy network has now failed
+   its SL gate: labels (R7, Wilson 0.2921), objective (R8, 0.3318),
+   representation (R7.b.2, 0.3045), label-shape (mcts-distill v1, 0.1470).
+   Best-ever 0.3318 never approached the 0.40 gate; the cross-axis pattern is
+   a structural raw-policy cap ≈0.30 against the rule-bot gate. The product
+   strength does not come from a stronger policy net — it comes from
+   inference-time search wrapped around the existing net (item 1). Raw-policy
+   SL is not a forward line; one revisit hypothesis is parked at P4
+   (`mcts-distill-followup-direction`, rule-bot-mixed-corpus variant only)
+   pending explicit new evidence. Single canonical detail home for all four
+   closures: `docs/ai-research/progress/r15.md` §§ R7 / R8 / R7.b.2 /
+   MCTS-distill v1.
 5. **Side asymmetry is real, not a determinism bug.** Engine determinism
    (R14.B AsyncLocalStorage) closed the parallel-worker non-determinism, but
    the player-vs-opponent gap (+0.11–0.30pp Wilson) replicates across four
@@ -54,18 +58,49 @@ Migration".
 ## Research north star (refreshed)
 
 Pre-R12: "move some honest measurement past Wilson 0.31." That bar is cleared
-by 32pp at max strength and at-or-near at cheap inference. The post-R14 north
-star is now a directional choice, not a measurement target:
+by 32pp at max strength and at-or-near at cheap inference. The F1 raw-policy
+SL line is now closed across all four axes (Current state #4) — there is no
+remaining "one more pivot" option there. The post-R14 north star is the
+**search-wrapped production path**:
 
-- **Ship the existing strength.** Finish the R14.E manual UI exercise; route
-  cheap-inference traffic by the empirical 0.39–0.45 envelope; pick a
-  rollout-leaf vs value-head deployment policy.
-- **Or commit to one more F1-line pivot.** R7 (labels), R8 (objective), and
-  R7.b.2 (representation) all closed FAIL (2026-05-14). The surviving
-  structural lever is **MCTS-distillation**: rollout-leaf MCTS at R12
-  iter-2 reaches Wilson 0.6479 at inference time; distilling that visit
-  distribution as the SL target is the next F1 lever. Scoping queued
-  (`mcts-distill-scoping` P2).
+- **Ship and harden the existing strength.** The production claim is
+  search-wrapped rollout-leaf MCTS @ W6 iter-2 (Wilson 0.6479). Forward work:
+  finish the R14.E manual UI exercise (human-gated, last R14 acceptance step);
+  pick a rollout-leaf vs value-head deployment policy against the empirical
+  0.39–0.45 cheap-inference envelope; harden MCTS robustness/determinism so
+  the deployed search behaves predictably (see "Production-path forward
+  work" below).
+- **Raw-policy SL is not a forward line.** R7 / R8 / R7.b.2 / mcts-distill
+  all closed FAIL; one parked revisit hypothesis at P4 only, not the next
+  pick. Do not re-open without explicit new evidence.
+
+## Production-path forward work (post-F1-closure, refreshed 2026-05-15)
+
+With the raw-policy SL line closed, all forward research leverage is on the
+working search-wrapped path. Ranked by leverage:
+
+1. **R14.E manual UI exercise — P1, human-gated, last R14 acceptance step.**
+   20 full browser games at value-head leaf + adaptive-ratio=1.5; exit:
+   fallback <5%, median decisionMs <3s. Cannot be done autonomously (needs
+   a human at the browser). Detail: R14 follow-ups below + `docs/r14-sprint-
+   plan.md` § E. Queue: `r14-e-manual-ui-exercise` P1.
+2. **MCTS search determinism + side-asymmetry shape — strongest forward
+   AUTONOMOUS production-path job (P2).** Two coupled unknowns that gate how
+   honestly we can state the production claim: (a) **single-worker
+   determinism audit** — R14.B's AsyncLocalStorage closed the parallel-worker
+   case (R-WILD #34) but single-worker CRN drift is unaudited; silent
+   non-determinism there would invalidate every advantage/Wilson estimate
+   underpinning the 0.6479 claim. (b) **side-asymmetry at rollout-leaf** —
+   the +0.11–0.30pp player/opponent gap is confirmed real at value-head-leaf
+   (R14.A.footnote) but its *shape at rollout-leaf* (where the 0.6479 claim
+   lives) is unmeasured; any deployment claim must disclose it correctly.
+   Both are read/measure/script tasks against existing checkpoints — no new
+   training, no orchestration framework. Detail: "Open / wild" below. Queue:
+   `mcts-determinism-and-side-asymmetry-audit` P2.
+3. **Deployment-policy decision (rollout-leaf vs value-head).** Downstream
+   of (2): once determinism + side shape are known, pick the production
+   inference config against the 0.39–0.45 cheap-inference envelope. Not yet
+   a discrete queue job — unblocked by (2)'s findings.
 
 The Tier-1/Tier-2/Tier-3 framework below is preserved as historical context
 for early-2026-05 reasoning; most entries are resolved and reduced to pointers.
@@ -99,44 +134,17 @@ results (2026-05-11)".
 - **R6.** Larger model capacity — **DONE / FAIL.** hidden=128/depth=3,
   50ep, value_weight=1.0: best imitator (83% argmax-match) AND weakest player
   (gate WR 33.0%). The cap is imitation-target-quality, not capacity.
-- **R7.** Multi-teacher BC blend — **DONE / FAIL (2026-05-14).** Iter-0 SL
-  gate Wilson lower **0.2921** vs R15.S1 iter-0 0.2844 (Δ +0.008, wash) and
-  pre-registered ≥0.35 SL gate not met; no PPO sweep run. Scoping doc:
-  `docs/ai-research/scoping/r7-multi-teacher-warmstart.md`; result block:
-  `docs/ai-research/progress/r15.md` § "R7 — multi-teacher BC blend".
-- **R8.** Direct preference optimization (DPO) — **DONE / FAIL (2026-05-14).**
-  Iter-0 Wilson lower **0.3318** (n=1000 side-balanced, β=0.1, item17 ref);
-  +3.97pp over R7 / +2.08pp over item17 / -3.59pp vs R15.S3 ceiling. Did not
-  clear the pre-reg ≥0.40 gate. Result block: `docs/ai-research/progress/r15.md`
-  § "R8 — DPO"; pointer below.
-- **R7.b.** Feature-representation expansion family — **DONE / FAIL (2026-05-14).**
-  R7.b.2 (card-embedding v3.0, headline pass) iter-0 Wilson lower **0.3045**
-  (n=1000 side-balanced) < 0.37 pre-reg close-out threshold; +1.24pp wash vs
-  R7 baseline. Branch closed per scoping § 7; R7.b.3 (attention) + R7.b.4
-  (history) + R7.b.5 (aux heads) were conditional on R7.b.2 lift and do not
-  auto-promote. F1 line three structural axes (labels, objective,
-  representation) now exhausted; next pick is MCTS-distillation. Result
-  block: `docs/ai-research/progress/r15.md` § "R7.b.2 — card-embedding
-  feature representation pass". Scoping doc at
-  `docs/ai-research/scoping/r7b-feature-representation.md` §§ 1–15.
-
-### R7. Multi-teacher BC blend (running)
-
-Full design + pre-flight teacher-agreement probe (GO) + step-by-step execution: `docs/ai-research/scoping/r7-multi-teacher-warmstart.md`. Status: step 4 mixed-teacher SL train running (2026-05-14, PID 3211541, ETA ~15–25 min from 06:45Z). SL/PPO gates at scoping § 4.
-
-### R8. DPO (Direct Preference Optimization) (DONE / FAIL, 2026-05-14)
-
-DONE / FAIL v1. Iter-0 Wilson lower **0.3318** (n=1000 side-balanced, β=0.1, item17 ref, 568 kept pairs at τ=0.3005). +3.97pp over R7, +2.08pp over item17, +0.49pp over R15.S1 iter-2 — real objective-family lift but ~3.6pp below R15.S3 ceiling 0.3677 and ~6.8pp below the pre-reg gate ≥0.40. Marginal-band β=0.3 follow-up (scoping § 5(b)) NOT triggered (Wilson < 0.37). Full design + closeout: `docs/ai-research/scoping/r8-dpo.md`, result block at `docs/ai-research/progress/r15.md` § R8. Next pick: R7.b.2 (card-embedding pass) per § R7.b below.
-
-### R7.b. Feature representation expansion (DONE / FAIL, 2026-05-14)
-
-DONE / FAIL. Wilson 0.3045 < 0.37 close-out threshold; branch closed per
-scoping § 7. R7.b.0 (re-encodability spike) and R7.b.1 (hygiene v2.1) both
-landed clean; R7.b.2 (card-embedding v3.0) iter-0 SL gate failed; R7.b.3
-(attention) + R7.b.4 (history) + R7.b.5 (aux heads) were conditional on
-R7.b.2 lift and do not auto-promote. Full design + closeout:
-`docs/ai-research/scoping/r7b-feature-representation.md`; result block at
-`docs/ai-research/progress/r15.md` § R7.b.2.
+- **R7 / R8 / R7.b / mcts-distill — F1 raw-policy SL line CLOSED, all four
+  axes FAIL.** One pointer for the whole closed line (see Current state #4):
+  R7 multi-teacher BC labels (Wilson 0.2921), R8 DPO objective (0.3318),
+  R7.b.2 card-embedding representation (0.3045), mcts-distill v1 soft-visit
+  label-shape (0.1470, 2026-05-15). None cleared the 0.40 gate; best-ever
+  0.3318. R7.b.3/4/5 (attention/history/aux-heads) were conditional on a
+  R7.b.2 lift and did not auto-promote. Canonical detail:
+  `docs/ai-research/progress/r15.md` §§ R7 / R8 / R7.b.2 / MCTS-distill v1.
+  Scoping docs: `docs/ai-research/scoping/{r7-multi-teacher-warmstart,
+  r8-dpo,r7b-feature-representation,mcts-distill}.md`. Forward status: not a
+  line; one parked P4 revisit hypothesis only (Production-path section).
 
 ## Tier 3 — structural changes (HISTORICAL)
 
