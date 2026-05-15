@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-15T13:40Z",
+  "updated": "2026-05-15T14:30Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -22,10 +22,10 @@
     },
     {
       "id": "mcts-distill-followup-direction",
-      "priority": "P2",
-      "status": "ready",
-      "summary": "Per mcts-distill.md § 6 FAIL path (Wilson 0.1470 < 0.30 → state-coverage binding, § 5(c)): label-shape is not the F1 bottleneck. Next direction must change either (i) the warm-start — init from W6/iter-2 directly rather than item17 — or (ii) the supervision distribution toward a rule-bot-covered state set (rule-bot-mixed mcts corpus, or DPO on MCTS-derived pairs). The § 6 MARGINAL 12k-regen + rule-bot-mix follow-up does NOT fire (requires Wilson ∈ [0.37,0.40)). Four F1 axes now exhausted: labels (R7), objective (R8), representation (R7.b.2), label-shape (MCTS-distill v1). Escalate direction pick to user.",
-      "next_action": "Scope a follow-up doc deciding between warm-start change (init from runs/R13-W6-phase-d/iter-2/checkpoint.pt) vs supervision-distribution change (rule-bot-mixed corpus / DPO on MCTS pairs). The architecture-incompat blocker (item17 checkpoint predates R7.b.2 card-vocab embedding; train_bc.py strict load_state_dict) must be resolved or designed around before any item17-warm-start variant — initing from W6/iter-2 (current-arch) sidesteps it. Bring the direction pick + the arch-bridge decision to the user."
+      "priority": "P4",
+      "status": "deferred-revisit",
+      "summary": "DEFERRED 2026-05-15 self-directed (escalations.md `## Resolved` F1-line-closed bullet). Raw-policy SL line is closed across 4 axes (R7 0.2921 / R8 0.3318 / R7.b.2 0.3045 / mcts-distill 0.1470); best-ever 0.3318 never approached the 0.40 gate. Both followup variants face a ~25pp gap no SL axis has reached → low prior; not worth compute now. Production strength is search-wrapped MCTS (0.6479). IF ever revisited: §5(c) indicates the rule-bot-mixed-corpus supervision variant (not the warm-start variant); item17 warm-start is also arch-blocked (predates R7.b.2 card-vocab embedding; train_bc.py strict load) so any revisit would init from W6/iter-2 (current-arch). Superseded as next-action by the strategic refinement below.",
+      "next_action": "Do not action until the strategic refinement (planning-refresh-after-r14-e) explicitly re-opens raw-policy SL investment. If re-opened: scope the rule-bot-mixed-corpus variant only."
     },
     {
       "id": "r7b-card-embedding-pass",
@@ -56,8 +56,8 @@
       "id": "planning-refresh-after-r14-e",
       "priority": "P2",
       "status": "ready",
-      "summary": "After the R14.E manual UI exercise lands or blocks, run a planning/refinement pass to reconcile queue, escalations, r14 sprint status, ai research backlog, and recent run evidence.",
-      "next_action": "Use /work to brief the implementer for a planning/refinement task: read docs/r14-sprint-plan.md, docs/ai-research-backlog.md, docs/ai-performance-research-progress.md, docs/ai-agent-state/escalations.md, and recent relevant run state; update queue and existing docs only where evidence changes the next action."
+      "summary": "STRATEGIC REFINEMENT (next autonomous-actionable job; R14.E is P1 but human-gated). Trigger: F1 raw-policy SL line closed across 4 axes (self-directed call 2026-05-15, escalations.md). Reconcile the backlog around the working search-wrapped path: the production claim is search-wrapped rollout-leaf MCTS (Wilson 0.6479), not raw-policy. Reframe ai-research-backlog forward items toward MCTS robustness / R14 acceptance and away from raw-policy SL axes; record the 4-axis closure as a one-line pointer (not a re-litigation). Decide whether any raw-policy SL revisit is justified (default: no, keep mcts-distill-followup-direction P4-deferred).",
+      "next_action": "Brief the implementer for a planning/refinement pass: read docs/ai-research-backlog.md, docs/r14-sprint-plan.md, docs/ai-research/progress/r15.md (recent §§), docs/ai-agent-state/escalations.md (`## Resolved` 2026-05-15 self-directed bullet). Update ai-research-backlog.md + queue.json only where evidence changes the next action; collapse the 4 closed F1 axes to one pointer; surface the strongest forward MCTS-robustness candidate as a scoped P2. Do NOT re-open raw-policy SL without explicit new evidence. Respect doc caps."
     },
     {
       "id": "harness-pidfile-race-fix",
