@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-14T18:00Z",
+  "updated": "2026-05-15T13:40Z",
   "items": [
     {
       "id": "r14-e-manual-ui-exercise",
@@ -17,9 +17,15 @@
     {
       "id": "mcts-distill-v1-run",
       "priority": "P2",
+      "status": "done",
+      "summary": "CLOSEOUT FAIL (2026-05-15): iter-0 SL gate Wilson lower 0.1470 (n=1000 side-balanced, rule-bot, seed-start 9000), point 0.169, on runs/mcts-distill-v1/iter-000/. Below 0.30 → scoping § 6 FAIL + § 5(c) state-coverage mismatch is the binding constraint (the pre-registered biggest risk). Soft-visit MCTS-distill BC is the worst F1 iter-0 axis (-15 to -18pp vs R7/R8/R7.b.2). MCTS-distill SL branch closed. Result: docs/ai-research/progress/r15.md § MCTS-distill v1. Reproduction-from-item17 blocked by post-R7.b.2 arch incompat (see run README); canonical gate verdict was produced at scoping commit 73c2d8c and is intact."
+    },
+    {
+      "id": "mcts-distill-followup-direction",
+      "priority": "P2",
       "status": "ready",
-      "summary": "Run mcts-distill v1 SL retrain + gate per scoping § 1 falsifiable proposition. Combined corpus runs/R13-W6-phase-d/iter-{0,1,2}/selfplay.jsonl (~6216 rows). Init from runs/item17-2026-05-11/iter-002/model/checkpoint.pt. Exit gate per scoping § 6: PASS ≥0.40, MARGINAL [0.37,0.40), FAIL <0.37.",
-      "next_action": "Concatenate the three selfplay.jsonl files into a single training input (or pass via comma-separated --data if train_bc.py supports it — check first). Launch chained train+gate: train_bc.py --data <combined> --init-from-checkpoint runs/item17-2026-05-11/iter-002/model/checkpoint.pt --data-mode mcts-distill --epochs 75 --hidden-dim 64 --depth 2 --kl-anchor-checkpoint runs/item17-2026-05-11/iter-002/model/checkpoint.pt --kl-anchor-weight 0.05 --out-dir runs/mcts-distill-v1/iter-000/model/ --device auto (NO --amp until model-py-amp-overflow-fix lands). Then r8_gate_eval.py --checkpoint .../checkpoint.pt --out-dir runs/mcts-distill-v1/iter-000/ --games 500 --seed-start 9000 --min-ci-lower 0.40. Surface verdict + close-out per scoping § 6."
+      "summary": "Per mcts-distill.md § 6 FAIL path (Wilson 0.1470 < 0.30 → state-coverage binding, § 5(c)): label-shape is not the F1 bottleneck. Next direction must change either (i) the warm-start — init from W6/iter-2 directly rather than item17 — or (ii) the supervision distribution toward a rule-bot-covered state set (rule-bot-mixed mcts corpus, or DPO on MCTS-derived pairs). The § 6 MARGINAL 12k-regen + rule-bot-mix follow-up does NOT fire (requires Wilson ∈ [0.37,0.40)). Four F1 axes now exhausted: labels (R7), objective (R8), representation (R7.b.2), label-shape (MCTS-distill v1). Escalate direction pick to user.",
+      "next_action": "Scope a follow-up doc deciding between warm-start change (init from runs/R13-W6-phase-d/iter-2/checkpoint.pt) vs supervision-distribution change (rule-bot-mixed corpus / DPO on MCTS pairs). The architecture-incompat blocker (item17 checkpoint predates R7.b.2 card-vocab embedding; train_bc.py strict load_state_dict) must be resolved or designed around before any item17-warm-start variant — initing from W6/iter-2 (current-arch) sidesteps it. Bring the direction pick + the arch-bridge decision to the user."
     },
     {
       "id": "r7b-card-embedding-pass",
