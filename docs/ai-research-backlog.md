@@ -91,13 +91,23 @@ working search-wrapped path. Ranked by leverage:
    side-balanced reproducible* claim, not a per-side guarantee. Detail:
    `docs/ai-research/progress/r15.md` § "MCTS production-claim audit".
    Queue: `mcts-determinism-and-side-asymmetry-audit` → done.
-3. **Deployment-policy decision (rollout-leaf vs value-head) — now the top
-   forward production job.** Unblocked by (2): determinism is clean, the
-   side gap (not non-determinism) is the open risk. Pick the production
-   inference config against the 0.39–0.45 cheap-inference envelope, and
-   decide how the ~10pp player/opponent asymmetry is handled (disclose vs
-   side-conditioned policy vs accept). Queue: `deployment-policy-rollout-vs-
-   valuehead`.
+3. **Deployment-policy decision (rollout-leaf vs value-head) — DECIDED
+   2026-05-15.** Production config = **rollout-leaf @ W6 iter-2** (Wilson
+   lower 0.6479 aggregate; ~20pp over value-head's best-case 0.4524 and
+   well over the honest-envelope-low 0.394). Tradeoff: rollout-leaf is
+   ~2.5× slower (value-head + ratio=1.5 cuts 61% wall-clock, ~0.5s/dec);
+   acceptable for a turn-based game with no hard move-clock. Value-head +
+   adaptive-ratio=1.5 is the documented latency-SLA fallback only, shipped
+   with the "*at* the 0.40 bar, 1-of-3 seeds below" caveat — not an
+   equivalent. Asymmetry stance: **disclose-as-aggregate with the per-side
+   caveat** (gap directional not separated; config choice does not cleanly
+   shrink it — rollout +10pp, value-head +6 to +14pp across seeds, both
+   player-weaker). Forward (non-blocking) bet: a side-conditioned sim
+   budget, gated on a larger-n side-split that separates the CIs — not a
+   deployment blocker, no human research-stance call needed. Detail +
+   honest claim string: `docs/ai-research/progress/r15.md` § "Deployment-
+   policy decision — rollout-leaf vs value-head-leaf". Queue:
+   `deployment-policy-rollout-vs-valuehead` → done.
 
 The Tier-1/Tier-2/Tier-3 framework below is preserved as historical context
 for early-2026-05 reasoning; most entries are resolved and reduced to pointers.

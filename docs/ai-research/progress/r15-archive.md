@@ -134,3 +134,140 @@ falsify rule fires R8 next. R7.b.2 promotes only if R8 also closes negative.
   (step 4 launch record). § 4 close-out condition fired by this block.
 - Backlog pointer: `docs/ai-research-backlog.md` § Tier 2 R7 line (DONE / FAIL).
 
+---
+
+## R8 — DPO (Direct Preference Optimization, single iter, FAIL) — 2026-05-14
+
+**Verdict: FAIL — closes the R8 v1 branch. Iter-0 Wilson lower 0.3318
+(n=1000 side-balanced, rule-bot, seed-start 9000) on
+`runs/R8-dpo/iter-000/`, +3.97pp over R7 iter-0's 0.2921 and +2.09pp over
+item17 iter-2's 0.311 — a real lift over both anchors but ~3.6pp below the
+R15.S3 obs-delta ceiling (0.3677) and ~6.8pp below the pre-registered
+gate ≥ 0.40 (`scoping § 4`).** Wilson lower < 0.37 → close-out path per
+scoping § 5(b); the marginal-band β=0.3 follow-up is NOT triggered. R7.b.2
+(card-embedding feature representation) promotes to the next pick.
+
+**Run setup.** Step 2a (digest slot 43) trained DPO from the item17
+warm-start (`runs/item17-2026-05-11/iter-002/model/checkpoint.pt`) with
+β=0.1, τ=0.3005, 568 kept pairs (13.9% of the 4094-row outcome corpus
+`training/runs/r8-outcome-crn/examples.jsonl`), 5 epochs / batch 32 / lr
+1e-4 on CUDA in ~30s. Train metrics from
+`runs/R8-dpo/iter-000/model/manifest.json`: train loss 0.683→0.603,
+val loss 0.683→0.618, train acc 0.692, val acc 0.681, train policy_margin
+3.31 / val 3.27, train logits_diff_mean 2.08 / val 1.53 — model moved
+away from reference as expected for non-zero β. ONNX roundtrip smoke PASS
+(max_logit_diff 7e-7, max_value_diff 3e-7).
+
+**Step 2b gate.** New driver `training/r8_gate_eval.py` (~150 LOC) wraps
+the three existing primitives `export_checkpoint_to_onnx`,
+`serve_onnx_context`, `run_eval_gate`. Seed-start 9000 chosen to match
+R7 step 4's `seedStart` field in
+`runs/R7-multi-teacher-warmstart/iter-000/gate.manifest.json`.
+**Deviation from scoping § 3.7 / brief:** brief asked for "n=500
+side-balanced" but `--games N` is interpreted per-side (`modelSide=both`),
+so the actual sample is **n=1000 (500 player + 500 opponent)** — 2×
+larger than R7's n=500. The verdict direction is unchanged (Wilson lower
+0.3318 is well below the 0.37 marginal-band floor); the larger n only
+tightens the interval (Wilson width 5.95pp at n=1000 vs ~8.2pp at R7's
+n=500). Wall-clock 1m 18s (15:42:41Z → 15:43:59Z).
+
+**Iter-0 gate result.** From
+`runs/R8-dpo/iter-000/gate.manifest.json`:
+
+| Metric | Value |
+| --- | --- |
+| games | 1000 (500 player + 500 opponent) |
+| modelWins | 361 |
+| modelWinRate | 36.1% |
+| Wilson 95% | [**0.3318**, 0.3912] |
+| averageModelPoints | 0.960 |
+| averageHeuristicPoints | 1.404 |
+| heuristicFallbacks | 0 |
+| selectedNoOps | 0 |
+| terminalReasons | gameOver: 1000 |
+
+Side split: player WR 31.8% Wilson [0.279, 0.360] (n=500); opponent WR
+40.4% Wilson [0.362, 0.448] (n=500). Same +8–10pp opponent-side gap
+that replicates across every F1 / R15 / R7 phase at value-head-leaf
+inference (backlog § "Current state" bullet 5). **Opponent side
+in isolation clears 0.40 (Wilson lower 0.3619 — within 4pp of the 0.40
+gate)** but the symmetric gate is the binding metric.
+
+**Comparison anchors.**
+
+| Anchor | Wilson lower | Δ vs R8 iter-0 | Source |
+| --- | --- | --- | --- |
+| R8 DPO iter-0 (β=0.1, item17 ref) | **0.3318** | — | this block |
+| R15.S3 ceiling (Phase N/O', obs-delta saturated) | 0.3677 | -3.59pp | `progress.md` § Phase N / O' |
+| R15.S1 iter-2 (3-iter DAgger from item17) | 0.3269 | +0.49pp | `progress.md` § Phase K |
+| item17 take-2 iter-2 (rollout-only DAgger ref) | 0.311 | +2.08pp | `progress.md` L582 |
+| Phase H (PPO from item17 warm-start) | 0.3109 | +2.09pp | `progress.md` § Phase K table |
+| R7 iter-0 (multi-teacher BC blend) | 0.2921 | +3.97pp | § R7 above |
+| Pre-registered R8 gate | ≥ 0.40 | -6.82pp | `scoping § 4` |
+
+**Mechanism interpretation.** DPO did move the gate above all SL/PPO
+anchors (R7, item17, Phase H, even R15.S1 iter-2 by a hair) — the
+Bradley-Terry objective is **not strictly bounded by the reference policy**
+in practice; the +3.97pp over R7 and +2.08pp over the item17 reference
+demonstrate genuine objective-family lift. But it lands **below** the
+R15.S3 reward-shaping ceiling (0.3677) and well below the 0.40 gate. Two
+interpretations consistent with the data:
+
+- **(a) Pair-budget binding.** 568 kept pairs after τ=0.3005 filtering is
+  ~5.7% of the 10k-row scoping budget. The corpus may simply be too small
+  for the DPO loss to extract more lift before val-loss bottoms out.
+- **(b) Reference-action-support binding (scoping risk (c)).** A
+  Wilson-0.31 reference assigns near-uniform mass to several bad actions;
+  DPO's BT loss can re-weight only between actions the reference already
+  considers, capping the lift the objective itself can deliver.
+
+Either way, β=0.1 v1 cleared the R7 / item17 / R15.S1 anchors but did not
+clear R15.S3's reward-shaping ceiling. The marginal-band β=0.3 follow-up
+(scoping § 5(b)) requires Wilson lower ∈ [0.37, 0.40) — at 0.3318 we are
+~4pp below that floor, so the follow-up does **not** fire automatically.
+
+**Limits of this falsification.** Only β=0.1 tested. Only single-pass
+(no iterative refresh from trained policy). Only the 568-pair τ=0.3005
+filter. R8.b candidates explicitly out of v1 scope (scoping § 7): R8.b
+DPO from R15.S3 phase-N warm-start (Wilson 0.368 — bypasses
+interpretation (b)); iter-2 DPO with refreshed pairs from the trained
+policy (scoping risk (d)); top-K / Plackett-Luce loss; β sweep at
+non-marginal start. Any of these could re-open the line; none are
+auto-promoted by this v1 outcome.
+
+**Cost.** Step 1 ~3 h code (corpus regen + `pair_corpus.py` 257 LOC +
+`train_dpo.py` 332 LOC + smoke 151 LOC). Step 2a train ~30s on CUDA.
+Step 2b gate driver ~150 LOC + 1m 18s gate wall-clock. Total under the
+scoping § 5 estimate (~3 h code + ~10 min training); the corpus was
+smaller than budgeted (568 vs ~10k pairs) which collapsed train + gate
+wall-clock from the projected ~15 min to ~2 min total.
+
+**Next direction picked.** **R7.b.2** (card-embedding feature
+representation pass) per `docs/ai-research-backlog.md` § R7.b and the
+queue's `r7b-card-embedding-pass` parked entry. Promotion fires per
+scoping § 4 close-out condition. R7.b.0 trace-reencodability spike
+already YES (digest slot 36) → R7.b.2 schema bump v3 is feature
+re-extraction only, not multi-hour DAgger regen. Cost ~1.5 days code +
+half day eval. R7.b.2 targets feature-representation interventions
+(card embeddings, action-target embedding) — distinct family from R7's
+labels axis and R8's objective axis, and the only remaining structural
+lever in the F1 line that hasn't been falsified.
+
+**Files & artifacts.**
+
+- `runs/R8-dpo/iter-000/gate.manifest.json` — summary + byModelSide +
+  terminalReasons; git sha `aea954e` (dirty: this block + queue/escalation
+  edits in flight).
+- `runs/R8-dpo/iter-000/policy.gate.onnx` — exported from
+  `runs/R8-dpo/iter-000/model/checkpoint.pt`.
+- `runs/R8-dpo/iter-000/gate.log` — full eval-gate stdout (1000-game
+  trace).
+- `runs/R8-dpo/iter-000/model/{checkpoint.pt, manifest.json}` —
+  step 2a outputs (digest slot 43).
+- `training/r8_gate_eval.py` — new mechanical driver wrapping
+  `export_checkpoint_to_onnx` / `serve_onnx_context` / `run_eval_gate`.
+- `docs/ai-research/scoping/r8-dpo.md` §§ 1–7 (closed design + pre-
+  registered gates). § 4 close-out condition fired by this block.
+- Backlog pointer: `docs/ai-research-backlog.md` § Tier 2 R8 line (DONE /
+  FAIL, demoted to one-liner).
+
