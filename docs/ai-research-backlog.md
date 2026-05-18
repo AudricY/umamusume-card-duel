@@ -31,9 +31,9 @@ As of 2026-05-18:
   user-gated regularization-dose decision.** The recipe-fix landed and was
   confirmed via a full R111 loop (iter-3 rot eliminated) but over-damps at
   default HP — net ceiling loss vs the 0.6042 baseline. R16-P1
-  temporal/turn-state features are now implemented (commit `357f0d6`); its
-  strength verdict is also user-gated. Live operational state is in
-  `docs/ai-agent-state/queue.json`.
+  temporal/turn-state features were implemented and **ablated NO-GO**
+  (v3.1 ≈ v3.0, no Wilson-lower win; `docs/ai-research/progress/r16.md`).
+  Live operational state is in `docs/ai-agent-state/queue.json`.
 
 ## Active Search-Wrapped Frontier
 
@@ -63,24 +63,19 @@ As of 2026-05-18:
    stays production. R16-P0 embedding fix confirmed working.
    `docs/ai-research/progress/r110.md`.
 
-2. **R16-P1 temporal/turn-state features — IMPLEMENTED (commit `357f0d6`).**
-   v3.1 164-d temporal/turn-state vertical landed end-to-end (TS observation
-   schemaVersion 2→3 → new `observation_to_features_v3_1` reusing frozen v3.0
-   0–109 byte-identical → serve_onnx 164→v3.1 → 164-d ONNX export); all
-   smokes green incl. real 96/110-d checkpoints. Forward line is a
-   **user-gated ~0.5-day v3.1 strength ablation/gate** vs the 110-d v3.0
-   baseline (DO NOT auto-launch; promote only on a gate Wilson-lower win or
-   targeted-phase diagnostic gain). Canonical:
-   `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`
-   (P1 = IMPLEMENTED, § P1 "Resolved").
+2. **R16-P1 temporal/turn-state features — ABLATED NO-GO.**
+   v3.1 164-d implemented end-to-end (commits `357f0d6`/`3ce1404`); the
+   faithful strength ablation produced **no Wilson-lower win** (v3.1 ≈ v3.0,
+   best-promoted 0.5955 < v3.0 0.6042). v3.1 NOT promoted; production stays
+   pinned 96-d. Null strength signal. Canonical:
+   `docs/ai-research/progress/r16.md`.
 
-2b. **R16-P2 per-Uma slot tokens — NEXT REPRESENTATION LIFT, gated.**
-   Dependency-unblocked (P0 done + P1 done) and fully scoped, but it is a
-   3–4-day model/ONNX migration (signature churn, old-checkpoint
-   incompatibility) and the dependency graph requires a cheap P1 signal
-   baseline before P2 is *evaluated*. Do not start until the user-gated P1
-   ablation gives that baseline or the user explicitly calls for it. Scope:
-   same r16 doc § "P2 - Per-Uma Slot Tokens".
+2b. **R16-P2 per-Uma slot tokens — user-gated larger lift, NOT auto.**
+   Dependency-unblocked (P0/P1 done) and fully scoped, but P1's strength
+   signal was **null**, so P2 no longer has a cheap-P1-baseline rationale.
+   It remains a 3–4-day model/ONNX migration (signature churn,
+   old-checkpoint incompatibility); do not start unless the user explicitly
+   calls for it. Scope: r16 scoping doc § "P2 - Per-Uma Slot Tokens".
 
 3. **GPU-fed stronger MCTS — P1 scoping, not implementation.**
    First prove which search configs can use GPU inference for strength:
@@ -146,13 +141,12 @@ section).
   mcts-distill v1 failure is the canonical negative example.
 - Do not re-open raw-policy SL unless a new coverage result explicitly
   falsifies the current diagnosis.
-- Do not auto-launch the two pending user-gated verdicts (the W6
-  regularization-dose sweep and the R16-P1 v3.1 strength ablation); they
-  need explicit go-ahead. The R16-P1 serving-schema guard prerequisite is
-  satisfied and P1 implementation has landed (`357f0d6`) — that old stop
-  line is retired.
-- Do not start R16-P2 per-Uma slot tokens (3–4-day migration) before the
-  user-gated P1 signal baseline exists or the user calls for it.
+- Do not auto-launch the W6 regularization-dose sweep; it needs explicit
+  go-ahead. (The R16-P1 v3.1 ablation is now CLOSED = NO-GO; no auto-launch
+  remains on that line — `docs/ai-research/progress/r16.md`.)
+- Do not start R16-P2 per-Uma slot tokens (3–4-day migration) unless the
+  user explicitly calls for it; P1's null strength signal removed its
+  cheap-baseline rationale.
 - Do not re-open representation/capacity tuning off the R110 MARGINAL band;
   the forward line is the loop-recipe axis only (`docs/ai-research/progress/r110.md`).
 
@@ -162,5 +156,6 @@ section).
 - R15 result blocks: `docs/ai-research/progress/r15.md` and
   `docs/ai-research/progress/r15-archive.md`.
 - R110 W6-repro verdict + recipe mechanism: `docs/ai-research/progress/r110.md`.
+- R16-P0/P1 results (P1 v3.1 ablation NO-GO): `docs/ai-research/progress/r16.md`.
 - Closed scoping docs: `docs/ai-research/scoping/archive/`.
 - Closed sprint/design/proposal docs: `docs/archive/ai-research/`.

@@ -6,26 +6,12 @@
 
 ## Resolved Pointers
 
-- 2026-05-19: R16-P1 v3.1 ablation 1st/2nd launches FAILED — iter-0 gate
-  crashed (`gate exited 1`, bogus `wilson_lower:0.0`). Root cause:
-  `serve_onnx.py` `PolicyServer` used Python default TCP
-  `request_queue_size=5`; 24-worker gate fan-in overflowed the listen
-  backlog (dmesg SYN-flood on the serve port) → ECONNREFUSED cascade.
-  NOT v3.1/OOM. Also found a recipe confound: launched `--eval-games
-  120` but real R110-W6-repro gate = `--games 60` (n=120 side-balanced,
-  the 0.6042 baseline). RESOLVED: serve fix commit `e846881`
-  (`request_queue_size=128` + per-iter `serve.log` observability,
-  empirically proven vs the `listen(5)` mechanism); relaunched (pid
-  2162) with verified recipe `--eval-games 60 --workers 16`,
-  w6-fix OFF, `--state-dim 164`. Canonical: queue `loop_note`.
-- 2026-05-19: R16-P1 v3.1 ablation was NOT launchable — commit `357f0d6`
-  wired dim-keyed feature selectors into serve/export only; the
-  mcts-distill TRAINING path (`selfplay_dataset.py`/`train_bc.py`/
-  `r12_orchestrator.py`) still hardcoded 110-d v3.0. RESOLVED commit
-  `3ce1404`: `--state-dim` threaded through the loop + 164-d
-  additive-tail warm-start init (output-identical to v3.0 init,
-  delta 0.0 — clean A/B). v3.1 4-iter ablation now launched (user
-  go-ahead). Canonical: queue `loop_note` + `r16-p1...`.
+- 2026-05-19: R16-P1 v3.1 strength ablation COMPLETE = NO-GO
+  (best-promoted 0.5955 < v3.0 0.6042; v3.1 not promoted, 96-d pin
+  unchanged). serve_onnx 24-worker gate-fan-in crash blocker resolved
+  `e846881` (TCP backlog 5→128, durable harness fact); trainer-wiring
+  gap resolved `3ce1404` (`--state-dim` + delta-0.0 additive init).
+  Canonical: `docs/ai-research/progress/r16.md`.
 - 2026-05-18: R16-P1 stop line CLEARED — serving-schema 96/110/164 guard
   prerequisite IMPLEMENTED (commits `66adca6`/`692091d`); R110 verdict
   MARGINAL/non-blocking. P1 implementation unblocked. Canonical:

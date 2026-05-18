@@ -1,7 +1,16 @@
 # R16 Model Feature Backlog Refinement
 
 - **Date:** 2026-05-18
-- **Status (2026-05-18):** P0 **DONE** (commit `b38de0e`). P1
+- **Status (2026-05-19):** P0 **DONE** (commit `b38de0e`). P1
+  **IMPLEMENTED + ABLATED NO-GO** — v3.1 strength ablation complete;
+  best-promoted v3.1 **0.5955 < v3.0 0.6042** (no Wilson-lower win,
+  null strength signal); v3.1 NOT promoted, production stays pinned
+  96-d. Full trajectory + verdict reasoning + the serve_onnx
+  backlog-fix (`e846881`) durable harness fact:
+  `docs/ai-research/progress/r16.md` (canonical — not restated here).
+  P2 scope below is intact but P1 produced a **null** strength signal,
+  so P2 no longer has a cheap-P1-baseline rationale (user-gated only).
+- **Status (2026-05-18 — implementation):** P1
   **IMPLEMENTED** (2026-05-18) — TS observation schemaVersion 2→3 with
   `temporal` + per-side/per-Uma `turnState`; NEW 164-d
   `observation_to_features_v3_1` builder (frozen v3.0 head [0:110]
