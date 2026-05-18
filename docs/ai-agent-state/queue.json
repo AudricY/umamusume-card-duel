@@ -1,6 +1,13 @@
 {
-  "updated": "2026-05-18T01:00Z",
+  "updated": "2026-05-18T01:30Z",
   "items": [
+    {
+      "id": "r16-p1-temporal-turn-state-features",
+      "priority": "P2",
+      "status": "blocked",
+      "summary": "READINESS-AUDITED 2026-05-18 (commit 0f9953c), implementation-ready but BLOCKED on R110 verdict + a code prerequisite. Read-only engine audit confirmed all P1 fields exist in shared/src/types.ts and are hidden-info-safe. Exact STATE_DIM = 110->164 (not the spec's '~148') with a committed slot layout; field renames + 2 omissions (globalRetreatCostReduction, first-turn threshold) folded into docs/ai-research/scoping/r16-model-feature-backlog-refinement.md § P1. Blocked because: (a) P1 builds richer features on top of v3.0 — gated on R110's 'does v3.0 reproduce W6' verdict; (b) P1 edits features.py/observation builder which the live R110 orchestrator re-execs per iteration (landing mid-run re-confounds R110 — the P0 lesson).",
+      "next_action": "Do NOT land code while R110 runs. After R110 verdict: (1) freeze/vendor the 110-d v3.0 builder + make serve_onnx schema resolution 3-way (96/110/164 keyed off graph dim) BEFORE bumping the shared STATE_DIM constant (else 110-d v3.0 serving silently breaks); (2) then implement the additive-tail 3.1 schema (slots 110:164) + ablation key state_temporal_turn_v31 per the scoping doc. P2 (per-Uma slot tokens) remains downstream (depends on P0 done + ideally P1)."
+    },
     {
       "id": "r16-p0-mcts-selfplay-v3-embedding",
       "priority": "P0",
