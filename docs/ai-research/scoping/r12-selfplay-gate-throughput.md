@@ -2,7 +2,9 @@
 
 Status: Deliverable 1 landed (worker default 1→24). Items #2
 (rollout hash-carry) and #3 (HTTP keep-alive) landed ON, both
-proven bit-identical by the determinism gate (see below). Item #4
+proven bit-identical by the determinism gate (see below). Item #5
+(work-stealing dispatch) landed ON, proven bit-identical (selfplay
+bytes + gate fingerprints) at workers>1 — see below. Item #4
 (CRN/value-head leaf) stays deferred to R111 — it is a research-recipe
 decision and changing it would break the trusted R110 A/B comparison.
 
@@ -49,6 +51,35 @@ per-stage numbers + trajectory-neutrality proof live in
    semantics, only socket reuse differs. Gated `MCTS_KEEPALIVE_ENABLED`,
    default ON, `UMA_MCTS_KEEPALIVE=0` reverts to bare fetch.
 
+5. **DONE — work-stealing dispatch (selfplay + gate).** Ranked
+   successor to #1. Static contiguous chunking
+   (`sliceSize=ceil(N/workers)` then `.slice(w*size,(w+1)*size)`,
+   `mctsSelfPlay.ts` `partitionSeeds`, `evalGate.ts` `partitionTasks`)
+   had two defects: (a) selfplay 60 games / 24 workers →
+   `ceil(60/24)=3` → only 20 slices, **workers 20-23 dark the entire
+   selfplay stage**; (b) per-game length variance is ~100× (gate games
+   1.6s-168s) so static assignment clusters long games onto unlucky
+   workers → 2-3× per-worker wall spread. **This refutes the
+   "make games a multiple of workers" framing**: the gate is already
+   exactly 5 games/worker and STILL ~20% imbalanced — equal slice
+   counts do not fix variance-driven skew; only dynamic assignment
+   does. Fix: shared task-index queue, each worker seeded with 2 tasks
+   then refilled one-per-completion; workers spun = `min(N,workers)`
+   (kills the dark-core bug). Result aggregation is by task/seed slot
+   (selfplay concatenates per-seed-index shards in ascending order;
+   gate stores into a slot array) — **never completion order** — so
+   output is byte-identical to static. Gated
+   `MCTS_WORK_STEALING_ENABLED` (`workStealing.ts`), default ON,
+   `UMA_MCTS_WORK_STEALING=0` reverts to static chunking for an exact
+   A/B. **GATE SATISFIED** — see work-stealing determinism gate below.
+   Expected wall: the static path delivered ~2.11×; balanced dispatch
+   lifts the ceiling to ~2.6-2.85×. It is NOT ~6×: ≈half the
+   2.11×-vs-idealized gap is the 4-worker-baseline re-anchoring
+   artifact + per-game rollout-cost floor (never recoverable), so
+   ~2.9× is the honest balanced max, not 6×. serve_onnx-sharding is
+   explicitly NOT worth it and out of scope (stdlib threaded server,
+   ~7% predict share at batch=1 — see bottleneck note).
+
 4. **DEFERRED to R111 — CRN / value-head leaf change.** Switching the
    leaf evaluator or CRN sample count changes the learning targets and
    is a research-recipe decision, NOT a unilateral throughput change.
@@ -66,6 +97,30 @@ FLAG-OFF (`UMA_MCTS_HASH_CARRY=0 UMA_MCTS_KEEPALIVE=0`): identical
 trajectories + terminal outcomes + gate win/loss. Both ship ON.
 Artifacts: `runs/R12-throughput-determinism-gate/result.json`. `cd
 backend && npx tsc --noEmit` clean.
+
+## Work-stealing determinism gate result
+
+`training/r12_workstealing_determinism_gate.py --games 8 --workers 3`
+(R110 prod config; checkpoint `runs/R13-W6-phase-d/iter-2/policy.onnx`;
+selfplay seedStart 12000, gate seedStart 9000): **PASS** — selfplay
+canonical `selfplay.jsonl` byte-identical (sha256
+`d63b89c7…`, 314 rows both) AND all 16 gate `(seed,modelSide)`
+fingerprints identical, zero mismatches, symmetric key set, FLAG-ON
+(work-stealing default) vs FLAG-OFF (`UMA_MCTS_WORK_STEALING=0`,
+static chunking) at workers>1 (the only regime where dispatch
+differs). NOTE: the first cut prefetched 2 tasks AND ran them
+concurrently in one worker → NOT identical (RNG AsyncLocalStorage +
+shared serve_onnx client interleave); fixed by buffering prefetched
+tasks in an internal FIFO drained STRICTLY SEQUENTIALLY (one game in
+flight per worker, matching the static per-worker for-loop) — load
+balancing still comes from the orchestrator refilling on completion.
+Re-ran: bit-identical. Trajectory-neutral → shipped ON. Artifacts:
+`runs/R12-workstealing-determinism-gate/result.json`. `cd backend &&
+npx tsc --noEmit` clean. Per-game RNG is seeded solely from the game
+seed (`mctsSelfPlay.ts` `:selfplay`, `evaluateModelVsHeuristic.ts`
+`:modelSide`) — no worker/order input — so dispatch order cannot
+perturb trajectories; the gate confirms result-aggregation is
+slot-ordered, not append-ordered.
 
 ## serve_onnx bottleneck note
 

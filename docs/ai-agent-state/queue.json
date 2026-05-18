@@ -1,12 +1,12 @@
 {
-  "updated": "2026-05-18T18:30Z",
+  "updated": "2026-05-18T21:30Z",
   "items": [
     {
       "id": "r12-throughput",
       "priority": "P1",
       "status": "in-progress",
       "summary": "Speedup CONFIRMED in a full R111 production loop: 2.11x wall-clock (stage-sum 3088s vs R110 4-worker baseline 6532s), trajectory-neutral (iter-0 bit-identical to baseline => #1-#3 do not perturb the loop). R110-W6-repro per-iter wall-clock: selfplay ~603s (~48%) + mcts-gate ~694s (~52%) = ~99% (pure single-thread CPU MCTS); distill ~0.6%; GPU correctly idle. Mechanism + per-stage numbers + trajectory-neutrality proof: docs/ai-research/progress/r110.md §4b/§4c. Ranked plan: docs/ai-research/scoping/r12-selfplay-gate-throughput.md.",
-      "next_action": "Deliverables 1-3 DONE and now validated at production scale (R111: 2.11x, iter-0 bit-identical). (1) r12_orchestrator.py --workers 1->24, commit 7d5bfd2. (2) rollout/collapse hash-carry refactor — MCTS_HASH_CARRY_ENABLED default ON (UMA_MCTS_HASH_CARRY=0 reverts). (3) /predict keep-alive transport — backend/src/sim/keepAliveClient.ts shared http(s).Agent; MCTS_KEEPALIVE_ENABLED default ON (UMA_MCTS_KEEPALIVE=0 reverts). The 2.11x-vs-idealized-~4-6x gap localizes to the integer-partition tail (60 games / 24 workers) + single serve_onnx-server contention at 24 workers — that is the next throughput leverage if pursued (e.g. serve_onnx ort-threads knob, flagged not changed; rebalance game/worker ratio). REMAINING: item (4) CRN/value-head leaf stays DEFERRED (research-recipe decision; keeps A/B comparable)."
+      "next_action": "Deliverables 1-3 + 5 DONE. (1) r12_orchestrator.py --workers 1->24, commit 7d5bfd2. (2) hash-carry MCTS_HASH_CARRY_ENABLED default ON. (3) /predict keep-alive MCTS_KEEPALIVE_ENABLED default ON. (5) WORK-STEALING DISPATCH (selfplay+gate) — backend/src/sim/workStealing.ts MCTS_WORK_STEALING_ENABLED default ON (UMA_MCTS_WORK_STEALING=0 reverts to static chunking); shared task-index queue, 2-task prefetch, slot-ordered aggregation; kills the 4-dark-selfplay-cores bug (60 games/ceil(60/24)=3=20 slices) + variance-driven per-worker skew; refutes the 'games-multiple-of-workers' framing (gate already 5 games/worker, still ~20% imbalanced). Proven bit-identical (selfplay bytes + gate fingerprints, workers>1) by training/r12_workstealing_determinism_gate.py. Expected balanced ceiling ~2.6-2.85x (honest max ~2.9x; the rest of the 2.11x-vs-~6x gap is the never-real 4w-baseline artifact + rollout-cost floor). serve_onnx-sharding explicitly NOT worth it / OUT OF SCOPE (stdlib threaded server, ~7% predict share at batch=1). R12 orchestrator launch command UNCHANGED (no new args; flag defaults ON). REMAINING: item (4) CRN/value-head leaf stays DEFERRED (research-recipe decision; keeps A/B comparable)."
     },
     {
       "id": "w6-loop-anti-degradation",
