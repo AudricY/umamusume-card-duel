@@ -1,6 +1,6 @@
 # R13 Sprint Plan — Make R12 Deployable, Find the Compounding Path
 
-Created 2026-05-11 after R12 cleared the 0.40 Wilson-lower bar by 15.6pp (final: 0.556 at n=200, rollout-leaf MCTS over R4). This sprint is the natural follow-on. See `docs/r12-sprint-plan.md` for the prior sprint and `docs/ai-research-backlog.md` for the R12 result + diagnostic.
+Created 2026-05-11 after R12 cleared the 0.40 Wilson-lower bar by 15.6pp (final: 0.556 at n=200, rollout-leaf MCTS over R4). This sprint is the natural follow-on. See `docs/archive/ai-research/sprints/r12-sprint-plan.md` for the prior sprint and `docs/ai-research-backlog.md` for the R12 result + diagnostic.
 
 ## Sprint progress (2026-05-11)
 

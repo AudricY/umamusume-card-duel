@@ -1,7 +1,7 @@
 // R7 pre-flight teacher-agreement probe.
 //
 // Step 1 of the R7 multi-teacher BC blend execution plan (see
-// `docs/ai-research/scoping/r7-multi-teacher-warmstart.md` § 6).
+// `docs/ai-research/scoping/archive/r7-multi-teacher-warmstart.md` § 6).
 //
 // Hypothesis under test: the three trace-teachers (rollout-CRN, search,
 // planner) make different mistakes per state, so a per-state mixture target

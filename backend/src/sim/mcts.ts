@@ -1,6 +1,6 @@
 // R12 day-1 spike: PUCT MCTS over the modeled simulator.
 //
-// Design choices (see docs/r12-sprint-plan.md for rationale):
+// Design choices (see docs/archive/ai-research/sprints/r12-sprint-plan.md for rationale):
 // - Tree nodes are *model-decision* states only. Opponent moves are
 //   collapsed via the rule-bot between expansions, mirroring how the
 //   existing `search`/`planner` selectors handle the same problem. This

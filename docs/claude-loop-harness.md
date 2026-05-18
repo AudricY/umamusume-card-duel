@@ -9,6 +9,7 @@ The harness is intentionally small:
 - One repo entrypoint: `CLAUDE.md`
 - Small state files under `docs/ai-agent-state/`
 - Per-sprint research evidence under `docs/ai-research/progress/`; scoping docs under `docs/ai-research/scoping/`
+- Research doc routing index: `docs/ai-research/README.md`
 
 There is no Python harness, no hooks, and no separate command mode per task type.
 
@@ -49,7 +50,7 @@ Examples of good times to choose a planning/refinement worker task:
 - Several implementation/debugging jobs have landed without a queue refresh.
 - Local work is no longer clearly connected to the model-quality, throughput, determinism, or UI-integration goal.
 
-Planning output should be small: update the queue, escalations, digest, or existing AI docs. Do not create new planning documents unless the user asks.
+Planning output should be small: update the queue, escalations, digest, or existing AI docs. Do not create new planning documents unless the user asks. Before writing, search for the topic and update the canonical home from `docs/ai-research/README.md` instead of creating another copy.
 
 ## Parallelism
 
@@ -76,6 +77,23 @@ docs/ai-research/
 State files are pointers to evidence, not copies of it. See CLAUDE.md "Documentation Discipline" for the full role+cap rules and the trim-before-append trigger.
 
 Canonical model/training evidence belongs in `docs/ai-research/progress/r<N>.md` (R15+) or the historical `docs/ai-performance-research-progress.md` (R1–R14), not in harness state.
+
+Archived and historical docs are read-only context unless the current task is
+explicitly archive cleanup. Active prompts should link to canonical docs rather
+than paste old sprint-plan or monolith details into state files.
+
+## Orchestrator Launch Convention
+
+Launch long-running Python orchestrators directly, not through `npm run`:
+
+```bash
+nohup training/.venv/bin/python -u training/<orchestrator>.py ... > <out-dir>/launch.log 2>&1 &
+```
+
+Launching through `nohup npm run <script> &` captures the npm wrapper PID, not
+the live Python worker. Use `<out-dir>/pid.txt` as the source of truth for the
+orchestrator PID; `dagger_orchestrator.py`, `r12_orchestrator.py`, and
+`ppo_orchestrator.py` write it at startup.
 
 ## Non-Goals
 

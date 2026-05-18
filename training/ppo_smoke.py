@@ -9,10 +9,10 @@ against the warm-start checkpoint at
   (rollout, gae, ppo-update including per-minibatch rows);
 - the promoted checkpoint differs in weights from the warm-start;
 - per-minibatch KL stays in [0, 0.5] (relaxed smoke tolerance — the
-  production f1-design.md gate is 0.05);
+  production docs/archive/ai-research/f1-design.md gate is 0.05);
 - entropy never collapses to zero (no NaN / no full-greedy degenerate);
 - importance ratios are finite (no NaN, no inf);
-- the per-update manifest records all five f1-design.md stability
+- the per-update manifest records all five docs/archive/ai-research/f1-design.md stability
   controls: lr, clip_epsilon, entropy_coef, value_coef, grad_clip.
 
 Smoke target: under 3 minutes wall clock with --skip-policy-gate to avoid
@@ -133,7 +133,7 @@ def main() -> None:
                 # estimator of KL(behavior || new). It is non-negative *in
                 # expectation* but a single minibatch's sample mean can be
                 # slightly negative due to noise. Tolerate small negatives;
-                # f1-design.md's production gate is +0.05 magnitude, so
+                # docs/archive/ai-research/f1-design.md's production gate is +0.05 magnitude, so
                 # smoke tolerates [-0.05, 0.5] (relaxed).
                 kl_value = float(data["kl"])
                 if not (-0.05 <= kl_value <= 0.5):
@@ -196,7 +196,7 @@ def main() -> None:
                 "iterations; trainer is silently no-opping."
             )
 
-        # 4. The 5 acceptance gates from f1-design.md "Smoke acceptance",
+        # 4. The 5 acceptance gates from docs/archive/ai-research/f1-design.md "Smoke acceptance",
         # verified at smoke tolerances. We've already asserted:
         #   - KL in [0, 0.5] (relaxed from 0.05) — per minibatch above
         #   - entropy > 0 — per minibatch above

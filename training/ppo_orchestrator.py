@@ -926,12 +926,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-root", default=None)
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--games-per-update", type=int, default=10,
-                        help="Games per PPO update. Smoke: 10. Prod: 800 (f1-design.md).")
+                        help="Games per PPO update. Smoke: 10. Prod: 800 (docs/archive/ai-research/f1-design.md).")
     parser.add_argument("--max-steps", type=int, default=400)
     parser.add_argument("--rollout-steps", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=1.0,
                         help="Sampling temperature for stochastic rollouts.")
-    # PPO hyperparams; defaults are the f1-design.md priors.
+    # PPO hyperparams; defaults are the docs/archive/ai-research/f1-design.md priors.
     parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--clip-epsilon", type=float, default=0.2)
     parser.add_argument("--entropy-coef", type=float, default=0.005)

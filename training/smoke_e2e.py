@@ -820,7 +820,7 @@ def assert_dpo_smoke(repo_root: Path, run_dir: Path, *, reference_checkpoint: Pa
     Synthetic 5-row preference batch (no JSONL needed — the BC-trained
     `reference_checkpoint` doubles as both the frozen reference policy
     AND the warm-start for the trainable model, matching the v1 setup
-    in `docs/ai-research/scoping/r8-dpo.md` § 3.5).
+    in `docs/ai-research/scoping/archive/r8-dpo.md` § 3.5).
 
     Asserts the four contracts from the brief:
       (a) loss is finite

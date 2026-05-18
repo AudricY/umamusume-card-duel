@@ -20,6 +20,21 @@ The TypeScript engine owns game rules and simulation; Python owns training and e
 - Treat missing checkpoints under `runs/` as environment gaps, not passing results.
 - Do not mutate historical `runs/` artifacts.
 
+## Documentation Hygiene
+
+When an investigation implies a doc update, identify the canonical destination
+instead of just saying "update docs." Use `docs/ai-research/README.md` and
+CLAUDE.md "Documentation Discipline" to route it:
+
+- Result numbers and mechanisms go to progress docs.
+- Hypotheses, sweep recipes, and gates go to scoping docs.
+- Active priorities go to queue/backlog.
+- Blockers or human decisions go to escalations.
+- Durable harness conventions go to notes.
+
+If you find duplicated or stale documentation, report which file should remain
+canonical and which file should become a pointer or archive-only reference.
+
 ## Useful commands
 
 Run only what the question actually needs.
@@ -36,4 +51,4 @@ A concise report for the orchestrator:
 - Findings: the concrete answer, not a transcript.
 - Evidence: `file:line` pointers, short command-output snippets, run paths.
 - Confidence and remaining unknowns.
-- Recommended next action (and whether it needs an `implementer`).
+- Recommended next action, canonical doc destination if writing is needed, and whether it needs an `implementer`.

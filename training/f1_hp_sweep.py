@@ -1,13 +1,13 @@
 """F1 PPO hyperparameter sweep.
 
 Drives ``ppo_orchestrator.py`` across the grid defined in
-``docs/f1-design.md``. Each cell × seed becomes a separate sweep
+``docs/archive/ai-research/f1-design.md``. Each cell × seed becomes a separate sweep
 subdirectory containing the orchestrator's full output tree (events,
 manifests, state). The sweep collects the final iteration's Wilson
 lower bound per trial and ranks cells by mean Wilson lower across seeds.
 
 Grid (after dropping the KL-coef axis since adaptive KL isn't enabled
-yet — see f1-design.md "Stability controls"):
+yet — see docs/archive/ai-research/f1-design.md "Stability controls"):
 
     lr           ∈ {3e-5, 1e-4}
     entropy_coef ∈ {0.001, 0.005}
@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 
-# Production grid from docs/f1-design.md.
+# Production grid from docs/archive/ai-research/f1-design.md.
 LR_VALUES = [3e-5, 1e-4]
 ENTROPY_VALUES = [0.001, 0.005]
 GAE_LAMBDA_VALUES = [0.9, 0.95]
@@ -254,7 +254,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iterations", type=int, default=3,
                         help="PPO iterations per trial.")
     parser.add_argument("--games-per-update", type=int, default=50,
-                        help="Games collected per PPO update. Prod 800 (f1-design.md); smoke uses much less.")
+                        help="Games collected per PPO update. Prod 800 (docs/archive/ai-research/f1-design.md); smoke uses much less.")
     parser.add_argument("--max-steps", type=int, default=400)
     parser.add_argument("--rollout-steps", type=int, default=200)
     parser.add_argument("--eval-games", type=int, default=100,

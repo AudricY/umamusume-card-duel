@@ -45,7 +45,9 @@ Use multiple subagents only for genuinely independent, low-resource tasks with d
 
 When the subagent returns, spot-check outputs, inspect changed files, and reconcile inconsistencies. Do not replay the whole exploration without a concrete reason.
 
-Persist useful state where it belongs. Follow CLAUDE.md "Documentation Discipline" — one canonical home per fact, hard caps, trim before append.
+Persist useful state where it belongs. Follow CLAUDE.md "Documentation Discipline" and `docs/ai-research/README.md` — one canonical home per fact, hard caps, trim before append.
+
+Before asking an implementer to update docs, include the intended canonical home in the brief. For direct doc edits, `rg` the key fact/topic first and update the existing canonical home rather than creating another narrative copy. Treat archived and historical docs as read-only context unless the objective is archive cleanup.
 
 - `queue.json` — operating priorities; `summary`/`next_action` are pointers.
 - `escalations.md` — blockers; ≤500 chars per bullet.

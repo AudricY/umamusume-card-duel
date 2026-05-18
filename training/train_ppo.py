@@ -3,7 +3,7 @@
 Reads a parsed trajectory JSONL (one record per model-side decision; produced
 by ppo_orchestrator), computes GAE advantages and returns against the
 existing value-head critic, then runs one PPO epoch over the buffer with the
-spec defaults from ``docs/f1-design.md`` (KL clip eps=0.2, entropy coef
+spec defaults from ``docs/archive/ai-research/f1-design.md`` (KL clip eps=0.2, entropy coef
 0.005, value coef 0.5, grad clip 0.5, 4 minibatches by default).
 
 Numerical guards live in this module:
@@ -20,7 +20,7 @@ so the F1 HP sweep (item F1.hp-sweep, not yet implemented) can shell out
 to it cell-by-cell.
 
 Manifest fields recorded per update (the five stability controls from
-``docs/f1-design.md`` plus diagnostics):
+``docs/archive/ai-research/f1-design.md`` plus diagnostics):
 - ``lr``, ``clip_epsilon``, ``entropy_coef``, ``value_coef``, ``grad_clip``
 - ``gae_lambda``, ``gae_gamma``
 - ``approx_kl_mean``, ``approx_kl_max``, ``entropy_mean``,
@@ -253,7 +253,7 @@ def main() -> None:
         "trajectories": str(args.trajectories),
         "samples": len(rows),
         "hyperparams": {
-            # The five stability controls from f1-design.md "Stability
+            # The five stability controls from docs/archive/ai-research/f1-design.md "Stability
             # controls" — all five present so a regression diff is mechanical.
             "lr": args.lr,
             "clip_epsilon": args.clip_epsilon,

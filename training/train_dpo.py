@@ -4,7 +4,7 @@ Bradley-Terry pairwise loss against a frozen reference policy:
 
     loss = -log_sigmoid( beta * ( (logp_w - logp_l) - (refp_w - refp_l) ) )
 
-Implementation per `docs/ai-research/scoping/r8-dpo.md`:
+Implementation per `docs/ai-research/scoping/archive/r8-dpo.md`:
     § 3.3 loss + beta=0.1 default
     § 3.4 dataset shape (one model forward + index gather per pair side)
     § 3.5 reference policy = frozen item17 warm-start

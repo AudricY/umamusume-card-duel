@@ -4,10 +4,10 @@ End goal (v4.1): graduate the v4 reframe ("DAgger is the warm-start; F1 is the p
 
 ## Files
 
-- `docs/ai-performance-research-backlog.md` — canonical, ordered, gated. Currently at v4.1.
+- `docs/archive/ai-research/ai-performance-research-backlog.md` — canonical, ordered, gated. Currently at v4.1.
 - `docs/ai-performance-research-progress.md` — append-only evidence log.
-- `docs/ai-performance-research-backlog-archive.md` — what was deferred/absorbed and why; v4.1 section near the bottom.
-- `docs/ai-training-findings.md` — raw experimental results.
+- `docs/archive/ai-research/ai-performance-research-backlog-archive.md` — what was deferred/absorbed and why; v4.1 section near the bottom.
+- `docs/archive/ai-research/ai-training-findings.md` — raw experimental results.
 
 ## Sequence (v4.1)
 

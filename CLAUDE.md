@@ -14,28 +14,21 @@ Do not create a new orchestration framework unless the user explicitly asks. Pre
 
 ## Default Workflow
 
-Use `/work` as the default operating command — see `.claude/commands/work.md` for the loop's full prose. Two subagents live in `.claude/agents/`: `investigator` (read-only) and `implementer` (write-capable). The main session stays small; it owns judgment and synthesis.
+Use `/work` as the default operating command. The detailed workflow lives in
+`.claude/commands/work.md`; role-specific subagent instructions live in
+`.claude/agents/`.
 
-**Size each step to the next external gate** — a training run, a re-extraction, a verdict eval, human input. Not to the next code unit that smokes green. If nothing real separates two phases of work, they are one step. Phase splits inside a single end-to-end code change (e.g. schema → encoder → ONNX wire, all smoke-validated together) are artificial and waste session overhead.
+The main session owns judgment and synthesis. Keep bulky exploration, logs, and
+bounded implementation detail in the appropriate subagent.
 
-Use a timeout or `/loop` only when blocked on wall-clock or external dependency. Backlog refinement and big-picture planning are normal `/work` jobs.
+## AI Research Docs
 
-## Claude Harness State
+Use `docs/ai-research/README.md` as the routing map for AI research docs:
+active sources of truth, historical context, implementation entrypoints, and
+write hygiene.
 
-Lightweight Claude operating state lives in `docs/ai-agent-state/`:
-
-- `queue.json`: small list of next useful jobs. `summary`/`next_action` are pointers to scoping/progress docs, not inlined plans. Strip `status: done` entries to digests when they pile up.
-- `escalations.md`: blockers, unsafe stop lines, missing local artifacts, or human decisions needed.
-- `notes.md`: durable harness notes.
-- `digests/YYYY-MM-DD.md`: short summaries from meaningful `/work` runs.
-
-Canonical AI research evidence:
-
-- `docs/ai-research/progress/r<N>.md` — phase writeups (R15+).
-- `docs/ai-performance-research-progress.md` — R1–R14 history, read-mostly.
-- `docs/ai-research/scoping/<topic>.md` — hypothesis + sweep config + exit gate. **Do not pre-decompose implementation into phase counts + LOC budgets here** — that turns scoping into a /work-slot schedule and over-splits the work.
-- `docs/ai-research-backlog.md` — forward-looking.
-- `docs/ai-performance-research-harness.md`, `docs/r<N>-sprint-plan.md`.
+The governing rule is one fact, one canonical home. State files point to
+evidence; they do not restate it.
 
 ## Safety And Scope
 
@@ -49,16 +42,9 @@ Canonical AI research evidence:
 
 ## Documentation Discipline
 
-Each fact lives in one file. Everywhere else links to it. State files are pointers, not copies.
+Before writing docs, search for the topic with `rg`, then update the canonical
+home from `docs/ai-research/README.md`. Archived or historical docs are
+read-only context unless the task is explicitly archive cleanup.
 
-Homes:
-
-- Phase result (mechanism + numbers): `docs/ai-research/progress/r<N>.md` (R15+) or the R1–R14 monolith.
-- Scoping: `docs/ai-research/scoping/<topic>.md` — hypothesis, sweep config, exit gate. Not implementation phase plans.
-- Backlog: forward-looking only. Landed/failed → one-line pointer.
-- `notes.md`: durable harness conventions.
-- `digests/YYYY-MM-DD.md`: daily index. One slot = ≤8 lines (verdict, number, 1-line mechanism, link). No file changelogs, no "next action" prose.
-- `escalations.md`: ≤500 chars per bullet; longer rationale → link a scoping doc.
-- `queue.json`: pointers, not plans.
-
-Caps (hard): digest ≤150 lines, backlog ≤300, per-sprint progress ≤500. Trim before append.
+Hard caps and state-file behavior are defined in `docs/ai-research/README.md`
+and `.claude/commands/work.md`. Trim before append.

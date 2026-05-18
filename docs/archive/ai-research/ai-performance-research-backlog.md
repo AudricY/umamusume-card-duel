@@ -18,7 +18,7 @@ The destination is a **PPO/self-play RL loop with a DAgger warm-start** (Options
 
 **Recipe bug recorded (v4.1):** the trace generation in `runs/dagger-real-2026-05-08/` ran at `--rollout-steps 200`, not the 500 used in the rebaseline gate that produced the 68% rollout-CRN number. The teacher that *generated training labels* was weaker than the teacher *measured for promotion*. Items 17 and 11 must align rollout-steps with the teacher's measured-strength config.
 
-Every active item below earns its place by being a **prerequisite for the RL loop** or by being on the loop itself. Items that were SL strength polish but do not unlock the loop have moved to "Behind The Gate." The archive (`docs/ai-performance-research-backlog-archive.md`) captures the rest. Progress notes remain in `docs/ai-performance-research-progress.md`.
+Every active item below earns its place by being a **prerequisite for the RL loop** or by being on the loop itself. Items that were SL strength polish but do not unlock the loop have moved to "Behind The Gate." The archive (`docs/archive/ai-research/ai-performance-research-backlog-archive.md`) captures the rest. Progress notes remain in `docs/ai-performance-research-progress.md`.
 
 ## Status Legend (v4 / v4.1)
 

@@ -3,7 +3,7 @@
 Reads outcome-export JSONL rows (`policy: rollout-outcome-v2`) and yields
 one preference pair per usable state: `y_w` is the highest-`rewardMean`
 candidate, `y_l` the runner-up. Drops low-margin rows per the noise filter
-in `docs/ai-research/scoping/r8-dpo.md` § 5 risk (a):
+in `docs/ai-research/scoping/archive/r8-dpo.md` § 5 risk (a):
 
     tau = max(0.02, sqrt(mean(rewardVariance) / sampleCount))
 

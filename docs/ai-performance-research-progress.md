@@ -341,7 +341,7 @@ auto-rollback on regression. Zero fallbacks and zero selected no-ops.
 **SL ceiling reproduced.** Trained policy at 34% / 28% sits well below
 the rollout teacher's 68% (Wilson lower 58.3%) and below the rule-bot
 mirror baseline 58%. This matches the archived imitation cap from
-`docs/ai-training-findings.md` (corrected trained policies 34-40%).
+`docs/archive/ai-research/ai-training-findings.md` (corrected trained policies 34-40%).
 The orchestrator's promote/reject machinery works; the underlying
 imitation gap is the same one the unified backlog already pre-
 registered. RL self-play (item 11+ → F1 PPO) remains the path through
@@ -423,7 +423,7 @@ PPO updates the target.
 missing the field. `relabelDecisionTrace.ts` forwards `behaviorPolicy`
 into the relabeled training row when present upstream.
 
-`docs/f1-design.md` fixes F1 defaults: reward shaping (per-step Δpoints
+`docs/archive/ai-research/f1-design.md` fixes F1 defaults: reward shaping (per-step Δpoints
 × 1/3 + terminal win × 1.0), one-game episode boundary, GAE λ=0.95
 γ=0.99, KL clip ε=0.2, entropy bonus 0.005, gradient clip 0.5,
 on-policy buffer of N games where `N × decisions_per_game ≈ 32K`
@@ -634,7 +634,7 @@ per-epoch loss events in `events.jsonl`; TensorBoard event files under
 ### Phase E — F1 PPO smoke
 
 Blocked on item 17's sweep producing a warm-start checkpoint. Defaults
-fixed in `docs/f1-design.md`. Implementation
+fixed in `docs/archive/ai-research/f1-design.md`. Implementation
 (`training/ppo_orchestrator.py`, stochastic serving mode,
 `training/f1_hp_sweep.py`) tracked under F1 in the active backlog.
 
@@ -1737,7 +1737,7 @@ After Tier-1 + stretch experiments + strategist + auditor analysis, the chosen p
 3. **R12 generates new labels via search.** Visit-count distributions from PUCT MCTS with N=100 sims integrate over the variance that single-rollout-CRN samples once. Label quality scales with compute (search depth) instead of being capped at teacher's single-sample noise floor.
 4. **Game structure favors MCTS.** 62% forced moves means search budget concentrates on the ~15 meaningful decisions per game. At our current simulator throughput, 100 sims × 15 real decisions × 200 games = 25–35 minute wall-clock per gate.
 
-**Sprint plan: see `docs/r12-sprint-plan.md`.** Day-1 spike has a hard go/no-go criterion (Wilson lower ≥ 0.40 at n=100). If NO-GO, write a postmortem and pivot to fallbacks (R7, R8, R9, R10) in the order ranked by tier.
+**Sprint plan: see `docs/archive/ai-research/sprints/r12-sprint-plan.md`.** Day-1 spike has a hard go/no-go criterion (Wilson lower ≥ 0.40 at n=100). If NO-GO, write a postmortem and pivot to fallbacks (R7, R8, R9, R10) in the order ranked by tier.
 
 R7/R8/R9/R10 are kept on the backlog as fallbacks; their task descriptions are annotated to reflect their fallback status.
 
@@ -1809,7 +1809,7 @@ Same R4 ckpt, same policy prior, same 100 sims — only the leaf evaluator chang
 
 #### Recommended next steps (post-R12 GO) → R13 sprint
 
-See `docs/r13-sprint-plan.md` for the detailed plan. Headline shift:
+See `docs/archive/ai-research/sprints/r13-sprint-plan.md` for the detailed plan. Headline shift:
 
 **Phase D as originally written (visit-count → policy distillation) is no longer the obvious next step.** The R12 diagnostic shows the value head is the bottleneck; a distilled policy would inherit that noise floor. Instead, the next sprint asks a sharper question:
 
@@ -1849,7 +1849,7 @@ Practical implication: W6's "use rollout-leaf for selfplay, value-head-leaf for 
 
 #### R14 sprint — refinement (2026-05-11)
 
-See `docs/r14-sprint-plan.md`. After R13's two production configs landed, the next sprint splits between shipping (W5 UI finish + Pareto-tuned latency) and one final honest RL attempt (MCTS-trajectory off-policy PPO). Also includes the engine determinism fix that closes R-WILD — a subagent investigation pinpointed `withRng` losing `activeRng` across `await` boundaries; AsyncLocalStorage is the ~10-LOC fix.
+See `docs/archive/ai-research/sprints/r14-sprint-plan.md`. After R13's two production configs landed, the next sprint splits between shipping (W5 UI finish + Pareto-tuned latency) and one final honest RL attempt (MCTS-trajectory off-policy PPO). Also includes the engine determinism fix that closes R-WILD — a subagent investigation pinpointed `withRng` losing `activeRng` across `await` boundaries; AsyncLocalStorage is the ~10-LOC fix.
 
 R14 workstreams:
 - **A** OOD gate for iter-1 (compute only, 30 min) — falsifies "iter-1 value-head leaf overfits its own selfplay distribution"

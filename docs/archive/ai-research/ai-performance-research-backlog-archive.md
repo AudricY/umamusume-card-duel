@@ -2,7 +2,7 @@
 
 Last refined: 2026-05-08 (v4.1 — adversarial pass on v4; four parallel reviewers).
 
-This file keeps the useful discarded signal from the original `ai-performance-research-backlog.md` and `ai-performance-research-backlog-v2.md` after consolidation into `docs/ai-performance-research-backlog.md`.
+This file keeps the useful discarded signal from the original `ai-performance-research-backlog.md` and `ai-performance-research-backlog-v2.md` after consolidation into `docs/archive/ai-research/ai-performance-research-backlog.md`.
 
 ## Completed Or Absorbed
 
@@ -102,4 +102,4 @@ Reviewers' raw reports preserved in conversation history.
 
 Older rollout/search/trained-model results before the corrected evaluator, state fingerprint, modeled action export, and card-aware reset are historical context only. They should not be compared directly with future results unless rerun through the corrected rebaseline suite.
 
-The active promotion standard is the one in `docs/ai-performance-research-backlog.md`: 500 side-balanced held-out games, fixed non-training seeds, documented decks/matchups, zero fallbacks/no selected no-ops, CI, side split, average points, terminal reasons, selected rank, and manifests.
+The active promotion standard is the one in `docs/archive/ai-research/ai-performance-research-backlog.md`: 500 side-balanced held-out games, fixed non-training seeds, documented decks/matchups, zero fallbacks/no selected no-ops, CI, side split, average points, terminal reasons, selected rank, and manifests.

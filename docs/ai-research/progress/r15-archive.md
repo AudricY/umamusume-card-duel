@@ -129,7 +129,7 @@ falsify rule fires R8 next. R7.b.2 promotes only if R8 also closes negative.
   byModelSide + terminalReasons; git sha 6be1e6a clean.
 - `runs/R7-multi-teacher-warmstart/events.jsonl` — per-epoch train metrics
   (75 rows for iter-0).
-- `docs/ai-research/scoping/r7-multi-teacher-warmstart.md` §§ 1–7 (closed
+- `docs/ai-research/scoping/archive/r7-multi-teacher-warmstart.md` §§ 1–7 (closed
   design + pre-registered gates), § 8 (pre-flight probe GO result), § 9
   (step 4 launch record). § 4 close-out condition fired by this block.
 - Backlog pointer: `docs/ai-research-backlog.md` § Tier 2 R7 line (DONE / FAIL).
@@ -266,7 +266,7 @@ lever in the F1 line that hasn't been falsified.
   step 2a outputs (digest slot 43).
 - `training/r8_gate_eval.py` — new mechanical driver wrapping
   `export_checkpoint_to_onnx` / `serve_onnx_context` / `run_eval_gate`.
-- `docs/ai-research/scoping/r8-dpo.md` §§ 1–7 (closed design + pre-
+- `docs/ai-research/scoping/archive/r8-dpo.md` §§ 1–7 (closed design + pre-
   registered gates). § 4 close-out condition fired by this block.
 - Backlog pointer: `docs/ai-research-backlog.md` § Tier 2 R8 line (DONE /
   FAIL, demoted to one-liner).
@@ -433,7 +433,7 @@ first locates the mcts-distill label source.
   `e3a35716156494d6`).
 - `runs/R7-multi-teacher-warmstart/iter-000/mixed-v3.jsonl` — Phase 4
   re-extracted corpus (12387 rows, observation.schemaVersion=2).
-- `docs/ai-research/scoping/r7b-feature-representation.md` §§ 1–15
+- `docs/ai-research/scoping/archive/r7b-feature-representation.md` §§ 1–15
   (closed design + pre-reg gates + Phase 1-4 landing records). § 7
   close-out condition fired by this block.
 - Closeout escalation: `docs/ai-agent-state/escalations.md` `## Resolved`

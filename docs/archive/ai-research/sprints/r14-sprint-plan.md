@@ -1,6 +1,6 @@
 # R14 Sprint Plan — Ship the Cheap Config, Honestly Off-Policy RL
 
-Created 2026-05-11. **Refined 2026-05-11 after W8 negative result + subagent re-prioritization.** R13 closed with two deployable configs (iter-1 + rollout-leaf MCTS at Wilson lower 0.573, iter-1 + value-head-leaf MCTS at Wilson lower 0.452) and a clearly-blocked raw-policy PPO probe. W8 then showed value-head-leaf Phase D regresses iter-on-iter from W6 iter-1 — *not a permanent failure*, but a premature switch before the value head has caught up to the rollout estimator. See `docs/r13-sprint-plan.md` for the prior sprint and `docs/ai-research-backlog.md` for result sections.
+Created 2026-05-11. **Refined 2026-05-11 after W8 negative result + subagent re-prioritization.** R13 closed with two deployable configs (iter-1 + rollout-leaf MCTS at Wilson lower 0.573, iter-1 + value-head-leaf MCTS at Wilson lower 0.452) and a clearly-blocked raw-policy PPO probe. W8 then showed value-head-leaf Phase D regresses iter-on-iter from W6 iter-1 — *not a permanent failure*, but a premature switch before the value head has caught up to the rollout estimator. See `docs/archive/ai-research/sprints/r13-sprint-plan.md` for the prior sprint and `docs/ai-research-backlog.md` for result sections.
 
 ## North star (refined)
 

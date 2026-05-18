@@ -9,3 +9,4 @@ This directory replaces the "scoping dump" usage of `docs/ai-agent-state/notes.m
 - Scoping content lives here, in its own file.
 - `notes.md` is durable harness conventions only.
 - The digest, escalations, and queue link to the file here; they do not re-state its contents.
+- Closed scoping docs move to `archive/` and are treated as historical context.

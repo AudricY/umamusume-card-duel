@@ -9,7 +9,7 @@ DAgger sweep produces a warm-start checkpoint, the F1 smoke runs against
 this spec.
 
 The backlog item that owns the *implementation* of F1 lives at
-`docs/ai-performance-research-backlog.md` under "F1. Online PPO Plumbing".
+`docs/archive/ai-research/ai-performance-research-backlog.md` under "F1. Online PPO Plumbing".
 This doc owns the *defaults* it points at.
 
 ## Reward shaping

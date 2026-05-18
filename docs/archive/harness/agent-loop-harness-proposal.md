@@ -92,7 +92,7 @@ Those are better captured in `CLAUDE.md` and command instructions first. Add hoo
 ```text
 CLAUDE.md
 docs/
-  agent-loop-harness-proposal.md
+  archive/harness/agent-loop-harness-proposal.md
   claude-loop-harness.md
 
 .claude/

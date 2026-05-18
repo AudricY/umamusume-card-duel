@@ -2,74 +2,25 @@
   "updated": "2026-05-18T01:30Z",
   "items": [
     {
-      "id": "r16-p1-temporal-turn-state-features",
-      "priority": "P2",
-      "status": "blocked",
-      "summary": "READINESS-AUDITED 2026-05-18 (commit 0f9953c), implementation-ready but BLOCKED on R110 verdict + a code prerequisite. Read-only engine audit confirmed all P1 fields exist in shared/src/types.ts and are hidden-info-safe. Exact STATE_DIM = 110->164 (not the spec's '~148') with a committed slot layout; field renames + 2 omissions (globalRetreatCostReduction, first-turn threshold) folded into docs/ai-research/scoping/r16-model-feature-backlog-refinement.md § P1. Blocked because: (a) P1 builds richer features on top of v3.0 — gated on R110's 'does v3.0 reproduce W6' verdict; (b) P1 edits features.py/observation builder which the live R110 orchestrator re-execs per iteration (landing mid-run re-confounds R110 — the P0 lesson).",
-      "next_action": "Do NOT land code while R110 runs. After R110 verdict: (1) freeze/vendor the 110-d v3.0 builder + make serve_onnx schema resolution 3-way (96/110/164 keyed off graph dim) BEFORE bumping the shared STATE_DIM constant (else 110-d v3.0 serving silently breaks); (2) then implement the additive-tail 3.1 schema (slots 110:164) + ablation key state_temporal_turn_v31 per the scoping doc. P2 (per-Uma slot tokens) remains downstream (depends on P0 done + ideally P1)."
-    },
-    {
-      "id": "r16-p0-mcts-selfplay-v3-embedding",
-      "priority": "P0",
-      "status": "done",
-      "summary": "DONE 2026-05-18, commit b38de0e. mcts-distill data-path correctness fix: train_bc.py --data-mode mcts-distill trained the 110-d/v3 model with the card-embedding branch INERT (selfplay_dataset.py never emitted card_ids_by_zone/action_card_idx -> batch.get->None). Confounded the first R110-W6 launch (killed iter-0). Fix: MctsSelfPlaySample carries optional embedding fields; load_mcts_selfplay_samples populates via observation_to_card_ids/action_card_idx_pair; collate emits int64 [B,8,30]/[B,A,2]; strict fail-loud default + named allow_missing_card_ids compat; evaluate_grouped collator no longer hardcoded; value-target consumers (value_target_dataset/r13_value_retrain/r14_value_crossover_probe) forward optional tensors. r16_mcts_embedding_smoke.py proves nonzero grad card_embed 2.04 / zone_projection 355.0. r12-distill/python-train/train smokes exit 0; ONNX still 5-input v3. Spec: docs/ai-research/scoping/r16-model-feature-backlog-refinement.md P0. Detail: digests/2026-05-18.md Slot 3.",
-      "next_action": "None — closed. Unblocks honest 110-d mcts-distill (R110-W6 relaunched as true v3). Downstream R16-P1 (temporal/turn-state features) and R16-P2 (per-Uma slot tokens) remain scoped/not-started in r16-model-feature-backlog-refinement.md; P2 depends on P0 (now done) + ideally P1."
-    },
-    {
-      "id": "r14-e-manual-ui-exercise",
-      "priority": "P1",
-      "status": "done",
-      "summary": "DONE 2026-05-15 — user-verified working (qualitative acceptance, no numeric capture). User manually exercised R14.E in-browser at production SHA bc6db85 (96-dim schema matching the 96-dim production model); confirmed BOTH MCTS configs functional end-to-end and the rollout-leaf opponent visibly beats the rule bot. Webapp opponent default now set to the production rollout-leaf config in useAppRuntimeEffects.ts (gate args byte-identical to runs/R13-W6-phase-d/iter-2/gate.manifest.json, Wilson lower 0.6479). Formal numeric exit criterion (median <3s, fallback <5%) NOT captured; closed on user acceptance + prior gate evidence. Open deployment caveat: 96-dim verified stack vs feat/ai HEAD's 110-dim extractor (cannot serve the 96-dim model; no 110-dim production-grade search model exists). Detail: docs/ai-research/progress/r15.md § R14.E closure; docs/r14-sprint-plan.md § E.",
-      "next_action": "None — closed. The 96-dim/110-dim deployment skew is now RESOLVED via an explicit serving pin (serve_onnx --feature-schema auto→v2); see docs/ai-research/progress/r15.md § 96-dim serving pin and escalations.md ## Resolved."
-    },
-    {
-      "id": "mcts-determinism-and-side-asymmetry-audit",
-      "priority": "P2",
-      "status": "done",
-      "summary": "DONE 2026-05-15. (a) Single-worker CRN determinism PASS: 0.0 full-outcome divergence over 16 (seed,side) keys x 2-3 single-worker replays at the exact production rollout-leaf config; thin wrapper training/r15_single_worker_determinism_replay.py run against an isolated git-worktree at production SHA bc6db85 (96-dim feature schema; current feat/ai HEAD is 110-dim v3.0 so the frozen artifact cannot serve against HEAD — version skew documented, not a bug). (b) Side-asymmetry at rollout-leaf extracted from the EXISTING iter-2 gate.manifest.json byModelSide (NO re-gate): player WR 0.6833 [0.5577,0.7869] vs opponent 0.7833 [0.6638,0.8688], +10.0pp directional gap (same direction as value-head-leaf), CIs overlap at n=60/side, player-side Wilson floor 0.5577 < 0.6479 aggregate. Conclusion: 0.6479 is a sound aggregate side-balanced reproducible Wilson-lower claim, NOT a per-side guarantee; side gap (not determinism) is the open deployment risk. No gate-rerun stop hit. Detail: docs/ai-research/progress/r15.md § 'MCTS production-claim audit'.",
-      "next_action": "None — closed. Downstream now-unblocked job: deployment-policy-rollout-vs-valuehead (added below)."
-    },
-    {
-      "id": "deployment-policy-rollout-vs-valuehead",
-      "priority": "P2",
-      "status": "done",
-      "summary": "DONE 2026-05-15. Decision: production MCTS config = ROLLOUT-LEAF @ W6 iter-2 (agg Wilson lower 0.6479, n=120; ~20pp over value-head best-case 0.4524 and over the honest cheap-inference-envelope-low 0.394 / 1-of-3 seeds below 0.40). Tradeoff stated explicitly: rollout-leaf ~2.5x slower (value-head + adaptive-ratio=1.5 cuts 61% wall-clock, ~0.5s/dec) — acceptable, no hard move-clock; value-head+ratio=1.5 retained only as the documented latency-SLA fallback with the at-the-0.40-bar caveat. Asymmetry stance: disclose-as-aggregate + per-side caveat (gap directional, CIs overlap; config choice does NOT cleanly shrink it — rollout +10pp, value-head +6 to +14pp across seeds, both player-weaker). No human research-stance call needed; side-conditioned sim budget is a non-blocking forward bet gated on a larger-n side-split. Doc-hygiene prereq done: R8 full block rolled r15.md→r15-archive.md, r15.md now 474/500. Detail + honest claim string: docs/ai-research/progress/r15.md § 'Deployment-policy decision — rollout-leaf vs value-head-leaf'. Evidence-only, no new gate, no stop hit.",
-      "next_action": "None — closed. No new autonomous production-path job is unblocked: the remaining R14 acceptance step (r14-e-manual-ui-exercise P1) stays HUMAN-GATED, and it exercises the value-head fallback config — note that 20-game UI exercise now validates the documented FALLBACK, not the chosen production config; the rollout-leaf production claim itself is already gate-backed (n=120 manifest)."
-    },
-    {
-      "id": "model-py-amp-overflow-fix",
-      "priority": "P3",
-      "status": "done",
-      "summary": "DONE 2026-05-15. Action-mask fill in training/uma_ai/model.py changed -1.0e9 -> torch.finfo(logits.dtype).min (dtype-safe for fp32+fp16); kills the silent fp16 --amp NaN-logit corruption. Regression smoke assert_amp_overflow_regression added to training/smoke_e2e.py (real model fp16 forward, asserts no inf/NaN + masked positions finite-very-negative + softmax/CE finite), wired into main() which is the test:python-train entry. TMPDIR=/tmp npm run test:python-train EXIT=0, final status PASS. Detail: docs/ai-agent-state/digests/2026-05-15.md Slot 5.",
-      "next_action": "None — closed."
-    },
-    {
-      "id": "training-data-coverage-audit",
-      "priority": "P1",
-      "status": "done",
-      "summary": "DONE 2026-05-18. Hypothesis CONFIRMED. R7 mixed corpus retains 3789/12387 (30.6%); the ~70% drop is 100% single-legal-action (loader min_actions=2, lt_min_actions(<2_legal)=8598/8598) — ZERO schema/label/feature/card-id loss. Cross-checked independently (R7 manifest samples:3789 == audit retained; mixed.jsonl 12387 lines == audit total). Bottleneck is decision-state coverage, not row count/label/schema. Coverage-vs-loss confirms: val loss clusters in thin/shifted slices (useAbility 3.51, pass 3.30, attachEnergy 3.00, relabeled-source 3.37). Top dropped: action_kind=pass 91.0%, hand_size<=2 77.2%. Env gaps recorded (gate per-state traces never persisted -> structural-proxy overlap only; per-state eval loss not logged -> phase/action/source proxy). Reproducible training/data_coverage_audit.py (+smoke, npm test:data-coverage-audit, exit 0). Detail: docs/ai-research/analysis/training-data-coverage-audit.md (canonical) + digests/2026-05-18.md Slot 1.",
-      "next_action": "None — closed. Unblocks backlog item 2 (rule-bot-covered state-generation recipe); proposed source-mix floors in the report. Do NOT relax min_actions; do NOT regenerate self-play-only rows (mcts-distill v1 failed at 0.1470 on exactly that)."
-    },
-    {
       "id": "r110-w6-reproduction",
       "priority": "P2",
       "status": "in-progress",
-      "summary": "RELAUNCHED 2026-05-18 as a TRUE v3 test (post R16-P0). First launch was killed at iter-0: it was confounded by the R16-P0 bug (mcts-distill trained the 110-d model with the card-embedding branch inert) — confounded run preserved runs/R110-W6-repro-CONFOUNDED-p0bug-iter0only (iter-0 Wilson 0.5273, embeddings inert, DISCARD). R16-P0 fixed + committed b38de0e (self-play dataset now emits card_ids_by_zone/action_card_idx; gradient smoke proves card_embed grad nonzero). Relaunch: runs/R110-W6-repro, PID 52908 (pid.txt), background GPU job ~1-2h, identical faithful W6 recipe + same R7b2 110-d init, now genuinely exercising the card-embed path each distill step. Faithful W6 iter-2 recipe via r12_orchestrator.py --mcts-leaf rollout: 60 selfplay/iter, 100 sims, K=3, rollout-steps 200, cpuct 1.5, dir 0.3/0.25, temp-moves 6, gate n=120 (60+60 modelSide both) rollout-leaf both sides eval-seed 9000, epochs 20, 64/2, kl-anchor 0.05, 4 workers, cuda, --iterations 5 (halt-after-2). INIT DECISION (self-directed, supersedes scoping §5 'random init'): orchestrator MANDATES --init-checkpoint (no random path; raise SystemExit). W6's own precedent = same-schema SL warm-start, so faithful analogue = runs/R7b2-card-embed/iter-000/model/checkpoint.pt (110-d/v3.0, hidden 64/depth 2 == W6 promoted arch). More faithful than random AND the only orchestrator-supported path. Launch verified clean (run_started + iter-0 selfplay, no SystemExit/shape error). SCOPED 2026-05-15 (user-commissioned next-arc). Reproduce the W6 Phase D rollout-leaf MCTS self-play + mcts-distill loop (that produced the pinned 96-d search-wrapped Wilson 0.6479 model) at the current 110-d / schema-v3.0 representation, to yield a 110-d model non-inferior to the pinned 96-d under the same search wrap and unlock the serve_onnx --feature-schema v3 promote path. The SL route is explicitly ruled OUT: R7.b.2 (110-d card-embed SL) already falsified it at Wilson 0.3045 and mcts-distill v1 single-pass at 0.1470 — both single SL passes, raw-policy. This arc is the iterated loop, search-wrapped. Pipeline audited READY 110-d end-to-end (features.py STATE_DIM=110, export_onnx v3 5-input graph, serve_onnx --feature-schema v3 auto-resolve, TS selfplay/gate schema-agnostic via /predict); the only delta vs W6 is config (no cross-schema warm-start — which also sidesteps the mcts-distill-v1 item17 arch-incompat). Cost ~19-23 min/iter, ~1-2h for 3-5 iters + one final gate (real compute job, flag before launch).",
-      "next_action": "RUNNING — monitor runs/R110-W6-repro/{events.jsonl,orchestrator-state.json}. On completion: read promoted_wilson_lower + per-iter trajectory; apply §6 exit gate (PASS agg Wilson lower >=0.6479 -> export v3 + promote via serve_onnx --feature-schema v3 + re-point webapp + record as new production model; MARGINAL 0.60-0.6479 -> reproduced-but-not-superior, no promote, no tuning; FAIL <0.60 -> new negative, escalate to user with trajectory, do NOT auto-pivot). The orchestrator does NOT run the final §6 confirmation gate (per-iter gate is its own n=120 promotion gate); take the best-promoted ckpt and confirm at §6 protocol if promoting. Detail/recipe/exit-bands: docs/ai-research/scoping/r110-w6-reproduction.md §6."
+      "summary": "True-v3 R110 W6-loop reproduction is running after the R16-P0 mcts-distill embedding fix. Monitor runs/R110-W6-repro. Canonical scope: docs/ai-research/scoping/r110-w6-reproduction.md.",
+      "next_action": "Read events/state, apply scoping doc §6 exit bands, and do not auto-pivot on fail."
+    },
+    {
+      "id": "r16-p1-temporal-turn-state-features",
+      "priority": "P2",
+      "status": "blocked",
+      "summary": "Implementation-ready but blocked on R110 verdict and schema-serving prerequisite. Canonical scope: docs/ai-research/scoping/r16-model-feature-backlog-refinement.md.",
+      "next_action": "Do not edit feature/schema code while R110 runs. Before STATE_DIM 164, freeze the 110-d v3 builder and make serve_onnx resolve 96/110/164 by graph shape."
     },
     {
       "id": "mcts-distill-followup-direction",
       "priority": "P4",
       "status": "deferred-revisit",
-      "summary": "DEFERRED 2026-05-15 self-directed (escalations.md `## Resolved` F1-line-closed bullet; reaffirmed by planning-refresh-after-r14-e 2026-05-15). Raw-policy SL line is closed across all 4 axes (R7 0.2921 / R8 0.3318 / R7.b.2 0.3045 / mcts-distill 0.1470); best-ever 0.3318 never approached the 0.40 gate. Both followup variants face a ~25pp gap no SL axis has reached -> low prior; not worth compute. Production strength is search-wrapped MCTS (0.6479). NOT a forward line. IF ever revisited: §5(c) indicates the rule-bot-mixed-corpus supervision variant (not the warm-start variant); item17 warm-start is arch-blocked (predates R7.b.2 card-vocab embedding; train_bc.py strict load) so any revisit would init from W6/iter-2 (current-arch).",
-      "next_action": "Do NOT action. Only re-open raw-policy SL on explicit NEW evidence (not a planning pass). If re-opened: scope the rule-bot-mixed-corpus variant only. Detail: docs/ai-research/progress/r15.md § MCTS-distill v1."
-    },
-    {
-      "id": "harness-pidfile-race-fix",
-      "priority": "P4",
-      "status": "done",
-      "summary": "DONE 2026-05-15. Hypothesis CONFIRMED by throwaway probe: `nohup npm run <s> &`'s `$!` is the npm wrapper PID; real python is a grandchild (npm 18502 -> sh -c 18519 -> python 18520), so kill/alive logic targeted the wrong PID (slots 18/20/22/25/26). Direct-python `nohup training/.venv/bin/python -u … &` makes `$!` the real PID (why slot 34 / R7 scoping launch never tripped it). Fix: dagger_orchestrator.py, r12_orchestrator.py, ppo_orchestrator.py each `(out_dir/'pid.txt').write_text(os.getpid())` immediately after out_dir.mkdir (byte-identical 1-line snippet; all 3 share identical startup so no shared helper). Verified: dagger smoke PASS + standalone run writes pid.txt with correct PID. Harness doc gained an 'Orchestrator launch convention' section: direct-python is canonical, <out-dir>/pid.txt is the live-PID source of truth. Detail: docs/ai-performance-research-harness.md + digests/2026-05-15.md.",
-      "next_action": "None — closed. No autonomous follow-up unblocked."
+      "summary": "Guardrail only: raw-policy SL follow-up is not a forward line absent new evidence. Canonical rationale: docs/ai-research/progress/r15.md and docs/ai-research-backlog.md.",
+      "next_action": "Do not action unless explicit new evidence or user request reopens the raw-policy line."
     }
   ]
 }
