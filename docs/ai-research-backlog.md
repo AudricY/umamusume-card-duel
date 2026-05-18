@@ -27,20 +27,28 @@ As of 2026-05-18:
   across seed ranges and is only a latency fallback.
 - **Side asymmetry is real enough to disclose.** Current rollout-leaf evidence
   is aggregate side-balanced strength, not a per-side guarantee.
-- **The active frontier is W6 loop anti-degradation (recipe axis).** Live
-  operational state is in `docs/ai-agent-state/queue.json`.
+- **The active frontier is W6 loop anti-degradation (recipe axis), now at a
+  user-gated regularization-dose decision.** The recipe-fix landed and was
+  confirmed via a full R111 loop (iter-3 rot eliminated) but over-damps at
+  default HP — net ceiling loss vs the 0.6042 baseline. R16-P1
+  temporal/turn-state features are now implemented (commit `357f0d6`); its
+  strength verdict is also user-gated. Live operational state is in
+  `docs/ai-agent-state/queue.json`.
 
 ## Active Search-Wrapped Frontier
 
-0. **W6 loop anti-degradation recipe — P0/P1, TOP PRIORITY.**
-   The iter-2-peak-then-rot is a schema-independent W6-recipe property that
-   caps both the 96-d production claim and the v3 reproduction. Read-only
-   prior-entropy/KL discriminator FIRST (replay on-disk iter checkpoints, no
-   loop compute), then — only if confirmed — two localized
-   `r12_orchestrator.py` fixes: cross-iter replay buffer + fixed-SL-anchor
-   KL. This is a loop-recipe/optimization axis, explicitly NOT the
-   §6/§7-closed representation/capacity axis. Lifts both ceilings.
-   Canonical: `docs/ai-research/progress/r110.md`.
+0. **W6 loop anti-degradation recipe — TOP PRIORITY, at a user-gated dose
+   decision.** Discriminator SATISFIED, recipe-fix LANDED (commit `d44de3f`;
+   cross-iter replay buffer + fixed iter-0/SL KL anchor in
+   `r12_orchestrator.py`), and CONFIRMED via a full R111 loop: the iter-3 rot
+   is eliminated (iter-3 holds 0.5527, no crater) but the fix over-damps at
+   default HP — policy froze then decayed (0.5527→0.5358), entire trajectory
+   below the 0.6042 baseline iter-2 peak. Forward line is now a **user-gated
+   regularization-dose sweep** (DO NOT auto-launch): lower/anneal the
+   fixed-KL-anchor weight from 0.05 and/or reduce replay old-fraction (0.40)
+   / window (3) to damp ONLY the iter-3 rot while keeping the iter-2 climb.
+   Canonical: `docs/ai-research/progress/r110.md` §4c; knobs in queue
+   `w6-loop-anti-degradation`.
 
 1. **R110 W6 reproduction — DONE.**
    Verdict MARGINAL (best-promoted iter-2 Wilson lower 0.6042, in the
@@ -48,11 +56,24 @@ As of 2026-05-18:
    stays production. R16-P0 embedding fix confirmed working.
    `docs/ai-research/progress/r110.md`.
 
-2. **R16-P1 temporal/turn-state features — BLOCKED.**
-   R110 verdict reached (MARGINAL, not blocking). Now blocked only on the
-   serving-schema 96/110/164 guard prerequisite (freeze the v3.0 builder +
-   make `serve_onnx` resolve schema by graph shape before STATE_DIM 164).
-   Scoping: `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`.
+2. **R16-P1 temporal/turn-state features — IMPLEMENTED (commit `357f0d6`).**
+   v3.1 164-d temporal/turn-state vertical landed end-to-end (TS observation
+   schemaVersion 2→3 → new `observation_to_features_v3_1` reusing frozen v3.0
+   0–109 byte-identical → serve_onnx 164→v3.1 → 164-d ONNX export); all
+   smokes green incl. real 96/110-d checkpoints. Forward line is a
+   **user-gated ~0.5-day v3.1 strength ablation/gate** vs the 110-d v3.0
+   baseline (DO NOT auto-launch; promote only on a gate Wilson-lower win or
+   targeted-phase diagnostic gain). Canonical:
+   `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`
+   (P1 = IMPLEMENTED, § P1 "Resolved").
+
+2b. **R16-P2 per-Uma slot tokens — NEXT REPRESENTATION LIFT, gated.**
+   Dependency-unblocked (P0 done + P1 done) and fully scoped, but it is a
+   3–4-day model/ONNX migration (signature churn, old-checkpoint
+   incompatibility) and the dependency graph requires a cheap P1 signal
+   baseline before P2 is *evaluated*. Do not start until the user-gated P1
+   ablation gives that baseline or the user explicitly calls for it. Scope:
+   same r16 doc § "P2 - Per-Uma Slot Tokens".
 
 3. **GPU-fed stronger MCTS — P1 scoping, not implementation.**
    First prove which search configs can use GPU inference for strength:
@@ -110,8 +131,13 @@ As of 2026-05-18:
   mcts-distill v1 failure is the canonical negative example.
 - Do not re-open raw-policy SL unless a new coverage result explicitly
   falsifies the current diagnosis.
-- Do not land R16-P1 schema/feature edits until the serving-schema
-  96/110/164 guard prerequisite is in place (R110 verdict is now reached).
+- Do not auto-launch the two pending user-gated verdicts (the W6
+  regularization-dose sweep and the R16-P1 v3.1 strength ablation); they
+  need explicit go-ahead. The R16-P1 serving-schema guard prerequisite is
+  satisfied and P1 implementation has landed (`357f0d6`) — that old stop
+  line is retired.
+- Do not start R16-P2 per-Uma slot tokens (3–4-day migration) before the
+  user-gated P1 signal baseline exists or the user calls for it.
 - Do not re-open representation/capacity tuning off the R110 MARGINAL band;
   the forward line is the loop-recipe axis only (`docs/ai-research/progress/r110.md`).
 
