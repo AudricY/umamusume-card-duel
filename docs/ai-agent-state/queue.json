@@ -1,12 +1,12 @@
 {
-  "updated": "2026-05-18T06:30Z",
+  "updated": "2026-05-18T07:10Z",
   "items": [
     {
       "id": "w6-loop-anti-degradation",
       "priority": "P1",
       "status": "ready",
       "summary": "Discriminator COMPLETE: recipe-rot confirmed as MONOTONE representation drift from iter-0 (not an iter-2 peak; both 96-d + 110-d v3 agree). §4 gate SATISFIED; §3 mechanisms 1&2 confirmed and ranked first. Loop-recipe axis, NOT the closed representation axis. Canonical: docs/ai-research/progress/r110.md §4a.",
-      "next_action": "Implementer: apply two localized training/r12_orchestrator.py changes — (1) accumulate a cross-iter replay buffer feeding the distill mixture (counter to per-iter-only behavior at :154,184); (2) pin the KL anchor to a fixed iter-0/SL checkpoint instead of the moving anchor at ~line 320. Then a gated loop run is required to test the ceiling lift (do NOT auto-launch)."
+      "next_action": "Code fix APPLIED in training/r12_orchestrator.py (commit d44de3f): (1) bounded cross-iter replay mixture via _build_distill_dataset (flag W6_FIX_CROSS_ITER_REPLAY / --no-w6-fix-cross-iter-replay, window=W6_REPLAY_WINDOW=3, old-frac=W6_REPLAY_OLD_FRACTION=0.40; iter-0/1 passthrough preserved); (2) KL anchor pinned to fixed iter-0/SL ckpt on R12State.kl_anchor_checkpoint, captured once in main(), persisted across resume (flag W6_FIX_FIXED_KL_ANCHOR / --no-w6-fix-fixed-kl-anchor). py_compile clean; anchor AST-verified never reassigned in the loop. REMAINING STEP: a USER-GATED A/B loop run — W6 recipe baseline (--no-w6-fix-* both) vs recipe-fix ON (defaults) — to measure whether the iter-2-peak ceiling lifts. DO NOT auto-launch; needs explicit user go-ahead."
     },
     {
       "id": "r110-w6-reproduction",
