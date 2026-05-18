@@ -7,9 +7,12 @@
   1. Corpus retention and state-coverage audit v2.
   2. Rule-bot-covered contested states relabeled by rollout-leaf MCTS.
   3. Hard-negative preference pairs from outcome and MCTS candidate vectors.
-- **Non-goal:** create more generic self-play rows or relax the training loader
-  to keep forced `legalActions.length < 2` states. The existing audit shows the
-  useful bottleneck is contested state coverage, not raw row volume.
+- **Non-goal:** create more generic self-play rows, relax the training loader
+  to keep forced `legalActions.length < 2` states, or revisit model capacity.
+  The bottleneck is contested-state coverage, not raw row volume
+  (`docs/ai-research/analysis/training-data-coverage-audit.md`); the capacity
+  axis is formally closed (see the closed-axes / Do-not list in
+  `docs/ai-research-backlog.md`).
 
 ## Summary
 
@@ -29,6 +32,94 @@ The current best training-data path is sequential:
 The main dependency is that old gate artifacts do not persist exact decision
 states. Any serious coverage comparison or MCTS relabeling needs new traces or
 online labels emitted during simulation.
+
+## Fork A — Contested-State Data Coverage (actionable backlog item)
+
+Fork A is the single backlog item that *moves the coverage metric*; P0/P1/P2
+above are its tooling, label-source, and ranking sub-tasks. This section is the
+canonical statement of the item — it cites evidence by path, it does not
+restate the audit table or the R6 capacity result.
+
+### Objective
+
+Raise the audit's existing **contested-state coverage** metric:
+
+> `legal_action_count`: fraction of *retained* (>=2-legal) decision rows that
+> are contested with **>=4 legal actions** — floor **>=30%**.
+
+This is the metric already defined at the bottom of
+`docs/ai-research/analysis/training-data-coverage-audit.md` (proposed
+source-mix target, `legal_action_count` row). Do not invent a new metric. The
+R7 retained corpus sits below this floor (it is dominated by exactly-2-legal
+binary choices per that audit); the goal is to move it above 30% **without**
+adding raw rows or model parameters.
+
+The end-to-end success signal is whether moving this coverage metric, at fixed
+raw volume and fixed capacity, moves the strength metric the repo already
+gates on: the side-balanced gate win rate / Wilson lower bound from
+`backend/src/sim/evaluateModelVsHeuristic.ts` (rule-bot opponent,
+side-balanced, the same gate the audit references).
+
+### Candidate mechanisms (options to test, not a chosen solution)
+
+All three keep raw retained-row volume fixed; they differ only in *where the
+contested states come from*:
+
+1. **Contested-state filtering / oversampling of already-generated rows.**
+   Re-mix the existing retained corpus so >=4-legal rows are upsampled and
+   2-legal rows downsampled to hold total retained count fixed. Cheapest;
+   tests whether coverage alone moves strength with no new generation. Risk:
+   may exhaust the existing >=4-legal population and just duplicate rows.
+2. **Targeted generation biased toward high-legal-action decision states.**
+   Bias the rule-bot-covered state generator (P1) to spend its game/seed
+   budget where branch factor is high, then keep only enough rows to match
+   the baseline retained count. Tests whether *fresh* contested states beat
+   reweighting the same ones.
+3. **Replay-buffer / loss weighting toward contested rows.**
+   Leave the corpus unchanged but weight the policy loss by legal-action
+   count (or a contested indicator). Tests the coverage hypothesis as an
+   optimization-weighting question, fully decoupled from data generation.
+
+P0 (Audit v2) is the measurement instrument for all three; P1 supplies the
+state source for option 2; option 1 and option 3 need no new corpus.
+
+### Cheap experiment design
+
+Pre-registered, single-variable, no expensive gate until the floor is met:
+
+- **Hold fixed:** model architecture/capacity (closed axis — see
+  `docs/ai-research-backlog.md` closed-axes list); total retained training-row
+  count (raw-volume axis — see
+  `docs/ai-research/analysis/training-data-coverage-audit.md`); optimizer,
+  schema, and seed discipline.
+- **Vary (one knob):** contested-state coverage via exactly one mechanism
+  above per run, sweeping the metric across roughly `{baseline, ~30%, ~45%}`.
+- **Generate:** for option 2 only, the P1 pilot budget already specified (50
+  games per source, `modelSide=both`) but biased toward high-branch states;
+  for options 1 and 3, nothing new is generated.
+- **Measure:** Audit v2 reports the `legal_action_count` contested fraction
+  (confirm the knob actually moved it); then train and run the existing
+  side-balanced gate.
+- **Success criterion:** at fixed raw volume and fixed capacity, increasing
+  the contested fraction toward/over the 30% floor produces a monotone,
+  side-balanced improvement in gate Wilson-lower over the coverage-matched
+  baseline. A flat or negative strength response at higher coverage
+  *falsifies* the contested-coverage bottleneck and reopens the data
+  question; it does not reopen capacity or raw volume.
+- **Stop rule:** no n>=1000 / expensive closed-loop gate until the audit
+  shows the trained corpus clears the >=30% contested floor and the cheap
+  sweep shows a positive coverage→strength slope.
+
+### Non-goals (reaffirmed)
+
+- No capacity / architecture tuning — formally closed
+  (`docs/ai-research-backlog.md` closed-axes list; R6 controlled
+  2x-capacity experiment is the cited evidence there).
+- No generic raw-volume increase and no relaxing `min_actions` to 1 —
+  single-action states carry zero policy gradient
+  (`docs/ai-research/analysis/training-data-coverage-audit.md`).
+- No MCTS self-play as the primary state distribution (mcts-distill v1
+  failed on exactly that mistake; recorded in the audit doc).
 
 ## Current Ground Truth
 

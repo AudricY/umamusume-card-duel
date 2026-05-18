@@ -50,6 +50,13 @@ As of 2026-05-18:
    Canonical: `docs/ai-research/progress/r110.md` §4c; knobs in queue
    `w6-loop-anti-degradation`.
 
+0b. **Fork B — label-quality test matrix (umbrella over item 0's dose
+   sweep).** Raises target/teacher quality at *fixed* capacity and volume
+   (both axes closed); the M6 anti-drift arm is the item-0 dose sweep, not a
+   re-plan. Gated behind a near-zero-cost read-only label-quality probe
+   before any user-gated loop compute. Canonical:
+   `docs/ai-research/scoping/forkb-label-quality-loop-recipe.md`.
+
 1. **R110 W6 reproduction — DONE.**
    Verdict MARGINAL (best-promoted iter-2 Wilson lower 0.6042, in the
    0.60-0.6479 band); reproduced-but-not-superior, not promoted; pinned 96-d
@@ -95,6 +102,14 @@ As of 2026-05-18:
    Later strategic bet. Do not use it to bypass search-wrapped gates above.
 
 ## Training-Data / State-Coverage Backlog
+
+**Fork A — contested-state coverage** frames items 1–2 below as its
+sub-tasks. Metric = retained `>=4`-legal fraction, floor `>=30%` (audit's
+existing `legal_action_count` target); cheap-experiment design and
+closed-axes non-goals (no capacity, no generic volume, no `min_actions`
+relaxation) in
+`docs/ai-research/scoping/r16-training-data-backlog-refinement.md` (Fork A
+section).
 
 1. **Corpus retention + state-overlap audit — DONE.**
    Canonical report:
