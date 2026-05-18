@@ -1,7 +1,14 @@
 # R16 Model Feature Backlog Refinement
 
 - **Date:** 2026-05-18
-- **Status:** scoped backlog, no implementation yet
+- **Status (2026-05-18):** P0 **DONE** (commit `b38de0e` — mcts-distill
+  v3 embedding data-path fixed; was confounding R110-W6). P1 **readiness-
+  audited, implementation-ready post-R110** (exact STATE_DIM=164, fields
+  verified public-safe, serve_onnx 3-way freeze prerequisite identified —
+  see § P1). P2 not started (depends on P0 ✓ + ideally P1). P1/P2 code
+  landing is sequential-after-R110: they edit `features.py`/observation
+  builder/`model.py` which the live R110 orchestrator re-execs per
+  iteration — landing mid-run re-confounds R110 (the P0 lesson).
 - **Scope:** top three model-feature research items after a mechanics/code audit:
   (1) MCTS self-play v3 embedding support, (2) temporal / turn-state features,
   (3) per-Uma slot tokens.
@@ -196,13 +203,79 @@ Two implementation options:
 
 1. **Scalar-only first pass (recommended).**
    - Bump `STATE_FEATURE_SCHEMA_VERSION` from `3.0` to `3.1`.
-   - Increase `STATE_DIM` from `110` to about `148`.
-   - Add additive slots:
-     - global temporal: own/opponent turns taken, first-turn flags
-     - own/opponent side turn-state scalars
-     - compact per-Uma temporal summary for own active, own bench aggregate,
-       opponent active, opponent bench aggregate
-   - Add ablation key: `state_temporal_turn_v31`.
+   - **Exact STATE_DIM = 110 → 164** (readiness audit 2026-05-18; the
+     earlier "about 148" was arithmetically low for the full layout).
+     Additive at the tail only — slots 0–109 byte-stable, following the
+     enforced v2.1/v3 append pattern (`features.py` writes by explicit
+     index slices; the frozen v2 builder depends on 0–95 stability).
+     Exact slot enumeration (commit this layout, do not leave a range):
+
+     | Block | Slots | Count |
+     |---|---|---|
+     | Global temporal: ownTurnsTaken(norm /20), oppTurnsTaken(norm), ownIsFirstTurn(bool), oppIsFirstTurn(bool) | 110–113 | 4 |
+     | Own side turnState ×7: energyAttachmentsThisTurn, bonusEnergyAttachments, retreatCostReduction, activeAttackDamageBonus, usedAbilityNameCountThisTurn, usedAbilityNameCountThisGame, guaranteedCoinFlipHeads | 114–120 | 7 |
+     | Opp side turnState ×7 (same) | 121–127 | 7 |
+     | Per-Uma temporal ×9 (turnsInPlay-norm, enteredThisTurn, evolvedThisTurn, evolvedLastTurn, tookDamageLastTurn, tookDamageThisTurn, nextTurnDamageReduction-norm, attackBlockedThisTurn, paralysisRecoveryPending) — own active | 128–136 | 9 |
+     | own bench aggregate (same 9, mean/max) | 137–145 | 9 |
+     | opp active (same 9) | 146–154 | 9 |
+     | opp bench aggregate (same 9) | 155–163 | 9 |
+     | **Total new** | | **54** |
+
+     Trim levers if a smaller dim is wanted (pre-register, don't hand-wave):
+     opp `energyAttachmentsThisTurn`/`bonusEnergyAttachments` are always 0
+     on your turn (reset at opp turn start) → droppable; or shrink the
+     per-Uma block from 9→5. Default recommendation: ship the full 164.
+   - Add ablation key `state_temporal_turn_v31` to `apply_state_ablations`
+     zeroing slots [110:164] (mirror the existing `state_hygiene_v21`
+     slice-zero pattern).
+   - **Encoding (overfit guard):** never emit raw turn stamps. Derive
+     booleans at observation-build time (`enteredThisTurn`,
+     `evolvedThisTurn`, `evolvedLastTurn`, `attackBlockedThisTurn`,
+     `paralysisRecoveryPending`) — these are exactly the predicates the
+     engine tests. Turn counters → bounded-norm `min(x,CAP)/CAP` (CAP≈20,
+     matching existing `turnNumber/20`). Small int budgets → bounded-norm
+     by small fixed caps (/3 budgets, /30 damage values). Damage memory →
+     bool as-is.
+
+   **Field reality (readiness audit) — fold name corrections in:** all
+   spec fields exist in `shared/src/types.ts` and are public-safe (clean
+   hidden-info story: all additions are board/side scalar state already
+   visible to the acting side). Renames: retreat reduction =
+   `SideState.retreatCostReduction`; ability locks =
+   `usedAbilityNamesThisTurn`/`usedAbilityNamesThisGame` (string arrays —
+   emit **counts only**, never the name strings);
+   `activeAttackDamageBonus` is on `SideState` not the Uma (spec already
+   places it side-level — correct); `evolvedLastTurn`/`enteredThisTurn`
+   etc. have no engine boolean — compute from `evolvedTurn`/`enteredTurn`
+   vs `turnNumber` at build time.
+
+   **Two omissions to resolve before implementing:**
+   - `globalRetreatCostReduction` (stadium effect): effective retreat
+     cost = `side.retreatCostReduction + getGlobalRetreatCostReduction`.
+     Encoding only the per-side field understates retreat legality —
+     decide whether to add an effective/derived field. (Most material
+     scoring-fidelity gap.)
+   - First-turn threshold is ambiguous: `startTurn` uses
+     `turnsTakenBySide === 0` (energy-skip rule); evolution uses `<= 1`.
+     A single `ownIsFirstTurn` bool can't represent both. Evolve-legality
+     is already covered by per-Uma `enteredThisTurn`/`evolvedThisTurn`;
+     define `ownIsFirstTurn` as the energy/setup-phase flag and document
+     that explicitly.
+
+   **Load-bearing implementation prerequisite (serve_onnx coordination).**
+   `STATE_DIM` is a single shared constant used by both the encoder and
+   `serve_onnx.request_to_arrays`'s shape validator. Bumping it to 164
+   **silently breaks 110-d v3.0 serving** (a 110-d v3.0 graph would be
+   fed 164-d vectors and fail the shape check). `serve_onnx` schema
+   resolution is currently binary (96→v2 frozen builder, else→v3 via the
+   live `STATE_DIM`). Prerequisite for the P1 bump: **freeze/vendor the
+   110-d v3.0 builder** (exactly as v2 was frozen) and make schema
+   resolution **3-way keyed off the graph's `state_features` last dim**
+   (96→v2, 110→frozen v3.0, 164→v3.1); rename CLI `v3`→`v3.0`, add
+   `v3.1`. Do NOT bump `STATE_DIM` before this freeze lands. This is the
+   only non-trivial code change in P1 and the highest implementation
+   risk — it is also R110-safe (R110/r12_orchestrator does not consume
+   serve_onnx schema resolution; v3.0 graphs stay valid until the bump).
 
 2. **Slot-token integration.**
    - If P2 per-Uma slots happens first, encode per-Uma temporal fields inside
