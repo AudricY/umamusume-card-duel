@@ -1,19 +1,26 @@
 {
-  "updated": "2026-05-18T01:30Z",
+  "updated": "2026-05-18T03:00Z",
   "items": [
+    {
+      "id": "w6-loop-anti-degradation",
+      "priority": "P1",
+      "status": "scoped",
+      "summary": "Iter-2-peak-then-rot is a characterized schema-independent W6-recipe property capping both 96-d production and v3. Loop-recipe axis, NOT the closed representation axis. Canonical: docs/ai-research/progress/r110.md.",
+      "next_action": "READ-ONLY discriminator FIRST: replay on-disk iter-{0,1,2,3}/policy.onnx (R13-W6-phase-d + R110-W6-repro) over one fixed state corpus; compute root prior entropy, prior-vs-rule-bot top-1 agreement, KL(iter-N prior || iter-0 prior). Only if confirmed: cross-iter replay buffer + fixed-SL-anchor KL in r12_orchestrator.py. No loop compute before the discriminator."
+    },
     {
       "id": "r110-w6-reproduction",
       "priority": "P2",
-      "status": "in-progress",
-      "summary": "True-v3 R110 W6-loop reproduction is running after the R16-P0 mcts-distill embedding fix. Monitor runs/R110-W6-repro. Canonical scope: docs/ai-research/scoping/r110-w6-reproduction.md.",
-      "next_action": "Read events/state, apply scoping doc §6 exit bands, and do not auto-pivot on fail."
+      "status": "done",
+      "summary": "Verdict MARGINAL: best-promoted iter-2 Wilson lower 0.6042 (in 0.60-0.6479 band), reproduced-but-not-superior, NOT promoted; pinned 96-d stays production; R16-P0 embedding fix confirmed working. Canonical: docs/ai-research/progress/r110.md.",
+      "next_action": "None — run COMPLETE (all 5 iters, did NOT auto-halt: iter-4 0.5612 promoted by a 0.001 tolerance squeak vs 110-d's lower 0.6042 floor; verdict unchanged, locked on best-promoted iter-2 0.6042). Forward line is the gated recipe-fix item w6-loop-anti-degradation (read-only discriminator first)."
     },
     {
       "id": "r16-p1-temporal-turn-state-features",
       "priority": "P2",
       "status": "blocked",
-      "summary": "Implementation-ready but blocked on R110 verdict and schema-serving prerequisite. Canonical scope: docs/ai-research/scoping/r16-model-feature-backlog-refinement.md.",
-      "next_action": "Do not edit feature/schema code while R110 runs. Before STATE_DIM 164, freeze the 110-d v3 builder and make serve_onnx resolve 96/110/164 by graph shape."
+      "summary": "Implementation-ready. R110 verdict reached (MARGINAL, non-blocking). Now blocked only on the serving-schema 96/110/164 guard prerequisite. Canonical scope: docs/ai-research/scoping/r16-model-feature-backlog-refinement.md.",
+      "next_action": "Before STATE_DIM 164, freeze the 110-d v3 builder and make serve_onnx resolve 96/110/164 by graph shape; then P1 is unblocked."
     },
     {
       "id": "mcts-distill-followup-direction",

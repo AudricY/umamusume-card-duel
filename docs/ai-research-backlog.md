@@ -8,11 +8,16 @@ in progress, scoping, or analysis docs. See `docs/ai-research/README.md`.
 
 As of 2026-05-18:
 
-- **Production strength comes from search-wrapped play.** Rollout-leaf MCTS at
-  W6 iter-2 is the current production claim: Wilson lower 0.6479 vs rule bot
-  at the side-balanced n=120 gate. Canonical details:
+- **Production stays pinned 96-d.** Rollout-leaf MCTS at W6 iter-2 is the
+  current production claim: Wilson lower 0.6479 vs rule bot at the
+  side-balanced n=120 gate. Canonical details:
   `docs/ai-research/progress/r15.md` and the R1-R14 historical record in
   `docs/ai-performance-research-progress.md`.
+- **The iter-2-peak-then-regress is now a characterized schema-independent
+  recipe property.** Reproduced across BOTH 96-d and 110-d v3; 0.6479 is
+  itself W6's *transient iter-2 peak*, not a stable optimum. The R110 v3
+  reproduction was MARGINAL (best-promoted iter-2 0.6042) and not promoted.
+  Canonical: `docs/ai-research/progress/r110.md`.
 - **The search-free/raw-policy SL line is closed.** Labels, objective,
   representation, and label-shape all failed to approach the 0.40 gate
   (R7/R8/R7.b.2/mcts-distill v1). Do not spend compute on another isolated
@@ -22,21 +27,31 @@ As of 2026-05-18:
   across seed ranges and is only a latency fallback.
 - **Side asymmetry is real enough to disclose.** Current rollout-leaf evidence
   is aggregate side-balanced strength, not a per-side guarantee.
-- **The active frontier is 110-d/v3 search-wrapped reproduction and then
-  stronger search.** Live operational state is in
-  `docs/ai-agent-state/queue.json`.
+- **The active frontier is W6 loop anti-degradation (recipe axis).** Live
+  operational state is in `docs/ai-agent-state/queue.json`.
 
 ## Active Search-Wrapped Frontier
 
-1. **R110 W6 reproduction — ACTIVE.**
-   Re-run the W6 rollout-leaf self-play plus mcts-distill loop at 110-d/v3
-   after the R16-P0 embedding-path fix. Success reproduces or beats the 96-d
-   production search-wrapped model and unlocks the v3 promotion path. Scoping:
-   `docs/ai-research/scoping/r110-w6-reproduction.md`.
+0. **W6 loop anti-degradation recipe — P0/P1, TOP PRIORITY.**
+   The iter-2-peak-then-rot is a schema-independent W6-recipe property that
+   caps both the 96-d production claim and the v3 reproduction. Read-only
+   prior-entropy/KL discriminator FIRST (replay on-disk iter checkpoints, no
+   loop compute), then — only if confirmed — two localized
+   `r12_orchestrator.py` fixes: cross-iter replay buffer + fixed-SL-anchor
+   KL. This is a loop-recipe/optimization axis, explicitly NOT the
+   §6/§7-closed representation/capacity axis. Lifts both ceilings.
+   Canonical: `docs/ai-research/progress/r110.md`.
+
+1. **R110 W6 reproduction — DONE.**
+   Verdict MARGINAL (best-promoted iter-2 Wilson lower 0.6042, in the
+   0.60-0.6479 band); reproduced-but-not-superior, not promoted; pinned 96-d
+   stays production. R16-P0 embedding fix confirmed working.
+   `docs/ai-research/progress/r110.md`.
 
 2. **R16-P1 temporal/turn-state features — BLOCKED.**
-   Additive-tail feature schema work is ready, but it must wait for the R110
-   verdict and a serving-schema guard so 96/110/164-d models resolve safely.
+   R110 verdict reached (MARGINAL, not blocking). Now blocked only on the
+   serving-schema 96/110/164 guard prerequisite (freeze the v3.0 builder +
+   make `serve_onnx` resolve schema by graph shape before STATE_DIM 164).
    Scoping: `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`.
 
 3. **GPU-fed stronger MCTS — P1 scoping, not implementation.**
@@ -95,12 +110,16 @@ As of 2026-05-18:
   mcts-distill v1 failure is the canonical negative example.
 - Do not re-open raw-policy SL unless a new coverage result explicitly
   falsifies the current diagnosis.
-- Do not land R16-P1 schema/feature edits while R110 is running.
+- Do not land R16-P1 schema/feature edits until the serving-schema
+  96/110/164 guard prerequisite is in place (R110 verdict is now reached).
+- Do not re-open representation/capacity tuning off the R110 MARGINAL band;
+  the forward line is the loop-recipe axis only (`docs/ai-research/progress/r110.md`).
 
 ## Historical Pointers
 
 - R1-R14 evidence: `docs/ai-performance-research-progress.md`.
 - R15 result blocks: `docs/ai-research/progress/r15.md` and
   `docs/ai-research/progress/r15-archive.md`.
+- R110 W6-repro verdict + recipe mechanism: `docs/ai-research/progress/r110.md`.
 - Closed scoping docs: `docs/ai-research/scoping/archive/`.
 - Closed sprint/design/proposal docs: `docs/archive/ai-research/`.
