@@ -36,6 +36,15 @@ NUM_ZONES = len(ZONE_ORDER)
 
 
 class PolicyServer(ThreadingHTTPServer):
+    # TCP listen backlog. socketserver.TCPServer.server_activate() calls
+    # self.socket.listen(self.request_queue_size); the stdlib default is 5,
+    # which silently SYN-floods (kernel drops connections, workers get
+    # ECONNRESET/ECONNREFUSED) once a gate fans in >5 concurrent workers.
+    # Neither ThreadingHTTPServer nor HTTPServer override server_activate /
+    # request_queue_size, so this class attribute is the documented knob and
+    # is honored as-is. 128 comfortably covers 24+ worker gate fan-in.
+    request_queue_size = 128
+
     def __init__(
         self,
         address: tuple[str, int],

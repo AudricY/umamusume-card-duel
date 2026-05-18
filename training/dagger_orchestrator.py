@@ -885,14 +885,45 @@ def export_checkpoint_to_onnx(repo_root: Path, checkpoint: Path, onnx_path: Path
         raise
 
 
+def _open_serve_log(onnx_path: Path) -> tuple[Any, Path]:
+    """Open a per-serve log file next to the served ONNX graph.
+
+    Returns (file_handle, path). The caller owns the handle and MUST keep it
+    alive for the lifetime of the serve subprocess (passing it to Popen as
+    stdout/stderr is not enough — if it's GC'd the fd closes under the
+    child). A real file handle does NOT have the kernel-pipe-buffer deadlock
+    that subprocess.PIPE-without-a-drainer has, so serve stderr is now
+    recoverable after a crash instead of being swallowed by /dev/null.
+    """
+
+    try:
+        serve_log = onnx_path.parent / "serve.log"
+        handle = open(serve_log, "ab")
+        return handle, serve_log
+    except OSError:
+        import tempfile
+
+        fd, tmp = tempfile.mkstemp(prefix="serve_onnx-", suffix=".log")
+        os.close(fd)
+        serve_log = Path(tmp)
+        return open(serve_log, "ab"), serve_log
+
+
 @contextlib.contextmanager
 def serve_onnx_context(repo_root: Path, onnx_path: Path, args: argparse.Namespace) -> Iterator[str]:
     """Spin up serve_onnx, yield the model URL, always tear it down.
 
     Notes:
-    - stdout/stderr → DEVNULL. v4 review caught a real bug: PIPE without a
-      drainer eventually fills the kernel pipe buffer (~64KB on Linux) and
-      blocks the server's writes. At item 17 scale that hangs the eval gate.
+    - stdout/stderr → a per-serve ``serve.log`` next to the ONNX graph (or a
+      tempfile fallback). The original code routed to DEVNULL because v4
+      review caught that subprocess.PIPE without a drainer fills the kernel
+      pipe buffer (~64KB on Linux) and hangs the server at gate scale. A
+      real file handle has no such buffer-backpressure hazard, so we keep
+      the no-drainer property while making serve stderr recoverable after a
+      crash (the default-5 backlog SYN-flood death was invisible under
+      DEVNULL).
+    - The log file handle is closed in the same finally block that reaps the
+      process so it isn't GC'd (fd-closed) while the child still holds it.
     - Outer try/finally guarantees the process is reaped even if the health
       poll, the subsequent run_evaluator, or a Ctrl-C interrupts. v4 had
       try/finally only around the inner run_evaluator call, leaving a
@@ -906,6 +937,7 @@ def serve_onnx_context(repo_root: Path, onnx_path: Path, args: argparse.Namespac
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         port = int(sock.getsockname()[1])
+    log_handle, log_path = _open_serve_log(onnx_path)
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -918,8 +950,8 @@ def serve_onnx_context(repo_root: Path, onnx_path: Path, args: argparse.Namespac
             "cpu",
         ],
         cwd=repo_root,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=log_handle,
     )
     try:
         deadline = time.time() + 30
@@ -931,7 +963,9 @@ def serve_onnx_context(repo_root: Path, onnx_path: Path, args: argparse.Namespac
                 return
             except Exception:
                 time.sleep(0.3)
-        raise TimeoutError(f"serve_onnx did not become healthy on port {port}")
+        raise TimeoutError(
+            f"serve_onnx did not become healthy on port {port}; see {log_path}"
+        )
     finally:
         proc.terminate()
         try:
@@ -942,6 +976,7 @@ def serve_onnx_context(repo_root: Path, onnx_path: Path, args: argparse.Namespac
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        log_handle.close()
 
 
 def start_serve_onnx(repo_root: Path, onnx_path: Path, args: argparse.Namespace):
@@ -954,6 +989,7 @@ def start_serve_onnx(repo_root: Path, onnx_path: Path, args: argparse.Namespace)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         port = int(sock.getsockname()[1])
+    log_handle, log_path = _open_serve_log(onnx_path)
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -966,9 +1002,13 @@ def start_serve_onnx(repo_root: Path, onnx_path: Path, args: argparse.Namespace)
             "cpu",
         ],
         cwd=repo_root,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=log_handle,
     )
+    # Keep the log handle alive for the process lifetime; stop_serve_onnx
+    # closes it on teardown. Without this reference the handle is GC'd and
+    # the child's stdout/stderr fd is closed under it.
+    proc._serve_log_handle = log_handle  # type: ignore[attr-defined]
     deadline = time.time() + 30
     health_url = f"http://127.0.0.1:{port}/health"
     while time.time() < deadline:
@@ -982,7 +1022,10 @@ def start_serve_onnx(repo_root: Path, onnx_path: Path, args: argparse.Namespace)
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
-    raise TimeoutError(f"serve_onnx did not become healthy on port {port}")
+    log_handle.close()
+    raise TimeoutError(
+        f"serve_onnx did not become healthy on port {port}; see {log_path}"
+    )
 
 
 def stop_serve_onnx(proc) -> None:
@@ -991,6 +1034,9 @@ def stop_serve_onnx(proc) -> None:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
+    handle = getattr(proc, "_serve_log_handle", None)
+    if handle is not None:
+        handle.close()
 
 
 def count_lines(path: Path) -> int:
