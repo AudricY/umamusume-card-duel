@@ -1,7 +1,10 @@
 # Scoping: r12 selfplay + gate throughput
 
-Status: Deliverable 1 landed (worker default 1→24). Remaining items
-are ranked follow-ups; none may be applied without the stated gate.
+Status: Deliverable 1 landed (worker default 1→24). Items #2
+(rollout hash-carry) and #3 (HTTP keep-alive) landed ON, both
+proven bit-identical by the determinism gate (see below). Item #4
+(CRN/value-head leaf) stays deferred to R111 — it is a research-recipe
+decision and changing it would break the trusted R110 A/B comparison.
 
 ## Context
 
@@ -20,29 +23,49 @@ per-stage numbers + trajectory-neutrality proof live in
    4-worker baseline (selfplay/gate scale near-linearly with cores
    until the serve_onnx HTTP path or memory bandwidth saturates).
 
-2. **Rollout clone/fingerprint hot loop refactor.** The leaf-rollout
-   path clones game state and recomputes fingerprints per simulation;
-   profiling flagged this as the dominant single-core cost inside the
-   ~99% selfplay+gate budget. Estimated material per-core speedup but
-   it changes simulation internals.
-   **GATE (hard prerequisite): a determinism replay gate must exist
-   and pass before this refactor lands.** The refactor risks
-   perturbing trajectories; without a byte-level replay check against
-   a frozen seed corpus it would silently contaminate the upcoming
-   trusted W6 A/B run (R111). Do NOT implement before the gate. This
-   is the explicit "determinism-gate-before-rollout-clone-refactor"
-   requirement.
+2. **DONE — rollout/collapse fingerprint hot-loop refactor.** The
+   leaf-rollout and opponent-collapse loops recomputed the full-state
+   JSON fingerprint (`stateHash`) TWICE per step — pre-advance `before`
+   + post-advance no-progress check. The post-advance hash of step N
+   is, by construction, exactly the pre-advance `before` of step N+1
+   (same `GameState` object content). Carry it forward instead of
+   recomputing: identical `stateHash` string comparisons for the
+   no-progress break, ~half the `JSON.stringify` cost. No per-step
+   deep clone was removed (each rollout/collapse already owned ONE
+   `cloneGame` at entry — verified, advance fns mutate the owned copy,
+   no aliasing escapes to MCTS node state). Gated `MCTS_HASH_CARRY_ENABLED`
+   (`mcts.ts`), default ON, `UMA_MCTS_HASH_CARRY=0` reverts for an
+   exact A/B (mirrors the W6 recipe-fix flag pattern).
+   **GATE SATISFIED.** `training/r12_throughput_determinism_gate.py`
+   exists and PASSED at the R110 production config — see determinism
+   gate result below.
 
-3. **HTTP keep-alive between workers and serve_onnx.** Each predict
-   currently pays connection setup. Low risk (transport only, no
-   trajectory effect) but lower expected payoff than (1)/(2) at
-   batch=1 / ~7% predict share. Cheap follow-up after (1) lands and
-   the new bottleneck is re-measured at 24 workers.
+3. **DONE — HTTP keep-alive between workers and serve_onnx.** Bare
+   per-call `fetch()` on the `/predict` path (200k+ calls/run) replaced
+   with a shared keep-alive `node:http`/`node:https` Agent
+   (`backend/src/sim/keepAliveClient.ts`, `postJsonKeepAlive`). Pure
+   transport reuse: byte-identical request body (pre-serialized string
+   passed through), identical response parsing/ordering/error
+   semantics, only socket reuse differs. Gated `MCTS_KEEPALIVE_ENABLED`,
+   default ON, `UMA_MCTS_KEEPALIVE=0` reverts to bare fetch.
 
-4. **CRN / value-head leaf change.** Switching the leaf evaluator or
-   CRN sample count changes the learning targets and is a
-   research-recipe decision, NOT a unilateral throughput change. Owned
-   by the research backlog, not this scoping doc.
+4. **DEFERRED to R111 — CRN / value-head leaf change.** Switching the
+   leaf evaluator or CRN sample count changes the learning targets and
+   is a research-recipe decision, NOT a unilateral throughput change.
+   Held OUT of scope so the R111 W6 recipe-fix A/B stays comparable to
+   R110. Owned by the research backlog, not this scoping doc.
+
+## Determinism gate result
+
+`training/r12_throughput_determinism_gate.py --games 6` (R110 prod
+config: rollout leaf, sims 100, CRN 3, rollout-steps 200, collapse 64,
+prior policy; checkpoint `runs/R13-W6-phase-d/iter-2/policy.onnx`,
+seed-start 9000, workers 1): **PASS** — 12 seed-side keys, symmetric
+key set, zero mismatches. FLAG-ON (#2+#3 defaults) is bit-identical to
+FLAG-OFF (`UMA_MCTS_HASH_CARRY=0 UMA_MCTS_KEEPALIVE=0`): identical
+trajectories + terminal outcomes + gate win/loss. Both ship ON.
+Artifacts: `runs/R12-throughput-determinism-gate/result.json`. `cd
+backend && npx tsc --noEmit` clean.
 
 ## serve_onnx bottleneck note
 
