@@ -18,3 +18,8 @@
   declared a loop-recipe axis distinct from the closed representation axis
   — made self-directed by the main session with rationale:
   `docs/ai-research/progress/r110.md`.
+- 2026-05-18: W6 discriminator gate SATISFIED (recipe-rot = monotone
+  representation drift from iter-0, not an iter-2 peak). Forward line is
+  the implementer r12_orchestrator.py recipe-fix (cross-iter replay
+  buffer + fixed iter-0/SL KL anchor). Canonical:
+  `docs/ai-research/progress/r110.md` §4a.

@@ -1,19 +1,19 @@
 {
-  "updated": "2026-05-18T03:00Z",
+  "updated": "2026-05-18T06:30Z",
   "items": [
     {
       "id": "w6-loop-anti-degradation",
       "priority": "P1",
-      "status": "scoped",
-      "summary": "Iter-2-peak-then-rot is a characterized schema-independent W6-recipe property capping both 96-d production and v3. Loop-recipe axis, NOT the closed representation axis. Canonical: docs/ai-research/progress/r110.md.",
-      "next_action": "READ-ONLY discriminator FIRST: replay on-disk iter-{0,1,2,3}/policy.onnx (R13-W6-phase-d + R110-W6-repro) over one fixed state corpus; compute root prior entropy, prior-vs-rule-bot top-1 agreement, KL(iter-N prior || iter-0 prior). Only if confirmed: cross-iter replay buffer + fixed-SL-anchor KL in r12_orchestrator.py. No loop compute before the discriminator."
+      "status": "ready",
+      "summary": "Discriminator COMPLETE: recipe-rot confirmed as MONOTONE representation drift from iter-0 (not an iter-2 peak; both 96-d + 110-d v3 agree). §4 gate SATISFIED; §3 mechanisms 1&2 confirmed and ranked first. Loop-recipe axis, NOT the closed representation axis. Canonical: docs/ai-research/progress/r110.md §4a.",
+      "next_action": "Implementer: apply two localized training/r12_orchestrator.py changes — (1) accumulate a cross-iter replay buffer feeding the distill mixture (counter to per-iter-only behavior at :154,184); (2) pin the KL anchor to a fixed iter-0/SL checkpoint instead of the moving anchor at ~line 320. Then a gated loop run is required to test the ceiling lift (do NOT auto-launch)."
     },
     {
       "id": "r110-w6-reproduction",
       "priority": "P2",
       "status": "done",
       "summary": "Verdict MARGINAL: best-promoted iter-2 Wilson lower 0.6042 (in 0.60-0.6479 band), reproduced-but-not-superior, NOT promoted; pinned 96-d stays production; R16-P0 embedding fix confirmed working. Canonical: docs/ai-research/progress/r110.md.",
-      "next_action": "None — run COMPLETE (all 5 iters, did NOT auto-halt: iter-4 0.5612 promoted by a 0.001 tolerance squeak vs 110-d's lower 0.6042 floor; verdict unchanged, locked on best-promoted iter-2 0.6042). Forward line is the gated recipe-fix item w6-loop-anti-degradation (read-only discriminator first)."
+      "next_action": "None — run COMPLETE (all 5 iters, did NOT auto-halt: iter-4 0.5612 promoted by a 0.001 tolerance squeak vs 110-d's lower 0.6042 floor; verdict unchanged, locked on best-promoted iter-2 0.6042). Forward line is the now-ready recipe-fix item w6-loop-anti-degradation (discriminator gate satisfied; implementer step)."
     },
     {
       "id": "r16-p1-temporal-turn-state-features",
