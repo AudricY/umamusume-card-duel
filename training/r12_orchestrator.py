@@ -50,6 +50,25 @@ from dagger_orchestrator import (
     wilson_lower_bound,
 )
 
+# --- W6 recipe-fix (r110.md §4a) -------------------------------------------
+# The W6 loop's iter-2-peak-then-rot was diagnosed as MONOTONE policy-prior
+# representation drift from iter-0, driven by two confirmed mechanisms:
+#   (1) per-iter-only distill on monotonically softening targets, and
+#   (2) catastrophic forgetting from a KL anchor that MOVED to the previous
+#       iter's checkpoint (zero cumulative anti-drift).
+# These two named flags default ON (the intended new recipe) but are
+# trivially flippable for an A/B loop run. See r110.md §3 and §4a.
+W6_FIX_CROSS_ITER_REPLAY = True   # change 1: bounded cross-iter replay mixture
+W6_FIX_FIXED_KL_ANCHOR = True     # change 2: KL anchor pinned to iter-0/SL ckpt
+# Bounded-buffer policy for change 1: how many of the most-recent prior
+# iterations' selfplay corpora to mix in alongside the current iter's, and
+# the fraction of the mixture drawn from those older vintages. Conservative
+# defaults: a 3-iter window, ~40% older vintage, so the current iter still
+# dominates while older distributions damp the monotone target-softening.
+W6_REPLAY_WINDOW = 3
+W6_REPLAY_OLD_FRACTION = 0.40
+# ---------------------------------------------------------------------------
+
 
 @dataclass
 class R12State:
@@ -59,6 +78,12 @@ class R12State:
     consecutive_failures: int = 0
     halted: bool = False
     halt_reason: str | None = None
+    # W6 recipe-fix change 2 (r110.md §4a): the iter-0 / SL warm-start
+    # checkpoint, captured ONCE and reused as the KL-anchor reference for
+    # every iteration. Pinning it here (instead of the moving promoted
+    # checkpoint) is what gives cumulative anti-drift. Persisted across
+    # resume so a restarted run keeps anchoring to the same origin ckpt.
+    kl_anchor_checkpoint: Path | None = None
 
 
 def main() -> None:
@@ -90,6 +115,24 @@ def main() -> None:
 
     if state.promoted_checkpoint is None:
         raise SystemExit("must pass --init-checkpoint or --resume-state with a promoted_checkpoint set")
+
+    # W6 recipe-fix change 2 (r110.md §4a): capture the fixed KL anchor ONCE,
+    # before any iteration runs, as the iter-0 / SL warm-start checkpoint.
+    # This is never reassigned in the iteration loop — that fixedness is the
+    # whole point (the old recipe re-anchored to the previous iter's ckpt,
+    # giving zero cumulative anti-drift). A resumed run keeps whatever anchor
+    # was persisted; only a brand-new run sets it from the init checkpoint.
+    if state.kl_anchor_checkpoint is None:
+        state.kl_anchor_checkpoint = state.promoted_checkpoint
+    emit_event(events_path, {
+        "stage": "r12-orchestrator", "event_type": "w6_recipe_fix_config",
+        "cross_iter_replay": bool(args.w6_fix_cross_iter_replay),
+        "fixed_kl_anchor": bool(args.w6_fix_fixed_kl_anchor),
+        "kl_anchor_checkpoint": str(state.kl_anchor_checkpoint),
+        "replay_window": int(args.w6_replay_window),
+        "replay_old_fraction": float(args.w6_replay_old_fraction),
+        "ts": time.time(),
+    })
 
     # R14: auto-infer hidden_dim/depth from the init checkpoint so an
     # operator passing the orchestrator defaults (128/3) against a 64/2
@@ -178,10 +221,23 @@ def run_iteration(
                              "elapsed_sec": selfplay_elapsed, "ts": time.time()})
 
     # --- step 2: distillation training, warm-started from promoted ckpt ---
+    # W6 recipe-fix change 1 (r110.md §4a): the distill set is a bounded
+    # cross-iter replay MIXTURE, not iter-N self-play only. Self-play
+    # generation above is untouched; only what distill *consumes* changes.
+    # _build_distill_dataset returns selfplay_path unchanged at iter-0/1 or
+    # when the fix is flipped off, so pre-fix behavior is preserved.
+    distill_data = _build_distill_dataset(
+        out_dir, iter_dir, iteration, selfplay_path, args, events_path
+    )
     emit_event(events_path, {"stage": "distill", "event_type": "started",
-                             "iteration": iteration, "epochs": args.epochs, "ts": time.time()})
+                             "iteration": iteration, "epochs": args.epochs,
+                             "distill_data": str(distill_data), "ts": time.time()})
     t0 = time.time()
-    run_distill(repo_root, ckpt_dir, selfplay_path, state.promoted_checkpoint, iteration, args, events_path)
+    # W6 recipe-fix change 2 (r110.md §4a): pass the FIXED iter-0/SL KL
+    # anchor (state.kl_anchor_checkpoint), distinct from the moving
+    # warm-start (state.promoted_checkpoint used for --init-from-checkpoint).
+    run_distill(repo_root, ckpt_dir, distill_data, state.promoted_checkpoint,
+                state.kl_anchor_checkpoint, iteration, args, events_path)
     distill_elapsed = time.time() - t0
     if not new_ckpt.exists():
         raise RuntimeError(f"distill did not produce checkpoint at {new_ckpt}")
@@ -292,6 +348,7 @@ def run_distill(
     ckpt_dir: Path,
     data_path: Path,
     init_checkpoint: Path,
+    kl_anchor_checkpoint: Path,
     iteration: int,
     args: argparse.Namespace,
     events_path: Path,
@@ -317,7 +374,15 @@ def run_distill(
         "--verbose",
     ]
     if args.kl_anchor_weight > 0:
-        cmd.extend(["--kl-anchor-checkpoint", str(init_checkpoint),
+        # W6 recipe-fix change 2 (r110.md §4a): the KL anchor is the FIXED
+        # iter-0/SL checkpoint (kl_anchor_checkpoint), not the moving
+        # warm-start (init_checkpoint == previous iter's promoted ckpt).
+        # The old recipe used init_checkpoint here, re-anchoring every
+        # iteration and giving zero cumulative anti-drift; v3 drifted ~2.4x
+        # harder in KL than 96-d. When the fix is flipped OFF for an A/B
+        # run, fall back to the original moving-anchor behavior.
+        anchor = kl_anchor_checkpoint if args.w6_fix_fixed_kl_anchor else init_checkpoint
+        cmd.extend(["--kl-anchor-checkpoint", str(anchor),
                     "--kl-anchor-weight", str(args.kl_anchor_weight)])
     with log_path.open("w") as logf:
         subprocess.run(cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True)
@@ -461,6 +526,100 @@ def count_lines(path: Path) -> int:
         return sum(1 for line in fh if line.strip())
 
 
+def _build_distill_dataset(
+    out_dir: Path,
+    iter_dir: Path,
+    iteration: int,
+    current_selfplay: Path,
+    args: argparse.Namespace,
+    events_path: Path,
+) -> Path:
+    """W6 recipe-fix change 1 (r110.md §4a): build the distill training set
+    from a BOUNDED cross-iter replay mixture instead of iter-N self-play only.
+
+    Mechanism being countered: the old recipe distilled iter-N purely on
+    iter-N self-play, on monotonically softening targets, producing monotone
+    entropy inflation / representation drift from iter-0. Mixing a bounded
+    window of older self-play vintages back in damps that monotone softening.
+
+    Buffer policy (conservative, explicit):
+      - window = args.w6_replay_window most-recent PRIOR iterations.
+      - old_fraction = args.w6_replay_old_fraction of the materialized
+        mixture is drawn (round-robin, deterministic, no shuffle/RNG) from
+        those older vintages; the rest is the current iter verbatim.
+      - The current iter's full corpus is ALWAYS included in full so we
+        never train on less signal than the old recipe did.
+
+    Fallback: when the fix is OFF, or at iter-0/1 where no usable prior
+    vintage exists, this returns the current iter's selfplay path unchanged
+    — byte-identical to the pre-fix behavior.
+    """
+    if not args.w6_fix_cross_iter_replay:
+        return current_selfplay
+
+    window = max(0, int(args.w6_replay_window))
+    prior_paths: list[Path] = []
+    for i in range(iteration - 1, max(-1, iteration - 1 - window), -1):
+        p = out_dir / f"iter-{i}" / "selfplay.jsonl"
+        if p.exists() and count_lines(p) > 0:
+            prior_paths.append(p)
+
+    # iter-0/1 (or no prior corpus on disk): preserve existing behavior.
+    if not prior_paths:
+        emit_event(events_path, {
+            "stage": "distill-replay", "event_type": "passthrough",
+            "iteration": iteration, "reason": "no_prior_vintage",
+            "data": str(current_selfplay), "ts": time.time(),
+        })
+        return current_selfplay
+
+    current_lines = [
+        ln for ln in current_selfplay.read_text(encoding="utf8").splitlines() if ln.strip()
+    ]
+    n_current = len(current_lines)
+    if n_current == 0:
+        return current_selfplay
+
+    # Older-vintage rows pooled newest-first, sampled deterministically by
+    # an evenly-spaced stride so each vintage contributes proportionally
+    # without an RNG (reproducible across resume).
+    old_pool: list[str] = []
+    for p in prior_paths:
+        old_pool.extend(
+            ln for ln in p.read_text(encoding="utf8").splitlines() if ln.strip()
+        )
+    old_frac = min(0.95, max(0.0, float(args.w6_replay_old_fraction)))
+    # Solve n_old / (n_current + n_old) ~= old_frac for n_old, capped by pool.
+    n_old_target = int(round(n_current * old_frac / max(1e-9, 1.0 - old_frac)))
+    n_old = min(len(old_pool), n_old_target)
+    if n_old <= 0:
+        return current_selfplay
+    stride = max(1, len(old_pool) // n_old)
+    sampled_old = old_pool[::stride][:n_old]
+
+    mixed_path = iter_dir / "distill-mixed.jsonl"
+    with mixed_path.open("w", encoding="utf8") as fh:
+        for ln in current_lines:
+            fh.write(ln + "\n")
+        for ln in sampled_old:
+            fh.write(ln + "\n")
+
+    emit_event(events_path, {
+        "stage": "distill-replay", "event_type": "materialized",
+        "iteration": iteration,
+        "window": window,
+        "old_fraction_target": old_frac,
+        "n_current": n_current,
+        "n_old_pool": len(old_pool),
+        "n_old_mixed": len(sampled_old),
+        "n_total": n_current + len(sampled_old),
+        "vintages": [str(p) for p in prior_paths],
+        "data": str(mixed_path),
+        "ts": time.time(),
+    })
+    return mixed_path
+
+
 def emit_event(events_path: Path, payload: dict[str, Any]) -> None:
     events_path.parent.mkdir(parents=True, exist_ok=True)
     with events_path.open("a", encoding="utf8") as fh:
@@ -526,6 +685,9 @@ def save_state(path: Path, state: R12State) -> None:
     payload = {
         "promoted_checkpoint": str(state.promoted_checkpoint) if state.promoted_checkpoint else None,
         "promoted_wilson_lower": state.promoted_wilson_lower,
+        # W6 recipe-fix change 2 (r110.md §4a): persist the fixed KL anchor so
+        # a resumed run keeps anchoring to the same origin checkpoint.
+        "kl_anchor_checkpoint": str(state.kl_anchor_checkpoint) if state.kl_anchor_checkpoint else None,
         "iterations": state.iterations,
         "consecutive_failures": state.consecutive_failures,
         "halted": state.halted,
@@ -541,6 +703,10 @@ def load_state(path: Path) -> R12State:
     state = R12State()
     state.promoted_checkpoint = Path(payload["promoted_checkpoint"]) if payload.get("promoted_checkpoint") else None
     state.promoted_wilson_lower = payload.get("promoted_wilson_lower")
+    # W6 recipe-fix change 2 (r110.md §4a): restore the fixed KL anchor.
+    state.kl_anchor_checkpoint = (
+        Path(payload["kl_anchor_checkpoint"]) if payload.get("kl_anchor_checkpoint") else None
+    )
     state.iterations = list(payload.get("iterations") or [])
     state.consecutive_failures = int(payload.get("consecutive_failures") or 0)
     state.halted = bool(payload.get("halted") or False)
@@ -582,6 +748,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--value-weight", type=float, default=1.0)
     p.add_argument("--kl-anchor-weight", type=float, default=0.0,
                    help="Optional anti-forgetting anchor weight (init checkpoint as anchor).")
+    # W6 recipe-fix (r110.md §4a). Default ON via the module constants above;
+    # these flags exist so an A/B loop run can flip either fix off without a
+    # code edit. --w6-fix-* take precedence over the constants when passed.
+    p.add_argument("--w6-fix-cross-iter-replay", dest="w6_fix_cross_iter_replay",
+                   default=None, action="store_true",
+                   help="W6 recipe-fix change 1: cross-iter replay mixture for distill (default ON).")
+    p.add_argument("--no-w6-fix-cross-iter-replay", dest="w6_fix_cross_iter_replay",
+                   action="store_false",
+                   help="Disable W6 recipe-fix change 1 (per-iter-only distill, the old recipe).")
+    p.add_argument("--w6-fix-fixed-kl-anchor", dest="w6_fix_fixed_kl_anchor",
+                   default=None, action="store_true",
+                   help="W6 recipe-fix change 2: pin KL anchor to iter-0/SL ckpt (default ON).")
+    p.add_argument("--no-w6-fix-fixed-kl-anchor", dest="w6_fix_fixed_kl_anchor",
+                   action="store_false",
+                   help="Disable W6 recipe-fix change 2 (moving previous-iter anchor, the old recipe).")
+    p.add_argument("--w6-replay-window", type=int, default=W6_REPLAY_WINDOW,
+                   help="W6 recipe-fix: # of most-recent prior iters mixed into the distill set.")
+    p.add_argument("--w6-replay-old-fraction", type=float, default=W6_REPLAY_OLD_FRACTION,
+                   help="W6 recipe-fix: fraction of the distill mixture drawn from older vintages.")
     # serve_onnx_context reads .device/.amp/etc indirectly; keep these
     # minimal Namespace fields so DAgger's helper doesn't crash on .get.
     p.add_argument("--device", default="cpu")
@@ -601,7 +786,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--crossover-mse-floor-manifest",
                    default="runs/R13-value-retrain-experiment/retrain/value-retrain.manifest.json",
                    help="W3 value-retrain manifest path; reads .val.loss as the irreducible-noise floor.")
-    return p.parse_args()
+    args = p.parse_args()
+    # Resolve the W6 recipe-fix flags: unspecified -> module-constant default
+    # (ON); an explicit --w6-fix-*/--no-w6-fix-* on the CLI wins. (r110.md §4a)
+    if args.w6_fix_cross_iter_replay is None:
+        args.w6_fix_cross_iter_replay = W6_FIX_CROSS_ITER_REPLAY
+    if args.w6_fix_fixed_kl_anchor is None:
+        args.w6_fix_fixed_kl_anchor = W6_FIX_FIXED_KL_ANCHOR
+    return args
 
 
 # Re-export so callers/inspectors don't have to import dagger_orchestrator.
