@@ -5,6 +5,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fork, type ChildProcess } from "node:child_process";
 import { withGitMetadata } from "./manifest";
+import { MCTS_WORK_STEALING_ENABLED, WORK_STEALING_PREFETCH } from "./workStealing";
 
 type Args = EvaluateModelArgs & {
   minGames: number;
@@ -150,6 +151,18 @@ async function runOrchestrator(
   tasks: WorkerTask[],
   onResult: (result: GateResult, workerId: number, gameSec: number) => void,
 ): Promise<GateResult[]> {
+  if (MCTS_WORK_STEALING_ENABLED) {
+    return runOrchestratorWorkStealing(args, tasks, onResult);
+  }
+  return runOrchestratorStatic(args, tasks, onResult);
+}
+
+// Static contiguous chunking. Kept verbatim behind UMA_MCTS_WORK_STEALING=0.
+async function runOrchestratorStatic(
+  args: Args,
+  tasks: WorkerTask[],
+  onResult: (result: GateResult, workerId: number, gameSec: number) => void,
+): Promise<GateResult[]> {
   const slices = partitionTasks(tasks, args.workers);
   const workerArgv = buildWorkerArgv(process.argv.slice(2));
   const collected: GateResult[] = [];
@@ -187,29 +200,150 @@ async function runOrchestrator(
   return collected;
 }
 
+// Work-stealing dispatch (docs/ai-research/scoping/r12-selfplay-gate-throughput.md).
+// Shared task-index queue: seed each worker with WORK_STEALING_PREFETCH tasks,
+// refill one on every completion. Workers spun = min(tasks, workers) (fixes
+// the dark-cores bug). Results are stored into a slot array indexed by task
+// index, NOT push-order, so the returned GateResult[] is deterministic
+// regardless of which worker finished when. Per-game RNG is seeded solely
+// from (seed, modelSide) (evaluateModelVsHeuristic.ts `:modelSide`), so
+// dispatch order cannot perturb trajectories or gate outcomes.
+async function runOrchestratorWorkStealing(
+  args: Args,
+  tasks: WorkerTask[],
+  onResult: (result: GateResult, workerId: number, gameSec: number) => void,
+): Promise<GateResult[]> {
+  const workerArgv = buildWorkerArgv(process.argv.slice(2));
+  const workerCount = Math.min(tasks.length, args.workers);
+  const slots: (GateResult | null)[] = new Array(tasks.length).fill(null);
+  let nextTaskIndex = 0;
+
+  await Promise.all(Array.from({ length: workerCount }, (_unused, workerId) => new Promise<void>((resolve, reject) => {
+    const child: ChildProcess = fork(process.argv[1]!, workerArgv, {
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
+    });
+    let workerReady = false;
+    let workerDone = false;
+    let inFlight = 0;
+
+    const dispatchNext = (): void => {
+      if (nextTaskIndex >= tasks.length) {
+        if (inFlight === 0) child.send({ kind: "no_more_tasks" });
+        return;
+      }
+      const taskIndex = nextTaskIndex;
+      nextTaskIndex += 1;
+      inFlight += 1;
+      const task = tasks[taskIndex]!;
+      child.send({ kind: "task", taskIndex, seed: task.seed, side: task.side });
+    };
+
+    child.on("message", (msg: unknown) => {
+      const m = msg as { kind: string; result?: GateResult; gameSec?: number; taskIndex?: number };
+      if (m.kind === "ready") {
+        workerReady = true;
+        for (let k = 0; k < WORK_STEALING_PREFETCH; k += 1) dispatchNext();
+      } else if (m.kind === "game_completed" && m.result && m.taskIndex !== undefined) {
+        slots[m.taskIndex] = m.result;
+        inFlight -= 1;
+        onResult(m.result, workerId, m.gameSec ?? 0);
+        dispatchNext();
+      } else if (m.kind === "done") {
+        workerDone = true;
+      }
+    });
+    child.on("error", (err) => reject(err));
+    child.on("exit", (code) => {
+      if (!workerReady) {
+        reject(new Error(`worker ${workerId} exited before becoming ready (code=${code})`));
+      } else if (!workerDone) {
+        reject(new Error(`worker ${workerId} exited before completing tasks (code=${code})`));
+      } else if (code !== 0 && code !== null) {
+        reject(new Error(`worker ${workerId} exited non-zero (code=${code})`));
+      } else {
+        resolve();
+      }
+    });
+  })));
+
+  // Return results in ascending task-index order (deterministic, independent
+  // of completion order). summarize() is itself order-independent, but slot
+  // ordering keeps the contract identical to the static path.
+  return slots.filter((r): r is GateResult => r !== null);
+}
+
 async function runWorker(args: Args): Promise<void> {
   if (!process.send) {
     process.stderr.write("evalGate worker has no IPC channel\n");
     process.exit(2);
     return;
   }
-  process.send({ kind: "ready" });
-  process.on("message", async (msg: unknown) => {
-    const m = msg as { kind: string; workerId?: number; tasks?: WorkerTask[] };
-    if (m.kind !== "tasks" || !m.tasks) return;
+  if (!MCTS_WORK_STEALING_ENABLED) {
+    process.send({ kind: "ready" });
+    process.on("message", async (msg: unknown) => {
+      const m = msg as { kind: string; workerId?: number; tasks?: WorkerTask[] };
+      if (m.kind !== "tasks" || !m.tasks) return;
+      try {
+        for (const task of m.tasks) {
+          const gameStart = Date.now();
+          const result = await runModelVsHeuristicGame(args, task.seed, task.side);
+          const gameSec = (Date.now() - gameStart) / 1000;
+          process.send!({ kind: "game_completed", result, gameSec });
+        }
+        process.send!({ kind: "done" });
+        setTimeout(() => process.exit(0), 25);
+      } catch (err) {
+        process.stderr.write(`worker error: ${(err as Error).message}\n`);
+        process.exit(1);
+      }
+    });
+    return;
+  }
+
+  // Work-stealing: the orchestrator prefetches WORK_STEALING_PREFETCH tasks
+  // per worker, so two `task` messages can sit in the mailbox at once. They
+  // MUST NOT run concurrently — a single game owns the process-wide
+  // AsyncLocalStorage RNG context (rngAsyncStore.ts) and the shared
+  // serve_onnx client; interleaving breaks bit-identity. Buffer prefetched
+  // tasks in an internal FIFO and drain STRICTLY SEQUENTIALLY (exactly one
+  // game in flight), matching the static path's per-worker `for`-loop.
+  type Pend = { taskIndex: number; seed: string; side: SideId };
+  const pending: Pend[] = [];
+  let draining = false;
+  let noMoreTasks = false;
+  const finish = (): void => {
+    process.send!({ kind: "done" });
+    setTimeout(() => process.exit(0), 25);
+  };
+  const drain = async (): Promise<void> => {
+    if (draining) return;
+    draining = true;
     try {
-      for (const task of m.tasks) {
+      while (pending.length > 0) {
+        const task = pending.shift()!;
         const gameStart = Date.now();
         const result = await runModelVsHeuristicGame(args, task.seed, task.side);
         const gameSec = (Date.now() - gameStart) / 1000;
-        process.send!({ kind: "game_completed", result, gameSec });
+        process.send!({ kind: "game_completed", result, gameSec, taskIndex: task.taskIndex });
       }
-      process.send!({ kind: "done" });
-      setTimeout(() => process.exit(0), 25);
     } catch (err) {
       process.stderr.write(`worker error: ${(err as Error).message}\n`);
       process.exit(1);
     }
+    draining = false;
+    if (noMoreTasks && pending.length === 0) finish();
+  };
+  process.send({ kind: "ready" });
+  process.on("message", (msg: unknown) => {
+    const m = msg as { kind: string; taskIndex?: number; seed?: string; side?: SideId };
+    if (m.kind === "no_more_tasks") {
+      noMoreTasks = true;
+      if (!draining && pending.length === 0) finish();
+      return;
+    }
+    if (m.kind !== "task" || m.seed === undefined || m.side === undefined || m.taskIndex === undefined) return;
+    pending.push({ taskIndex: m.taskIndex, seed: m.seed, side: m.side });
+    void drain();
   });
 }
 

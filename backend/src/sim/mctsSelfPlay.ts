@@ -35,6 +35,7 @@ import {
 } from "./evaluateModelVsHeuristic";
 import { defaultMctsConfig, runMcts, type MctsConfig, type MctsResult } from "./mcts";
 import { withGitMetadata } from "./manifest";
+import { MCTS_WORK_STEALING_ENABLED, WORK_STEALING_PREFETCH } from "./workStealing";
 
 const ROW_SCHEMA_VERSION = 1;
 
@@ -165,7 +166,10 @@ function partitionSeeds(seeds: string[], workers: number): string[][] {
   return out;
 }
 
-async function runOrchestrator(args: SelfPlayArgs, seeds: string[], summaries: GameSummary[]): Promise<void> {
+// Static contiguous chunking. Worker w owns seed-index slice
+// [w*size,(w+1)*size); concatenating shards in worker order is therefore
+// already global seed order. Kept verbatim behind UMA_MCTS_WORK_STEALING=0.
+async function runOrchestratorStatic(args: SelfPlayArgs, seeds: string[], summaries: GameSummary[]): Promise<void> {
   const slices = partitionSeeds(seeds, args.workers);
   const workerArgv = buildWorkerArgv(process.argv.slice(2));
   const shardPaths: string[] = [];
@@ -209,7 +213,8 @@ async function runOrchestrator(args: SelfPlayArgs, seeds: string[], summaries: G
       }
     });
   })));
-  // Concatenate shard files into the canonical outPath.
+  // Concatenate shard files into the canonical outPath (worker order ==
+  // global seed order under contiguous chunking).
   for (const shardPath of shardPaths) {
     try {
       const data = readFileSync(shardPath, "utf8");
@@ -221,33 +226,185 @@ async function runOrchestrator(args: SelfPlayArgs, seeds: string[], summaries: G
   }
 }
 
+// Work-stealing dispatch (docs/ai-research/scoping/r12-selfplay-gate-throughput.md).
+// Shared seed-index queue: seed each worker with WORK_STEALING_PREFETCH tasks,
+// refill one task on every completion. Each game's rows are written to a
+// per-seed-index shard `${outPath}.s${idx}`; the orchestrator concatenates
+// shards in ASCENDING SEED-INDEX ORDER (not completion order), and pushes
+// summaries into a slot array indexed by seed-index. Output is therefore
+// byte-identical to the static path regardless of which worker finished when.
+async function runOrchestratorWorkStealing(args: SelfPlayArgs, seeds: string[], summaries: GameSummary[]): Promise<void> {
+  const workerArgv = buildWorkerArgv(process.argv.slice(2));
+  const workerCount = Math.min(seeds.length, args.workers);
+  const summarySlots: (GameSummary | null)[] = new Array(seeds.length).fill(null);
+  const runStartedAt = Date.now();
+  let nextSeedIndex = 0;
+  let gamesCompleted = 0;
+
+  await Promise.all(Array.from({ length: workerCount }, (_unused, workerId) => new Promise<void>((resolve, reject) => {
+    const child: ChildProcess = fork(process.argv[1]!, workerArgv, {
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
+    });
+    let workerReady = false;
+    let workerDone = false;
+    let inFlight = 0;
+
+    const dispatchNext = (): void => {
+      if (nextSeedIndex >= seeds.length) {
+        if (inFlight === 0) child.send({ kind: "no_more_tasks" });
+        return;
+      }
+      const seedIndex = nextSeedIndex;
+      nextSeedIndex += 1;
+      inFlight += 1;
+      child.send({
+        kind: "task",
+        seedIndex,
+        seed: seeds[seedIndex]!,
+        shardPath: `${args.outPath}.s${seedIndex}`,
+      });
+    };
+
+    child.on("message", (msg: unknown) => {
+      const m = msg as { kind: string; summary?: GameSummary; seedIndex?: number };
+      if (m.kind === "ready") {
+        workerReady = true;
+        for (let k = 0; k < WORK_STEALING_PREFETCH; k += 1) dispatchNext();
+      } else if (m.kind === "game_completed" && m.summary && m.seedIndex !== undefined) {
+        summarySlots[m.seedIndex] = m.summary;
+        inFlight -= 1;
+        gamesCompleted += 1;
+        const elapsedSec = (Date.now() - runStartedAt) / 1000;
+        process.stderr.write(
+          `[selfplay ${gamesCompleted}/${seeds.length} w${workerId}] seed=${m.summary.seed} winner=${m.summary.winner ?? "none"} rows=${m.summary.rowCount} elapsed=${elapsedSec.toFixed(1)}s\n`,
+        );
+        dispatchNext();
+      } else if (m.kind === "done") {
+        workerDone = true;
+      }
+    });
+    child.on("error", (err) => reject(err));
+    child.on("exit", (code) => {
+      if (!workerReady) {
+        reject(new Error(`selfplay worker ${workerId} exited before becoming ready (code=${code})`));
+      } else if (!workerDone) {
+        reject(new Error(`selfplay worker ${workerId} exited before completing tasks (code=${code})`));
+      } else if (code !== 0 && code !== null) {
+        reject(new Error(`selfplay worker ${workerId} exited non-zero (code=${code})`));
+      } else {
+        resolve();
+      }
+    });
+  })));
+
+  // Concatenate per-seed-index shards in ascending seed order (deterministic,
+  // independent of completion order) then push summaries in the same order.
+  for (let seedIndex = 0; seedIndex < seeds.length; seedIndex += 1) {
+    const shardPath = `${args.outPath}.s${seedIndex}`;
+    try {
+      const data = readFileSync(shardPath, "utf8");
+      if (data.length > 0) appendFileSync(args.outPath, data, "utf8");
+      unlinkSync(shardPath);
+    } catch {
+      // Shard may not exist if the game produced zero rows; ignore.
+    }
+    const slot = summarySlots[seedIndex];
+    if (slot) summaries.push(slot);
+  }
+}
+
+async function runOrchestrator(args: SelfPlayArgs, seeds: string[], summaries: GameSummary[]): Promise<void> {
+  if (MCTS_WORK_STEALING_ENABLED) {
+    return runOrchestratorWorkStealing(args, seeds, summaries);
+  }
+  return runOrchestratorStatic(args, seeds, summaries);
+}
+
 async function runWorker(args: SelfPlayArgs): Promise<void> {
   if (!process.send) {
     process.stderr.write("mctsSelfPlay worker has no IPC channel\n");
     process.exit(2);
     return;
   }
-  mkdirSync(dirname(args.outPath), { recursive: true });
-  writeFileSync(args.outPath, "", "utf8");
-  process.send({ kind: "ready" });
-  process.on("message", async (msg: unknown) => {
-    const m = msg as { kind: string; workerId?: number; seeds?: string[] };
-    if (m.kind !== "seeds" || !m.seeds) return;
-    try {
-      for (const seed of m.seeds) {
-        const record = await runSelfPlayGame(args, seed);
-        if (record.rows.length) {
-          appendFileSync(args.outPath, record.rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+  if (!MCTS_WORK_STEALING_ENABLED) {
+    // Static contiguous chunking: worker writes its whole slice to the
+    // single `--out` shard the orchestrator assigned it.
+    mkdirSync(dirname(args.outPath), { recursive: true });
+    writeFileSync(args.outPath, "", "utf8");
+    process.send({ kind: "ready" });
+    process.on("message", async (msg: unknown) => {
+      const m = msg as { kind: string; workerId?: number; seeds?: string[] };
+      if (m.kind !== "seeds" || !m.seeds) return;
+      try {
+        for (const seed of m.seeds) {
+          const record = await runSelfPlayGame(args, seed);
+          if (record.rows.length) {
+            appendFileSync(args.outPath, record.rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+          }
+          const summary = gameRecordToSummary(seed, record);
+          process.send!({ kind: "game_completed", summary });
         }
-        const summary = gameRecordToSummary(seed, record);
-        process.send!({ kind: "game_completed", summary });
+        process.send!({ kind: "done" });
+        setTimeout(() => process.exit(0), 25);
+      } catch (err) {
+        process.stderr.write(`selfplay worker error: ${(err as Error).message}\n`);
+        process.exit(1);
       }
-      process.send!({ kind: "done" });
-      setTimeout(() => process.exit(0), 25);
+    });
+    return;
+  }
+
+  // Work-stealing: the orchestrator prefetches WORK_STEALING_PREFETCH tasks
+  // per worker to hide the IPC round-trip, so two `task` messages can be
+  // in this worker's mailbox at once. They MUST NOT run concurrently: a
+  // single game owns the process-wide AsyncLocalStorage RNG context
+  // (rngAsyncStore.ts) and the shared serve_onnx client; interleaving two
+  // games on the event loop perturbs both and breaks bit-identity. So
+  // buffer prefetched tasks in an internal FIFO and drain it STRICTLY
+  // SEQUENTIALLY — exactly one game in flight at any time, matching the
+  // static path's per-worker `for`-loop semantics. Load balancing comes
+  // from the orchestrator pulling the next task on completion, not from
+  // intra-worker concurrency.
+  type Task = { seedIndex: number; seed: string; shardPath: string };
+  const pending: Task[] = [];
+  let draining = false;
+  let noMoreTasks = false;
+  const finish = (): void => {
+    process.send!({ kind: "done" });
+    setTimeout(() => process.exit(0), 25);
+  };
+  const drain = async (): Promise<void> => {
+    if (draining) return;
+    draining = true;
+    try {
+      while (pending.length > 0) {
+        const task = pending.shift()!;
+        const record = await runSelfPlayGame(args, task.seed);
+        if (record.rows.length) {
+          mkdirSync(dirname(task.shardPath), { recursive: true });
+          writeFileSync(task.shardPath, record.rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
+        }
+        const summary = gameRecordToSummary(task.seed, record);
+        process.send!({ kind: "game_completed", summary, seedIndex: task.seedIndex });
+      }
     } catch (err) {
       process.stderr.write(`selfplay worker error: ${(err as Error).message}\n`);
       process.exit(1);
     }
+    draining = false;
+    if (noMoreTasks && pending.length === 0) finish();
+  };
+  process.send({ kind: "ready" });
+  process.on("message", (msg: unknown) => {
+    const m = msg as { kind: string; seedIndex?: number; seed?: string; shardPath?: string };
+    if (m.kind === "no_more_tasks") {
+      noMoreTasks = true;
+      if (!draining && pending.length === 0) finish();
+      return;
+    }
+    if (m.kind !== "task" || m.seed === undefined || m.seedIndex === undefined || !m.shardPath) return;
+    pending.push({ seedIndex: m.seedIndex, seed: m.seed, shardPath: m.shardPath });
+    void drain();
   });
 }
 
