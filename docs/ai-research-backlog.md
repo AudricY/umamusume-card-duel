@@ -62,21 +62,22 @@ Migration".
 Pre-R12: "move some honest measurement past Wilson 0.31." That bar is cleared
 by 32pp at max strength and at-or-near at cheap inference. The F1 raw-policy
 SL line is now closed across all four axes (Current state #4) — there is no
-remaining "one more pivot" option there. The post-R14 north star is the
-**search-wrapped production path**:
+remaining "one more pivot" option there. The post-R14 north star is
+**stronger search-wrapped play**, not a stronger search-free policy:
 
-- **Ship and harden the existing strength.** The production claim is
-  search-wrapped rollout-leaf MCTS @ W6 iter-2 (Wilson 0.6479). Forward work:
-  finish the R14.E manual UI exercise (human-gated, last R14 acceptance step);
-  pick a rollout-leaf vs value-head deployment policy against the empirical
-  0.39–0.45 cheap-inference envelope; harden MCTS robustness/determinism so
-  the deployed search behaves predictably (see "Production-path forward
-  work" below).
-- **Raw-policy SL is not a forward line.** R7 / R8 / R7.b.2 / mcts-distill
-  all closed FAIL; one parked revisit hypothesis at P4 only, not the next
-  pick. Do not re-open without explicit new evidence.
+- **Ship and harden the existing search-wrapped strength.** Rollout-leaf MCTS
+  @ W6 iter-2 (Wilson 0.6479) remains the production floor; value-head +
+  adaptive-ratio is only the documented latency fallback.
+- **Explore GPU-fed stronger MCTS as a search-scaling line.** GPU inference is
+  useful only if it buys more or better evaluated search signal: batched
+  policy/value calls, larger effective simulation budgets, learned/hybrid
+  leaves, ensembles, or root search variants. The gate is always the wrapped
+  player's strength/latency frontier against production, never raw-policy WR.
+- **Raw-policy SL is not a forward line.** R7 / R8 / R7.b.2 / mcts-distill v1
+  all closed FAIL. A raw-policy experiment requires explicit new coverage
+  evidence and a pre-registered reopen gate.
 
-## Production-path forward work (post-F1-closure, refreshed 2026-05-15)
+## Production-path forward work (post-F1-closure, refreshed 2026-05-18)
 
 With the raw-policy SL line closed, all forward research leverage is on the
 working search-wrapped path. Ranked by leverage:
@@ -115,55 +116,57 @@ working search-wrapped path. Ranked by leverage:
    policy decision — rollout-leaf vs value-head-leaf". Queue:
    `deployment-policy-rollout-vs-valuehead` → done.
 
-**Program state (2026-05-15): the search-wrapped production path is fully
-consolidated** — F1 raw-policy SL closed across all 4 axes; rollout-leaf @
-W6 iter-2 decided, characterized (determinism + side-asymmetry), UI-
-integrated, user-verified, and deployment-pinned (96-d). No autonomous
-forward research job remains. The next-arc frontier ((a) is now scoped +
-loop-actionable; (b)–(d) still require a user steer):
-- **(a) A 110-d production-grade model** would unlock the `--feature-schema
-  v3` promote path. The *SL* route is closed (R7.b.2 110-d card-embed SL
-  Wilson 0.3045; mcts-distill v1 single-pass 0.1470 — both single SL passes,
-  raw-policy). **Now SCOPED with a concrete non-SL approach (user-
-  commissioned):** reproduce the W6 rollout-leaf MCTS self-play + distill
-  *loop* at 110-d/v3.0, evaluated **search-wrapped** — the pipeline that
-  produced the pinned 0.6479 96-d model; pipeline audited 110-d-ready.
-  Exit gate = search-wrapped Wilson lower ≥ 0.6479 → promote v3. Scoping:
-  `docs/ai-research/scoping/r110-w6-reproduction.md`. Queue:
-  `r110-w6-reproduction` (P2, ready).
-- **(b) Side-conditioned sim budget** — the logged non-blocking bet; gated
-  on a larger-n rollout-leaf side-split that separates the player/opponent
-  CIs (currently overlap at n=60/side). Not a deployment blocker.
-- **(c) RL/PPO from the strong search-wrapped checkpoint, or scaling** —
-  the natural "next big bet" beyond SL; a strategic call for the user.
-- **(d) Training-data/state-coverage program** — user-steered 2026-05-15.
-  Treat the current data evidence as a *coverage bottleneck*, not a generic
-  "more rows" ask: R7 retained only 3789/12387 mixed rows, mcts-distill v1
-  failed at Wilson 0.1470 on self-play-only state coverage, and search-wrapped
-  MCTS remains strong. Work below is diagnostic-first and must not silently
-  re-open the closed raw-policy SL line.
+**Program state (2026-05-18): the search-wrapped production path is
+consolidated and now has a strength-scaling frontier.** Rollout-leaf @ W6
+iter-2 is decided, characterized, UI-integrated, and deployment-pinned (96-d).
+Forward work is ordered below:
+
+1. **R16-P0 MCTS-distill v3 embedding support — ACTIVE BLOCKER.** The 2026-05-15
+   R110 readiness note was too optimistic: `--data-mode mcts-distill` did not
+   feed `card_ids_by_zone` / `action_card_idx`, so the v3 embedding branch was
+   inert. Gate before any 110-d or GPU-fed strength run: `test:r16-mcts-
+   embedding` passes; 100% current v3 MCTS rows emit embedding tensors; legacy
+   rows fail loud unless compat is explicit.
+2. **R110 W6 reproduction — P1 after R16-P0.** Re-run the exact W6 rollout-leaf
+   self-play + mcts-distill loop at 110-d/v3 and evaluate search-wrapped.
+   Success: Wilson lower ≥0.6479 at the production gate; marginal ≥0.60 with a
+   positive trajectory. Scoping: `docs/ai-research/scoping/r110-w6-
+   reproduction.md`.
+3. **GPU-fed stronger MCTS scoping — P1, not implementation.** First prove
+   which configs can use GPU inference for strength. Candidate levers:
+   batched `/predict` or `/predict-batch`, value-head or hybrid learned leaves,
+   larger sim budgets, ensembles, root search variants, and worker/batch
+   sweeps. Promotion requires a search-wrapped gain over production: either
+   ≥+3pp Wilson-lower vs 0.6479 under the same rule-bot protocol, or head-to-
+   head Wilson lower >0.52 vs production, with zero fallbacks/no-ops and
+   per-side reporting. Latency-only wins do not promote. Scoping seed:
+   `docs/ai-research/scoping/gpu-fed-stronger-mcts.md`.
+4. **Value/head data program — P1/P2 dependency for GPU-fed leaves.** Train
+   value/action-value heads on rule-bot-covered contested states relabeled by
+   rollout-leaf MCTS, not self-play-only states. Pre-search gate: crossover
+   Pearson ≥0.70 and MSE ≤1.10x the rollout-noise floor on held-out
+   deployment-like states; then value-head-leaf MCTS must clear Wilson lower
+   ≥0.50 before it can be a strength candidate.
+5. **Side-conditioned sim budget — P2.** Still a non-blocking bet; run only
+   after a larger-n rollout-leaf side split separates CIs or a GPU-fed variant
+   shows side-specific regression.
+6. **RL/PPO from a strong search-wrapped checkpoint — P3.** Strategic later
+   bet; do not use it to bypass the search-wrapped gates above.
 
 ## Training-data/state-coverage backlog (user-steered 2026-05-15)
 
-1. **P1 — Corpus retention + state-overlap audit
-   (`training-data-coverage-audit`).** No training. Build a report that
-   compares raw exported rows, loader-retained samples, and gate/eval traces
-   by source, side, seed range, phase, action kind, turn bucket, legal-action
-   count, points, board stage, energy, hand/deck size, terminal distance, and
-   schema/card-id availability. Explain why ~70% of the R7 mixed corpus is
-   dropped, whether the retained set covers failing gate states, and where
-   eval losses cluster in low-coverage buckets. Acceptance: one reproducible
-   command + JSON/markdown report, with filter-reason counts, top 5 missing or
-   overrepresented slices, coverage-vs-error buckets, and an explicit proposed
-   source-mix target.
-2. **P2 — Rule-bot-covered state corpus recipe.** Generate states from the
+1. **P1 — Corpus retention + state-overlap audit — DONE.** Canonical report:
+   `docs/ai-research/analysis/training-data-coverage-audit.md`. Finding: the
+   R7 corpus retained 3789/12387 rows (30.6%); drops were 100% single-legal-
+   action forced states, not schema/card-id loss. Do not relax `min_actions=1`;
+   target contested decision-state coverage instead.
+2. **P1 — Rule-bot-covered state corpus recipe.** Generate states from the
    deployment-relevant distribution (raw/search policy vs rule-bot, rule-bot
    mirror, side-balanced), then relabel those exact states with rollout-leaf
-   MCTS or the strongest feasible oracle. This is the only plausible
-   `mcts-distill` revisit shape: it changes the state distribution, not the
-   label shape alone. Acceptance: retained-row rate >=80%, slice floors for
-   rare phases/actions, and a closed-loop gate reported as diagnostic only
-   unless it beats the best raw-policy SL baseline by a pre-registered margin.
+   MCTS or the strongest feasible oracle. This is also the data prerequisite
+   for GPU-fed value/hybrid leaves. Acceptance: retained contested-row rate
+   >=80%, slice floors from the audit report, and held-out value targets for
+   crossover probes before any training run starts.
 3. **P2 — Preference pairs on rule-bot-covered states.** If the coverage audit
    shows enough contested states, create DPO/BT pairs from the same state set
    using MCTS top action vs legal alternatives / rule-bot action, including
@@ -278,23 +281,11 @@ summary") ranked four follow-on moves after phases 2/G/H closed at Wilson
   backlog above.
 - **Side-asymmetry confirmation gate (R14.A footnote).** Closed 2026-05-14;
   cheap-inference production claim contradicted at independent seeds.
-- **Compute-architecture: `--workers` lever vs batched leaf-inference
-  (deferred / conditional — do NOT action).** Origin 2026-05-18 GPU-idle
-  inquiry; read-only evidence from the live R110-W6-repro run. (1) Self-play
-  /gate ≈18.7 min/iter, ≈1–1.5 h/arc fully unattended → NOT the research-
-  cadence bottleneck (human judgment turnaround between arcs is). (2) In the
-  rollout-leaf production config the CPU hot path is the TS engine running
-  rule-bot rollouts, NOT NN inference (eval workers ~92% CPU vs serve_onnx
-  sidecar ~19.5%; only the PUCT prior is a model call) — batched inference
-  barely helps this config. (3) Cheap lever IF cadence ever binds: raise
-  `r12_orchestrator.py --workers` 4→16–24 (nproc=32, load ~7) — pure config,
-  ~4–6× faster compute phases, no code; validate via one short worker sweep
-  before making default. (4) Batched leaf-inference (virtual-loss leaf
-  collector in `backend/src/sim/mcts.ts` + additive `/predict-batch` in
-  `training/serve_onnx.py`; M-tier, Python already vectorized) is a real but
-  CONDITIONAL bet — only justified when ALL hold: (a) self-play cadence is
-  the binding research constraint, (b) a CUDA serve path exists, (c) the
-  active config is leaf-eval-bound (value-head-leaf), not rollout-bound.
-  Risk: virtual loss perturbs search → must re-clear the determinism-
-  sensitive eval gates (R14.B / R15 single-worker replay). Premise falsified
-  for the production config; informational, not actionable.
+- **GPU-fed stronger MCTS architecture — SCOPING SEED, not implementation.**
+  Current evidence says rollout-leaf production MCTS is CPU-rollout-bound, so
+  naive batched inference will not strengthen that exact config. The viable
+  line is narrower: benchmark whether value-head or hybrid learned-leaf MCTS
+  becomes leaf-eval-bound and can use batched inference to buy more simulations,
+  ensembles, or deeper root search at acceptable latency. First action is a
+  scoping doc plus a tiny worker/batch/leaf ablation. Success metric is the
+  search-wrapped strength/latency frontier; raw-policy gates are out of scope.

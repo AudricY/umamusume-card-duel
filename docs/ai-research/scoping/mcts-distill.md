@@ -1,7 +1,12 @@
 # mcts-distill — Scoping
 
 - **Date:** 2026-05-14
-- **Status:** scoping
+- **Status:** CLOSED / FAIL as standalone raw-policy scoping. Status update
+  2026-05-15: mcts-distill v1 landed at raw-policy Wilson 0.1470 and is part
+  of the closed raw-policy SL line. Keep this file as historical scoping only.
+  Future use of `mcts-distill` is allowed only inside an iterated search-
+  wrapped loop or a coverage-backed reopen proposal; it is not a standalone
+  raw-policy north-star path.
 - **One-liner:** Distill rollout-leaf MCTS soft-visit-distribution policy targets into the BC trainer to test whether the F1 raw-policy ceiling (Wilson 0.30-0.37 across labels/objective/representation axes) is binding on label *shape* (argmax vs soft visits). Pre-existing W6 corpus is reusable; experiment cost <30 min compute.
 - **Forward brief:** queue entry `mcts-distill-scoping`.
 - **Pick rationale:** F1 line exhausted across three axes (R7 labels 0.2921, R8 objective 0.3318, R7.b.2 representation 0.3045). Rollout-leaf MCTS at R12-W6/iter-2 reaches search-wrapped Wilson 0.6479 — the network family plays strong with search-time compute. `train_bc.py --data-mode mcts-distill` already wired; W6 selfplay corpus on disk.

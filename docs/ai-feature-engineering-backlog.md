@@ -286,21 +286,42 @@ action remains legal.
 
 ## P3 - Later Bets
 
-### 17. Search Ablation Matrix
+### 17. GPU-Fed MCTS Scaling Probe
+
+**Why:** The research north star is stronger search-wrapped play, not latency
+for its own sake. Before building batching infrastructure, prove which MCTS
+configs can actually use GPU-fed inference for strength rather than staying
+CPU-rollout-bound.
+
+**Approach:** Run a small matrix over rollout-leaf, value-head-leaf, and one
+hybrid learned-leaf candidate; vary workers, simulations, batch size, and
+`/predict` vs `/predict-batch` or microbatched serving. Record GPU
+utilization, worker CPU, decision latency, node count, batch size, queue wait,
+feature-encoding time, ORT time, and Wilson lower.
+
+**Dependencies:** Benchmark registry, production latency harness, search
+ablation matrix, `serve_onnx` batching scoping.
+
+**Acceptance:** Report identifies whether any config is leaf-eval-bound and
+whether batching improves the search-wrapped strength/latency frontier. No
+raw-policy SL result is used as a promotion gate.
+
+### 18. Search Ablation Matrix
 
 **Why:** Production strength comes from search, but robustness across search
 knobs is only partially characterized.
 
 **Approach:** Controlled matrix over leaf type, simulations, prior, CRN
-samples, rollout steps, adaptive ratio, and side. Report the strength/latency
+samples, rollout steps, adaptive ratio, side, worker count, batching mode, and
+leaf-eval-bound vs rollout-bound classification. Report the strength/latency
 frontier, not only the best point.
 
 **Dependencies:** Benchmark registry, latency harness, served model.
 
-**Acceptance:** Ablation report with comparable Wilson and latency metrics for
-each cell.
+**Acceptance:** Ablation report with comparable Wilson, latency, and bottleneck
+classification for each cell.
 
-### 18. Rule-Bot-Covered Relabel Corpus Pipeline
+### 19. Rule-Bot-Covered Relabel Corpus Pipeline
 
 **Why:** If the coverage audit confirms mismatch, the next data program should
 target deployment-relevant states instead of generic self-play rows.
@@ -315,7 +336,7 @@ before training.
 **Acceptance:** Corpus manifest records source coverage, retained-row rate,
 slice floors, and relabel oracle; no training run starts until these pass.
 
-### 19. Post-Game "Why Did I Lose?" Investigator
+### 20. Post-Game "Why Did I Lose?" Investigator
 
 **Why:** High-value coaching, but it needs reliable replay and explanation
 infrastructure first.
@@ -331,7 +352,7 @@ endpoint, post-game UI.
 **Acceptance:** Post-game panel cites concrete turns/actions and avoids generic
 or speculative advice.
 
-### 20. Raw-Policy Reopen Gate
+### 21. Raw-Policy Reopen Gate
 
 **Why:** Prevent accidental re-opening of the closed raw-policy line.
 

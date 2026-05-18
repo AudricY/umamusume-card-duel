@@ -74,5 +74,8 @@ Final evaluation: best-promoted 110-d checkpoint, exported v3, served `serve_onn
 - Representation / capacity / objective tuning of the net (R7.b.* axes are closed; changing them re-opens a falsified line).
 - Cross-schema warm-start (96-d → 110-d) — explicitly avoided; init is same-schema.
 - Changing the MCTS search config (sims / K / leaf type / rollout steps) — the recipe is a faithful W6 reproduction; tuning search is a different experiment.
+- GPU-fed MCTS scaling / batching — separate scoping line. This reproduction
+  holds the W6 search recipe fixed to isolate schema/reproduction; it should
+  not absorb search-architecture tuning.
 - PPO / DPO from the 110-d checkpoint — downstream, gated on PASS first.
 - Multi-iteration tuning beyond the orchestrator's built-in halt-after-2-failures policy.
