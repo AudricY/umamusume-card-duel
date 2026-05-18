@@ -1,5 +1,5 @@
 {
-  "updated": "2026-05-18T23:30Z",
+  "updated": "2026-05-18T23:59Z",
   "items": [
     {
       "id": "r12-throughput",
@@ -25,9 +25,9 @@
     {
       "id": "r16-p1-temporal-turn-state-features",
       "priority": "P2",
-      "status": "scoped",
-      "summary": "Implementation-ready and UNBLOCKED. R110 verdict reached (MARGINAL, non-blocking). Serving-schema 96/110/164 guard prerequisite IMPLEMENTED: serve_onnx resolves the feature builder strictly from the ONNX graph state_features dim against an explicit table (96->v2, 110->v3.0), fails fast on the declared-but-unimplemented 164 v3.1 placeholder and any unknown/inconsistent dim (never a silent v3 fallback); the 96-d/110-d frozen builders now assert their output widths + an import-time STATE_DIM==STATE_DIM_V3 contract. Canonical scope: docs/ai-research/scoping/r16-model-feature-backlog-refinement.md (serving-schema-guard section = IMPLEMENTED). Guard smoke: training/serve_schema_guard_smoke.py.",
-      "next_action": "Implement P1 STATE_DIM 164 v3.1 temporal/turn-state scalar features per the scope doc P1 slot table (110->164 additive tail: add a NEW STATE_DIM_V3_1 builder + ONNX export + serve_onnx _SCHEMA_BY_STATE_DIM 164 entry; do NOT mutate the frozen 110-d v3.0 builder). Land sequential-after-R110 (features.py/observation edits re-confound a live loop). Resolve the two scope-doc omissions first: globalRetreatCostReduction effective field + the ownIsFirstTurn energy-vs-evolve threshold definition."
+      "status": "done",
+      "summary": "IMPLEMENTED end-to-end, commit 357f0d6 (13 files, +1139/-92). v3.1 temporal/turn-state scalar features: TS observation schemaVersion 2->3 (temporal block + side/Uma turnState, counts-only ability locks, derived effectiveRetreatCostReduction) -> NEW Python observation_to_features_v3_1 (164-d; reuses frozen v3.0 verbatim for slots 0-109 byte-identical, appends 54 temporal slots) -> serve_onnx 164->v3.1 _SCHEMA_BY_STATE_DIM entry (removed from placeholders) -> 164-d ONNX export. STATE_DIM stays frozen alias of STATE_DIM_V3=110 (assertion intact); v3.1 opt-in via dim-keyed selectors. Two scope omissions resolved against engine code (globalRetreatCostReduction -> derived effective field; ownIsFirstTurn = energy/setup-phase flag turnsTakenBySide===0, evolution <=1 left to per-Uma enteredThisTurn/evolvedThisTurn). All smokes green incl. real 96-d/110-d checkpoints, frozen-head byte-identity, temporal-only diff isolation, ONNX roundtrip <1e-3. Canonical: docs/ai-research/scoping/r16-model-feature-backlog-refinement.md (P1 = IMPLEMENTED, § P1 Resolved).",
+      "next_action": "None for implementation. Pre-registered follow-up (NOT auto-launch, user-gated like the W6 dose sweep): the ~0.5-day v3.1 strength ablation/gate verdict vs the 110-d v3.0 baseline — promote v3.1 only on a gate Wilson-lower win or targeted-phase diagnostic gain (scope doc Acceptance/Effort). P2 per-Uma slot tokens now unblocked (depends on P0 done + P1 done) if a representation-lift line is reopened."
     },
     {
       "id": "mcts-distill-followup-direction",

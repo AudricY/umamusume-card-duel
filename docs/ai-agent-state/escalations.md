@@ -2,14 +2,15 @@
 
 ## Open
 
-- **2026-05-18 stop line:** Do not land R16-P1 feature/schema edits until the
-  serving-schema 96/110/164 guard prerequisite is in place. R110 verdict is
-  now reached (MARGINAL, non-blocking) so it no longer gates P1; the schema
-  guard still does. Details: `docs/ai-agent-state/queue.json`,
-  `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`.
+- _(none)_
 
 ## Resolved Pointers
 
+- 2026-05-18: R16-P1 stop line CLEARED — serving-schema 96/110/164 guard
+  prerequisite IMPLEMENTED (commits `66adca6`/`692091d`); R110 verdict
+  MARGINAL/non-blocking. P1 implementation unblocked. Canonical:
+  `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`
+  § "Load-bearing implementation prerequisite".
 - 96-dim serving pin: `docs/ai-research/progress/r15.md`.
 - Raw-policy SL line closed; search-wrapped path is the forward line:
   `docs/ai-research-backlog.md`.
