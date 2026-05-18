@@ -6,6 +6,14 @@
 
 ## Resolved Pointers
 
+- 2026-05-19: R16-P1 v3.1 ablation was NOT launchable — commit `357f0d6`
+  wired dim-keyed feature selectors into serve/export only; the
+  mcts-distill TRAINING path (`selfplay_dataset.py`/`train_bc.py`/
+  `r12_orchestrator.py`) still hardcoded 110-d v3.0. RESOLVED commit
+  `3ce1404`: `--state-dim` threaded through the loop + 164-d
+  additive-tail warm-start init (output-identical to v3.0 init,
+  delta 0.0 — clean A/B). v3.1 4-iter ablation now launched (user
+  go-ahead). Canonical: queue `loop_note` + `r16-p1...`.
 - 2026-05-18: R16-P1 stop line CLEARED — serving-schema 96/110/164 guard
   prerequisite IMPLEMENTED (commits `66adca6`/`692091d`); R110 verdict
   MARGINAL/non-blocking. P1 implementation unblocked. Canonical:
