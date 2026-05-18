@@ -774,8 +774,24 @@ def parse_args() -> argparse.Namespace:
     # R13.W1 parallelism — the orchestrator's selfplay + gate stages
     # accept a --workers count that is forwarded to the underlying
     # `sim:mcts-selfplay` and `sim:eval-gate` runners.
-    p.add_argument("--workers", type=int, default=1,
-                   help="Number of parallel worker processes for selfplay and gate stages.")
+    #
+    # Throughput diagnosis (docs/ai-research/progress/r110.md "Throughput"):
+    # selfplay (~48%) + mcts-gate (~52%) are ~99% of wall time and are pure
+    # single-threaded CPU MCTS sim; the R110-W6-repro run used --workers 4 on
+    # a 32-core box, leaving ~28 cores idle. The worker count is a PURE
+    # distribution knob: both stages build a fixed seed-indexed task set
+    # (mctsSelfPlay.ts:120 seed=seedStart+index; evalGate.ts:46) and only
+    # partition it across processes (partitionSeeds/partitionTasks); per-game
+    # RNG is seeded solely from the game seed (mctsSelfPlay.ts:255,
+    # evaluateModelVsHeuristic.ts:269) with no worker/PID/order input. Raising
+    # the default is therefore trajectory-neutral and stays bit-comparable to
+    # the 4-worker R110-W6-repro baseline. Default 24 leaves headroom for the
+    # serve_onnx process + OS on a 32-core box; override for other hardware.
+    p.add_argument("--workers", type=int, default=24,
+                   help="Parallel worker processes for selfplay and gate stages. "
+                        "Pure distribution knob (trajectory-neutral): worker count only "
+                        "partitions a fixed seed-indexed game set across processes. "
+                        "Default 24 targets a 32-core box; override for other hardware.")
     # R14.I.1 crossover probe wiring — runs after distill against the previous
     # iter's selfplay corpus (held-out). Two consecutive crossed=true events
     # gate R14.I.3.
