@@ -6,6 +6,15 @@
 
 ## Resolved Pointers
 
+- 2026-05-18: R16 contested-coverage pilot (Fork A cheap tier, W6
+  predecessor #1) DONE = POSITIVE slope. Option1 resample sweep at fixed
+  retained-count/capacity: legal_action_count 0.20/0.30/0.45 →
+  side-balanced gate Wilson-lower 0.2416/0.2572/0.2635 (monotone).
+  Pre-registered acceptance MET; contested-coverage hypothesis NOT
+  falsified. Margin small (within single-gate noise) → next bounded step
+  is a larger-n confirmation gate; expensive n≥1000 closed-loop still
+  gated. Mechanisms shipped in `training/uma_ai/dataset.py` (default OFF).
+  Canonical: `docs/ai-research/progress/r16.md`.
 - 2026-05-19: User reprioritization — HP tuning (W6 regularization-dose
   sweep) DEPRIORITIZED P1→P3. Gate-depth = option B (user-confirmed): W6
   runs only after all three core predecessors land —

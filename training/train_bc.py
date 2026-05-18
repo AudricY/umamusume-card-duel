@@ -37,7 +37,20 @@ def main() -> None:
         dataset = MctsSelfPlayDataset(args.data, min_actions=2, ablations=ablations, state_dim=state_dim)
         collate_fn = collate_mcts_selfplay_batch
     else:
-        dataset = JsonlPolicyDataset(args.data, min_actions=2, ablations=ablations, state_dim=state_dim)
+        # R16 Fork A contested-coverage pilot knobs. Both default OFF
+        # (weight=1.0 / fraction=None) so unset is bit-identical to
+        # pre-pilot behavior. Design + verdict home:
+        # docs/ai-research/scoping/r16-training-data-backlog-refinement.md
+        dataset = JsonlPolicyDataset(
+            args.data,
+            min_actions=2,
+            ablations=ablations,
+            state_dim=state_dim,
+            contested_loss_weight=args.contested_loss_weight,
+            contested_min_legal=args.contested_min_legal,
+            contested_resample_fraction=args.contested_resample_fraction,
+            contested_resample_seed=args.seed,
+        )
         collate_fn = collate_policy_batch
     train_indices, val_indices, split_metadata = split_dataset(dataset, args.seed, args.split_by)
     dataset_summary = summarize_dataset(dataset)
@@ -909,6 +922,27 @@ def parse_args() -> argparse.Namespace:
                              "byte-identical to pre-R16-P1 behavior. Drives the "
                              "dataset builder, ModelConfig.state_dim, the "
                              "checkpoint feature_schema, and the ONNX graph dim.")
+    parser.add_argument("--contested-loss-weight", type=float, default=1.0,
+                        help="R16 Fork A Option 3: multiply the policy sample "
+                             "weight for contested (>= --contested-min-legal "
+                             "legal) rows. 1.0 (default) is a bit-identical "
+                             "no-op; no corpus or row-count change. bc mode "
+                             "only. See "
+                             "docs/ai-research/scoping/"
+                             "r16-training-data-backlog-refinement.md.")
+    parser.add_argument("--contested-min-legal", type=int, default=4,
+                        help="R16 Fork A: legal-action count at/above which a "
+                             "row counts as contested, for both pilot knobs. "
+                             "Default 4 matches the audit's "
+                             "`legal_action_count` metric.")
+    parser.add_argument("--contested-resample-fraction", type=float,
+                        default=None,
+                        help="R16 Fork A Option 1: upsample contested rows / "
+                             "downsample 2-legal rows so the contested "
+                             "fraction of the retained stream hits this value, "
+                             "holding total retained-row count FIXED. Unset "
+                             "(default) is a bit-identical no-op. bc mode "
+                             "only. Resample RNG seeded by --seed.")
     return parser.parse_args()
 
 

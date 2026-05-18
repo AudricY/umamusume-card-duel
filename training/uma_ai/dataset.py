@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -82,6 +83,10 @@ class JsonlPolicyDataset(Dataset[PolicySample]):
         ablations: set[str] | None = None,
         strict_schema_version: bool = True,
         state_dim: int = STATE_DIM,
+        contested_loss_weight: float = 1.0,
+        contested_min_legal: int = 4,
+        contested_resample_fraction: float | None = None,
+        contested_resample_seed: int = 0,
     ) -> None:
         # `state_dim` selects the frozen builder (96=v2, 110=v3.0, 164=v3.1)
         # via the same dim-keyed mechanism serve_onnx uses. Default is the
@@ -96,6 +101,10 @@ class JsonlPolicyDataset(Dataset[PolicySample]):
                 ablations=self.ablations,
                 strict_schema_version=strict_schema_version,
                 state_dim=state_dim,
+                contested_loss_weight=contested_loss_weight,
+                contested_min_legal=contested_min_legal,
+                contested_resample_fraction=contested_resample_fraction,
+                contested_resample_seed=contested_resample_seed,
             )
         )
         if not self.samples:
@@ -115,8 +124,118 @@ def load_policy_samples(
     ablations: set[str] | None = None,
     strict_schema_version: bool = True,
     state_dim: int = STATE_DIM,
+    contested_loss_weight: float = 1.0,
+    contested_min_legal: int = 4,
+    contested_resample_fraction: float | None = None,
+    contested_resample_seed: int = 0,
 ) -> Iterable[PolicySample]:
+    """Load retained (>=`min_actions`-legal) policy rows.
+
+    R16 Fork A contested-coverage pilot — two independently-selectable knobs,
+    both holding the total retained-row count fixed and both defaulting OFF
+    (bit-identical to pre-pilot behavior when unset). Design + verdict home:
+    `docs/ai-research/scoping/r16-training-data-backlog-refinement.md`
+    § "Fork A — Contested-State Data Coverage"; metric definition in
+    `docs/ai-research/analysis/training-data-coverage-audit.md`
+    (`legal_action_count`).
+
+    - Option 3 (`contested_loss_weight` != 1.0): multiply `sample_weight` by
+      `contested_loss_weight` for rows with `>= contested_min_legal` legal
+      actions. Reuses the existing `_sample_weight` /
+      `collate_policy_batch` / `normalized_weights` seam — no corpus change,
+      no row-count change. `1.0` is a no-op.
+    - Option 1 (`contested_resample_fraction` is not None): upsample
+      `>= contested_min_legal`-legal rows and downsample 2-legal rows so the
+      contested fraction of the *retained* stream hits the target, while
+      holding the total retained-row count exactly fixed (sample WITH
+      replacement within each group to the computed group target). `None`
+      is a no-op (rows yielded once, in file order).
+
+    Both knobs use `contested_min_legal` (default 4) as the contested
+    threshold so they match the audit's `legal_action_count` metric
+    (fraction of retained rows with >= 4 legal actions).
+    """
+
+    weight_contested = contested_loss_weight != 1.0
+    resample = contested_resample_fraction is not None
     encode_state = feature_builder_for_state_dim(state_dim)
+    if not resample:
+        yield from _stream_policy_samples(
+            path,
+            min_actions=min_actions,
+            ablations=ablations,
+            strict_schema_version=strict_schema_version,
+            state_dim=state_dim,
+            encode_state=encode_state,
+            weight_contested=weight_contested,
+            contested_loss_weight=contested_loss_weight,
+            contested_min_legal=contested_min_legal,
+        )
+        return
+
+    # Option 1 — contested resampling. Buffer the retained stream so we can
+    # split it into a contested (>=`contested_min_legal`-legal) group and a
+    # non-contested remainder, then draw WITH replacement from each group to
+    # hit `contested_resample_fraction` while keeping the total retained
+    # count identical to the no-op load. Deterministic given the seed.
+    buffered = list(
+        _stream_policy_samples(
+            path,
+            min_actions=min_actions,
+            ablations=ablations,
+            strict_schema_version=strict_schema_version,
+            state_dim=state_dim,
+            encode_state=encode_state,
+            weight_contested=weight_contested,
+            contested_loss_weight=contested_loss_weight,
+            contested_min_legal=contested_min_legal,
+        )
+    )
+    total = len(buffered)
+    if total == 0:
+        return
+    frac = float(contested_resample_fraction)
+    if not 0.0 <= frac <= 1.0:
+        raise ValueError(
+            f"contested_resample_fraction must be in [0, 1]; got {frac}"
+        )
+    contested = [
+        s for s in buffered if s.action_features.shape[0] >= contested_min_legal
+    ]
+    others = [
+        s for s in buffered if s.action_features.shape[0] < contested_min_legal
+    ]
+    if not contested or not others:
+        # One group is empty — the target fraction is unreachable without
+        # fabricating rows. Yield the unmodified buffered stream (count
+        # fixed) rather than silently distorting the corpus.
+        yield from buffered
+        return
+    target_contested = int(round(frac * total))
+    target_contested = max(0, min(total, target_contested))
+    target_others = total - target_contested
+    rng = random.Random(contested_resample_seed)
+    picked: list[PolicySample] = []
+    if target_contested > 0:
+        picked.extend(rng.choices(contested, k=target_contested))
+    if target_others > 0:
+        picked.extend(rng.choices(others, k=target_others))
+    rng.shuffle(picked)
+    yield from picked
+
+
+def _stream_policy_samples(
+    path: str | Path,
+    *,
+    min_actions: int,
+    ablations: set[str] | None,
+    strict_schema_version: bool,
+    state_dim: int,
+    encode_state: Any,
+    weight_contested: bool,
+    contested_loss_weight: float,
+    contested_min_legal: int,
+) -> Iterable[PolicySample]:
     with Path(path).open("r", encoding="utf8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -153,12 +272,19 @@ def load_policy_samples(
             except ValueError as exc:
                 raise ValueError(f"{path}:{line_number}: {exc}") from exc
             action_card_idx = np.stack([action_card_idx_pair(action) for action in actions], axis=0)
+            sample_weight = _sample_weight(example)
+            # Option 3 — legal-action-count loss weighting. Scale the policy
+            # sample weight for contested (>= contested_min_legal-legal)
+            # rows. No-op when contested_loss_weight == 1.0 (weight_contested
+            # is False), so the unset path is bit-identical.
+            if weight_contested and len(actions) >= contested_min_legal:
+                sample_weight *= contested_loss_weight
             yield PolicySample(
                 state_features=state_features,
                 action_features=action_features,
                 target_index=target_index,
                 value_target=_value_target(example),
-                sample_weight=_sample_weight(example),
+                sample_weight=sample_weight,
                 example=example,
                 policy_target=policy_target,
                 card_ids_by_zone=card_ids_by_zone,
