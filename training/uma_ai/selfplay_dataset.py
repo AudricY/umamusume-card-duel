@@ -27,7 +27,16 @@ import torch
 from torch.utils.data import Dataset
 
 from .dataset import ROW_SCHEMA_VERSION, RowSchemaError
-from .features import ACTION_DIM, STATE_DIM, legal_actions_to_features, observation_to_features
+from .features import (
+    ACTION_DIM,
+    CARD_ID_SHAPES,
+    STATE_DIM,
+    ZONE_ORDER,
+    action_card_idx_pair,
+    legal_actions_to_features,
+    observation_to_card_ids,
+    observation_to_features,
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +48,19 @@ class MctsSelfPlaySample:
     sample_weight: float
     policy_target: np.ndarray  # shape (num_actions,), sums to 1
     example: dict[str, Any]
+    # R16-P0: per-zone packed card-vocab indices (8 zones, fixed
+    # `CARD_ID_SHAPES`) and per-action source/target idx (shape `(A, 2)`).
+    # Mirrors `PolicySample`'s embedding fields so `train_bc.py
+    # --data-mode mcts-distill` exercises the same v3 card-embedding
+    # branch the BC path does. By default `load_mcts_selfplay_samples()`
+    # fails loud on rows missing `cardIdsByZone` (via
+    # `observation_to_card_ids`), so any loaded sample carries both
+    # fields. `None` stays the type-level nullable to mirror legacy
+    # rows produced under the explicit `allow_missing_card_ids` compat
+    # path, and so test fixtures can construct samples with the
+    # embedding branch disabled.
+    card_ids_by_zone: dict[str, np.ndarray] | None = None
+    action_card_idx: np.ndarray | None = None
 
 
 class MctsSelfPlayDataset(Dataset[MctsSelfPlaySample]):
@@ -48,10 +70,19 @@ class MctsSelfPlayDataset(Dataset[MctsSelfPlaySample]):
         *,
         min_actions: int = 2,
         ablations: set[str] | None = None,
+        allow_missing_card_ids: bool = False,
     ) -> None:
         self.path = Path(path)
         self.ablations = ablations or set()
-        self.samples = list(load_mcts_selfplay_samples(self.path, min_actions=min_actions, ablations=self.ablations))
+        self.allow_missing_card_ids = allow_missing_card_ids
+        self.samples = list(
+            load_mcts_selfplay_samples(
+                self.path,
+                min_actions=min_actions,
+                ablations=self.ablations,
+                allow_missing_card_ids=allow_missing_card_ids,
+            )
+        )
         if not self.samples:
             raise ValueError(f"No usable mcts-selfplay samples in {self.path}")
 
@@ -67,7 +98,24 @@ def load_mcts_selfplay_samples(
     *,
     min_actions: int = 2,
     ablations: set[str] | None = None,
+    allow_missing_card_ids: bool = False,
 ) -> Iterable[MctsSelfPlaySample]:
+    """Load mcts-selfplay rows as `MctsSelfPlaySample`s.
+
+    R16-P0: by default this fails loud on rows that lack
+    `observation.cardIdsByZone` (the v3 card-embedding inputs), reusing
+    the existing `observation_to_card_ids()` error path. This rejects
+    pre-R7.b.2-Phase-1 / pre-v3 self-play corpora at load time rather
+    than silently training the 110-d model with the embedding branch
+    inert (the exact bug that confounded R110-W6).
+
+    `allow_missing_card_ids=True` is a deliberate, named compatibility
+    escape hatch for old corpora: rows missing `cardIdsByZone` are still
+    loaded but their `card_ids_by_zone` / `action_card_idx` stay `None`,
+    so the collator omits the embedding tensors for those batches. It
+    never silently zeroes malformed-but-present v3 rows — a present
+    `cardIdsByZone` that fails to parse still raises.
+    """
     with Path(path).open("r", encoding="utf8") as fh:
         for line_number, line in enumerate(fh, start=1):
             if not line.strip():
@@ -101,6 +149,27 @@ def load_mcts_selfplay_samples(
                 raise ValueError(f"Bad action feature shape at line {line_number}: {action_features.shape}")
             value_target = float(example.get("valueTarget", 0) or 0)
             weight = float(example.get("sampleWeight", 1.0) or 1.0)
+            # R16-P0: emit packed per-zone card-id arrays and per-action
+            # source/target idx so mcts-distill exercises the v3
+            # card-embedding branch. `observation_to_card_ids` raises on
+            # a missing `cardIdsByZone`; under the explicit
+            # `allow_missing_card_ids` compat path we leave both fields
+            # `None` for that row only (a present-but-malformed
+            # `cardIdsByZone` still raises — never silently zeroed).
+            observation = example.get("observation", {})
+            card_ids_by_zone: dict[str, np.ndarray] | None
+            action_card_idx: np.ndarray | None
+            if allow_missing_card_ids and "cardIdsByZone" not in observation:
+                card_ids_by_zone = None
+                action_card_idx = None
+            else:
+                try:
+                    card_ids_by_zone = observation_to_card_ids(observation)
+                except ValueError as exc:
+                    raise ValueError(f"{path}:{line_number}: {exc}") from exc
+                action_card_idx = np.stack(
+                    [action_card_idx_pair(action) for action in actions], axis=0
+                )
             yield MctsSelfPlaySample(
                 state_features=state_features,
                 action_features=action_features,
@@ -109,6 +178,8 @@ def load_mcts_selfplay_samples(
                 sample_weight=max(0.05, weight),
                 policy_target=policy_target,
                 example=example,
+                card_ids_by_zone=card_ids_by_zone,
+                action_card_idx=action_card_idx,
             )
 
 
@@ -124,6 +195,32 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
     sample_weights = np.ones((batch_size,), dtype=np.float32)
     policy_targets = np.zeros((batch_size, max_actions), dtype=np.float32)
 
+    # R16-P0: pack the v3 card-embedding tensors, mirroring
+    # `collate_policy_batch`. `max_cards_per_zone` is the global cap (30,
+    # the discard cap) so smaller-cap zones see padding beyond their cap;
+    # the embedding's `padding_idx=0` zeroes those positions in the
+    # gather. Only emit them when EVERY sample in the batch carries both
+    # fields — a mixed batch (one v3 row + one legacy/compat row) falls
+    # back to the embedding-inert path uniformly rather than silently
+    # zero-tensoring real v3 rows.
+    max_cards_per_zone = max(CARD_ID_SHAPES.values())
+    num_zones = len(ZONE_ORDER)
+    all_have_card_ids = all(
+        getattr(sample, "card_ids_by_zone", None) is not None
+        and getattr(sample, "action_card_idx", None) is not None
+        for sample in samples
+    )
+    card_ids_buffer = (
+        np.zeros((batch_size, num_zones, max_cards_per_zone), dtype=np.int64)
+        if all_have_card_ids
+        else None
+    )
+    action_card_idx_buffer = (
+        np.zeros((batch_size, max_actions, 2), dtype=np.int64)
+        if all_have_card_ids
+        else None
+    )
+
     for row, sample in enumerate(samples):
         count = sample.action_features.shape[0]
         state_features[row] = sample.state_features
@@ -133,8 +230,14 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
         value_targets[row] = sample.value_target
         sample_weights[row] = sample.sample_weight
         policy_targets[row, :count] = sample.policy_target
+        if card_ids_buffer is not None and action_card_idx_buffer is not None:
+            for zone_index, zone in enumerate(ZONE_ORDER):
+                zone_arr = sample.card_ids_by_zone[zone]  # type: ignore[index]
+                width = zone_arr.shape[0]
+                card_ids_buffer[row, zone_index, :width] = zone_arr
+            action_card_idx_buffer[row, :count, :] = sample.action_card_idx  # type: ignore[index]
 
-    return {
+    batch: dict[str, torch.Tensor] = {
         "state_features": torch.from_numpy(state_features),
         "action_features": torch.from_numpy(action_features),
         "action_mask": torch.from_numpy(action_mask),
@@ -143,3 +246,7 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
         "sample_weights": torch.from_numpy(sample_weights),
         "policy_targets": torch.from_numpy(policy_targets),
     }
+    if card_ids_buffer is not None and action_card_idx_buffer is not None:
+        batch["card_ids_by_zone"] = torch.from_numpy(card_ids_buffer)
+        batch["action_card_idx"] = torch.from_numpy(action_card_idx_buffer)
+    return batch

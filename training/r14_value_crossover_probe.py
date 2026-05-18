@@ -123,7 +123,22 @@ def main() -> None:
             actions = batch["action_features"].to(device)
             mask = batch["action_mask"].to(device)
             value_target = batch["value_targets"].to(device)
-            _logits, value_pred = model(state, actions, mask)
+            # R16-P0: forward the optional v3 card-embedding tensors so
+            # the probe scores through the same trunk the model was
+            # trained with. Absent on legacy/compat batches → None.
+            card_ids_by_zone = batch.get("card_ids_by_zone")
+            action_card_idx = batch.get("action_card_idx")
+            if card_ids_by_zone is not None:
+                card_ids_by_zone = card_ids_by_zone.to(device)
+            if action_card_idx is not None:
+                action_card_idx = action_card_idx.to(device)
+            _logits, value_pred = model(
+                state,
+                actions,
+                mask,
+                card_ids_by_zone=card_ids_by_zone,
+                action_card_idx=action_card_idx,
+            )
             preds.extend(value_pred.detach().cpu().tolist())
             targets.extend(value_target.detach().cpu().tolist())
 

@@ -141,8 +141,24 @@ def main() -> None:
             sample_weights = batch["sample_weights"].to(device)
             if training:
                 optimizer.zero_grad(set_to_none=True)
+            # R16-P0: forward the optional v3 card-embedding tensors when
+            # the loader emitted them (v3 corpora) so the value retrain
+            # runs through the same trunk as mcts-distill. Absent
+            # (legacy/compat batches) → None, embedding branch inert.
+            card_ids_by_zone = batch.get("card_ids_by_zone")
+            action_card_idx = batch.get("action_card_idx")
+            if card_ids_by_zone is not None:
+                card_ids_by_zone = card_ids_by_zone.to(device)
+            if action_card_idx is not None:
+                action_card_idx = action_card_idx.to(device)
             with torch.set_grad_enabled(training):
-                _logits, value_pred = model(state, actions, mask)
+                _logits, value_pred = model(
+                    state,
+                    actions,
+                    mask,
+                    card_ids_by_zone=card_ids_by_zone,
+                    action_card_idx=action_card_idx,
+                )
                 # Plain weighted MSE — rootValue is a regression target,
                 # not a class label. tanh saturation in the head guards
                 # against overshoot; clipped targets bound the loss.

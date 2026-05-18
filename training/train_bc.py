@@ -155,8 +155,8 @@ def main() -> None:
         tb_writer.flush()
         tb_writer.close()
     diagnostics = {
-        "train": evaluate_grouped(model, dataset, train_indices, value_weight=args.value_weight, batch_size=args.batch_size),
-        "val": evaluate_grouped(model, dataset, val_indices, value_weight=args.value_weight, batch_size=args.batch_size) if val_indices else {},
+        "train": evaluate_grouped(model, dataset, train_indices, value_weight=args.value_weight, batch_size=args.batch_size, collate_fn=collate_fn),
+        "val": evaluate_grouped(model, dataset, val_indices, value_weight=args.value_weight, batch_size=args.batch_size, collate_fn=collate_fn) if val_indices else {},
     }
     rng_state = {
         "torch": torch.get_rng_state().tolist(),
@@ -572,6 +572,7 @@ def evaluate_grouped(
     *,
     value_weight: float,
     batch_size: int,
+    collate_fn=collate_policy_batch,
 ) -> dict[str, dict[str, dict[str, float]]]:
     if not indices:
         return {}
@@ -592,7 +593,7 @@ def evaluate_grouped(
         category: {
             name: evaluate(
                 model,
-                DataLoader(Subset(dataset, group_indices), batch_size=batch_size, shuffle=False, collate_fn=collate_policy_batch),
+                DataLoader(Subset(dataset, group_indices), batch_size=batch_size, shuffle=False, collate_fn=collate_fn),
                 value_weight=value_weight,
             )
             for name, group_indices in sorted(category_groups.items())
