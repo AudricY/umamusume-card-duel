@@ -1,0 +1,657 @@
+{
+ "_meta": {
+  "backlog_item": "training-data-coverage-audit (P1)",
+  "diagnostic_only": true,
+  "tool": "training/data_coverage_audit.py"
+ },
+ "corpus_retention": {
+  "corpus_path": "/home/audric/work/umamusume-card-duel/runs/R7-multi-teacher-warmstart/iter-000/mixed.jsonl",
+  "drop_reason_counts": {
+   "lt_min_actions(<2_legal)": 8598
+  },
+  "dropped_fraction": 0.6941,
+  "dropped_rows": 8598,
+  "per_source": {
+   "model-visited-rollout-relabeled": {
+    "available": 7955,
+    "dropped": 5359,
+    "retained": 2596
+   },
+   "rule-bot-replay": {
+    "available": 4432,
+    "dropped": 3239,
+    "retained": 1193
+   }
+  },
+  "retained_fraction": 0.3059,
+  "retained_rows": 3789,
+  "slices": {
+   "action_kind": {
+    "attachEnergy": {
+     "dropped": 0,
+     "retained": 709
+    },
+    "attack": {
+     "dropped": 849,
+     "retained": 189
+    },
+    "endTurn": {
+     "dropped": 167,
+     "retained": 0
+    },
+    "evolve": {
+     "dropped": 0,
+     "retained": 296
+    },
+    "pass": {
+     "dropped": 7568,
+     "retained": 746
+    },
+    "playBasic": {
+     "dropped": 0,
+     "retained": 223
+    },
+    "playTrainer": {
+     "dropped": 0,
+     "retained": 1556
+    },
+    "retreatAttack": {
+     "dropped": 14,
+     "retained": 22
+    },
+    "useAbility": {
+     "dropped": 0,
+     "retained": 48
+    }
+   },
+   "board_stage": {
+    "p0": {
+     "dropped": 6419,
+     "retained": 2970
+    },
+    "p1": {
+     "dropped": 1680,
+     "retained": 645
+    },
+    "p2+": {
+     "dropped": 499,
+     "retained": 174
+    }
+   },
+   "deck_size_bucket": {
+    "13-16": {
+     "dropped": 1684,
+     "retained": 964
+    },
+    "5-8": {
+     "dropped": 2504,
+     "retained": 976
+    },
+    "9-12": {
+     "dropped": 3559,
+     "retained": 1543
+    },
+    "<=4": {
+     "dropped": 851,
+     "retained": 306
+    }
+   },
+   "energy": {
+    "e0": {
+     "dropped": 2069,
+     "retained": 1549
+    },
+    "e1-2": {
+     "dropped": 4151,
+     "retained": 1534
+    },
+    "e3+": {
+     "dropped": 2378,
+     "retained": 706
+    }
+   },
+   "hand_size_bucket": {
+    "3-4": {
+     "dropped": 2626,
+     "retained": 1634
+    },
+    "5-6": {
+     "dropped": 449,
+     "retained": 511
+    },
+    "7-8": {
+     "dropped": 8,
+     "retained": 14
+    },
+    "<=2": {
+     "dropped": 5515,
+     "retained": 1630
+    }
+   },
+   "legal_action_count_bucket": {
+    "2-2": {
+     "dropped": 0,
+     "retained": 2052
+    },
+    "3-4": {
+     "dropped": 0,
+     "retained": 1323
+    },
+    "5-8": {
+     "dropped": 0,
+     "retained": 219
+    },
+    "9-16": {
+     "dropped": 0,
+     "retained": 118
+    },
+    "<=1": {
+     "dropped": 8598,
+     "retained": 0
+    },
+    ">16": {
+     "dropped": 0,
+     "retained": 77
+    }
+   },
+   "phase": {
+    "ability": {
+     "dropped": 894,
+     "retained": 70
+    },
+    "attach": {
+     "dropped": 1754,
+     "retained": 729
+    },
+    "bench": {
+     "dropped": 1860,
+     "retained": 253
+    },
+    "combat": {
+     "dropped": 1030,
+     "retained": 211
+    },
+    "evolve": {
+     "dropped": 1149,
+     "retained": 332
+    },
+    "trainerAfter": {
+     "dropped": 779,
+     "retained": 152
+    },
+    "trainerBefore": {
+     "dropped": 1132,
+     "retained": 2042
+    }
+   },
+   "points": {
+    "p0": {
+     "dropped": 6419,
+     "retained": 2970
+    },
+    "p1": {
+     "dropped": 1680,
+     "retained": 645
+    },
+    "p2+": {
+     "dropped": 499,
+     "retained": 174
+    }
+   },
+   "schema_card_id_availability": {
+    "schemaV1_cardIdsByZone=no": {
+     "dropped": 8598,
+     "retained": 3789
+    }
+   },
+   "seed_prefix": {
+    "120xxx": {
+     "dropped": 3239,
+     "retained": 1193
+    },
+    "140xxx": {
+     "dropped": 5359,
+     "retained": 2596
+    }
+   },
+   "side": {
+    "opponent": {
+     "dropped": 4229,
+     "retained": 1852
+    },
+    "player": {
+     "dropped": 4369,
+     "retained": 1937
+    }
+   },
+   "source": {
+    "model-visited-rollout-relabeled": {
+     "dropped": 5359,
+     "retained": 2596
+    },
+    "rule-bot-replay": {
+     "dropped": 3239,
+     "retained": 1193
+    }
+   },
+   "terminal_distance": {
+    "p0": {
+     "dropped": 6419,
+     "retained": 2970
+    },
+    "p1": {
+     "dropped": 1680,
+     "retained": 645
+    },
+    "p2+": {
+     "dropped": 499,
+     "retained": 174
+    }
+   },
+   "turn_bucket": {
+    "t1-2": {
+     "dropped": 3237,
+     "retained": 1794
+    },
+    "t10+": {
+     "dropped": 18,
+     "retained": 5
+    },
+    "t3-5": {
+     "dropped": 4036,
+     "retained": 1561
+    },
+    "t6-9": {
+     "dropped": 1307,
+     "retained": 429
+    }
+   }
+  },
+  "total_rows": 12387
+ },
+ "environment_gaps": [
+  "Gate per-state observation traces never persisted (decisionTraceOut empty across all runs/ gate manifests; no decision-trace files exist) \u2014 exact state-level overlap uncomputable; structural proxy used.",
+  "Per-state eval loss not logged; loss is only bucketed by phase/action_kind/source in the train manifest diagnostics \u2014 coverage-vs-loss uses those buckets as the justified proxy.",
+  "Exact terminal-distance per row not in corpus; own-points used as the monotone progress proxy."
+ ],
+ "production_gate": {
+  "decision_trace_persisted": false,
+  "games": 120,
+  "manifest": "/home/audric/work/umamusume-card-duel/runs/R13-W6-phase-d/iter-2/gate.manifest.json",
+  "model_side": "both",
+  "model_win_rate": 0.7333333333333333,
+  "opponent": "rule",
+  "seed_start": 9000,
+  "selection": "mcts",
+  "side_split": {
+   "opponent": {
+    "games": 60,
+    "wilson_lower": 0.6637973165265748,
+    "winRate": 0.7833333333333333
+   },
+   "player": {
+    "games": 60,
+    "wilson_lower": 0.5576599505698345,
+    "winRate": 0.6833333333333333
+   }
+  },
+  "wilson_lower": 0.6478739437150142
+ },
+ "proposed_source_mix_target": {
+  "do_not": "Do NOT relax min_actions to 1 \u2014 single-action states carry zero policy gradient and would dilute the loss. Do NOT regenerate self-play-only rows (mcts-distill v1 failed at 0.1470 on that exact mistake). Implement via backlog items 2-4 only.",
+  "rationale": "The R7 corpus drop is ~100% single-legal-action forced states (no decision to imitate), not schema/feature loss. Row count is not the bottleneck; decision-state coverage is. The fix is a state-generation recipe (backlog item 2), not more self-play rows. Target percentages are floors over the RETAINED (>=2-legal-action) decision-state population.",
+  "targets": [
+   {
+    "floor": "player >= 45% and opponent >= 45% within each major phase bucket (gate is side-balanced; R7 retained is player 51% / opp 49% overall but skewed within phases)",
+    "slice": "side"
+   },
+   {
+    "floor": "rollout-leaf-MCTS-relabeled on rule-bot-covered states >= 60%; rule-bot-replay <= 40% (R7 had rollout 69% / rule-bot 31% of retained \u2014 keep rollout dominant but regenerate its STATES from the gate distribution)",
+    "slice": "source"
+   },
+   {
+    "floor": "every non-trivial phase (combat, evolve, bench, trainerAfter) >= 8% each; cap trainerBefore <= 45% (R7 retained is trainerBefore-dominated)",
+    "slice": "phase"
+   },
+   {
+    "floor": "attack + retreatAttack combined >= 12%; evolve >= 6%; useAbility >= 3% (R7 retained: attack ~5%, retreatAttack ~0.6%, useAbility ~1.3% \u2014 combat-line under-covered, the exact contested decisions the gate rewards)",
+    "slice": "action_kind"
+   },
+   {
+    "floor": "t6-9 and t10+ combined >= 25% (late-game decisive states; R7 retained skews to early turns)",
+    "slice": "turn_bucket"
+   },
+   {
+    "floor": "contested states (>=4 legal) >= 30% of retained (R7 retained is dominated by exactly-2-legal binary choices)",
+    "slice": "legal_action_count"
+   }
+  ]
+ },
+ "r7_gate": {
+  "decision_trace_persisted": false,
+  "games": 500,
+  "manifest": "/home/audric/work/umamusume-card-duel/runs/R7-multi-teacher-warmstart/iter-000/gate.manifest.json",
+  "model_side": "both",
+  "model_win_rate": 0.332,
+  "opponent": "rule",
+  "seed_start": 9000,
+  "selection": "policy",
+  "side_split": {
+   "opponent": {
+    "games": 250,
+    "wilson_lower": 0.3258981738809542,
+    "winRate": 0.384
+   },
+   "player": {
+    "games": 250,
+    "wilson_lower": 0.22799348323513563,
+    "winRate": 0.28
+   }
+  },
+  "wilson_lower": 0.2921397376306511
+ },
+ "top_skew_slices": {
+  "most_dropped_buckets": [
+   {
+    "axis": "action_kind",
+    "bucket": "pass",
+    "drop_rate": 0.9103,
+    "dropped": 7568,
+    "retained": 746
+   },
+   {
+    "axis": "points",
+    "bucket": "p0",
+    "drop_rate": 0.6837,
+    "dropped": 6419,
+    "retained": 2970
+   },
+   {
+    "axis": "board_stage",
+    "bucket": "p0",
+    "drop_rate": 0.6837,
+    "dropped": 6419,
+    "retained": 2970
+   },
+   {
+    "axis": "terminal_distance",
+    "bucket": "p0",
+    "drop_rate": 0.6837,
+    "dropped": 6419,
+    "retained": 2970
+   },
+   {
+    "axis": "hand_size_bucket",
+    "bucket": "<=2",
+    "drop_rate": 0.7719,
+    "dropped": 5515,
+    "retained": 1630
+   }
+  ],
+  "most_overrepresented_in_retained": [
+   {
+    "axis": "points",
+    "bucket": "p0",
+    "retained": 2970,
+    "share_of_axis_retained": 0.7838
+   },
+   {
+    "axis": "board_stage",
+    "bucket": "p0",
+    "retained": 2970,
+    "share_of_axis_retained": 0.7838
+   },
+   {
+    "axis": "terminal_distance",
+    "bucket": "p0",
+    "retained": 2970,
+    "share_of_axis_retained": 0.7838
+   },
+   {
+    "axis": "source",
+    "bucket": "model-visited-rollout-relabeled",
+    "retained": 2596,
+    "share_of_axis_retained": 0.6851
+   },
+   {
+    "axis": "seed_prefix",
+    "bucket": "140xxx",
+    "retained": 2596,
+    "share_of_axis_retained": 0.6851
+   }
+  ]
+ },
+ "train_diagnostics": {
+  "coverage_vs_loss": {
+   "action_kind": [
+    {
+     "bucket": "useAbility",
+     "train_samples": 39.0,
+     "val_accuracy": 0.7777777777777778,
+     "val_loss": 3.507387161254883,
+     "val_policy_loss": 3.4560389518737793,
+     "val_samples": 9.0
+    },
+    {
+     "bucket": "pass",
+     "train_samples": 602.0,
+     "val_accuracy": 0.4861111111111111,
+     "val_loss": 3.2988398340013294,
+     "val_policy_loss": 3.1894697613186307,
+     "val_samples": 144.0
+    },
+    {
+     "bucket": "attachEnergy",
+     "train_samples": 539.0,
+     "val_accuracy": 0.9,
+     "val_loss": 3.001521811765783,
+     "val_policy_loss": 2.9126885189729577,
+     "val_samples": 170.0
+    },
+    {
+     "bucket": "playTrainer",
+     "train_samples": 1221.0,
+     "val_accuracy": 0.6865671641791045,
+     "val_loss": 2.065534352544528,
+     "val_policy_loss": 1.9654602235822536,
+     "val_samples": 335.0
+    },
+    {
+     "bucket": "retreatAttack",
+     "train_samples": 19.0,
+     "val_accuracy": 1.0,
+     "val_loss": 0.7209672927856445,
+     "val_policy_loss": 0.5875537991523743,
+     "val_samples": 3.0
+    },
+    {
+     "bucket": "evolve",
+     "train_samples": 218.0,
+     "val_accuracy": 0.9615384615384616,
+     "val_loss": 0.650676048718966,
+     "val_policy_loss": 0.5386343185718243,
+     "val_samples": 78.0
+    },
+    {
+     "bucket": "playBasic",
+     "train_samples": 173.0,
+     "val_accuracy": 0.88,
+     "val_loss": 0.5205281257629395,
+     "val_policy_loss": 0.4158679962158203,
+     "val_samples": 50.0
+    },
+    {
+     "bucket": "attack",
+     "train_samples": 139.0,
+     "val_accuracy": 0.9,
+     "val_loss": 0.37921459436416627,
+     "val_policy_loss": 0.3397020125389099,
+     "val_samples": 50.0
+    }
+   ],
+   "phase": [
+    {
+     "bucket": "unknown",
+     "train_samples": 1975.0,
+     "val_accuracy": 0.7246376811594203,
+     "val_loss": 3.370242804912745,
+     "val_policy_loss": 3.2738797772141854,
+     "val_samples": 621.0
+    },
+    {
+     "bucket": "trainerAfter",
+     "train_samples": 24.0,
+     "val_accuracy": 0.5,
+     "val_loss": 1.3418464660644531,
+     "val_policy_loss": 1.296278715133667,
+     "val_samples": 4.0
+    },
+    {
+     "bucket": "trainerBefore",
+     "train_samples": 738.0,
+     "val_accuracy": 0.783625730994152,
+     "val_loss": 0.9832932007940192,
+     "val_policy_loss": 0.8810329792792337,
+     "val_samples": 171.0
+    },
+    {
+     "bucket": "bench",
+     "train_samples": 67.0,
+     "val_accuracy": 0.9411764705882353,
+     "val_loss": 0.237138032913208,
+     "val_policy_loss": 0.15855246782302856,
+     "val_samples": 17.0
+    },
+    {
+     "bucket": "evolve",
+     "train_samples": 33.0,
+     "val_accuracy": 1.0,
+     "val_loss": 0.22355759143829346,
+     "val_policy_loss": 0.02743065357208252,
+     "val_samples": 10.0
+    },
+    {
+     "bucket": "combat",
+     "train_samples": 113.0,
+     "val_accuracy": 0.9375,
+     "val_loss": 0.10812364518642426,
+     "val_policy_loss": 0.08445923030376434,
+     "val_samples": 16.0
+    }
+   ],
+   "source": [
+    {
+     "bucket": "model-visited-rollout-relabeled",
+     "train_samples": 1975.0,
+     "val_accuracy": 0.7246376811594203,
+     "val_loss": 3.370242804912745,
+     "val_policy_loss": 3.2738797772141854,
+     "val_samples": 621.0
+    },
+    {
+     "bucket": "heuristic-candidate-v1",
+     "train_samples": 975.0,
+     "val_accuracy": 0.8119266055045872,
+     "val_loss": 0.8326029848614964,
+     "val_policy_loss": 0.7346918675877633,
+     "val_samples": 218.0
+    }
+   ]
+  },
+  "dataset_summary": {
+   "margin_bucket": {
+    "unknown": 3789
+   },
+   "phase": {
+    "bench": 84,
+    "combat": 129,
+    "evolve": 43,
+    "trainerAfter": 28,
+    "trainerBefore": 909,
+    "unknown": 2596
+   },
+   "policy": {
+    "heuristic-candidate-v1": 1193,
+    "unknown": 2596
+   },
+   "selected_action_kind": {
+    "attachEnergy": 709,
+    "attack": 189,
+    "evolve": 296,
+    "pass": 746,
+    "playBasic": 223,
+    "playTrainer": 1556,
+    "retreatAttack": 22,
+    "useAbility": 48
+   },
+   "source": {
+    "model-visited-rollout-relabeled": 2596,
+    "unknown": 1193
+   }
+  },
+  "samples": 3789,
+  "train_loss": 0.16355273107350882,
+  "val_accuracy": 0.7473182359952324,
+  "val_loss": 2.210414935067669
+ },
+ "train_vs_gate_state_overlap": {
+  "gate_structure": {
+   "evaluates_all_legal_action_counts": true,
+   "note": "The gate plays full games end-to-end, so it traverses ALL decision states including the 1-legal-action forced states the loader drops (min_actions=2). Training never sees that ~69% of the visited-state stream.",
+   "rule_bot_opponent": true,
+   "seed_start": 9000,
+   "side_balanced": true
+  },
+  "legal_action_count_coverage": {
+   "2-2": {
+    "dropped": 0,
+    "retained": 2052
+   },
+   "3-4": {
+    "dropped": 0,
+    "retained": 1323
+   },
+   "5-8": {
+    "dropped": 0,
+    "retained": 219
+   },
+   "9-16": {
+    "dropped": 0,
+    "retained": 118
+   },
+   "<=1": {
+    "dropped": 8598,
+    "retained": 0
+   },
+   ">16": {
+    "dropped": 0,
+    "retained": 77
+   }
+  },
+  "limitation": "Gate per-state observation traces were never persisted (decisionTraceOut empty in all runs/ gate manifests; no decision trace files exist). Exact retained-state vs gate-state observation overlap is UNCOMPUTABLE from existing artifacts \u2014 recorded as an environment gap. Structural comparison used instead.",
+  "training_side_balance_vs_gate": {
+   "gate_side_split": {
+    "opponent": {
+     "games": 250,
+     "wilson_lower": 0.3258981738809542,
+     "winRate": 0.384
+    },
+    "player": {
+     "games": 250,
+     "wilson_lower": 0.22799348323513563,
+     "winRate": 0.28
+    }
+   },
+   "retained_side_distribution": {
+    "opponent": {
+     "retained_rows": 1852,
+     "retained_share": 0.4888
+    },
+    "player": {
+     "retained_rows": 1937,
+     "retained_share": 0.5112
+    }
+   }
+  }
+ }
+}

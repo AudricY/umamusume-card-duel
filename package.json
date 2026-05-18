@@ -25,7 +25,8 @@
     "test:dagger-orchestrator": "training/.venv/bin/python training/dagger_smoke.py",
     "test:opponent-pool": "training/.venv/bin/python training/opponent_pool_smoke.py",
     "test:ppo-smoke": "training/.venv/bin/python training/ppo_smoke.py",
-    "test:f1-hp-sweep": "training/.venv/bin/python training/f1_hp_sweep_smoke.py"
+    "test:f1-hp-sweep": "training/.venv/bin/python training/f1_hp_sweep_smoke.py",
+    "test:data-coverage-audit": "training/.venv/bin/python training/data_coverage_audit_smoke.py"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
