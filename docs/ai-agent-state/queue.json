@@ -1,33 +1,33 @@
 {
-  "updated": "2026-05-18T21:30Z",
+  "updated": "2026-05-18T23:30Z",
   "items": [
     {
       "id": "r12-throughput",
       "priority": "P1",
-      "status": "in-progress",
-      "summary": "Speedup CONFIRMED in a full R111 production loop: 2.11x wall-clock (stage-sum 3088s vs R110 4-worker baseline 6532s), trajectory-neutral (iter-0 bit-identical to baseline => #1-#3 do not perturb the loop). R110-W6-repro per-iter wall-clock: selfplay ~603s (~48%) + mcts-gate ~694s (~52%) = ~99% (pure single-thread CPU MCTS); distill ~0.6%; GPU correctly idle. Mechanism + per-stage numbers + trajectory-neutrality proof: docs/ai-research/progress/r110.md §4b/§4c. Ranked plan: docs/ai-research/scoping/r12-selfplay-gate-throughput.md.",
-      "next_action": "Deliverables 1-3 + 5 DONE. (1) r12_orchestrator.py --workers 1->24, commit 7d5bfd2. (2) hash-carry MCTS_HASH_CARRY_ENABLED default ON. (3) /predict keep-alive MCTS_KEEPALIVE_ENABLED default ON. (5) WORK-STEALING DISPATCH (selfplay+gate) — backend/src/sim/workStealing.ts MCTS_WORK_STEALING_ENABLED default ON (UMA_MCTS_WORK_STEALING=0 reverts to static chunking); shared task-index queue, 2-task prefetch, slot-ordered aggregation; kills the 4-dark-selfplay-cores bug (60 games/ceil(60/24)=3=20 slices) + variance-driven per-worker skew; refutes the 'games-multiple-of-workers' framing (gate already 5 games/worker, still ~20% imbalanced). Proven bit-identical (selfplay bytes + gate fingerprints, workers>1) by training/r12_workstealing_determinism_gate.py. Expected balanced ceiling ~2.6-2.85x (honest max ~2.9x; the rest of the 2.11x-vs-~6x gap is the never-real 4w-baseline artifact + rollout-cost floor). serve_onnx-sharding explicitly NOT worth it / OUT OF SCOPE (stdlib threaded server, ~7% predict share at batch=1). R12 orchestrator launch command UNCHANGED (no new args; flag defaults ON). REMAINING: item (4) CRN/value-head leaf stays DEFERRED (research-recipe decision; keeps A/B comparable)."
+      "status": "done",
+      "summary": "Speedup CONFIRMED in a full R111 production loop: 2.11x wall-clock (stage-sum 3088s vs R110 4-worker baseline 6532s), trajectory-neutral (iter-0 bit-identical to baseline => #1-#3 do not perturb the loop). R110-W6-repro per-iter wall-clock: selfplay ~603s (~48%) + mcts-gate ~694s (~52%) = ~99% (pure single-thread CPU MCTS); distill ~0.6%; GPU correctly idle. Mechanism + per-stage numbers + trajectory-neutrality proof: docs/ai-research/progress/r110.md \u00a74b/\u00a74c. Ranked plan: docs/ai-research/scoping/r12-selfplay-gate-throughput.md. REMAINING item (4) CRN/value-head leaf stays DEFERRED by research-recipe decision (keeps the A/B comparable) - tracked here as a one-line pointer, not a forward line unless explicitly reopened.",
+      "next_action": "DONE: deliverables 1-3+5 landed and proven bit-identical (commit 7d5bfd2; training/r12_workstealing_determinism_gate.py). Item (4) CRN/value-head leaf intentionally DEFERRED (research-recipe decision). Mechanism/numbers: docs/ai-research/progress/r110.md 4b/4c; plan: docs/ai-research/scoping/r12-selfplay-gate-throughput.md."
     },
     {
       "id": "w6-loop-anti-degradation",
       "priority": "P1",
       "status": "scoped",
-      "summary": "Mechanism CONFIRMED via R111 full loop: the W6 recipe-fix eliminates the iter-3 rot (baseline craters 0.6042->0.5106 fail-promote; R111 iter-3 holds 0.5527, promoted, no crater). BUT it over-damps at default HP — net ceiling LOSS vs baseline: R111 Wilson lower is bit-identical 0.5527 across iter-1/2/3 (policy froze) then decays to 0.5358 at iter-4, entire trajectory below the baseline iter-2 peak 0.6042 and below the §6 0.60-0.6479 band. Anti-degradation question answered (yes, real); open question is now regularization-dose tuning. Canonical: docs/ai-research/progress/r110.md §4c.",
-      "next_action": "USER-GATED regularization-dose sweep loop run (DO NOT auto-launch; needs explicit go-ahead). Concrete knobs: lower and/or anneal the fixed-KL-anchor weight from 0.05 (e.g. a schedule), and reduce the cross-iter replay old-fraction from 0.40 and/or the window from 3 — goal: damp ONLY the iter-3 rot while retaining the iter-2 climb. A/B comparators: R110-W6-repro 0.6042 iter-2 peak (unregularized baseline) and R111 0.5527 frozen plateau (over-damped default HP). Recipe-fix code already landed in training/r12_orchestrator.py (commit d44de3f; flags W6_FIX_CROSS_ITER_REPLAY / W6_FIX_FIXED_KL_ANCHOR, knobs W6_REPLAY_WINDOW / W6_REPLAY_OLD_FRACTION / kl-anchor-weight)."
+      "summary": "Mechanism CONFIRMED via R111 full loop: the W6 recipe-fix eliminates the iter-3 rot (baseline craters 0.6042->0.5106 fail-promote; R111 iter-3 holds 0.5527, promoted, no crater). BUT it over-damps at default HP \u2014 net ceiling LOSS vs baseline: R111 Wilson lower is bit-identical 0.5527 across iter-1/2/3 (policy froze) then decays to 0.5358 at iter-4, entire trajectory below the baseline iter-2 peak 0.6042 and below the \u00a76 0.60-0.6479 band. Anti-degradation question answered (yes, real); open question is now regularization-dose tuning. Canonical: docs/ai-research/progress/r110.md \u00a74c.",
+      "next_action": "USER-GATED regularization-dose sweep loop run (DO NOT auto-launch; needs explicit go-ahead). Concrete knobs: lower and/or anneal the fixed-KL-anchor weight from 0.05 (e.g. a schedule), and reduce the cross-iter replay old-fraction from 0.40 and/or the window from 3 \u2014 goal: damp ONLY the iter-3 rot while retaining the iter-2 climb. A/B comparators: R110-W6-repro 0.6042 iter-2 peak (unregularized baseline) and R111 0.5527 frozen plateau (over-damped default HP). Recipe-fix code already landed in training/r12_orchestrator.py (commit d44de3f; flags W6_FIX_CROSS_ITER_REPLAY / W6_FIX_FIXED_KL_ANCHOR, knobs W6_REPLAY_WINDOW / W6_REPLAY_OLD_FRACTION / kl-anchor-weight)."
     },
     {
       "id": "r110-w6-reproduction",
       "priority": "P2",
       "status": "done",
       "summary": "Verdict MARGINAL: best-promoted iter-2 Wilson lower 0.6042 (in 0.60-0.6479 band), reproduced-but-not-superior, NOT promoted; pinned 96-d stays production; R16-P0 embedding fix confirmed working. Canonical: docs/ai-research/progress/r110.md.",
-      "next_action": "None — run COMPLETE (all 5 iters, did NOT auto-halt: iter-4 0.5612 promoted by a 0.001 tolerance squeak vs 110-d's lower 0.6042 floor; verdict unchanged, locked on best-promoted iter-2 0.6042). Forward line is the now-ready recipe-fix item w6-loop-anti-degradation (discriminator gate satisfied; implementer step)."
+      "next_action": "None \u2014 run COMPLETE (all 5 iters, did NOT auto-halt: iter-4 0.5612 promoted by a 0.001 tolerance squeak vs 110-d's lower 0.6042 floor; verdict unchanged, locked on best-promoted iter-2 0.6042). Forward line is the now-ready recipe-fix item w6-loop-anti-degradation (discriminator gate satisfied; implementer step)."
     },
     {
       "id": "r16-p1-temporal-turn-state-features",
       "priority": "P2",
-      "status": "blocked",
-      "summary": "Implementation-ready. R110 verdict reached (MARGINAL, non-blocking). Now blocked only on the serving-schema 96/110/164 guard prerequisite. Canonical scope: docs/ai-research/scoping/r16-model-feature-backlog-refinement.md.",
-      "next_action": "Before STATE_DIM 164, freeze the 110-d v3 builder and make serve_onnx resolve 96/110/164 by graph shape; then P1 is unblocked."
+      "status": "scoped",
+      "summary": "Implementation-ready and UNBLOCKED. R110 verdict reached (MARGINAL, non-blocking). Serving-schema 96/110/164 guard prerequisite IMPLEMENTED: serve_onnx resolves the feature builder strictly from the ONNX graph state_features dim against an explicit table (96->v2, 110->v3.0), fails fast on the declared-but-unimplemented 164 v3.1 placeholder and any unknown/inconsistent dim (never a silent v3 fallback); the 96-d/110-d frozen builders now assert their output widths + an import-time STATE_DIM==STATE_DIM_V3 contract. Canonical scope: docs/ai-research/scoping/r16-model-feature-backlog-refinement.md (serving-schema-guard section = IMPLEMENTED). Guard smoke: training/serve_schema_guard_smoke.py.",
+      "next_action": "Implement P1 STATE_DIM 164 v3.1 temporal/turn-state scalar features per the scope doc P1 slot table (110->164 additive tail: add a NEW STATE_DIM_V3_1 builder + ONNX export + serve_onnx _SCHEMA_BY_STATE_DIM 164 entry; do NOT mutate the frozen 110-d v3.0 builder). Land sequential-after-R110 (features.py/observation edits re-confound a live loop). Resolve the two scope-doc omissions first: globalRetreatCostReduction effective field + the ownIsFirstTurn energy-vs-evolve threshold definition."
     },
     {
       "id": "mcts-distill-followup-direction",

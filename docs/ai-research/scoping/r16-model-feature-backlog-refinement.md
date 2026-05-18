@@ -2,10 +2,12 @@
 
 - **Date:** 2026-05-18
 - **Status (2026-05-18):** P0 **DONE** (commit `b38de0e` — mcts-distill
-  v3 embedding data-path fixed; was confounding R110-W6). P1 **readiness-
-  audited, implementation-ready post-R110** (exact STATE_DIM=164, fields
-  verified public-safe, serve_onnx 3-way freeze prerequisite identified —
-  see § P1). P2 not started (depends on P0 ✓ + ideally P1). P1/P2 code
+  v3 embedding data-path fixed; was confounding R110-W6). P1
+  **UNBLOCKED, implementation-ready post-R110** (exact STATE_DIM=164,
+  fields verified public-safe; the serve_onnx 96/110/164 freeze
+  prerequisite is **IMPLEMENTED** 2026-05-18 — see § P1
+  "Load-bearing implementation prerequisite"). P2 not started (depends
+  on P0 ✓ + ideally P1). P1/P2 code
   landing is sequential-after-R110: they edit `features.py`/observation
   builder/`model.py` which the live R110 orchestrator re-execs per
   iteration — landing mid-run re-confounds R110 (the P0 lesson).
@@ -262,20 +264,52 @@ Two implementation options:
      define `ownIsFirstTurn` as the energy/setup-phase flag and document
      that explicitly.
 
-   **Load-bearing implementation prerequisite (serve_onnx coordination).**
-   `STATE_DIM` is a single shared constant used by both the encoder and
-   `serve_onnx.request_to_arrays`'s shape validator. Bumping it to 164
-   **silently breaks 110-d v3.0 serving** (a 110-d v3.0 graph would be
-   fed 164-d vectors and fail the shape check). `serve_onnx` schema
-   resolution is currently binary (96→v2 frozen builder, else→v3 via the
-   live `STATE_DIM`). Prerequisite for the P1 bump: **freeze/vendor the
-   110-d v3.0 builder** (exactly as v2 was frozen) and make schema
-   resolution **3-way keyed off the graph's `state_features` last dim**
-   (96→v2, 110→frozen v3.0, 164→v3.1); rename CLI `v3`→`v3.0`, add
-   `v3.1`. Do NOT bump `STATE_DIM` before this freeze lands. This is the
-   only non-trivial code change in P1 and the highest implementation
-   risk — it is also R110-safe (R110/r12_orchestrator does not consume
-   serve_onnx schema resolution; v3.0 graphs stay valid until the bump).
+   **Load-bearing implementation prerequisite (serve_onnx coordination)
+   — IMPLEMENTED 2026-05-18.** `STATE_DIM` is a single shared constant
+   used by both the encoder and `serve_onnx.request_to_arrays`'s shape
+   validator; bumping it to 164 would otherwise silently feed a 110-d
+   v3.0 graph 164-d vectors. The serving-schema 96/110/164 guard is now
+   in place:
+
+   - **Shape-driven resolution.** `serve_onnx._resolve_feature_schema`
+     resolves the builder STRICTLY from the loaded ONNX graph's
+     `state_features` last dim against an explicit table
+     `_SCHEMA_BY_STATE_DIM` (`96→v2` no-embedding, `110→v3.0`
+     embedding). It also asserts the graph's `card_ids_by_zone` input
+     presence agrees with the resolved schema. An explicit
+     `--feature-schema v2|v3` is checked consistent with the resolved
+     schema and exits non-zero if not. Exactly one startup line logs the
+     resolved schema + graph dim (loud, not silent).
+   - **Fail-fast, no silent v3 fallback.** Any dim that is not an
+     implemented schema raises `SystemExit(2)` at startup. `164` is a
+     **declared-but-unimplemented placeholder** (`STATE_DIM_V3_1 = 164`
+     in `features.py`, listed in `serve_onnx._PLACEHOLDER_DIMS`) with a
+     specific "land P1 first" message; unknown dims raise generically.
+     The old binary "96→v2 else→v3" rule (which would have paired a
+     future 164-d graph with the 110-d builder) is gone.
+   - **v3.0 freeze contract.** `features.py` declares
+     `STATE_DIM_V3 = 110` / `STATE_DIM_V3_1 = 164` (placeholder, no
+     logic) and an import-time `assert STATE_DIM == STATE_DIM_V3`.
+     `observation_to_features` (v3.0) and `observation_to_features_v2`
+     (v2) each assert their emitted width equals `STATE_DIM_V3` /
+     `STATE_DIM_V2`. A future 164-d schema must therefore be a NEW
+     `STATE_DIM_V3_1` builder + NEW `_SCHEMA_BY_STATE_DIM` entry, never
+     an edit that shifts v2/v3 slots — `STATE_DIM` stays an alias of
+     `STATE_DIM_V3`.
+   - **96-d transparency preserved.** v2 pin still emits exactly the
+     three frozen feeds (no embedding inputs); existing 96-d serving is
+     bit-identical. The CLI rename `v3→v3.0` was found unnecessary: the
+     internal/return token stays `"v3"` so `request_to_arrays` is
+     untouched (v3.0 is the only v3 builder until P1); the graph-dim
+     table, not a CLI string, is what discriminates 110 vs 164.
+   - **Test.** `training/serve_schema_guard_smoke.py` — resolves the
+     real 96-d (`runs/R13-W6-phase-d/iter-2`) and 110-d v3.0
+     (`runs/R110-W6-repro/iter-0`) graphs to the right schema, asserts
+     fail-fast on synthetic 164-d / 999-d / inconsistent-110-d graphs
+     and on explicit-pin mismatches, and checks v2 feed transparency.
+     Verdict: ALL PASS. R110-safe (r12_orchestrator does not consume
+     serve_onnx schema resolution; v3.0 graphs stay valid until the
+     bump). **P1 is now unblocked.**
 
 2. **Slot-token integration.**
    - If P2 per-Uma slots happens first, encode per-Uma temporal fields inside
