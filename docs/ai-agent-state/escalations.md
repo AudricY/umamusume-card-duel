@@ -54,3 +54,10 @@
   loss vs baseline 0.6042 (frozen 0.5527 then decay 0.5358). Forward
   line is now a user-gated regularization-dose sweep. Canonical:
   `docs/ai-research/progress/r110.md` §4c.
+- 2026-05-18: REPRIORITIZATION (evidence-driven, OVERRIDES 2026-05-19
+  user-confirmed sequence — pending user veto). Sizing pass falsified the
+  "TD-3a = heavy/INFRA-BLOCKED" basis: MCTS already runs on live
+  GameState; emit-path is ~2-4d cheap plumbing, a shared 3a+3b
+  unblocker. 3a moved AHEAD of `r16-p2-per-uma-slot-tokens`; 3a
+  emit-path + 50-game pilot + Audit-v2 LANDED (all PASS); larger-n
+  coverage gate decoupled. Canonical: `docs/ai-research/progress/r16.md`.

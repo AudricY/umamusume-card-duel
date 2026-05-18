@@ -105,6 +105,8 @@ async function runMethodAsModel(args: RebaselineArgs, method: MethodKey) {
     decisionTraceOut: null,
     manifestOut: null,
     traceTeacher: [],
+    relabelMcts: false,
+    relabelStateSource: "rule-bot-mirror",
     plannerTopK: args.plannerTopK,
     plannerMaxSequences: args.plannerMaxSequences,
     plannerMaxDepth: args.plannerMaxDepth,

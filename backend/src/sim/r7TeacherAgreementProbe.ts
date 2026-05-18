@@ -118,6 +118,8 @@ function buildSelectorArgs(): EvaluateModelArgs {
     decisionTraceOut: null,
     manifestOut: null,
     traceTeacher: [],
+    relabelMcts: false,
+    relabelStateSource: "rule-bot-mirror",
     plannerTopK: 4,
     plannerMaxSequences: 64,
     plannerMaxDepth: 8,

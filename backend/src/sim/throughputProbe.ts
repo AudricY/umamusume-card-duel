@@ -145,6 +145,8 @@ function makePlannerArgs(args: ProbeArgs): EvaluateModelArgs {
     decisionTraceOut: null,
     manifestOut: null,
     traceTeacher: [],
+    relabelMcts: false,
+    relabelStateSource: "rule-bot-mirror",
     plannerTopK: args.plannerTopK,
     plannerMaxSequences: args.plannerMaxSequences,
     plannerMaxDepth: args.plannerMaxDepth,

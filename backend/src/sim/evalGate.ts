@@ -449,6 +449,8 @@ function parseArgs(argv: string[]): Args {
     plannerFirstActionAggregate: parsePlannerFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
     rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
     traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
+    relabelMcts: false,
+    relabelStateSource: "rule-bot-mirror",
     opponentModelUrl: get("--opponent-model-url", "") || null,
     mctsSimulations: Number(get("--mcts-simulations", "100")),
     mctsCPuct: Number(get("--mcts-c-puct", "1.5")),

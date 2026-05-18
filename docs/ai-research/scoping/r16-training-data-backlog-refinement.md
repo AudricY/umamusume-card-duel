@@ -292,8 +292,30 @@ Estimated `4-5.5` engineering days:
 The best next rows should come from states the production system actually
 visits, not from self-play-only distributions. The audit shows that forced
 decisions dominate discarded rows, and old gate artifacts do not contain exact
-decision states. Offline MCTS relabeling from current trace rows is not
-possible because traces do not serialize full `GameState`.
+decision states.
+
+Cost basis (corrected, 2026-05-18 sizing pass). The earlier
+"INFRA-BLOCKED / offline relabel impossible / heavy expensive arm" framing
+materially misrepresented the cost and was driving priority wrong. The
+relabel does **not** need an offline `GameState` serializer: rollout-leaf MCTS
+already runs on the live in-game `GameState` at the decision point
+(`evaluateModelVsHeuristic.ts:315-316,711`; `runMcts` `mcts.ts:170`), the
+rollout-leaf / deterministic-no-noise / uniform-prior knobs already exist
+(`mcts.ts:609,632,151,148,436-440`), the full diagnostics already map
+field-for-field onto the `oracle` schema below (`MctsResult.diagnostics`
+`mcts.ts:99-124`), forced-state skip already exists
+(`evaluateModelVsHeuristic.ts:693`), and the downstream audit already enforces
+the acceptance criteria (`relabelDecisionTrace.ts:85-94,105-109,188-195`). The
+single blocker is that `runMctsForSide`
+(`evaluateModelVsHeuristic.ts:685-714`) discards `MctsResult.visits` /
+`diagnostics` and returns only `{action, selectedIndex}`, so the visit
+distribution never reaches the trace row. Closing that is a bounded ~2-4
+eng-day emit-path wiring, not a new serializer. Compute is low single-digit
+CPU-hours for the production corpus, gated by a cheap ~single-digit-minute
+50-game pilot smoke (§ Compute Budget). This infra is a **shared unblocker for
+both 3a and 3b** of `training-data-deep-program`. The larger-n
+contested-coverage confirmation gate is **decoupled** — it runs in
+parallel/later and is no longer a blocker for the infra itself.
 
 ### Scope
 
@@ -445,8 +467,10 @@ Production candidate corpus:
 - Rollout-leaf MCTS still inherits rule-bot rollout blind spots.
 - Policy priors can bias labels toward the current model; bootstrap with
   uniform priors or report prior-vs-visit disagreement.
-- Current traces lack full `GameState`, so an offline relabeler will be
-  insufficient unless traces are expanded.
+- Online relabel is the chosen path (MCTS on the live `GameState` at the
+  decision point); an offline relabeler from current trace rows is *not*
+  pursued because traces do not serialize full `GameState` and online relabel
+  is the cheaper, already-shipping route — see corrected cost basis above.
 
 ### Effort
 

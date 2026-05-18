@@ -39,6 +39,13 @@ type DecisionTraceRow = {
   fallback: boolean;
   behaviorPolicy?: BehaviorPolicySnapshot;
   teachers?: TeacherEntry[];
+  // R16-TD 3a: online rollout-leaf MCTS relabel payload emitted by
+  // evaluateModelVsHeuristic.ts under --relabel-mcts. When present the
+  // --label-source rollout-leaf-mcts branch forwards these directly instead
+  // of recomputing a mixture from `teachers`.
+  policyTargets?: number[];
+  oracle?: Record<string, unknown>;
+  stateSource?: string;
   result: { winner: "player" | "opponent" | null; modelWon: boolean; points: Record<string, number>; terminalReason: string } | null;
 };
 
@@ -68,9 +75,15 @@ function main() {
   mkdirSync(dirname(args.out), { recursive: true });
   const out = [] as string[];
 
+  // R16-TD 3a: rollout-leaf-mcts pass-through. The evaluator already computed
+  // the soft target online on the live GameState; forward policyTargets/oracle
+  // verbatim and reuse the SAME fallback/leak/range/sum gates (no new audit
+  // logic, no mixture recomputation from teachers).
+  const mctsPassThrough = args.labelSource === "rollout-leaf-mcts";
+
   for (const row of rows) {
     const teachers = row.teachers ?? [];
-    if (teachers.length === 0) {
+    if (!mctsPassThrough && teachers.length === 0) {
       skippedNoTeacher += 1;
       continue;
     }
@@ -79,6 +92,63 @@ function main() {
       continue;
     }
     const numActions = row.legalActions.length;
+    if (mctsPassThrough) {
+      const targets = row.policyTargets ?? [];
+      if (targets.length !== numActions) {
+        outOfRange += 1;
+        continue;
+      }
+      const leakFieldsMcts = detectLeakFields(row);
+      if (leakFieldsMcts.length > 0) {
+        leakDetected += 1;
+        throw new Error(`Hidden-info leak in row seed=${row.seed} step=${row.step}: ${leakFieldsMcts.join(",")}`);
+      }
+      const sumMcts = targets.reduce((acc, v) => acc + v, 0);
+      if (!(Math.abs(sumMcts - 1.0) < 1e-6)) {
+        outOfRange += 1;
+        continue;
+      }
+      let argmaxIdx = 0;
+      let argmaxVal = targets[0]!;
+      for (let i = 1; i < targets.length; i += 1) {
+        if (targets[i]! > argmaxVal) {
+          argmaxVal = targets[i]!;
+          argmaxIdx = i;
+        }
+      }
+      const argmaxAct = row.legalActions[argmaxIdx]!;
+      const res = row.result ?? { winner: null, modelWon: false, points: { player: 0, opponent: 0 }, terminalReason: "unknown" };
+      const mctsRow: Record<string, unknown> = {
+        schemaVersion: 1,
+        source: args.source,
+        labelSource: args.labelSource,
+        stateSource: row.stateSource ?? null,
+        relabeledFrom: { source: row.source, selection: row.selection },
+        episodeId: `${row.seed}:${row.modelSide}`,
+        seed: row.seed,
+        modelSide: row.modelSide,
+        step: row.step,
+        sideId: row.sideId,
+        observation: row.observation,
+        legalActions: row.legalActions,
+        selectedActionId: argmaxAct.id,
+        selectedActionIndex: argmaxIdx,
+        policyTargets: targets,
+        oracle: row.oracle ?? null,
+        heuristicSelectedActionId: row.heuristicSelectedActionId,
+        heuristicSelectedActionIndex: row.heuristicSelectedActionIndex,
+        modelChoseActionId: row.selectedActionId,
+        modelChoseActionIndex: row.selectedActionIndex,
+        modelFallback: row.fallback,
+        result: { winner: res.winner, points: res.points, terminalReason: res.terminalReason },
+      };
+      if (row.behaviorPolicy) mctsRow.behaviorPolicy = row.behaviorPolicy;
+      out.push(JSON.stringify(mctsRow));
+      kept += 1;
+      teacherByName["rollout-leaf-mcts"] = (teacherByName["rollout-leaf-mcts"] ?? 0) + 1;
+      teachersPerRowHistogram["mcts"] = (teachersPerRowHistogram["mcts"] ?? 0) + 1;
+      continue;
+    }
     // Validate every teacher's chosen index lies inside legalActions. A single
     // bad teacher invalidates the entire row — the mixture target is only
     // well-defined when all teachers vote in-range.

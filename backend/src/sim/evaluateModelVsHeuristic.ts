@@ -44,7 +44,7 @@ import type { CoinFlipResult, EnergyCost, EnergyType, GameState, SideId, SideSta
 import { stateFingerprint } from "./stateFingerprint";
 import { rankLegalActions, type CandidateRankerMode } from "./candidateRanker";
 import { withGitMetadata } from "./manifest";
-import { runMcts, defaultMctsConfig, type MctsConfig } from "./mcts";
+import { runMcts, defaultMctsConfig, type MctsConfig, type MctsResult } from "./mcts";
 
 // R7 step 2: the three trace-teacher selectors a row can carry. The full set
 // is fixed by the three selector functions exported below
@@ -103,6 +103,17 @@ export type EvaluateModelArgs = {
   // back-compat for the single-teacher recipe R3/R4/R6/R15.S1 used; a length-3
   // list is the multi-teacher mixture target that R7 step 2 introduces.
   traceTeacher: TraceTeacherSelection[];
+  // R16-TD 3a: online rollout-leaf MCTS relabel mode. When set, the model-side
+  // trace row carries a soft `policyTargets` (normalized root visit
+  // distribution) plus an `oracle` diagnostics block computed by running MCTS
+  // on the live `GameState` at the decision point — no offline GameState
+  // serializer needed. Default OFF; when OFF the trace/eval output is
+  // bit-identical to the pre-3a behavior (no extra MCTS call, no new fields).
+  // Forced states (legalActions.length <= 1) suppress the row entirely so the
+  // corpus is contested-only by construction. `stateSource` tags the
+  // generating recipe for downstream source-mix accounting.
+  relabelMcts: boolean;
+  relabelStateSource: string;
   plannerTopK: number;
   plannerMaxSequences: number;
   plannerMaxDepth: number;
@@ -189,6 +200,27 @@ type DecisionTraceRow = {
     selectedActionIndex: number;
     selectedOriginalRank?: number;
   }>;
+  // R16-TD 3a: online rollout-leaf MCTS relabel payload. Present only when
+  // `--relabel-mcts` is set. `policyTargets` is the normalized root visit
+  // distribution over `legalActions` (length === legalActions.length, sums to
+  // 1). `oracle` mirrors `MctsResult.diagnostics` field-for-field onto the
+  // scoping doc § P1 schema. `stateSource` tags the generating recipe. Rows
+  // for forced states (<=1 legal action) are never emitted in this mode.
+  policyTargets?: number[];
+  oracle?: {
+    simulationsRun: number;
+    rolloutCrnSamples: number;
+    rolloutSteps: number;
+    rootValue: number;
+    rootMeanQ: number[];
+    rootPriors: number[];
+    visitDistribution: number[];
+    rootPriorEntropy: number;
+    expansions: number;
+    leafEvaluations: number;
+    haltedEarly: boolean;
+  };
+  stateSource?: string;
   result: {
     winner: SideId | null;
     modelWon: boolean;
@@ -319,8 +351,18 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
       if (decision.selectedOriginalRank !== undefined) selectedCandidateRanks.push(decision.selectedOriginalRank);
       const next = advanceModeledTurnStep(state, sideId, decision.action, forcedCoinResults, rng);
       const fallback = stateHash(next) === beforeHash;
-      if (args.decisionTraceOut) {
-        const teachers = chooseTraceTeacher(args, state, sideId, `${seed}:${modelSide}:${step}:trace-teacher`);
+      // R16-TD 3a: when relabel mode is on, compute the rollout-leaf MCTS
+      // target on the live `state` *before* building the row. A null result
+      // means a forced state (<=1 legal action) — suppress the row entirely
+      // so the corpus is contested-only by construction (does not fall
+      // through to an unlabeled emission).
+      const relabel = args.decisionTraceOut && args.relabelMcts
+        ? await runMctsRelabel(args, state, sideId, `${seed}:${modelSide}:${step}:relabel-mcts`)
+        : null;
+      if (args.decisionTraceOut && !(args.relabelMcts && relabel === null)) {
+        const teachers = args.relabelMcts
+          ? []
+          : chooseTraceTeacher(args, state, sideId, `${seed}:${modelSide}:${step}:trace-teacher`);
         const trace: DecisionTraceRow = {
           schemaVersion: 1,
           source: "model-visited",
@@ -342,6 +384,12 @@ async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: str
         if (teachers.length > 0) trace.teachers = teachers;
         const behavior = (decision as { behavior?: BehaviorPolicySnapshot }).behavior;
         if (behavior) trace.behaviorPolicy = behavior;
+        if (relabel) {
+          const payload = buildRelabelPayload(args, relabel.legalActions.length, relabel.result);
+          trace.policyTargets = payload.policyTargets;
+          trace.oracle = payload.oracle;
+          trace.stateSource = args.relabelStateSource;
+        }
         decisionTraces.push(trace);
       }
       if (fallback) {
@@ -711,6 +759,75 @@ async function runMctsForSide(
   const result = await runMcts(state, sideId, config, modelUrl, seed);
   const selectedIndex = Math.min(Math.max(0, result.selectedIndex), legalActions.length - 1);
   return rankedDecision(legalActions, selectedIndex);
+}
+
+// R16-TD 3a online relabel: run rollout-leaf, no-noise MCTS on the *live*
+// `GameState` at the decision point and return the full `MctsResult` (visits +
+// diagnostics) so the trace row can carry soft `policyTargets` and an `oracle`
+// block. Sibling of `runMctsForSide` so the existing decision path is left
+// bit-identical (no-op invariant when `--relabel-mcts` is off). Returns null
+// for forced states so the caller suppresses row emission entirely. Dirichlet
+// root noise is forced off here regardless of the model-side MCTS knobs —
+// relabel targets must be deterministic under a fixed seed.
+async function runMctsRelabel(
+  args: EvaluateModelArgs,
+  state: GameState,
+  sideId: SideId,
+  seed: string,
+): Promise<{ legalActions: LegalAiAction[]; result: MctsResult } | null> {
+  const legalActions = enumerateLegalAiActions(state, sideId);
+  if (legalActions.length <= 1) return null;
+  const config: MctsConfig = defaultMctsConfig({
+    simulations: Math.max(1, args.mctsSimulations),
+    cPuct: args.mctsCPuct,
+    leaf: "rollout",
+    rolloutCrnSamples: Math.max(1, args.mctsRolloutCrnSamples),
+    rolloutSteps: Math.max(1, args.mctsRolloutSteps),
+    prior: args.mctsPrior,
+    addRootDirichlet: false,
+    dirichletAlpha: args.mctsDirichletAlpha,
+    dirichletEpsilon: args.mctsDirichletEpsilon,
+    collapseMaxSteps: Math.max(1, args.mctsCollapseMaxSteps),
+    maxNodes: Math.max(64, args.mctsMaxNodes),
+    adaptiveRatio: Math.max(0, args.mctsAdaptiveRatio),
+    adaptiveMinSims: Math.max(1, args.mctsAdaptiveMinSims),
+  });
+  const result = await runMcts(state, sideId, config, args.modelUrl, seed);
+  return { legalActions, result };
+}
+
+// Normalize the raw root visit vector into a `policyTargets` distribution and
+// project `MctsResult.diagnostics` onto the scoping doc § P1 `oracle` schema.
+// `policyTargets` is forced to sum to exactly 1 (length === legalActions
+// length) so the downstream `relabelDecisionTrace.ts` sum/length audit passes
+// without re-deriving anything.
+function buildRelabelPayload(
+  args: EvaluateModelArgs,
+  legalActionCount: number,
+  result: MctsResult,
+): { policyTargets: number[]; oracle: NonNullable<DecisionTraceRow["oracle"]> } {
+  const visits = result.diagnostics.rootVisitDistribution.length === legalActionCount
+    ? result.diagnostics.rootVisitDistribution.slice()
+    : result.visits.slice();
+  const padded = Array.from({ length: legalActionCount }, (_, i) => Math.max(0, visits[i] ?? 0));
+  const total = padded.reduce((acc, v) => acc + v, 0);
+  const policyTargets = total > 0
+    ? padded.map((v) => v / total)
+    : padded.map(() => 1 / legalActionCount);
+  const oracle: NonNullable<DecisionTraceRow["oracle"]> = {
+    simulationsRun: result.diagnostics.simulationsRun,
+    rolloutCrnSamples: Math.max(1, args.mctsRolloutCrnSamples),
+    rolloutSteps: Math.max(1, args.mctsRolloutSteps),
+    rootValue: result.diagnostics.rootValue,
+    rootMeanQ: result.diagnostics.rootMeanQ.slice(),
+    rootPriors: result.diagnostics.rootPriors.slice(),
+    visitDistribution: padded,
+    rootPriorEntropy: result.diagnostics.rootPriorEntropy,
+    expansions: result.diagnostics.expansions,
+    leafEvaluations: result.diagnostics.leafEvaluations,
+    haltedEarly: result.diagnostics.haltedEarly,
+  };
+  return { policyTargets, oracle };
 }
 
 async function predictStateValue(modelUrl: string, state: GameState, sideId: SideId): Promise<number> {
@@ -1371,6 +1488,8 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     decisionTraceOut: get("--decision-trace-out", ""),
     manifestOut: get("--manifest-out", ""),
     traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
+    relabelMcts: argv.includes("--relabel-mcts"),
+    relabelStateSource: get("--relabel-state-source", "rule-bot-mirror"),
     plannerTopK: Number(get("--planner-top-k", get("--search-top-k", "4"))),
     plannerMaxSequences: Number(get("--planner-max-sequences", "64")),
     plannerMaxDepth: Number(get("--planner-max-depth", "8")),
