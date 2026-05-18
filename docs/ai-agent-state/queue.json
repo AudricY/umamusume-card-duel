@@ -1,5 +1,6 @@
 {
-  "updated": "2026-05-18T23:59Z",
+  "updated": "2026-05-19T00:10Z",
+  "loop_note": "ALL forward lines are user-gated as of 2026-05-19. No safe non-gated implementation/training/planning job remains: R16-P1 IMPLEMENTED (357f0d6), r12-throughput done, R110/W6-repro done; backlog+escalations+digest reconciled. Pending = (a) user-gated W6 regularization-dose sweep, (b) user-gated R16-P1 v3.1 strength ablation, (c) R16-P2 slot tokens (blocked behind the P1 ablation baseline + 3-4d migration, do not start unprompted). Next /work cycles: confirm no state change then STOP this cycle (waiting on human input) — do NOT auto-launch gated work or re-run full reconciliation. Reopen only on user go-ahead or genuinely new evidence.",
   "items": [
     {
       "id": "r12-throughput",
