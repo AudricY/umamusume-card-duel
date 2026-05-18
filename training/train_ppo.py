@@ -48,10 +48,10 @@ from uma_ai.features import (
     ACTION_DIM,
     ACTION_FEATURE_SCHEMA_VERSION,
     STATE_DIM,
-    STATE_FEATURE_SCHEMA_VERSION,
     card_vocab_metadata,
     legal_actions_to_features,
     observation_to_features,
+    schema_version_for_state_dim,
 )
 from uma_ai.model import CandidatePolicyNet, ModelConfig
 
@@ -233,7 +233,7 @@ def main() -> None:
         "feature_schema": {
             "state_dim": STATE_DIM,
             "action_dim": ACTION_DIM,
-            "state_feature_schema_version": STATE_FEATURE_SCHEMA_VERSION,
+            "state_feature_schema_version": schema_version_for_state_dim(STATE_DIM),
             "action_feature_schema_version": ACTION_FEATURE_SCHEMA_VERSION,
             "card_vocab": card_vocab_metadata(),
         },

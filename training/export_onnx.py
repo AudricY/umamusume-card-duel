@@ -6,7 +6,13 @@ from pathlib import Path
 
 import torch
 
-from uma_ai.features import ACTION_DIM, CARD_ID_SHAPES, STATE_DIM, card_vocab_metadata
+from uma_ai.features import (
+    ACTION_DIM,
+    CARD_ID_SHAPES,
+    card_vocab_metadata,
+    feature_builder_for_state_dim,
+    schema_version_for_state_dim,
+)
 from uma_ai.model import CARD_VOCAB_TABLE_SIZE, NUM_ZONES, CandidatePolicyNet, ModelConfig
 
 # R7.b.2 Phase 3: per-zone max-cards width is FIXED in the ONNX graph for
@@ -23,11 +29,19 @@ def main() -> None:
     args = parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     config = ModelConfig.from_dict(checkpoint.get("model_config"))
-    if config.state_dim != STATE_DIM or config.action_dim != ACTION_DIM:
+    # R16-P1: the graph state dim is driven by the CHECKPOINT's
+    # config.state_dim (96 / 110 / 164), not the module default STATE_DIM
+    # (which stays 110 = v3.0). Validate it is a known builder dim so a
+    # 164-d v3.1 checkpoint exports a 164-d graph while 96/110 graphs are
+    # byte-unchanged. Unknown dims fail loud (feature_builder_for_state_dim
+    # raises) — never silently produce a mis-sized graph.
+    if config.action_dim != ACTION_DIM:
         raise ValueError(
-            f"Checkpoint feature dimensions {config.state_dim}/{config.action_dim} "
-            f"do not match current {STATE_DIM}/{ACTION_DIM}"
+            f"Checkpoint action dim {config.action_dim} does not match "
+            f"current {ACTION_DIM}"
         )
+    graph_state_dim = config.state_dim
+    feature_builder_for_state_dim(graph_state_dim)  # fail loud on unknown dim
     expected_vocab = card_vocab_metadata()
     checkpoint_schema = checkpoint.get("feature_schema") or {}
     checkpoint_vocab = checkpoint_schema.get("card_vocab")
@@ -57,7 +71,7 @@ def main() -> None:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    state = torch.zeros((1, STATE_DIM), dtype=torch.float32)
+    state = torch.zeros((1, graph_state_dim), dtype=torch.float32)
     actions = torch.zeros((1, args.max_actions, ACTION_DIM), dtype=torch.float32)
     mask = torch.ones((1, args.max_actions), dtype=torch.bool)
     # R7.b.2 Phase 3: two new int64 tensors flow into the embedding pass.
@@ -101,7 +115,8 @@ def main() -> None:
     sidecar.write_text(
         json.dumps(
             {
-                "state_dim": STATE_DIM,
+                "state_dim": graph_state_dim,
+                "state_feature_schema_version": schema_version_for_state_dim(graph_state_dim),
                 "action_dim": ACTION_DIM,
                 "card_vocab": expected_vocab,
                 "checkpoint_vocab": checkpoint_vocab,

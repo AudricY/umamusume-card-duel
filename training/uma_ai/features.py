@@ -21,14 +21,16 @@ import numpy as np
 # JSONLs re-extract under v2.1 without resimulating (R7.b.0 verdict YES).
 STATE_DIM = 110
 ACTION_DIM = 48
-# R7.b.2 Phase 2 bumps STATE_FEATURE_SCHEMA_VERSION 2.1 → 3.0 because the
-# Python encoder now consumes the new TS-side fields landed in Phase 1
-# (`PublicObservation.cardIdsByZone`, per-action `actionSourceCardIdx` /
-# `actionTargetCardIdx`). STATE_DIM is unchanged — the embedding pass is
-# ADDITIVE over the 110-d hygiene encoding (see model.py header for the
-# additive-vs-replace rationale); Phase 6 will decide whether the 16
-# identity-hash slots (32–47) can be retired in a future bump.
-STATE_FEATURE_SCHEMA_VERSION = 3.0
+# R7.b.2 Phase 2 bumped STATE_FEATURE_SCHEMA_VERSION 2.1 → 3.0 (Python
+# encoder consumes `cardIdsByZone` + per-action idx). R16-P1 bumps the
+# latest-schema marker 3.0 → 3.1 (164-d temporal/turn-state builder). This
+# constant is the LATEST available schema version; the version actually
+# emitted by a run is derived from its state dim via
+# `schema_version_for_state_dim` so a 110-d (v3.0) run is still tagged 3.0
+# even though 3.1 exists. STATE_DIM stays an alias of STATE_DIM_V3 (110) so
+# the default builder (and default manifest version) remain v3.0; v3.1 is
+# opt-in by state dim.
+STATE_FEATURE_SCHEMA_VERSION = 3.1
 ACTION_FEATURE_SCHEMA_VERSION = 2
 
 # --- Serving-schema 96/110/164 freeze contract (r16 P1 prerequisite) -------
@@ -51,7 +53,13 @@ STATE_FEATURE_SCHEMA_VERSION_V3 = 3.0
 # schema. Declared here so the serving guard's schema table has a named slot
 # to reject against today (it maps to no builder until P1 lands). Implement
 # NO 164-d feature logic against this — it is a contract anchor only.
-STATE_DIM_V3_1 = 164  # placeholder; P1 work, intentionally unimplemented
+# R16-P1: STATE_DIM_V3_1 is now a REAL builder (`observation_to_features_v3_1`)
+# emitting 164-d = frozen v3.0 110-d (slots 0–109, byte-stable) + 54 temporal
+# / turn-state scalar slots [110:164]. STATE_DIM stays an alias of
+# STATE_DIM_V3 (110) — v3.1 is opt-in (selected by graph state dim in
+# serve_onnx, or by an explicit builder choice in training).
+STATE_DIM_V3_1 = 164  # R16-P1: real v3.1 temporal/turn-state builder
+STATE_FEATURE_SCHEMA_VERSION_V3_1 = 3.1
 assert STATE_DIM == STATE_DIM_V3, (
     f"STATE_DIM ({STATE_DIM}) must equal the frozen v3.0 dim "
     f"STATE_DIM_V3 ({STATE_DIM_V3}). The 110-d v3.0 builder is frozen for "
@@ -226,6 +234,212 @@ def observation_to_features_v2(
     return features
 
 
+# ---------------------------------------------------------------------------
+# R16-P1 schema-v3.1 temporal / turn-state builder.
+#
+# Emits 164-d = frozen v3.0 110-d (slots 0–109, byte-IDENTICAL — produced by
+# reusing `observation_to_features` verbatim, never re-deriving them) + 54
+# temporal/turn-state scalar slots [110:164]. Slot layout is the FROZEN
+# enumeration from
+# docs/ai-research/scoping/r16-model-feature-backlog-refinement.md § P1:
+#
+#   110–113  global temporal: ownTurnsTaken(/CAP), oppTurnsTaken(/CAP),
+#            ownIsFirstTurn(bool), oppIsFirstTurn(bool)
+#   114–120  own side turnState ×7
+#   121–127  opp side turnState ×7
+#   128–136  own active per-Uma temporal ×9
+#   137–145  own bench aggregate (mean of the 9 over present bench Umas)
+#   146–154  opp active per-Uma temporal ×9
+#   155–163  opp bench aggregate (mean of the 9 over present bench Umas)
+#
+# Encoding (overfit guard, per scope § "Encoding"):
+#   - never emit raw turn stamps; the TS observation already derives the
+#     sickness/memory booleans (enteredThisTurn/evolvedThisTurn/
+#     evolvedLastTurn/attackBlockedThisTurn/paralysisRecoveryPending).
+#   - turn counters: bounded-norm min(x, _TURN_CAP)/_TURN_CAP (CAP=20,
+#     matching the existing turnNumber/20 normalisation at slot 2).
+#   - small int budgets: /3 (energy attach budgets, coin flips,
+#     ability-name counts), /30 (damage-ish values: activeAttackDamageBonus,
+#     nextTurnDamageReduction, retreat reduction).
+#   - damage memory / sickness predicates: bool as-is (0.0/1.0).
+# The bench block is the *mean* of each per-Uma field over present bench
+# Umas (0 if the bench is empty) — a max variant was considered but mean
+# keeps the 9-wide block (table says "mean/max"; mean chosen as the single
+# aggregate that does not double the block width beyond the 54-slot budget).
+STATE_DIM_V3_1 = 164  # (re-stated post-helpers for locality; == module const)
+_TURN_CAP = 20.0  # matches features[2] = turnNumber / 20.0
+_BUDGET_CAP = 3.0  # energy-attach budgets, coin flips, ability-name counts
+_DAMAGE_CAP = 30.0  # activeAttackDamageBonus / nextTurnDamageReduction / retreat
+
+
+def _norm(value: float, cap: float) -> float:
+    return min(float(value), cap) / cap
+
+
+def _side_turn_state_vec(side: dict[str, Any]) -> np.ndarray:
+    """7 side-level turnState scalars. The retreat slot encodes the DERIVED
+    `effectiveRetreatCostReduction` (raw side reduction + stadium global
+    term) per the omission resolution — falling back to the raw
+    `retreatCostReduction` only if the TS observation predates the v3.1
+    schema bump (it should not, schemaVersion 3 carries the derived key).
+    Ability NAME strings are never read — the TS layer emits counts only.
+    """
+
+    ts = side.get("turnState") or {}
+    effective_retreat = ts.get("effectiveRetreatCostReduction")
+    if effective_retreat is None:
+        effective_retreat = ts.get("retreatCostReduction", 0)
+    out = np.zeros(7, dtype=np.float32)
+    out[0] = _norm(ts.get("energyAttachmentsThisTurn", 0), _BUDGET_CAP)
+    out[1] = _norm(ts.get("bonusEnergyAttachments", 0), _BUDGET_CAP)
+    out[2] = _norm(effective_retreat, _DAMAGE_CAP)
+    out[3] = _norm(ts.get("activeAttackDamageBonus", 0), _DAMAGE_CAP)
+    out[4] = _norm(ts.get("usedAbilityNameCountThisTurn", 0), _BUDGET_CAP)
+    out[5] = _norm(ts.get("usedAbilityNameCountThisGame", 0), _TURN_CAP)
+    out[6] = _norm(ts.get("guaranteedCoinFlipHeads", 0), _BUDGET_CAP)
+    return out
+
+
+def _uma_turn_state_vec(uma: dict[str, Any] | None) -> np.ndarray:
+    """9 per-Uma temporal scalars. Absent Uma (None / empty slot) → zeros
+    (the present-mask is already carried by the v3.0 board-feature slots)."""
+
+    out = np.zeros(9, dtype=np.float32)
+    if not uma:
+        return out
+    ts = uma.get("turnState") or {}
+    out[0] = _norm(ts.get("turnsInPlay", 0), _TURN_CAP)
+    out[1] = 1.0 if ts.get("enteredThisTurn") else 0.0
+    out[2] = 1.0 if ts.get("evolvedThisTurn") else 0.0
+    out[3] = 1.0 if ts.get("evolvedLastTurn") else 0.0
+    out[4] = 1.0 if ts.get("tookDamageLastTurn") else 0.0
+    out[5] = 1.0 if ts.get("tookDamageThisTurn") else 0.0
+    out[6] = _norm(ts.get("nextTurnDamageReduction", 0), _DAMAGE_CAP)
+    out[7] = 1.0 if ts.get("attackBlockedThisTurn") else 0.0
+    out[8] = 1.0 if ts.get("paralysisRecoveryPending") else 0.0
+    return out
+
+
+def _bench_turn_state_aggregate(side: dict[str, Any]) -> np.ndarray:
+    """Mean of the 9 per-Uma temporal scalars over present bench Umas.
+    Empty bench → zeros."""
+
+    bench = side.get("bench") or []
+    present = [u for u in bench if u]
+    if not present:
+        return np.zeros(9, dtype=np.float32)
+    stacked = np.stack([_uma_turn_state_vec(u) for u in present], axis=0)
+    return stacked.mean(axis=0).astype(np.float32)
+
+
+def observation_to_features_v3_1(
+    observation: dict[str, Any], ablations: set[FeatureAblation] | None = None
+) -> np.ndarray:
+    """R16-P1 schema-v3.1: 164-d. Slots 0–109 are byte-identical to the
+    frozen v3.0 builder (produced by calling it directly, NOT re-derived);
+    slots [110:164] are the temporal/turn-state block. The
+    `state_temporal_turn_v31` ablation zeroes [110:164]."""
+
+    base_ablations = set(ablations or set())
+    # v3.0 owns ablations that touch slots 0–109; the temporal-block
+    # ablation is applied below after the tail is written so it cannot be
+    # silently dropped by the v3.0 builder's slice asserts.
+    v30 = {a for a in base_ablations if a != "state_temporal_turn_v31"}
+    head = observation_to_features(observation, ablations=v30)
+    assert head.shape == (STATE_DIM_V3,), (
+        f"v3.1 head reuse expected ({STATE_DIM_V3},), got {head.shape}"
+    )
+
+    features = np.zeros(STATE_DIM_V3_1, dtype=np.float32)
+    features[0:STATE_DIM_V3] = head
+
+    own = observation.get("own", {}) or {}
+    opponent = observation.get("opponent", {}) or {}
+    temporal = observation.get("temporal", {}) or {}
+
+    # 110–113 global temporal
+    features[110] = _norm(temporal.get("ownTurnsTaken", 0), _TURN_CAP)
+    features[111] = _norm(temporal.get("opponentTurnsTaken", 0), _TURN_CAP)
+    features[112] = 1.0 if temporal.get("ownIsFirstTurn") else 0.0
+    features[113] = 1.0 if temporal.get("opponentIsFirstTurn") else 0.0
+
+    # 114–120 own side turnState ×7 ; 121–127 opp side turnState ×7
+    features[114:121] = _side_turn_state_vec(own)
+    features[121:128] = _side_turn_state_vec(opponent)
+
+    # 128–136 own active ×9 ; 137–145 own bench aggregate ×9
+    features[128:137] = _uma_turn_state_vec(own.get("active"))
+    features[137:146] = _bench_turn_state_aggregate(own)
+    # 146–154 opp active ×9 ; 155–163 opp bench aggregate ×9
+    features[146:155] = _uma_turn_state_vec(opponent.get("active"))
+    features[155:164] = _bench_turn_state_aggregate(opponent)
+
+    # Temporal-block ablation lives in `apply_state_ablations` (canonical
+    # home, mirrors `state_hygiene_v21`). Slots 0–109 ablations were already
+    # applied by the v3.0 head call; apply ONLY the temporal key here so the
+    # head stays byte-identical to the standalone v3.0 builder.
+    if "state_temporal_turn_v31" in base_ablations:
+        apply_state_ablations(features, {"state_temporal_turn_v31"})
+
+    assert features.shape == (STATE_DIM_V3_1,), (
+        f"observation_to_features_v3_1 emitted {features.shape}, "
+        f"expected ({STATE_DIM_V3_1},)."
+    )
+    return features
+
+
+# Builder selector keyed off the state dim. Mirrors the existing serve_onnx
+# `_SCHEMA_BY_STATE_DIM` discrimination (graph dim -> builder) so training /
+# dataset code can opt into v3.1 without a new framework: pass the state dim
+# and get the matching frozen builder. v3.0 (110) stays the default
+# everywhere `STATE_DIM` is referenced.
+_BUILDER_BY_STATE_DIM = {
+    STATE_DIM_V2: observation_to_features_v2,
+    STATE_DIM_V3: observation_to_features,
+    STATE_DIM_V3_1: observation_to_features_v3_1,
+}
+
+
+_SCHEMA_VERSION_BY_STATE_DIM = {
+    STATE_DIM_V2: STATE_FEATURE_SCHEMA_VERSION_V2,
+    STATE_DIM_V3: STATE_FEATURE_SCHEMA_VERSION_V3,
+    STATE_DIM_V3_1: STATE_FEATURE_SCHEMA_VERSION_V3_1,
+}
+
+
+def feature_builder_for_state_dim(state_dim: int):
+    """Return the frozen observation->features builder for a state dim.
+
+    96 -> v2, 110 -> v3.0, 164 -> v3.1. Unknown dims raise (never silently
+    fall back) — same fail-loud contract the serve_onnx guard enforces."""
+
+    try:
+        return _BUILDER_BY_STATE_DIM[state_dim]
+    except KeyError as exc:
+        known = ", ".join(str(d) for d in sorted(_BUILDER_BY_STATE_DIM))
+        raise ValueError(
+            f"no feature builder for state_dim={state_dim} "
+            f"(known: {known}). A new schema must add a NEW builder + "
+            f"constant, never mutate a frozen one."
+        ) from exc
+
+
+def schema_version_for_state_dim(state_dim: int) -> float:
+    """The state-feature schema version a given state dim actually emits.
+
+    Manifest/metadata writers pair this with the run's state dim so a 110-d
+    v3.0 run is tagged 3.0 even though the module's latest-schema constant
+    (`STATE_FEATURE_SCHEMA_VERSION`) is 3.1. Unknown dims raise."""
+
+    try:
+        return _SCHEMA_VERSION_BY_STATE_DIM[state_dim]
+    except KeyError as exc:
+        known = ", ".join(str(d) for d in sorted(_SCHEMA_VERSION_BY_STATE_DIM))
+        raise ValueError(
+            f"no schema version for state_dim={state_dim} (known: {known})."
+        ) from exc
+
+
 def legal_actions_to_features(actions: list[dict[str, Any]], ablations: set[FeatureAblation] | None = None) -> np.ndarray:
     rows = []
     for action in actions:
@@ -327,6 +541,13 @@ def apply_state_ablations(features: np.ndarray, ablations: set[FeatureAblation])
     # touching slot meanings elsewhere.
     if "state_hygiene_v21" in ablations:
         features[96:110] = 0
+    # R16-P1 v3.1 ablation hook: zero the 54 temporal/turn-state slots so
+    # callers can isolate the temporal signal against the frozen v3.0
+    # encoding. No-op on a 96/110-d array (numpy slice past the end is
+    # empty) — only bites the 164-d v3.1 vector. Mirrors the
+    # `state_hygiene_v21` slice-zero pattern above.
+    if "state_temporal_turn_v31" in ablations:
+        features[110:164] = 0
 
 
 def apply_action_ablations(features: np.ndarray, ablations: set[FeatureAblation]) -> None:

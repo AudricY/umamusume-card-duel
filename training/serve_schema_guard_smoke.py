@@ -6,8 +6,9 @@ last dim:
 
   - a real 96-d v2 production graph  -> schema "v2" (no embedding feeds)
   - a real 110-d v3.0 graph          -> schema "v3" (embedding feeds)
-  - a synthetic 164-d graph          -> fail fast (declared-but-unimplemented
-                                        P1 v3.1 placeholder; SystemExit)
+  - a synthetic 164-d v3.1 graph     -> schema "v3.1" (embedding feeds)
+                                        [R16-P1: now a REAL builder, no
+                                        longer a fail-fast placeholder]
   - a synthetic 999-d graph          -> fail fast (unknown schema; SystemExit)
 
 It also runs the production-transparency check: the resolved schema for the
@@ -118,12 +119,25 @@ def main() -> None:
         lambda: _resolve_feature_schema("v2", v3_sess),
     )
 
-    # 164-d -> declared-but-unimplemented P1 placeholder, must fail fast and
-    # NOT silently fall back to v3 (the whole point of the guard).
+    # 164-d -> R16-P1 landed: resolves to the REAL v3.1 builder (embedding
+    # feeds, v3.0 head). It must NOT fall back to v3 and must NOT fail fast
+    # anymore (that was the pre-P1 placeholder behaviour).
     s164 = _synthetic_session(STATE_DIM_V3_1, with_embedding=True)
+    schema = _resolve_feature_schema("auto", s164)
+    assert schema == "v3.1", f"164-d graph resolved to {schema!r}, expected 'v3.1'"
+    assert _resolve_feature_schema("v3.1", s164) == "v3.1"
+    print(f"  PASS  synthetic 164-d graph -> schema 'v3.1' (STATE_DIM_V3_1={STATE_DIM_V3_1})")
+    # 164-d graph WITHOUT the embedding input is internally inconsistent
+    # (v3.1 head is the v3.0 embedding encoding) -> fail fast.
+    s164_noemb = _synthetic_session(STATE_DIM_V3_1, with_embedding=False)
     _expect_systemexit(
-        f"synthetic {STATE_DIM_V3_1}-d v3.1 placeholder",
-        lambda: _resolve_feature_schema("auto", s164),
+        "164-d graph missing card_ids_by_zone",
+        lambda: _resolve_feature_schema("auto", s164_noemb),
+    )
+    # Explicit-pin mismatch still fails fast.
+    _expect_systemexit(
+        "explicit v3 against 164-d graph",
+        lambda: _resolve_feature_schema("v3", s164),
     )
 
     # Wholly unknown dim -> fail fast.

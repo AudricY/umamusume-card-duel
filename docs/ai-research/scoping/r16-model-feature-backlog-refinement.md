@@ -1,16 +1,20 @@
 # R16 Model Feature Backlog Refinement
 
 - **Date:** 2026-05-18
-- **Status (2026-05-18):** P0 **DONE** (commit `b38de0e` — mcts-distill
-  v3 embedding data-path fixed; was confounding R110-W6). P1
-  **UNBLOCKED, implementation-ready post-R110** (exact STATE_DIM=164,
-  fields verified public-safe; the serve_onnx 96/110/164 freeze
-  prerequisite is **IMPLEMENTED** 2026-05-18 — see § P1
-  "Load-bearing implementation prerequisite"). P2 not started (depends
-  on P0 ✓ + ideally P1). P1/P2 code
-  landing is sequential-after-R110: they edit `features.py`/observation
-  builder/`model.py` which the live R110 orchestrator re-execs per
-  iteration — landing mid-run re-confounds R110 (the P0 lesson).
+- **Status (2026-05-18):** P0 **DONE** (commit `b38de0e`). P1
+  **IMPLEMENTED** (2026-05-18) — TS observation schemaVersion 2→3 with
+  `temporal` + per-side/per-Uma `turnState`; NEW 164-d
+  `observation_to_features_v3_1` builder (frozen v3.0 head [0:110]
+  byte-stable + 54 temporal slots [110:164]);
+  `STATE_FEATURE_SCHEMA_VERSION` 3.0→3.1 (latest-schema marker; manifest
+  version derived per state dim); serve_onnx `164→v3.1` schema entry +
+  `_PLACEHOLDER_DIMS` now empty; export/dataset/collator schema-dim-aware;
+  `state_temporal_turn_v31` ablation. Both omissions resolved against
+  engine code (see § P1 "Resolved"). Smokes green:
+  `temporalObservationSmoke.ts` (in `test:train`), `r16_temporal_v31_smoke.py`,
+  updated `serve_schema_guard_smoke.py`, `npm run test:train`,
+  `test:python-train`. P2 not started (depends on P0 ✓ + ideally P1 ✓).
+  No live R110 loop running, so landing now is R110-safe.
 - **Scope:** top three model-feature research items after a mechanics/code audit:
   (1) MCTS self-play v3 embedding support, (2) temporal / turn-state features,
   (3) per-Uma slot tokens.
@@ -135,6 +139,32 @@ mcts-distill card-embedding inputs are handled.
 
 ## P1 - Temporal / Turn-State Features
 
+**IMPLEMENTED 2026-05-18.** What landed (the spec below is the
+as-built contract):
+- TS: `frontend/src/game/engine/ai-policy/types.ts` (schemaVersion
+  2→3, `PublicTemporalObservation`, `PublicSideTurnState`,
+  `PublicUmaTurnState`) + `ai-policy/observation.ts` (derived fields,
+  counts-only ability locks, `effectiveRetreatCostReduction`,
+  energy/setup-phase first-turn flag with code comment). Hidden-info
+  story preserved (opponent hand ids still absent; `turnDeadlineMs`
+  excluded).
+- Python: NEW `observation_to_features_v3_1` (164-d; reuses the frozen
+  v3.0 builder verbatim for [0:110], appends the 54-slot temporal block
+  per the table); `STATE_DIM_V3_1=164` real; `STATE_DIM` still aliases
+  `STATE_DIM_V3=110`; `feature_builder_for_state_dim` /
+  `schema_version_for_state_dim` dim-keyed selectors;
+  `state_temporal_turn_v31` ablation in `apply_state_ablations`.
+- serve_onnx: `164→("v3.1",True,…)` in `_SCHEMA_BY_STATE_DIM`,
+  `_PLACEHOLDER_DIMS` now `{}`, `request_to_arrays` v3.1 branch (v3.0
+  head ⇒ same embedding feeds); 96→v2 / 110→v3.0 bit-identical.
+- export_onnx: graph state dim driven by checkpoint `config.state_dim`
+  (96/110/164), validated against the builder table.
+- One per-Uma encoding decision vs the table's "mean/max": the bench
+  aggregate is the **mean** of each per-Uma scalar over present bench
+  Umas (not mean *and* max) so the bench block stays 9-wide and the
+  total stays exactly 54 / STATE_DIM 164. Documented in the v3.1
+  builder header.
+
 ### Problem
 
 The observation has coarse turn context but omits public state memory that the
@@ -251,18 +281,49 @@ Two implementation options:
    etc. have no engine boolean — compute from `evolvedTurn`/`enteredTurn`
    vs `turnNumber` at build time.
 
-   **Two omissions to resolve before implementing:**
-   - `globalRetreatCostReduction` (stadium effect): effective retreat
-     cost = `side.retreatCostReduction + getGlobalRetreatCostReduction`.
-     Encoding only the per-side field understates retreat legality —
-     decide whether to add an effective/derived field. (Most material
-     scoring-fidelity gap.)
-   - First-turn threshold is ambiguous: `startTurn` uses
-     `turnsTakenBySide === 0` (energy-skip rule); evolution uses `<= 1`.
-     A single `ownIsFirstTurn` bool can't represent both. Evolve-legality
-     is already covered by per-Uma `enteredThisTurn`/`evolvedThisTurn`;
-     define `ownIsFirstTurn` as the energy/setup-phase flag and document
-     that explicitly.
+   **Resolved (2026-05-18, against TS engine code; landed in v3.1):**
+   - **globalRetreatCostReduction → emit a derived effective field.**
+     Code: `getGlobalRetreatCostReduction(state: GameState): number`
+     (`frontend/src/game/engine/flow/retreat.ts:13`) reads the active
+     stadium's `effect.globalRetreatCostReduction` (0 if no stadium /
+     non-trainer). `effectiveRetreatCost`
+     (`retreat.ts:20-26`) computes
+     `max(0, retreatCost - side.retreatCostReduction -
+     getGlobalRetreatCostReduction(state))`. Encoding only the per-side
+     `SideState.retreatCostReduction` understates retreat legality by
+     exactly the stadium term. Decision: the side `turnState` emits BOTH
+     the raw `retreatCostReduction` (per-side, slot in the ×7 block) and a
+     derived **`effectiveRetreatCostReduction`** =
+     `side.retreatCostReduction + getGlobalRetreatCostReduction(state)`
+     (ability-conditional zero-cost cases in `effectiveRetreatCost`
+     depend on hidden per-Uma ability state and damage memory already
+     exposed elsewhere, so the linear-sum derived field is the faithful
+     public scalar). The side `turnState` block is therefore 8 fields
+     (raw 7 + 1 derived), not 7. *Slot accounting note:* the 54-slot
+     enumeration table below keeps the side blocks at 7 each so slots
+     0–163 stay byte-stable; `effectiveRetreatCostReduction` rides in the
+     side-block budget by replacing the now-redundant raw
+     `retreatCostReduction` encoding with the effective value (the raw
+     per-side number is still emitted in the TS observation for
+     completeness/debugging, but the scalar slot encodes the effective
+     value — the legality-relevant quantity). The TS `turnState` object
+     carries both keys; the Python v3.1 encoder maps the
+     `retreatCostReduction` slot to `effectiveRetreatCostReduction`.
+   - **ownIsFirstTurn = energy/setup-phase flag (`turnsTakenBySide
+     === 0`).** Code: `startTurn`
+     (`frontend/src/game/engine/flow/turn.ts:55-72`) computes
+     `isSideFirstTurn = turnsTaken === 0` and skips the energy roll only
+     when `isSideFirstTurn && firstPlayer === sideId`. Evolution's
+     `isSideFirstTurn` (`frontend/src/game/engine/flow/evolution.ts:42-44`)
+     uses `turnsTakenBySide <= 1`, but evolve-legality is *already* fully
+     covered by per-Uma `enteredThisTurn`/`evolvedThisTurn`
+     (`evolution.ts:21-22`, computed from `enteredTurn`/`evolvedTurn` vs
+     `turnNumber`). Decision: define `temporal.ownIsFirstTurn` /
+     `opponentIsFirstTurn` strictly as the **energy/setup-phase** flag
+     `(state.turnsTakenBySide[sideId] ?? 0) === 0`. The `<= 1` evolution
+     threshold is intentionally NOT re-encoded as a separate bool — it is
+     redundant with the per-Uma sickness booleans. This is documented in
+     a code comment at the observation build site.
 
    **Load-bearing implementation prerequisite (serve_onnx coordination)
    — IMPLEMENTED 2026-05-18.** `STATE_DIM` is a single shared constant

@@ -25,6 +25,7 @@ from uma_ai.features import (
     observation_to_card_ids,
     observation_to_features,
     observation_to_features_v2,
+    observation_to_features_v3_1,
 )
 
 # R7.b.2 Phase 3: fixed per-zone width for the embedding inputs — mirrors
@@ -127,25 +128,25 @@ def _graph_signature(session: ort.InferenceSession) -> tuple[int | None, bool]:
 # is bumped for P1. Each entry: graph_state_dim -> (schema token, requires
 # `card_ids_by_zone` embedding input, human label). The schema token is the
 # internal selector consumed by `request_to_arrays` ("v2" = frozen 96-d, no
-# embedding feeds; "v3" = frozen 110-d v3.0, embedding feeds). 164 is a
-# DISABLED placeholder: it has a named dim contract but no builder until P1
-# (STATE_DIM 164 temporal/turn-state features) lands, so it fails fast here.
+# embedding feeds; "v3" = frozen 110-d v3.0, embedding feeds; "v3.1" =
+# 164-d temporal/turn-state, embedding feeds — its head is the v3.0 encoding
+# so it carries the same `card_ids_by_zone` input). R16-P1 made 164 a REAL
+# builder, so it moved out of `_PLACEHOLDER_DIMS` into the schema table.
 #
-# `_SCHEMA_BUILDER` enumerates only the schemas that have a real builder
-# today. `_PLACEHOLDER_DIMS` are known-but-unimplemented dims that must fail
-# loud (never silently fall back to v3) so a bump cannot corrupt serving.
+# `_SCHEMA_BY_STATE_DIM` enumerates only schemas that have a real builder.
+# `_PLACEHOLDER_DIMS` (now empty) are declared-but-unimplemented dims that
+# must fail loud (never silently fall back) so a future bump cannot corrupt
+# serving — the contract anchor stays even with no current placeholder.
 _SCHEMA_BY_STATE_DIM: dict[int, tuple[str, bool, str]] = {
     STATE_DIM_V2: ("v2", False, "frozen 96-d v2 (no embedding inputs)"),
     STATE_DIM_V3: ("v3", True, "frozen 110-d v3.0 (embedding inputs)"),
-}
-_PLACEHOLDER_DIMS: dict[int, str] = {
     STATE_DIM_V3_1: (
-        "STATE_DIM=164 v3.1 temporal/turn-state schema (r16 P1) is a "
-        "declared-but-unimplemented placeholder: no feature builder exists "
-        "yet. Land P1 (features.py STATE_DIM_V3_1 builder + export) before "
-        "serving a 164-d graph"
+        "v3.1",
+        True,
+        "164-d v3.1 temporal/turn-state (embedding inputs; v3.0 head)",
     ),
 }
+_PLACEHOLDER_DIMS: dict[int, str] = {}
 
 
 def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:
@@ -204,7 +205,7 @@ def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> st
 
     if requested == "auto":
         source = "auto-graph"
-    elif requested in {"v2", "v3"}:
+    elif requested in {"v2", "v3", "v3.1"}:
         source = "--feature-schema/env"
         if requested != schema:
             sys.stderr.write(
@@ -364,19 +365,29 @@ def request_to_arrays(
     payload: dict[str, Any], feature_schema: str = "v3"
 ) -> tuple[dict[str, np.ndarray], list[list[str]] | None]:
     # v2 = the FROZEN 96-d production encoding (no embedding inputs); v3 =
-    # the HEAD-trained 110-d additive embedding encoding. The pinned schema
-    # is resolved once at startup (see _resolve_feature_schema); here it
-    # only selects the encoder + which feed keys are emitted. ORT hard-
-    # rejects unknown feed keys, so v2 MUST omit (not zero) the embedding
-    # inputs.
+    # the HEAD-trained 110-d v3.0 additive embedding encoding; v3.1 = the
+    # 164-d temporal/turn-state encoding (v3.0 head + 54 temporal slots,
+    # SAME embedding feeds as v3). The pinned schema is resolved once at
+    # startup (see _resolve_feature_schema); here it only selects the
+    # encoder + which feed keys are emitted. ORT hard-rejects unknown feed
+    # keys, so v2 MUST omit (not zero) the embedding inputs. v3 and v3.1
+    # both carry them.
     is_v2 = feature_schema == "v2"
-    expected_state_dim = STATE_DIM_V2 if is_v2 else STATE_DIM
+    is_v3_1 = feature_schema == "v3.1"
+    if is_v2:
+        expected_state_dim = STATE_DIM_V2
+        encode_state = observation_to_features_v2
+    elif is_v3_1:
+        expected_state_dim = STATE_DIM_V3_1
+        encode_state = observation_to_features_v3_1
+    else:
+        expected_state_dim = STATE_DIM
+        encode_state = observation_to_features
     if "observation" in payload and "legalActions" in payload:
         actions = payload["legalActions"]
         if not actions:
             raise ValueError("legalActions must not be empty")
         observation = payload["observation"]
-        encode_state = observation_to_features_v2 if is_v2 else observation_to_features
         state_features = encode_state(observation)[None, :]
         action_features = legal_actions_to_features(actions)[None, :, :]
         action_mask = np.ones(action_features.shape[:2], dtype=np.bool_)
@@ -550,17 +561,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--feature-schema",
-        choices=["auto", "v2", "v3"],
+        choices=["auto", "v2", "v3", "v3.1"],
         default=os.environ.get("UMA_FEATURE_SCHEMA", "auto"),
         help=(
             "State-feature encoding pin. 'auto' (default; env "
-            "UMA_FEATURE_SCHEMA overrides the default) selects v2 vs v3 "
+            "UMA_FEATURE_SCHEMA overrides the default) selects v2/v3/v3.1 "
             "from the loaded ONNX graph signature: v2 = the FROZEN 96-d "
             "production encoding (no embedding inputs, e.g. "
             "runs/R13-W6-phase-d/iter-2/policy.onnx); v3 = the HEAD 110-d "
-            "additive embedding encoding. An explicit 'v2'/'v3' is asserted "
-            "consistent with the graph and the server exits at startup if "
-            "not. 'Promote later' = serve a 110-d model under v3/auto."
+            "v3.0 additive embedding encoding; v3.1 = the 164-d "
+            "temporal/turn-state encoding (v3.0 head + 54 temporal slots). "
+            "An explicit pin is asserted consistent with the graph and the "
+            "server exits at startup if not. 'Promote later' = serve a "
+            "110-d/164-d model under v3/v3.1/auto."
         ),
     )
     parser.add_argument(

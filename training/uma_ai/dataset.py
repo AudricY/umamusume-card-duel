@@ -15,9 +15,9 @@ from .features import (
     STATE_DIM,
     ZONE_ORDER,
     action_card_idx_pair,
+    feature_builder_for_state_dim,
     legal_actions_to_features,
     observation_to_card_ids,
-    observation_to_features,
 )
 
 # R7.b.2 Phase 2 NOTE on schema versions:
@@ -74,10 +74,30 @@ class PolicySample:
 
 
 class JsonlPolicyDataset(Dataset[PolicySample]):
-    def __init__(self, path: str | Path, *, min_actions: int = 2, ablations: set[str] | None = None, strict_schema_version: bool = True) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        min_actions: int = 2,
+        ablations: set[str] | None = None,
+        strict_schema_version: bool = True,
+        state_dim: int = STATE_DIM,
+    ) -> None:
+        # `state_dim` selects the frozen builder (96=v2, 110=v3.0, 164=v3.1)
+        # via the same dim-keyed mechanism serve_onnx uses. Default is the
+        # module STATE_DIM (110 = v3.0) so existing callers are byte-stable;
+        # v3.1 training opts in by passing state_dim=STATE_DIM_V3_1.
         self.path = Path(path)
         self.ablations = ablations or set()
-        self.samples = list(load_policy_samples(self.path, min_actions=min_actions, ablations=self.ablations, strict_schema_version=strict_schema_version))
+        self.samples = list(
+            load_policy_samples(
+                self.path,
+                min_actions=min_actions,
+                ablations=self.ablations,
+                strict_schema_version=strict_schema_version,
+                state_dim=state_dim,
+            )
+        )
         if not self.samples:
             raise ValueError(f"No usable policy samples found in {self.path}")
 
@@ -88,7 +108,15 @@ class JsonlPolicyDataset(Dataset[PolicySample]):
         return self.samples[index]
 
 
-def load_policy_samples(path: str | Path, *, min_actions: int = 2, ablations: set[str] | None = None, strict_schema_version: bool = True) -> Iterable[PolicySample]:
+def load_policy_samples(
+    path: str | Path,
+    *,
+    min_actions: int = 2,
+    ablations: set[str] | None = None,
+    strict_schema_version: bool = True,
+    state_dim: int = STATE_DIM,
+) -> Iterable[PolicySample]:
+    encode_state = feature_builder_for_state_dim(state_dim)
     with Path(path).open("r", encoding="utf8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -109,9 +137,9 @@ def load_policy_samples(path: str | Path, *, min_actions: int = 2, ablations: se
             if len(actions) < min_actions or target_index < 0 or target_index >= len(actions):
                 continue
             observation = example.get("observation", {})
-            state_features = observation_to_features(observation, ablations=ablations)
+            state_features = encode_state(observation, ablations=ablations)
             action_features = legal_actions_to_features(actions, ablations=ablations)
-            if state_features.shape != (STATE_DIM,):
+            if state_features.shape != (state_dim,):
                 raise ValueError(f"Bad state feature shape at line {line_number}: {state_features.shape}")
             if action_features.shape[1:] != (ACTION_DIM,):
                 raise ValueError(f"Bad action feature shape at line {line_number}: {action_features.shape}")
@@ -151,7 +179,18 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
     max_cards_per_zone = max(CARD_ID_SHAPES.values())
     num_zones = len(ZONE_ORDER)
 
-    state_features = np.zeros((batch_size, STATE_DIM), dtype=np.float32)
+    # R16-P1: infer the state dim from the samples (96/110/164) rather than
+    # the module STATE_DIM constant so a v3.1 (164-d) dataset collates
+    # correctly without a new mechanism. All samples in a batch share a
+    # builder (one loader, one schema); assert that to fail loud on a mixed
+    # batch instead of silently truncating.
+    state_dim = samples[0].state_features.shape[0]
+    if any(s.state_features.shape[0] != state_dim for s in samples):
+        raise ValueError(
+            "collate_policy_batch: mixed state-feature dims in one batch "
+            f"(first={state_dim}); all rows must share one feature schema."
+        )
+    state_features = np.zeros((batch_size, state_dim), dtype=np.float32)
     action_features = np.zeros((batch_size, max_actions, ACTION_DIM), dtype=np.float32)
     action_mask = np.zeros((batch_size, max_actions), dtype=np.bool_)
     targets = np.zeros((batch_size,), dtype=np.int64)

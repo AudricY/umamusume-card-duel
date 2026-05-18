@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Subset
 from events import EventWriter
 from uma_ai.dataset import JsonlPolicyDataset, collate_policy_batch
 from uma_ai.selfplay_dataset import MctsSelfPlayDataset, collate_mcts_selfplay_batch
-from uma_ai.features import ACTION_DIM, ACTION_FEATURE_SCHEMA_VERSION, STATE_DIM, STATE_FEATURE_SCHEMA_VERSION, card_vocab_metadata
+from uma_ai.features import ACTION_DIM, ACTION_FEATURE_SCHEMA_VERSION, STATE_DIM, card_vocab_metadata, schema_version_for_state_dim
 from uma_ai.model import CandidatePolicyNet, ModelConfig
 
 
@@ -770,7 +770,7 @@ def feature_schema_metadata() -> dict[str, Any]:
     return {
         "state_dim": STATE_DIM,
         "action_dim": ACTION_DIM,
-        "state_feature_schema_version": STATE_FEATURE_SCHEMA_VERSION,
+        "state_feature_schema_version": schema_version_for_state_dim(STATE_DIM),
         "action_feature_schema_version": ACTION_FEATURE_SCHEMA_VERSION,
         "card_vocab": card_vocab_metadata(),
     }

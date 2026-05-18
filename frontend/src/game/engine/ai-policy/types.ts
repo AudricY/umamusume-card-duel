@@ -39,16 +39,65 @@ export type LegalAiAction = {
   actionTargetCardIdx: number | null;
 };
 
+// R16-P1 temporal / turn-state scalar block. Bumped schemaVersion 2 → 3.
+// `ownIsFirstTurn`/`opponentIsFirstTurn` are the ENERGY/SETUP-PHASE flag
+// only: `(turnsTakenBySide[side] ?? 0) === 0` (the `startTurn` energy-skip
+// predicate, frontend/src/game/engine/flow/turn.ts:55-72). Evolution's
+// `<= 1` first-turn threshold (evolution.ts:42-44) is deliberately NOT
+// re-encoded here — evolve-legality is already covered by the per-Uma
+// `enteredThisTurn`/`evolvedThisTurn` sickness booleans below. See
+// docs/ai-research/scoping/r16-model-feature-backlog-refinement.md
+// § P1 "Resolved" for the full omission resolution.
+export type PublicTemporalObservation = {
+  ownTurnsTaken: number;
+  opponentTurnsTaken: number;
+  ownIsFirstTurn: boolean;
+  opponentIsFirstTurn: boolean;
+};
+
+export type PublicSideTurnState = {
+  energyAttachmentsThisTurn: number;
+  bonusEnergyAttachments: number;
+  // Raw per-side reduction (`SideState.retreatCostReduction`). Kept for
+  // completeness/debug; the legality-relevant quantity is the derived
+  // `effectiveRetreatCostReduction` below (raw + stadium global term).
+  retreatCostReduction: number;
+  // Derived: side.retreatCostReduction + getGlobalRetreatCostReduction(state)
+  // (the stadium `globalRetreatCostReduction` effect; retreat.ts:13,20-26).
+  // The Python v3.1 encoder maps the retreat slot to THIS value.
+  effectiveRetreatCostReduction: number;
+  activeAttackDamageBonus: number;
+  // Counts ONLY — the ability NAME strings are public-info-sensitive and
+  // are never emitted (hidden-info contract).
+  usedAbilityNameCountThisTurn: number;
+  usedAbilityNameCountThisGame: number;
+  guaranteedCoinFlipHeads: number;
+};
+
+export type PublicUmaTurnState = {
+  turnsInPlay: number;
+  enteredThisTurn: boolean;
+  evolvedThisTurn: boolean;
+  evolvedLastTurn: boolean;
+  tookDamageLastTurn: boolean;
+  tookDamageThisTurn: boolean;
+  nextTurnDamageReduction: number;
+  attackBlockedThisTurn: boolean;
+  paralysisRecoveryPending: boolean;
+};
+
 export type PublicObservation = {
-  // R7.b.2 Phase 1 bumped 1 → 2; observation now also carries
-  // `cardIdsByZone`. Phase 2 Python encoder will bump its own
-  // `STATE_FEATURE_SCHEMA_VERSION` once it consumes the new field.
-  schemaVersion: 2;
+  // R7.b.2 Phase 1 bumped 1 → 2 (added `cardIdsByZone`). R16-P1 bumps
+  // 2 → 3: observation now also carries `temporal` + per-side/per-Uma
+  // `turnState`. The Python encoder bumps `STATE_FEATURE_SCHEMA_VERSION`
+  // 3.0 → 3.1 and adds a NEW 164-d builder when it consumes these.
+  schemaVersion: 3;
   sideToAct: SideId;
   phase: AiPhase;
   turnNumber: number;
   firstPlayer: SideId;
   pendingChoiceKind: "promoteAfterKnockout" | "switchAfterGust" | null;
+  temporal: PublicTemporalObservation;
   own: PublicSideObservation;
   opponent: PublicSideObservation;
   shared: {
@@ -75,6 +124,7 @@ export type PublicSideObservation = {
   usedSupporterThisTurn: boolean;
   usedRetreatThisTurn: boolean;
   usedStadiumThisTurn: boolean;
+  turnState: PublicSideTurnState;
 };
 
 export type PublicUmaObservation = {
@@ -89,6 +139,7 @@ export type PublicUmaObservation = {
   specialConditions: string[];
   toolCardId: string | null;
   usedAbilityThisTurn: boolean;
+  turnState: PublicUmaTurnState;
 };
 
 export type AiPolicyInput = {
