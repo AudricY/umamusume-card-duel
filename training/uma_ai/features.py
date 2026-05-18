@@ -31,6 +31,34 @@ ACTION_DIM = 48
 STATE_FEATURE_SCHEMA_VERSION = 3.0
 ACTION_FEATURE_SCHEMA_VERSION = 2
 
+# --- Serving-schema 96/110/164 freeze contract (r16 P1 prerequisite) -------
+# `serve_onnx` resolves the feature builder from the loaded ONNX graph's
+# `state_features` last dim. These named dim constants are the *contract*
+# that resolution keys off. The frozen 110-d v3.0 builder
+# (`observation_to_features`) and the frozen 96-d v2 builder
+# (`observation_to_features_v2`) MUST keep emitting exactly these widths so
+# that introducing a future STATE_DIM=164 v3.1 schema (P1 temporal/turn-state
+# features) is an *additive new schema*, never an edit that shifts v2/v3
+# slots. The module-load assertion below makes a stale constant a hard import
+# failure, not a silent serving corruption.
+#
+# STATE_DIM is intentionally an alias of STATE_DIM_V3 (not the reverse) so a
+# future P1 bump adds STATE_DIM_V3_1 = 164 as a NEW constant and a NEW builder
+# rather than mutating STATE_DIM_V3 / `observation_to_features`.
+STATE_DIM_V3 = 110  # frozen 110-d v3.0 builder (`observation_to_features`)
+STATE_FEATURE_SCHEMA_VERSION_V3 = 3.0
+# Disabled placeholder for the P1 STATE_DIM=164 v3.1 temporal/turn-state
+# schema. Declared here so the serving guard's schema table has a named slot
+# to reject against today (it maps to no builder until P1 lands). Implement
+# NO 164-d feature logic against this — it is a contract anchor only.
+STATE_DIM_V3_1 = 164  # placeholder; P1 work, intentionally unimplemented
+assert STATE_DIM == STATE_DIM_V3, (
+    f"STATE_DIM ({STATE_DIM}) must equal the frozen v3.0 dim "
+    f"STATE_DIM_V3 ({STATE_DIM_V3}). The 110-d v3.0 builder is frozen for "
+    f"serving-schema resolution; a 164-d v3.1 schema must be ADDITIVE "
+    f"(new STATE_DIM_V3_1 + new builder), not an edit to STATE_DIM."
+)
+
 # R7.b.2 Phase 2: per-zone pad widths consumed by `observation_to_card_ids`
 # AND the dataset collator (so packed `LongTensor[B, 8, max_cards_per_zone]`
 # has stable per-zone slots) AND any future ONNX exporter (Phase 3) so the
@@ -110,6 +138,13 @@ def observation_to_features(observation: dict[str, Any], ablations: set[FeatureA
     features[97:100] = _pending_choice_one_hot(observation.get("pendingChoiceKind"))
     features[100:110] = _tool_card_features(own, opponent)
     apply_state_ablations(features, ablations or set())
+    # FROZEN v3.0 contract: this builder MUST emit exactly STATE_DIM_V3 (110)
+    # slots. If a future change shifts the layout the serving guard would
+    # silently pair a 110-d graph with a wrong-width vector — fail here first.
+    assert features.shape == (STATE_DIM_V3,), (
+        f"observation_to_features (frozen v3.0) emitted {features.shape}, "
+        f"expected ({STATE_DIM_V3},). The 110-d v3.0 slot layout is frozen."
+    )
     return features
 
 
@@ -181,6 +216,13 @@ def observation_to_features_v2(
     v2_safe = {a for a in (ablations or set()) if a != "state_hygiene_v21"}
     if v2_safe:
         apply_state_ablations(features, v2_safe)
+    # FROZEN v2 contract: this builder MUST emit exactly STATE_DIM_V2 (96)
+    # slots — it is the production-pinned encoding. Same rationale as the
+    # v3.0 assertion above.
+    assert features.shape == (STATE_DIM_V2,), (
+        f"observation_to_features_v2 (frozen v2) emitted {features.shape}, "
+        f"expected ({STATE_DIM_V2},). The 96-d v2 slot layout is frozen."
+    )
     return features
 
 

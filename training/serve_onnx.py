@@ -16,6 +16,8 @@ from uma_ai.features import (
     CARD_ID_SHAPES,
     STATE_DIM,
     STATE_DIM_V2,
+    STATE_DIM_V3,
+    STATE_DIM_V3_1,
     ZONE_ORDER,
     action_card_idx_pair,
     card_vocab_metadata,
@@ -117,41 +119,109 @@ def _graph_signature(session: ort.InferenceSession) -> tuple[int | None, bool]:
     return state_dim, has_embedding
 
 
-def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:
-    """Resolve the serving feature schema (v2|v3) and fail loud on mismatch.
+# --- Serving-schema 96/110/164 guard (r16 P1 prerequisite) ----------------
+# The feature builder is resolved STRICTLY from the loaded ONNX graph's
+# `state_features` last dim against this explicit table. This replaces the
+# old binary "96 -> v2 else -> v3" rule, which would have silently paired a
+# future 164-d v3.1 graph with the frozen 110-d v3.0 builder once STATE_DIM
+# is bumped for P1. Each entry: graph_state_dim -> (schema token, requires
+# `card_ids_by_zone` embedding input, human label). The schema token is the
+# internal selector consumed by `request_to_arrays` ("v2" = frozen 96-d, no
+# embedding feeds; "v3" = frozen 110-d v3.0, embedding feeds). 164 is a
+# DISABLED placeholder: it has a named dim contract but no builder until P1
+# (STATE_DIM 164 temporal/turn-state features) lands, so it fails fast here.
+#
+# `_SCHEMA_BUILDER` enumerates only the schemas that have a real builder
+# today. `_PLACEHOLDER_DIMS` are known-but-unimplemented dims that must fail
+# loud (never silently fall back to v3) so a bump cannot corrupt serving.
+_SCHEMA_BY_STATE_DIM: dict[int, tuple[str, bool, str]] = {
+    STATE_DIM_V2: ("v2", False, "frozen 96-d v2 (no embedding inputs)"),
+    STATE_DIM_V3: ("v3", True, "frozen 110-d v3.0 (embedding inputs)"),
+}
+_PLACEHOLDER_DIMS: dict[int, str] = {
+    STATE_DIM_V3_1: (
+        "STATE_DIM=164 v3.1 temporal/turn-state schema (r16 P1) is a "
+        "declared-but-unimplemented placeholder: no feature builder exists "
+        "yet. Land P1 (features.py STATE_DIM_V3_1 builder + export) before "
+        "serving a 164-d graph"
+    ),
+}
 
-    `auto` inspects the ONNX graph signature: v2 iff state_features last
-    dim == 96 AND no `card_ids_by_zone` input; else v3. An explicit
-    `v2`/`v3` is asserted consistent with the graph and exits non-zero at
-    startup if not. Exactly one startup line is logged.
+
+def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:
+    """Resolve the serving feature builder STRICTLY by graph state dim.
+
+    Resolution is keyed off the ONNX graph's `state_features` last dim
+    against `_SCHEMA_BY_STATE_DIM` (96 -> v2, 110 -> v3.0). Any dim that is
+    not a known *implemented* schema fails fast at startup: declared-but-
+    unimplemented dims (e.g. the 164-d v3.1 P1 placeholder) raise with a
+    specific message; anything else raises generically. The guard never
+    silently defaults to v3 — that silent fallback is exactly what would let
+    a STATE_DIM 164 bump corrupt 96-d/110-d serving. An explicit
+    `v2`/`v3` request is asserted consistent with the resolved schema and
+    exits non-zero at startup if not. Exactly one startup line is logged.
     """
     state_dim, has_embedding = _graph_signature(session)
-    graph_is_v2 = state_dim == STATE_DIM_V2 and not has_embedding
+
+    if state_dim is None:
+        sys.stderr.write(
+            "[serve_onnx] FATAL: could not read a concrete `state_features` "
+            "last dim from the ONNX graph signature; refusing to guess a "
+            "feature schema. Re-export the graph with a fixed state dim.\n"
+        )
+        raise SystemExit(2)
+
+    if state_dim not in _SCHEMA_BY_STATE_DIM:
+        placeholder = _PLACEHOLDER_DIMS.get(state_dim)
+        if placeholder is not None:
+            sys.stderr.write(
+                f"[serve_onnx] FATAL: graph state_dim={state_dim} maps to a "
+                f"declared-but-unimplemented schema. {placeholder}.\n"
+            )
+            raise SystemExit(2)
+        known = ", ".join(str(d) for d in sorted(_SCHEMA_BY_STATE_DIM))
+        sys.stderr.write(
+            f"[serve_onnx] FATAL: graph state_dim={state_dim} matches no "
+            f"known feature schema (known: {known}). Refusing to serve an "
+            f"unrecognized encoding.\n"
+        )
+        raise SystemExit(2)
+
+    schema, expects_embedding, label = _SCHEMA_BY_STATE_DIM[state_dim]
+
+    # The state dim alone selects the schema, but the embedding-input
+    # presence must agree with that schema or the feeds will not match the
+    # graph (v3 needs `card_ids_by_zone`; v2 must NOT receive it).
+    if has_embedding != expects_embedding:
+        sys.stderr.write(
+            f"[serve_onnx] FATAL: graph state_dim={state_dim} resolves to "
+            f"schema {schema} ({label}) but `card_ids_by_zone` input "
+            f"presence={has_embedding} contradicts it "
+            f"(expected {expects_embedding}). The ONNX graph signature is "
+            f"internally inconsistent; refusing to serve.\n"
+        )
+        raise SystemExit(2)
 
     if requested == "auto":
-        schema = "v2" if graph_is_v2 else "v3"
         source = "auto-graph"
     elif requested in {"v2", "v3"}:
-        schema = requested
         source = "--feature-schema/env"
-        graph_schema = "v2" if graph_is_v2 else "v3"
-        if schema != graph_schema:
+        if requested != schema:
             sys.stderr.write(
                 f"[serve_onnx] FATAL: --feature-schema={requested} is "
                 f"inconsistent with the loaded ONNX graph signature "
                 f"(state_dim={state_dim}, card_ids_by_zone input="
-                f"{has_embedding} -> graph is {graph_schema}). Refusing to "
+                f"{has_embedding} -> graph is {schema}). Refusing to "
                 f"serve a mismatched encoding.\n"
             )
             raise SystemExit(2)
     else:
         raise ValueError(f"unknown feature schema: {requested!r}")
 
-    if schema == "v2":
-        detail = "state_dim=96, no embedding inputs"
-    else:
-        detail = f"state_dim={state_dim if state_dim is not None else '?'}, embedding inputs"
-    print(f"[serve_onnx] feature schema = {schema} ({detail}) [source: {source}]")
+    print(
+        f"[serve_onnx] feature schema = {schema} "
+        f"(graph state_dim={state_dim}, {label}) [source: {source}]"
+    )
     return schema
 
 
