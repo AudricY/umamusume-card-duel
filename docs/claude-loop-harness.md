@@ -41,14 +41,15 @@ The default loop is therefore synchronous: worker returns, orchestrator synthesi
 
 The single `/work` command still owns backlog refinement and strategic planning. These are job types inside `/work`, not separate modes.
 
-Examples of good times to choose a planning/refinement worker task:
+Use planning/refinement when judgment says the loop is about to drift: the
+queue is stale or vague, recent evidence changes priorities, docs disagree, an
+escalation blocks the apparent next step, or the work is no longer clearly tied
+to model quality, throughput, determinism, or UI integration.
 
-- `docs/ai-agent-state/queue.json` is stale, empty, vague, or contradicted by recent evidence.
-- A run result, smoke failure, or implementation finding changes priorities.
-- `docs/ai-agent-state/escalations.md` has blockers that should redirect work.
-- Sprint, backlog, and progress docs disagree.
-- Several implementation/debugging jobs have landed without a queue refresh.
-- Local work is no longer clearly connected to the model-quality, throughput, determinism, or UI-integration goal.
+Queue refresh should be small and practical: reconcile enough live evidence,
+blockers, and active backlog context to make the next few safe jobs clear. Do
+not exhaustively re-rank the whole backlog unless the current state is genuinely
+unusable.
 
 Planning output should be small: update the queue, escalations, digest, or existing AI docs. Do not create new planning documents unless the user asks. Before writing, search for the topic and update the canonical home from `docs/ai-research/README.md` instead of creating another copy.
 

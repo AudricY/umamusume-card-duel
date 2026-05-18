@@ -24,6 +24,11 @@ Prefer the user-supplied objective when present. Otherwise pick the highest-leve
 
 Good `/work` jobs include implementation, debugging, run analysis, validation, backlog refinement, and big-picture planning. Do not let the loop collapse into only coding/debugging: if the queue is stale, evidence changes priorities, docs disagree, or the path no longer clearly advances model quality, throughput, determinism, or UI integration, choose a planning/refinement job.
 
+When the queue no longer gives a clearly safe next job, spend one bounded cycle
+reconciling live evidence, blockers, and the active backlog, then update only
+the smallest state needed to make the next few jobs clear. Treat queue refresh
+as opportunistic maintenance inside `/work`, not a separate ritual.
+
 Avoid launching long training/eval work unless the user or queue clearly calls for it.
 
 ## Delegation
