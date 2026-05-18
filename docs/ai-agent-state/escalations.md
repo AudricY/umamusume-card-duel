@@ -23,3 +23,8 @@
   the implementer r12_orchestrator.py recipe-fix (cross-iter replay
   buffer + fixed iter-0/SL KL anchor). Canonical:
   `docs/ai-research/progress/r110.md` §4a.
+- 2026-05-18: W6 recipe-fix mechanism CONFIRMED via R111 full loop
+  (iter-3 rot eliminated) but it over-damps at default HP — net ceiling
+  loss vs baseline 0.6042 (frozen 0.5527 then decay 0.5358). Forward
+  line is now a user-gated regularization-dose sweep. Canonical:
+  `docs/ai-research/progress/r110.md` §4c.
