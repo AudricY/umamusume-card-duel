@@ -23,6 +23,42 @@ import { buildPublicObservation } from "../../../frontend/src/game/engine/ai-pol
 import type { LegalAiAction } from "../../../frontend/src/game/engine/ai-policy/types";
 import type { GameState, SideId } from "../../../shared/src/types";
 import { advanceModeledTurnStep, getForcedAttackCoinResults, stateHash } from "./evaluateModelVsHeuristic";
+import { MCTS_KEEPALIVE_ENABLED, postJsonKeepAlive } from "./keepAliveClient";
+
+// Throughput #2 (docs/ai-research/scoping/r12-selfplay-gate-throughput.md):
+// the rollout / collapse hot loops computed the full-state JSON fingerprint
+// (stateHash) TWICE per step — once for the pre-advance `before` snapshot and
+// once for the post-advance no-progress check. The post-advance hash of step
+// N is, by construction, exactly the `before` of step N+1 (same GameState
+// object content, same stateHash). Carrying it forward eliminates the
+// redundant recompute while leaving the no-progress break condition a
+// byte-identical stateHash string comparison. Bit-identical by construction;
+// proven by the determinism replay gate recorded in the scoping doc.
+// Default ON; UMA_MCTS_HASH_CARRY=0 reverts to the recompute-per-step path
+// for an exact A/B (mirrors the W6 recipe-fix flag pattern).
+const MCTS_HASH_CARRY_ENABLED = process.env.UMA_MCTS_HASH_CARRY !== "0";
+
+// Throughput #4: shared keep-alive transport for the /predict path. Same URL,
+// same request body, same parsed response — socket reuse only.
+async function predictHttpPost(
+  url: string,
+  bodyJson: string,
+): Promise<{ ok: boolean; status: number; text: () => Promise<string>; json: () => Promise<unknown> }> {
+  if (MCTS_KEEPALIVE_ENABLED) {
+    return postJsonKeepAlive(url, bodyJson);
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: bodyJson,
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: () => response.text(),
+    json: () => response.json(),
+  };
+}
 
 export type MctsLeaf = "value-head" | "rollout";
 export type MctsPrior = "uniform" | "policy";
@@ -423,15 +459,14 @@ async function predictPolicyAndValue(
   modelSide: SideId,
   legalActions: LegalAiAction[],
 ): Promise<{ actionProbs: number[]; value: number }> {
-  const response = await fetch(`${modelUrl.replace(/\/$/, "")}/predict`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  const response = await predictHttpPost(
+    `${modelUrl.replace(/\/$/, "")}/predict`,
+    JSON.stringify({
       observation: buildPublicObservation(state, modelSide),
       legalActions,
       sampling: "greedy",
     }),
-  });
+  );
   if (!response.ok) {
     throw new Error(`MCTS prior+value request failed: ${response.status} ${await response.text()}`);
   }
@@ -472,16 +507,38 @@ function collapseUntilModelOrTerminal(
   rng: Rng,
 ): GameState {
   let current = cloneGame(state);
+  if (!MCTS_HASH_CARRY_ENABLED) {
+    // Pre-change path; kept verbatim behind UMA_MCTS_HASH_CARRY=0.
+    for (let step = 0; step < maxSteps; step += 1) {
+      if (current.gameOver) break;
+      if (current.currentSide === modelSide) break;
+      const before = stateHash(current);
+      const sideId: SideId = current.currentSide === "player" ? "player" : "opponent";
+      const forcedCoins = getForcedAttackCoinResults(current, rng);
+      current = sideId === "player"
+        ? advancePlayerAiTurnStep(current, forcedCoins, rng.next)
+        : advanceOpponentTurnStep(current, forcedCoins, rng.next);
+      if (stateHash(current) === before) break;
+    }
+    return current;
+  }
+  // Throughput #2 carry-forward (see rolloutHeuristic). Note `before` must be
+  // re-seeded to null whenever the loop continues without advancing past the
+  // hash check — here it never does (every iteration that passes the two top
+  // guards advances), so post-advance hash of step N == pre-advance of N+1.
+  let before: string | null = null;
   for (let step = 0; step < maxSteps; step += 1) {
     if (current.gameOver) break;
     if (current.currentSide === modelSide) break;
-    const before = stateHash(current);
+    if (before === null) before = stateHash(current);
     const sideId: SideId = current.currentSide === "player" ? "player" : "opponent";
     const forcedCoins = getForcedAttackCoinResults(current, rng);
     current = sideId === "player"
       ? advancePlayerAiTurnStep(current, forcedCoins, rng.next)
       : advanceOpponentTurnStep(current, forcedCoins, rng.next);
-    if (stateHash(current) === before) break;
+    const after = stateHash(current);
+    if (after === before) break;
+    before = after;
   }
   return current;
 }
@@ -557,15 +614,14 @@ async function leafValue(
 
 async function valueHeadLeafValue(state: GameState, modelSide: SideId, modelUrl: string): Promise<number> {
   const legalActions = enumerateLegalAiActions(state, modelSide);
-  const response = await fetch(`${modelUrl.replace(/\/$/, "")}/predict`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  const response = await predictHttpPost(
+    `${modelUrl.replace(/\/$/, "")}/predict`,
+    JSON.stringify({
       observation: buildPublicObservation(state, modelSide),
       legalActions,
       sampling: "greedy",
     }),
-  });
+  );
   if (!response.ok) {
     throw new Error(`MCTS leaf value request failed: ${response.status} ${await response.text()}`);
   }
@@ -596,15 +652,39 @@ function rolloutLeafValue(
 
 function rolloutHeuristic(state: GameState, rng: Rng, maxSteps: number): GameState {
   let next = cloneGame(state);
+  if (!MCTS_HASH_CARRY_ENABLED) {
+    // Pre-change path (recompute the pre-advance fingerprint every step).
+    // Kept verbatim behind UMA_MCTS_HASH_CARRY=0 for an exact A/B.
+    for (let step = 0; step < maxSteps; step += 1) {
+      if (next.gameOver) break;
+      const before = stateHash(next);
+      const sideId: SideId = next.currentSide === "player" ? "player" : "opponent";
+      const forcedCoins = getForcedAttackCoinResults(next, rng);
+      next = sideId === "player"
+        ? advancePlayerAiTurnStep(next, forcedCoins, rng.next)
+        : advanceOpponentTurnStep(next, forcedCoins, rng.next);
+      if (stateHash(next) === before) break;
+    }
+    return next;
+  }
+  // Throughput #2: the post-advance hash of step N is, by content, exactly
+  // the pre-advance `before` of step N+1 (same GameState passed forward).
+  // Carry it instead of recomputing — identical stateHash string comparisons,
+  // half the JSON.stringify cost. Lazily seed `before` so a 0-step / already
+  // gameOver rollout never pays a fingerprint (matches the old early `break`,
+  // which also computed no hash in that case).
+  let before: string | null = null;
   for (let step = 0; step < maxSteps; step += 1) {
     if (next.gameOver) break;
-    const before = stateHash(next);
+    if (before === null) before = stateHash(next);
     const sideId: SideId = next.currentSide === "player" ? "player" : "opponent";
     const forcedCoins = getForcedAttackCoinResults(next, rng);
     next = sideId === "player"
       ? advancePlayerAiTurnStep(next, forcedCoins, rng.next)
       : advanceOpponentTurnStep(next, forcedCoins, rng.next);
-    if (stateHash(next) === before) break;
+    const after = stateHash(next);
+    if (after === before) break;
+    before = after;
   }
   return next;
 }
