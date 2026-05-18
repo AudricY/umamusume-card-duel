@@ -363,6 +363,12 @@ def run_distill(
         "--batch-size", str(args.batch_size),
         "--hidden-dim", str(args.hidden_dim),
         "--depth", str(args.depth),
+        # R16-P1: select the frozen feature builder for distill. Default 110
+        # (v3.0) keeps the loop byte-identical; --state-dim 164 trains v3.1.
+        # The resulting checkpoint records this in model_config/feature_schema
+        # so the downstream export_onnx + serve_onnx (both checkpoint-/graph-
+        # driven) carry it end-to-end with no further orchestrator wiring.
+        "--state-dim", str(args.state_dim),
         "--lr", str(args.lr),
         "--value-weight", str(args.value_weight),
         "--policy-weight", "1.0",
@@ -746,6 +752,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--depth", type=int, default=3)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--value-weight", type=float, default=1.0)
+    p.add_argument("--state-dim", type=int, default=110,
+                   help="R16-P1: frozen feature builder selector for the "
+                        "distill trainer (96=v2, 110=v3.0, 164=v3.1). Default "
+                        "110 (v3.0) — unset is byte-identical to pre-R16-P1 "
+                        "loops. Passed straight to train_bc.py --state-dim; the "
+                        "per-iter export + serve path is checkpoint-driven "
+                        "(export_onnx reads model_config.state_dim) so a 164-d "
+                        "distilled ckpt yields a 164-d ONNX graph and serve_onnx "
+                        "resolves v3.1 with no extra wiring. The 164-d init "
+                        "checkpoint must match (--init-checkpoint).")
     p.add_argument("--kl-anchor-weight", type=float, default=0.0,
                    help="Optional anti-forgetting anchor weight (init checkpoint as anchor).")
     # W6 recipe-fix (r110.md §4a). Default ON via the module constants above;

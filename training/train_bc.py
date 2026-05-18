@@ -26,12 +26,18 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ablations = set(args.ablate)
+    # R16-P1: `--state-dim` selects the frozen feature builder (96=v2,
+    # 110=v3.0, 164=v3.1) for BOTH data modes via the same dim-keyed
+    # mechanism serve_onnx/export_onnx use. Default is STATE_DIM (110 =
+    # v3.0) so unset is byte-identical to pre-change behavior; v3.1
+    # training opts in with `--state-dim 164`.
+    state_dim = int(args.state_dim)
     if args.data_mode == "mcts-distill":
         # R12 phase C: soft policy target from MCTS visit distribution.
-        dataset = MctsSelfPlayDataset(args.data, min_actions=2, ablations=ablations)
+        dataset = MctsSelfPlayDataset(args.data, min_actions=2, ablations=ablations, state_dim=state_dim)
         collate_fn = collate_mcts_selfplay_batch
     else:
-        dataset = JsonlPolicyDataset(args.data, min_actions=2, ablations=ablations)
+        dataset = JsonlPolicyDataset(args.data, min_actions=2, ablations=ablations, state_dim=state_dim)
         collate_fn = collate_policy_batch
     train_indices, val_indices, split_metadata = split_dataset(dataset, args.seed, args.split_by)
     dataset_summary = summarize_dataset(dataset)
@@ -48,7 +54,7 @@ def main() -> None:
         collate_fn=collate_fn,
     ) if val_indices else None
 
-    config = ModelConfig(hidden_dim=args.hidden_dim, depth=args.depth, dropout=args.dropout)
+    config = ModelConfig(state_dim=state_dim, hidden_dim=args.hidden_dim, depth=args.depth, dropout=args.dropout)
     model = CandidatePolicyNet(config).to(device)
     # Item 11/17 KL-anchor anti-forgetting: if --kl-anchor-checkpoint is set,
     # load that checkpoint as a frozen anchor distribution and regularize the
@@ -165,7 +171,7 @@ def main() -> None:
     checkpoint = {
         "model_state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
         "model_config": config.to_dict(),
-        "feature_schema": feature_schema_metadata(),
+        "feature_schema": feature_schema_metadata(config.state_dim),
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "scaler_state": scaler.state_dict() if scaler is not None else None,
@@ -204,7 +210,7 @@ def main() -> None:
     manifest = {
         "checkpoint": "checkpoint.pt",
         "model_config": config.to_dict(),
-        "feature_schema": feature_schema_metadata(),
+        "feature_schema": feature_schema_metadata(config.state_dim),
         "device": str(device),
         "data": str(args.data),
         "samples": len(dataset),
@@ -297,7 +303,10 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
     cpu_model.load_state_dict({k: v.cpu() for k, v in model.state_dict().items()})
     cpu_model.eval()
     onnx_path = out_dir / "policy.smoke.onnx"
-    state = torch.zeros((1, STATE_DIM), dtype=torch.float32)
+    # R16-P1: the smoke graph width follows the trained config's state_dim
+    # (96/110/164), not the module STATE_DIM, so a 164-d v3.1 checkpoint
+    # roundtrips a 164-d graph.
+    state = torch.zeros((1, config.state_dim), dtype=torch.float32)
     actions = torch.zeros((1, 4, ACTION_DIM), dtype=torch.float32)
     mask = torch.ones((1, 4), dtype=torch.bool)
     # R7.b.2 Phase 3: embedding-pass tensors. Use the same fixed
@@ -766,11 +775,14 @@ def weighted_mean(losses: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     return (losses * weights).sum() / weights.sum().clamp_min(1.0e-6)
 
 
-def feature_schema_metadata() -> dict[str, Any]:
+def feature_schema_metadata(state_dim: int = STATE_DIM) -> dict[str, Any]:
+    # R16-P1: the recorded schema follows the run's actual state dim so a
+    # 164-d v3.1 checkpoint is tagged v3.1 (and export_onnx/serve_onnx
+    # resolve v3.1 from it). Default STATE_DIM keeps 110-d runs tagged v3.0.
     return {
-        "state_dim": STATE_DIM,
+        "state_dim": state_dim,
         "action_dim": ACTION_DIM,
-        "state_feature_schema_version": schema_version_for_state_dim(STATE_DIM),
+        "state_feature_schema_version": schema_version_for_state_dim(state_dim),
         "action_feature_schema_version": ACTION_FEATURE_SCHEMA_VERSION,
         "card_vocab": card_vocab_metadata(),
     }
@@ -891,6 +903,12 @@ def parse_args() -> argparse.Namespace:
                              "soft cross-entropy loss). R12 phase C.")
     parser.add_argument("--policy-weight", type=float, default=1.0,
                         help="Weight on the policy loss (distill mode uses soft CE).")
+    parser.add_argument("--state-dim", type=int, default=STATE_DIM,
+                        help="Frozen feature builder selector (96=v2, 110=v3.0, "
+                             "164=v3.1). Default %(default)s (v3.0) — unset is "
+                             "byte-identical to pre-R16-P1 behavior. Drives the "
+                             "dataset builder, ModelConfig.state_dim, the "
+                             "checkpoint feature_schema, and the ONNX graph dim.")
     return parser.parse_args()
 
 

@@ -33,9 +33,9 @@ from .features import (
     STATE_DIM,
     ZONE_ORDER,
     action_card_idx_pair,
+    feature_builder_for_state_dim,
     legal_actions_to_features,
     observation_to_card_ids,
-    observation_to_features,
 )
 
 
@@ -71,16 +71,24 @@ class MctsSelfPlayDataset(Dataset[MctsSelfPlaySample]):
         min_actions: int = 2,
         ablations: set[str] | None = None,
         allow_missing_card_ids: bool = False,
+        state_dim: int = STATE_DIM,
     ) -> None:
+        # `state_dim` selects the frozen builder (96=v2, 110=v3.0, 164=v3.1)
+        # via the same dim-keyed mechanism `JsonlPolicyDataset` (BC path) and
+        # serve_onnx use. Default is the module STATE_DIM (110 = v3.0) so the
+        # mcts-distill path is byte-stable for existing callers; v3.1 distill
+        # opts in by passing state_dim=STATE_DIM_V3_1.
         self.path = Path(path)
         self.ablations = ablations or set()
         self.allow_missing_card_ids = allow_missing_card_ids
+        self.state_dim = state_dim
         self.samples = list(
             load_mcts_selfplay_samples(
                 self.path,
                 min_actions=min_actions,
                 ablations=self.ablations,
                 allow_missing_card_ids=allow_missing_card_ids,
+                state_dim=state_dim,
             )
         )
         if not self.samples:
@@ -99,6 +107,7 @@ def load_mcts_selfplay_samples(
     min_actions: int = 2,
     ablations: set[str] | None = None,
     allow_missing_card_ids: bool = False,
+    state_dim: int = STATE_DIM,
 ) -> Iterable[MctsSelfPlaySample]:
     """Load mcts-selfplay rows as `MctsSelfPlaySample`s.
 
@@ -116,6 +125,7 @@ def load_mcts_selfplay_samples(
     never silently zeroes malformed-but-present v3 rows — a present
     `cardIdsByZone` that fails to parse still raises.
     """
+    encode_state = feature_builder_for_state_dim(state_dim)
     with Path(path).open("r", encoding="utf8") as fh:
         for line_number, line in enumerate(fh, start=1):
             if not line.strip():
@@ -141,9 +151,9 @@ def load_mcts_selfplay_samples(
                 continue
             policy_target = arr / total
             target_index = int(np.argmax(policy_target))
-            state_features = observation_to_features(example.get("observation", {}), ablations=ablations)
+            state_features = encode_state(example.get("observation", {}), ablations=ablations)
             action_features = legal_actions_to_features(actions, ablations=ablations)
-            if state_features.shape != (STATE_DIM,):
+            if state_features.shape != (state_dim,):
                 raise ValueError(f"Bad state feature shape at line {line_number}: {state_features.shape}")
             if action_features.shape[1:] != (ACTION_DIM,):
                 raise ValueError(f"Bad action feature shape at line {line_number}: {action_features.shape}")
@@ -186,8 +196,13 @@ def load_mcts_selfplay_samples(
 def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, torch.Tensor]:
     batch_size = len(samples)
     max_actions = max(sample.action_features.shape[0] for sample in samples)
+    # State width is derived from the samples (same pattern as `max_actions`)
+    # rather than the module STATE_DIM constant so a 164-d v3.1 distill batch
+    # collates to `[B, 164]`. All samples in a batch share one builder (the
+    # dataset's `state_dim`), so taking the first row's width is exact.
+    state_dim = samples[0].state_features.shape[0]
 
-    state_features = np.zeros((batch_size, STATE_DIM), dtype=np.float32)
+    state_features = np.zeros((batch_size, state_dim), dtype=np.float32)
     action_features = np.zeros((batch_size, max_actions, ACTION_DIM), dtype=np.float32)
     action_mask = np.zeros((batch_size, max_actions), dtype=np.bool_)
     targets = np.zeros((batch_size,), dtype=np.int64)
