@@ -27,34 +27,60 @@ As of 2026-05-18:
   across seed ranges and is only a latency fallback.
 - **Side asymmetry is real enough to disclose.** Current rollout-leaf evidence
   is aggregate side-balanced strength, not a per-side guarantee.
-- **The active frontier is W6 loop anti-degradation (recipe axis), now at a
-  user-gated regularization-dose decision.** The recipe-fix landed and was
-  confirmed via a full R111 loop (iter-3 rot eliminated) but over-damps at
-  default HP — net ceiling loss vs the 0.6042 baseline. R16-P1
-  temporal/turn-state features were implemented and **ablated NO-GO**
-  (v3.1 ≈ v3.0, no Wilson-lower win; `docs/ai-research/progress/r16.md`).
-  Live operational state is in `docs/ai-agent-state/queue.json`.
+- **User reprioritization (2026-05-19): hyperparameter tuning is
+  deprioritized.** Land ALL model-feature-upgrade and training-data-upgrade
+  items first, then return to the W6 regularization-dose sweep. The active
+  frontier is now (1) the cheap contested-state coverage pilot, then (2) the
+  R16-P2 per-Uma slot-token model-feature migration, then downstream data
+  items; the W6 loop anti-degradation **regularization-dose sweep is the
+  deprioritized HP tuning** and runs only after that block lands (still
+  user-gated). R16-P1 temporal/turn-state features were implemented and
+  **ablated NO-GO** (v3.1 ≈ v3.0, no Wilson-lower win;
+  `docs/ai-research/progress/r16.md`). Live operational state and forward
+  order are in `docs/ai-agent-state/queue.json`.
 
 ## Active Search-Wrapped Frontier
 
-0. **W6 loop anti-degradation recipe — TOP PRIORITY, at a user-gated dose
-   decision.** Discriminator SATISFIED, recipe-fix LANDED (commit `d44de3f`;
-   cross-iter replay buffer + fixed iter-0/SL KL anchor in
-   `r12_orchestrator.py`), and CONFIRMED via a full R111 loop: the iter-3 rot
-   is eliminated (iter-3 holds 0.5527, no crater) but the fix over-damps at
-   default HP — policy froze then decayed (0.5527→0.5358), entire trajectory
-   below the 0.6042 baseline iter-2 peak. Forward line is now a **user-gated
-   regularization-dose sweep** (DO NOT auto-launch): lower/anneal the
-   fixed-KL-anchor weight from 0.05 and/or reduce replay old-fraction (0.40)
-   / window (3) to damp ONLY the iter-3 rot while keeping the iter-2 climb.
-   Canonical: `docs/ai-research/progress/r110.md` §4c; knobs in queue
-   `w6-loop-anti-degradation`.
+0. **Contested-state coverage pilot — TOP PRIORITY (training-data
+   upgrade).** The R16-P1 NO-GO resolved the pre-registered contingency: the
+   cheap single-variable coverage pilot is now the highest-leverage forward
+   line, and the 2026-05-19 user reprioritization confirms training-data and
+   model-feature upgrades land before any HP tuning. No new data — a
+   `training/uma_ai/dataset.py` loader/loss change only. Canonical:
+   Training-Data / State-Coverage Backlog item 2 below and
+   `docs/ai-research/scoping/r16-training-data-backlog-refinement.md`; queue
+   `training-data-coverage-pilot`.
 
-0b. **Fork B — label-quality test matrix (umbrella over item 0's dose
+0a. **R16-P2 per-Uma slot tokens — model-feature upgrade, user-gate now
+   OPEN.** The 2026-05-19 "land all model feature upgrade items first"
+   directive is the explicit user call the prior guardrail required. A 3–4-day
+   model/ONNX migration; sequence *after* the cheap coverage pilot
+   (leverage-per-cost). Scope: `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`
+   § "P2 - Per-Uma Slot Tokens"; queue `r16-p2-per-uma-slot-tokens`.
+
+0b. **W6 loop anti-degradation recipe — DEPRIORITIZED (regularization-dose
+   sweep = the deprioritized HP tuning).** Demoted from TOP PRIORITY to P3 by
+   the 2026-05-19 user reprioritization: runs only AFTER all three core
+   predecessors land (coverage pilot → R16-P2 → deep data program: corpus
+   recipe → preference/value-data), and stays user-gated. Gate-depth =
+   option B: it is **NOT** gated on the conditional side-balancing item or
+   the P3 manual mistake catalog (those fire on their own triggers; gating
+   W6 behind the conditional item could block it indefinitely). Operational
+   predecessor set is canonical in `docs/ai-agent-state/queue.json`. Mechanism still
+   CONFIRMED via R111 (iter-3 rot eliminated; recipe-fix landed commit
+   `d44de3f`, cross-iter replay buffer + fixed iter-0/SL KL anchor in
+   `r12_orchestrator.py`) but over-damps at default HP — policy froze then
+   decayed (0.5527→0.5358), below the 0.6042 baseline iter-2 peak. Reopen
+   knobs: lower/anneal the fixed-KL-anchor weight from 0.05 and/or reduce
+   replay old-fraction (0.40) / window (3). Canonical:
+   `docs/ai-research/progress/r110.md` §4c; queue `w6-loop-anti-degradation`.
+
+0c. **Fork B — label-quality test matrix (umbrella over the W6 dose
    sweep).** Raises target/teacher quality at *fixed* capacity and volume
-   (both axes closed); the M6 anti-drift arm is the item-0 dose sweep, not a
-   re-plan. Gated behind a near-zero-cost read-only label-quality probe
-   before any user-gated loop compute. Canonical:
+   (both axes closed); the M6 anti-drift arm is the W6 dose sweep, not a
+   re-plan. Deprioritized with the W6 sweep above; gated behind a
+   near-zero-cost read-only label-quality probe before any user-gated loop
+   compute. Canonical:
    `docs/ai-research/scoping/forkb-label-quality-loop-recipe.md`.
 
 1. **R110 W6 reproduction — DONE.**
@@ -127,11 +153,15 @@ section).
 4. **Side-conditioned retained-data balancing — P2.**
    If side weakness is data-linked, balance retained player/opponent decision
    states within major phase/action buckets and require side-split gate
-   reporting.
+   reporting. **Conditional + NOT a W6 predecessor** (option B): it fires
+   only if side weakness proves data-linked; gating the W6 sweep behind it
+   could block W6 indefinitely.
 
 5. **Rule-bot mistake catalog + forced-state suite — P3.**
    Build hand-audited tactical states that explain where MCTS beats the rule
-   bot and feed the fixture/eval tooling backlog.
+   bot and feed the fixture/eval tooling backlog. **P3 manual + NOT a W6
+   predecessor** (option B): fires on its own track, not in the HP-gate
+   chain.
 
 ## Guardrails
 
@@ -141,12 +171,18 @@ section).
   mcts-distill v1 failure is the canonical negative example.
 - Do not re-open raw-policy SL unless a new coverage result explicitly
   falsifies the current diagnosis.
-- Do not auto-launch the W6 regularization-dose sweep; it needs explicit
-  go-ahead. (The R16-P1 v3.1 ablation is now CLOSED = NO-GO; no auto-launch
-  remains on that line — `docs/ai-research/progress/r16.md`.)
-- Do not start R16-P2 per-Uma slot tokens (3–4-day migration) unless the
-  user explicitly calls for it; P1's null strength signal removed its
-  cheap-baseline rationale.
+- Do not auto-launch the W6 regularization-dose sweep. Per the 2026-05-19
+  user reprioritization it is DEPRIORITIZED (P3): it runs only AFTER all
+  three core predecessors land (coverage pilot → R16-P2 → deep data
+  program) AND with explicit go-ahead. Gate-depth = option B: do NOT extend
+  the W6 gate to the conditional side-balancing item or the P3 manual
+  mistake catalog.
+  (The R16-P1 v3.1 ablation is now CLOSED = NO-GO; no auto-launch remains on
+  that line — `docs/ai-research/progress/r16.md`.)
+- R16-P2 per-Uma slot tokens: the prior "do not start unless the user
+  explicitly calls for it" gate is now SATISFIED by the 2026-05-19
+  reprioritization. Still sequence it AFTER the cheap coverage pilot
+  (leverage-per-cost); it remains a 3–4-day model/ONNX migration.
 - Do not re-open representation/capacity tuning off the R110 MARGINAL band;
   the forward line is the loop-recipe axis only (`docs/ai-research/progress/r110.md`).
 

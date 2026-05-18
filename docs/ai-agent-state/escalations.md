@@ -6,6 +6,16 @@
 
 ## Resolved Pointers
 
+- 2026-05-19: User reprioritization — HP tuning (W6 regularization-dose
+  sweep) DEPRIORITIZED P1→P3. Gate-depth = option B (user-confirmed): W6
+  runs only after all three core predecessors land —
+  training-data-coverage-pilot → r16-p2-per-uma-slot-tokens →
+  training-data-deep-program (corpus recipe → preference/value-data).
+  R16-P2 user-gate now OPEN; it is the LAST model-feature item (series =
+  P0/P1/P2, no P3+). NOT W6 predecessors by explicit decision: conditional
+  side-balancing (TD item 4) and P3 manual mistake catalog (TD item 5) —
+  gating W6 behind the conditional item could block it indefinitely.
+  Canonical: `docs/ai-agent-state/queue.json`, `docs/ai-research-backlog.md`.
 - 2026-05-19: R16-P1 v3.1 strength ablation COMPLETE = NO-GO
   (best-promoted 0.5955 < v3.0 0.6042; v3.1 not promoted, 96-d pin
   unchanged). serve_onnx 24-worker gate-fan-in crash blocker resolved
