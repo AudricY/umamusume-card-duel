@@ -198,75 +198,55 @@ for early-2026-05 reasoning; most entries are resolved and reduced to pointers.
 
 ## Tier 1 — discriminating experiments (HISTORICAL)
 
-All four resolved by 2026-05-11; full result blocks in progress doc § "Tier 1
-results (2026-05-11)". One-line pointers:
-
-- **R1** perfect-oracle ceiling — DONE / Q1 REFUTED (rollout-CRN×3 itself
-  58.5% vs rule-bot; not a teacher-strength cap). **R2** multi-temp gate —
-  REPURPOSED (deployment tuning, R15.S4). **R3** entropy-BC — DONE / DIAGNOSIS
-  WRONG (warm-start entropy already 0.532; the peakedness mechanism R3 attacked
-  did not exist). **R4** value-head ablation — DONE / Q3 PARTIAL (value_brier
-  0.084 PASS but gate WR 34.5%; calibration alone does not move the gate).
+All four resolved by 2026-05-11. One-line pointers:
+- **R1** oracle ceiling — DONE / Q1 REFUTED (not a teacher-strength cap).
+  **R2** multi-temp gate — REPURPOSED (deployment tuning, R15.S4). **R3**
+  entropy-BC — DONE / DIAGNOSIS WRONG (mechanism did not exist). **R4**
+  value-head ablation — DONE / Q3 PARTIAL (calibration alone does not move
+  the gate). Detail: progress doc § "Tier 1 results (2026-05-11)".
 
 ## Tier 2 — directional experiments (HISTORICAL)
 
-- **R5.** PPO self-play via PFSP pool — **DONE / FAIL.** 3 iters × 800 games
-  against item17 pool; gate WR locked at 0.3109 same as phase H. Re-attempted
-  later as R15.S2 against the stronger W6 pool; that re-attempt also failed.
-  See progress doc § "Tier 1 results (2026-05-11)" R5 block and § "Phase J".
-- **R6.** Larger model capacity — **DONE / FAIL.** hidden=128/depth=3,
-  50ep, value_weight=1.0: best imitator (83% argmax-match) AND weakest player
-  (gate WR 33.0%). The cap is imitation-target-quality, not capacity.
+- **R5.** PPO self-play via PFSP pool — DONE / FAIL (gate WR 0.3109; W6
+  re-attempt R15.S2 also failed). Pointer: progress doc § "Tier 1 results
+  (2026-05-11)" R5 block and § "Phase J".
+- **R6.** Larger model capacity — DONE / FAIL (best imitator, weakest player;
+  cap is imitation-target-quality, not capacity). Pointer: progress doc.
 - **R7 / R8 / R7.b / mcts-distill — F1 raw-policy SL line CLOSED, all four
-  axes FAIL.** One pointer for the whole closed line (see Current state #4):
-  R7 multi-teacher BC labels (Wilson 0.2921), R8 DPO objective (0.3318),
-  R7.b.2 card-embedding representation (0.3045), mcts-distill v1 soft-visit
-  label-shape (0.1470, 2026-05-15). None cleared the 0.40 gate; best-ever
-  0.3318. R7.b.3/4/5 (attention/history/aux-heads) were conditional on a
-  R7.b.2 lift and did not auto-promote. Canonical detail:
-  `docs/ai-research/progress/r15.md` §§ R7 / R8 / R7.b.2 / MCTS-distill v1.
-  Scoping docs: `docs/ai-research/scoping/{r7-multi-teacher-warmstart,
-  r8-dpo,r7b-feature-representation,mcts-distill}.md`. Forward status: not a
-  line; one parked P4 revisit hypothesis only (Production-path section).
+  axes FAIL** (best-ever Wilson 0.3318, none cleared 0.40; see Current state
+  #4). Pointer: `docs/ai-research/progress/r15.md` §§ R7 / R8 / R7.b.2 /
+  MCTS-distill v1; scoping `docs/ai-research/scoping/{r7-multi-teacher-
+  warmstart,r8-dpo,r7b-feature-representation,mcts-distill}.md`. Forward: one
+  parked P4 revisit hypothesis only (Production-path section).
 
 ## Tier 3 — structural changes (HISTORICAL)
 
-- **R9.** Q-learning head as the policy — **DELETED 2026-05-11.** Obsoleted
-  by R12 GO (label-quality fixes inherit the value-head noise floor).
-- **R10.** Larger DAgger sweep at production scale — **DELETED 2026-05-11.**
-  Same reason. R15.S1 later confirmed compute-scaling at fixed capacity does
-  not break the cap.
-- **R11.** Auxiliary self-supervised objectives in the trunk — **PARKED.** No
-  evidence the cap is a representation-quality problem now that R12 GO and
-  R14.I.2 land at Wilson 0.6479; would only be relevant if R7/R8 also close
-  negative and we need a structurally different SL pipeline.
-- **R12.** MCTS-augmented self-play (mini-AlphaZero) — **DONE / GO.** Rollout-
-  leaf spike cleared the 0.40 bar by +15.6pp on 2026-05-11; R13 then compounded
-  to Wilson 0.570 at iter-1; R14.I.2 extended to Wilson 0.6479 at iter-2. R12
-  is the production line. See progress doc §§ "Rollout-leaf spike: GO",
-  "R13.W6 result", "R14 progress checkpoint".
+- **R9 / R10.** Q-learning head / larger DAgger sweep — DELETED 2026-05-11
+  (obsoleted by R12 GO; R15.S1 confirmed compute-scaling at fixed capacity
+  does not break the cap).
+- **R11.** Auxiliary self-supervised trunk objectives — PARKED. No evidence
+  the cap is representation-quality now that R12/R14.I.2 land at Wilson
+  0.6479; only relevant if R7/R8 also close negative.
+- **R12.** MCTS-augmented self-play (mini-AlphaZero) — DONE / GO; the
+  production line (rollout-leaf → Wilson 0.6479 at R14.I.2 iter-2). Pointer:
+  progress doc §§ "Rollout-leaf spike: GO", "R13.W6 result", "R14 progress
+  checkpoint".
 
 ## R15 sprint — F1 PPO post-mortem follow-ons (2026-05-14)
 
 The F1 PPO post-mortem (`docs/ai-performance-research-progress.md` § "F1 Phase
-summary") ranked four follow-on moves after phases 2/G/H closed at Wilson 0.31.
-All four are now executed or queued:
+summary") ranked four follow-on moves after phases 2/G/H closed at Wilson
+0.31. All four are now executed or queued:
 
-- **R15.S1.** Better SL warm-start (compute-scaled DAgger) — **DONE / FAIL.**
-  iter-2 Wilson 0.3269 inside the pre-registered falsification band; plateau-
-  then-overfit signature fired in train-time val_accuracy. ~12 min compute.
-  See progress doc § "R15.S1–S4 result blocks" and § "Phase K".
-- **R15.S2.** PFSP self-play PPO with the strong W6 pool — **DONE / FAIL.**
-  iter-2 Wilson 0.2188 (regressed) after iter-1 self-promotion co-adaptation.
-  Largest single PPO step on record (+14.5pp at iter-1) but did not survive.
-  See progress doc § "R15.S1–S4 result blocks" and § "Phase J".
-- **R15.S3.** Richer per-step reward shaping — **DONE / EXHAUSTED (both
-  axes closed).** Six phases (L/M/N/O'/O/P) covered axis 1 (observation-delta
-  signals: magnitude, schedule, signal-mix; saturated at iter-2 Wilson
-  0.368 ± 0.001) and axis 2 (value-head-delta tempo signal at coef 0.05 and
-  0.01; both regressed). ~36 min total compute. Surviving F1-line moves are
-  R7 / R8 above. See progress doc § "R15.S1–S4 result blocks" and §§ Phase
-  L / M / N / O' / O / P.
+- **R15.S1.** Better SL warm-start (compute-scaled DAgger) — DONE / FAIL
+  (iter-2 Wilson 0.3269, in falsification band). Pointer: progress doc §
+  "R15.S1–S4 result blocks" and § "Phase K".
+- **R15.S2.** PFSP self-play PPO with the strong W6 pool — DONE / FAIL
+  (iter-2 Wilson 0.2188 regressed). Pointer: progress doc § "R15.S1–S4
+  result blocks" and § "Phase J".
+- **R15.S3.** Richer per-step reward shaping — DONE / EXHAUSTED (both
+  axes closed). Pointer: progress doc § "R15.S1–S4 result blocks" and §§
+  Phase L / M / N / O' / O / P.
 - **R15.S4.** Sampling-temperature gate (forward, diagnostic) — see below.
 
 ### R15.S4 — Sampling-temperature gate (F1 next-move #4) (forward)
@@ -298,3 +278,23 @@ All four are now executed or queued:
   backlog above.
 - **Side-asymmetry confirmation gate (R14.A footnote).** Closed 2026-05-14;
   cheap-inference production claim contradicted at independent seeds.
+- **Compute-architecture: `--workers` lever vs batched leaf-inference
+  (deferred / conditional — do NOT action).** Origin 2026-05-18 GPU-idle
+  inquiry; read-only evidence from the live R110-W6-repro run. (1) Self-play
+  /gate ≈18.7 min/iter, ≈1–1.5 h/arc fully unattended → NOT the research-
+  cadence bottleneck (human judgment turnaround between arcs is). (2) In the
+  rollout-leaf production config the CPU hot path is the TS engine running
+  rule-bot rollouts, NOT NN inference (eval workers ~92% CPU vs serve_onnx
+  sidecar ~19.5%; only the PUCT prior is a model call) — batched inference
+  barely helps this config. (3) Cheap lever IF cadence ever binds: raise
+  `r12_orchestrator.py --workers` 4→16–24 (nproc=32, load ~7) — pure config,
+  ~4–6× faster compute phases, no code; validate via one short worker sweep
+  before making default. (4) Batched leaf-inference (virtual-loss leaf
+  collector in `backend/src/sim/mcts.ts` + additive `/predict-batch` in
+  `training/serve_onnx.py`; M-tier, Python already vectorized) is a real but
+  CONDITIONAL bet — only justified when ALL hold: (a) self-play cadence is
+  the binding research constraint, (b) a CUDA serve path exists, (c) the
+  active config is leaf-eval-bound (value-head-leaf), not rollout-bound.
+  Risk: virtual loss perturbs search → must re-clear the determinism-
+  sensitive eval gates (R14.B / R15 single-worker replay). Premise falsified
+  for the production config; informational, not actionable.
