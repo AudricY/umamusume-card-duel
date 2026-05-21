@@ -1,5 +1,43 @@
 # R16 Archive — Rolled Detail
 
+## R16-P1 v3.1 trajectory + reasoning (full prose)
+
+Compact summary lives in `r16.md` § "R16-P1 step 3". Full trajectory
+table + reasoning retained here.
+
+### Full trajectory — v3.1 6-iter vs v3.0 R110-W6-repro 5-iter
+
+n=120 side-balanced rollout-leaf gate, Wilson lower vs rule bot. All
+v3.1 iters: 120-game, 0 heuristic fallbacks, promoted.
+
+| Iter | v3.1 Wilson-lower | v3.1 win-rate | v3.0 Wilson-lower |
+|---|---|---|---|
+| 0 | 0.5189 | 0.608 | 0.5273 |
+| 1 | 0.5869 | 0.675 | 0.5612 |
+| 2 | 0.5442 | 0.633 | **0.6042 (best)** |
+| 3 | **0.5955 (best)** | 0.683 | 0.5106 |
+| 4 | 0.5527 | 0.642 | 0.5612 |
+| 5 | 0.5527 | 0.642 | — |
+
+v3.1 best-promoted **0.5955** (iter-3) vs v3.0 best-promoted **0.6042**
+(iter-2): −0.0087, within-noise, no Wilson win → **NO-GO**.
+
+### Reasoning (full)
+
+- **No Wilson-lower win.** v3.1 peak 0.5955 is below the v3.0 peak
+  0.6042; the difference is within gate noise — at best parity, not
+  a gain.
+- **Oscillation, not climb.** v3.1 sits in a ~0.52-0.60 band and
+  never clears the v3.0 ceiling.
+- **Extension confirmed no late climb.** The user requested a +2-iter
+  extension (iters 4-5) after the 4-iter run; iter-4/5 are flat at
+  0.5527, confirming no delayed gain.
+- **Schema-independent W6 pattern.** The iter-peak-then-oscillate
+  behavior reproduces under v3.1 as it did under v3.0 and 96-d —
+  consistent with the canonical R110 finding that this is an
+  intrinsic W6-recipe property, not a representation effect.
+  Canonical: `docs/ai-research/progress/r110.md` §3.
+
 ## R16 Contested-Coverage Pilot — Methodology + cross-references (full prose)
 
 Compact summary lives in `r16.md` § "R16 Training-Data — Contested-Coverage
