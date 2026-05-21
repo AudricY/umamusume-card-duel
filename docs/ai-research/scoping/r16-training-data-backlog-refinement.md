@@ -603,6 +603,25 @@ Cap pairs per state:
    - Support modes: `runner-up`, `top-k`, `rule-bot`, `high-prior`, and
      `policy-argmax`.
    - Emit kept/dropped counts by reason and pair source.
+   - [PLANNED 2026-05-21, post-3a-Audit-v2-PASS] Recommended first chunk:
+     new `training/pair_builder.py` (~150-200 LOC, CLI) reading R16-TD 3a
+     relabel JSONL rows, emitting pair JSONL in `runner-up` mode ONLY
+     (winner = argmax of `oracle.visitDistribution`, loser = second-highest;
+     `sourceKind=mcts-relabel`). Drop predicates: `legalActions.length<2`,
+     winner==loser, indices out-of-range, `visitShareWinner -
+     visitShareLoser < 0.05`. Plus `training/pair_builder_smoke.py`
+     synthetic-fixture smoke (no invalid indices, winner!=loser, margin
+     floor, schema parse). NO touch to `pair_corpus.py` /
+     `train_dpo.py` in this chunk (those are 3b chunks 2-3). Note: load-
+     bearing context for chunk 2 — `pair_corpus.py:128-212` is hardwired
+     to outcome-v2 schema (reads `oracle.candidates[*].rewardMean/Variance`
+     + `selectedVsRunnerUpMargin`); the explicit-pair schema decouples
+     chunks 2+3 from that contract. Note: chunk 3 must also extend
+     `collate_preference_batch` (`pair_corpus.py:255-294`) to emit
+     `card_ids_by_zone`/`action_card_idx` matching `collate_policy_batch`
+     (`dataset.py:295-410`); `train_dpo.py:232-248` does not currently
+     forward those, so the v3 embedding branch is silently inert under
+     DPO today (zero-tensor fallback in `model.py:116-183`).
 
 3. Update DPO loader.
    - Teach `training/pair_corpus.py` to read explicit pair rows in addition to
