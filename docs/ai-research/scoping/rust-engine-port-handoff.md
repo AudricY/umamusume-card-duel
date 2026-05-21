@@ -177,6 +177,28 @@ If any seed diverges, Phase 1d is paused per the scoping-doc kill signal.
 
 ---
 
+## Measured perf vs scoping projection
+
+Microbenchmark results (Criterion, release build, single core, AMD WSL2):
+
+| Operation | TS target (probe-default.json) | Rust measured | Speedup |
+| --- | ---: | ---: | ---: |
+| `clone` (structuredClone) | 22,007 ns | 907 ns | **24×** |
+| `fingerprint` (JSON.stringify) | 8,034 ns | 25 ns (hash only) / 157 ns (pack + hash) | **51×** |
+| `enumerate` (legal actions) | 2,559 ns | — (Phase 1e + 1f pending) | — |
+
+Reproduce with:
+
+```bash
+cargo bench --manifest-path engine-rs/Cargo.toml -p engine --bench clone_and_fingerprint -- --quick
+```
+
+These confirm the scoping doc's §6 "Payoff estimate" — the allocator-
+bound TS hot path collapses to sub-microsecond in Rust as predicted.
+Whether the projected 15–40× per-iter wall-clock improvement holds end-
+to-end depends on the legal-action enumerator + heuristic-opponent ports
+(Phase 1e + 1f) hitting similar speedups.
+
 ## Test coverage today
 
 ```

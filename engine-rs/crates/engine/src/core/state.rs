@@ -196,6 +196,29 @@ impl GameState {
     pub fn side_mut(&mut self, id: SideId) -> &mut SideState {
         &mut self.sides[id as usize]
     }
+
+    /// Disjoint-mutable split of the two sides. Returns `(player, opponent)`
+    /// in canonical declaration order.
+    pub fn sides_mut(&mut self) -> (&mut SideState, &mut SideState) {
+        let [a, b] = &mut self.sides;
+        (a, b)
+    }
+
+    /// Disjoint-mutable split aligned to a specific actor: returns
+    /// `(acting_side, opposing_side)` regardless of which underlying slot
+    /// they live in. Used by combat / trainer flows that must hold both
+    /// sides mutably at once (TS routinely aliases `attacker.active` and
+    /// `defender.active`).
+    pub fn sides_mut_for(
+        &mut self,
+        actor_id: SideId,
+    ) -> (&mut SideState, &mut SideState) {
+        let (p, o) = self.sides_mut();
+        match actor_id {
+            SideId::Player => (p, o),
+            SideId::Opponent => (o, p),
+        }
+    }
 }
 
 /// Reference table for the engine: the catalog of card definitions, plus
