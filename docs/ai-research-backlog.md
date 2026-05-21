@@ -189,12 +189,12 @@ As of 2026-05-18:
 
 Engine-rust-port branch merged into feat/ai as commit `4e86ea7`. Phases 0/1/2
 all complete (canonical home: `docs/ai-research/scoping/rust-engine-port-handoff.md`).
-Forward items:
+Forward items, ordered by user prioritization 2026-05-21:
 
-- **v3.2 schema verification** (P2, gated on C8 promotion): Rust `/predict` client emits `schemaVersion=3` with `cardIdsByZone` only; no `uma_slot_*`. Verify whether `serve_onnx.py` v3.2 path synthesizes slot tensors server-side from `PublicObservation`; if not, extend Rust observation builder.
-- **Orchestrator wiring** (P2, user-gated pilot): `r12_orchestrator.py` (+ppo+dagger) still invoke TS `npm run sim:*`. Flag-compatible Rust CLIs offer 140-220× speedup; add opt-in `--engine rust|ts` with A/B parity gate.
-- **Backend NAPI consumer** (P3, exploratory): no `backend/src/` consumer yet; pick a target after orchestrator wiring lands.
-- **Engine residual TODO** (P4): `has_consecutive_no_attack_streak: u8` field on `SideState` (V4 RNG-gap reframed as benign behavioral variance, but field still missing if anyone wants exact parity).
+- **Orchestrator wiring** (P1, user-approved next-up): `r12_orchestrator.py` (+ppo+dagger) still invoke TS `npm run sim:*`. Rust sim CLIs offer 140-220× via flag-compatible aliases. Add opt-in `--engine rust|ts` with A/B parity gate (1-iter R110 in both engines, compare trajectory rows + eval-gate verdict). Sequenced ahead of P1 research items because the speedup compounds across tight-gate-reverdict-program, high-sim-mcts-regime-probe, side-conditioned eval (item 5), PPO/RL feasibility (item 6), and W6 HP-sweep density (item 0b).
+- **v3.2 schema verification** (P2, step-1 pre-C8 feasible): Rust `/predict` client emits `schemaVersion=3` + `cardIdsByZone` only, no `uma_slot_*`. Step-1 (read whether `serve_onnx.py` synthesizes slots server-side from `PublicObservation`) is a cheap code-check doable now as insurance. Step-2 (extend Rust observation builder) gated on C8 promoting v3.2.
+- **Backend NAPI consumer** (P3, exploratory): no `backend/src/` consumer yet. Defer.
+- **Engine residual TODO** (P4): `has_consecutive_no_attack_streak: u8` on `SideState` (V4 RNG-gap reframed as benign behavioral variance).
 
 5. **Side-conditioned sim budget — P2, throughput-unlocked.**
    Side-split CI separation was the throughput-driven gate. Rust 140x makes
