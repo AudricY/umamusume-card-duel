@@ -122,6 +122,38 @@ fn determinism_same_seed_same_outcome() {
     assert_eq!(a.winner, b.winner);
 }
 
+/// Throughput benchmark — drive 100 games and report games/sec.
+/// Marked `#[ignore]` so it doesn't run by default. Enable with
+/// `cargo test --release -- --ignored throughput`.
+#[test]
+#[ignore]
+fn throughput_100_headless_games() {
+    let n = 100u32;
+    let start = std::time::Instant::now();
+    let mut total_steps = 0u32;
+    let mut player_wins = 0u32;
+    let mut opponent_wins = 0u32;
+    for seed_num in 0..n {
+        let seed = seed_num.to_string();
+        let outcome = drive_one_game(&seed, 1000);
+        total_steps += outcome.steps_taken + 1;
+        match outcome.winner {
+            Some(SideId::Player) => player_wins += 1,
+            Some(SideId::Opponent) => opponent_wins += 1,
+            None => {}
+        }
+    }
+    let elapsed = start.elapsed();
+    let games_per_sec = n as f64 / elapsed.as_secs_f64();
+    let steps_per_sec = total_steps as f64 / elapsed.as_secs_f64();
+    let avg_steps = total_steps as f64 / n as f64;
+    eprintln!(
+        "100-game throughput: {:.1} games/s, {:.1} steps/s, avg {:.1} steps/game; player={}, opponent={}, elapsed={:?}",
+        games_per_sec, steps_per_sec, avg_steps, player_wins, opponent_wins, elapsed,
+    );
+    assert!(games_per_sec > 50.0, "expected >50 games/s, got {:.1}", games_per_sec);
+}
+
 /// Broader sweep — first 32 seeds — to flush out any stall a single
 /// seed might miss. Marked `#[ignore]` by default to keep the standard
 /// `cargo test` fast; enable with `cargo test -- --ignored`.
