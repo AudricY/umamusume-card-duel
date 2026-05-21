@@ -1,7 +1,7 @@
 # r12 Loop Throughput — Spike Candidates
 
 - **Date:** 2026-05-21
-- **Status:** SCOPING — candidates identified from in-flight C8-W6FIX-ON-extended profiling; full data + ranking lands at run completion in `docs/ai-research/analysis/r12-loop-throughput.md`. Tracked in queue under `throughput-optimization-spike`.
+- **Status:** LANDED 2026-05-21 — pointer to `docs/ai-research/analysis/r12-loop-throughput.md`. Headline: GPU util mean 0.26% (98.5% of wall samples = 0%) confirms idle, but the bottleneck is HTTP-RTT between Rust sims and serve_onnx, NOT serve_onnx provider — candidate A (cpu→cuda) refuted, candidate B (NAPI in-process predict) recommended first spike. Body below preserved as historical pre-completion scoping context. Tracked in queue under `throughput-optimization-spike`.
 
 ## Why
 
