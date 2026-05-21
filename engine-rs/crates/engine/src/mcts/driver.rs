@@ -618,12 +618,42 @@ fn rollout_leaf_value(
     }
 }
 
+thread_local! {
+    /// Per-rollout-termination-reason counters (instrumentation only).
+    /// Reset via `reset_rollout_stats()`; readable via `rollout_stats()`.
+    pub static ROLLOUT_STATS: std::cell::RefCell<RolloutStats> =
+        std::cell::RefCell::new(RolloutStats::default());
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RolloutStats {
+    pub rollouts_started: u64,
+    pub rollouts_ended_game_over: u64,
+    pub rollouts_ended_current_side_done: u64,
+    pub rollouts_ended_state_unchanged: u64,
+    pub rollouts_ended_max_steps: u64,
+    pub total_advance_calls: u64,
+}
+
+pub fn reset_rollout_stats() {
+    ROLLOUT_STATS.with(|s| *s.borrow_mut() = RolloutStats::default());
+}
+
+pub fn rollout_stats() -> RolloutStats {
+    ROLLOUT_STATS.with(|s| *s.borrow())
+}
+
 fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameState {
+    ROLLOUT_STATS.with(|s| s.borrow_mut().rollouts_started += 1);
     let mut next = state.clone();
     let mut before: Option<String> = None;
-    for _ in 0..max_steps {
+    let mut step_idx: u32 = 0;
+    let end_reason: u8 = 'rollout: loop {
+        if step_idx >= max_steps {
+            break 'rollout 3; // max_steps
+        }
         if next.game_over {
-            break;
+            break 'rollout 0; // game_over
         }
         if before.is_none() {
             before = Some(state_hash(&next));
@@ -631,7 +661,7 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
         let side_id = match next.current_side {
             CurrentSide::Player => SideId::Player,
             CurrentSide::Opponent => SideId::Opponent,
-            CurrentSide::Done => break,
+            CurrentSide::Done => break 'rollout 1, // current_side_done
         };
         // get_forced_attack_coin_results: TS calls with INNER rng explicitly
         // (mcts.ts:653 rolloutHeuristic). Keep the inner-rng install here.
@@ -646,12 +676,24 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
         } else {
             advance_opponent_turn_step(&mut next, forced.clone());
         }
+        ROLLOUT_STATS.with(|s| s.borrow_mut().total_advance_calls += 1);
         let after = state_hash(&next);
         if Some(&after) == before.as_ref() {
-            break;
+            break 'rollout 2; // state_unchanged
         }
         before = Some(after);
-    }
+        step_idx += 1;
+    };
+    ROLLOUT_STATS.with(|s| {
+        let mut st = s.borrow_mut();
+        match end_reason {
+            0 => st.rollouts_ended_game_over += 1,
+            1 => st.rollouts_ended_current_side_done += 1,
+            2 => st.rollouts_ended_state_unchanged += 1,
+            3 => st.rollouts_ended_max_steps += 1,
+            _ => {}
+        }
+    });
     next
 }
 

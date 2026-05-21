@@ -36,7 +36,7 @@ use engine::core::state::{CurrentSide, GameState};
 use engine::dispatcher::{advance_modeled_turn_step, get_forced_attack_coin_results};
 use engine::headless_setup::setup_ai_vs_ai_game;
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
-use engine::mcts::driver::run_mcts;
+use engine::mcts::driver::{reset_rollout_stats, rollout_stats, run_mcts};
 use engine::policy::actions::enumerate_legal_ai_actions;
 use engine::policy::types::{AiPhase, LegalAiAction};
 use serde::Deserialize;
@@ -232,11 +232,25 @@ fn v4_replay_for_seed(
         // Once engine correctness is confirmed, a separate gate compares
         // Rust MCTS's selected_index to the recorded selectedIndex.
         if legal.len() > 1 {
+            reset_rollout_stats();
             let mcts_seed = format!("{}:{}:{}:mcts", trace.seed, step.side_id, i);
             let (_mcts_result, used_rng) = with_rng(step_rng.clone(), || {
                 run_mcts(&state, side_id, &config, "", mcts_seed.as_str())
             });
             step_rng = used_rng;
+            let s = rollout_stats();
+            if i < 5 {
+                eprintln!(
+                    "  step[{}] rollouts={} game_over={} side_done={} state_unchanged={} max_steps={} advances={}",
+                    i,
+                    s.rollouts_started,
+                    s.rollouts_ended_game_over,
+                    s.rollouts_ended_current_side_done,
+                    s.rollouts_ended_state_unchanged,
+                    s.rollouts_ended_max_steps,
+                    s.total_advance_calls,
+                );
+            }
         }
 
         // Apply the RECORDED action (with uid remap).
