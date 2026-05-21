@@ -88,9 +88,9 @@ assert d['terminalGameOver'] == d['config']['seeds'], 'some games did not reach 
 "
 
 echo
-echo ">>> Phase 2 NAPI bridge (libnapi_bridge.so loaded from Node)"
+echo ">>> Phase 2 NAPI bridge (loaded via engine-rs/crates/napi-bridge package)"
 cargo build --manifest-path engine-rs/Cargo.toml -p napi-bridge --release --lib >/dev/null 2>&1
-cp "$BIN_DIR/libnapi_bridge.so" "$BIN_DIR/napi_bridge.node"
+# index.js handles the .so → .node copy itself; no manual step needed.
 node engine-rs/scripts/napi-smoke.mjs > "$TMP_DIR/napi.log" 2>&1
 if ! grep -q "napi-bridge smoke OK" "$TMP_DIR/napi.log"; then
   echo "NAPI smoke FAILED. Log tail:"
