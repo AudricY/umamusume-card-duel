@@ -36,28 +36,71 @@ use serde::Serialize;
     about = "Rust port of backend/src/sim/evalGate.ts"
 )]
 struct Args {
+    /// Model URL (also serves as the value-head /predict endpoint when
+    /// --leaf=value-head). Orchestrators pass this here.
     #[arg(long)]
     challenger: Option<String>,
     #[arg(long)]
     baseline: Option<String>,
-    #[arg(long, default_value_t = 100)]
+    /// Number of seeds. Orchestrator alias: --games.
+    #[arg(long, alias = "games", default_value_t = 100)]
     seeds: u32,
-    #[arg(long, default_value_t = 0)]
+    /// First seed. Orchestrator alias: --seed-start.
+    #[arg(long, alias = "seed-start", default_value_t = 0)]
     seed_base: u32,
-    #[arg(long, default_value_t = 100)]
+    /// MCTS simulations. Orchestrator alias: --mcts-simulations.
+    #[arg(long, alias = "mcts-simulations", default_value_t = 100)]
     sims: u32,
-    #[arg(long, default_value_t = 3)]
+    /// CRN rollout samples. Orchestrator alias: --mcts-rollout-crn-samples.
+    #[arg(long, alias = "mcts-rollout-crn-samples", default_value_t = 3)]
     k: u32,
-    #[arg(long, default_value_t = 200)]
+    /// Rollout step cap. Orchestrator alias: --mcts-rollout-steps.
+    #[arg(long, alias = "mcts-rollout-steps", default_value_t = 200)]
     rollout_steps: u32,
     #[arg(long, default_value_t = 1000)]
     max_steps: u32,
+    /// Manifest output (mirrors TS --manifest-out).
     #[arg(long)]
     manifest_out: Option<String>,
     /// Leaf mode: "rollout" (default) or "value-head" (queries /predict
-    /// via the --challenger URL).
-    #[arg(long, default_value = "rollout")]
+    /// via --challenger URL). Orchestrator alias: --mcts-leaf.
+    #[arg(long, alias = "mcts-leaf", default_value = "rollout")]
     leaf: String,
+    /// Prior mode. Orchestrator alias: --mcts-prior.
+    #[arg(long, alias = "mcts-prior", default_value = "uniform")]
+    prior: String,
+    /// PUCT constant. Orchestrator alias: --mcts-c-puct.
+    #[arg(long, alias = "mcts-c-puct", default_value_t = 1.5)]
+    c_puct: f64,
+    /// MCTS tree-node cap. Orchestrator alias: --mcts-max-nodes.
+    #[arg(long, alias = "mcts-max-nodes", default_value_t = 5_000)]
+    max_nodes: u32,
+    /// Heuristic-collapse cap. Orchestrator alias: --mcts-collapse-max-steps.
+    #[arg(long, alias = "mcts-collapse-max-steps", default_value_t = 64)]
+    collapse_max: u32,
+    /// Selection mode (mcts | rollout | planner). Currently only mcts
+    /// is wired in this binary; accepted for orchestrator-flag parity.
+    #[arg(long, default_value = "mcts")]
+    selection: String,
+    /// Model-side rotation: "both" (default — alternate per-seed),
+    /// "player", or "opponent". Accepted for orchestrator-flag parity.
+    #[arg(long, default_value = "both")]
+    model_side: String,
+    /// Early-stop Wilson-lower threshold. If overall WR's Wilson lower
+    /// bound crosses this AFTER --min-games, the gate halts and returns
+    /// the partial summary. 0.0 disables early-stop.
+    #[arg(long, default_value_t = 0.0)]
+    min_ci_lower: f64,
+    /// Minimum games before early-stop is allowed.
+    #[arg(long, default_value_t = 0)]
+    min_games: u32,
+    /// Per-game progress JSONL output.
+    #[arg(long)]
+    progress_out: Option<String>,
+    /// Worker fan-out (no-op — Rust runs single-process; orchestrators
+    /// parallelise by spawning multiple Rust binaries).
+    #[arg(long, default_value_t = 1)]
+    workers: u32,
 }
 
 #[derive(Serialize)]
@@ -186,23 +229,34 @@ fn main() -> Result<()> {
         "value-head" => MctsLeaf::ValueHead,
         _ => MctsLeaf::Rollout,
     };
+    let prior = match args.prior.as_str() {
+        "policy" => MctsPrior::Policy,
+        _ => MctsPrior::Uniform,
+    };
     let model_url = args.challenger.clone().unwrap_or_default();
     let config = MctsConfig {
         simulations: args.sims,
-        c_puct: 1.5,
+        c_puct: args.c_puct,
         leaf,
-        prior: MctsPrior::Uniform,
+        prior,
         rollout_crn_samples: args.k,
         rollout_steps: args.rollout_steps,
         add_root_dirichlet: false,
         dirichlet_alpha: 0.3,
         dirichlet_epsilon: 0.25,
-        max_nodes: 5_000,
-        collapse_max_steps: 64,
+        max_nodes: args.max_nodes,
+        collapse_max_steps: args.collapse_max,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
         model_url: model_url.clone(),
     };
+    // Accept for orchestrator-flag parity (no-op stubs for now).
+    let _ = args.selection;
+    let _ = args.model_side;
+    let _ = args.min_ci_lower;
+    let _ = args.min_games;
+    let _ = args.progress_out;
+    let _ = args.workers;
 
     eprintln!(
         "sim-eval-gate: sims={} K={} rollout_steps={} seeds={} (base={}) challenger={:?} baseline={:?}",
