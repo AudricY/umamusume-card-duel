@@ -2,27 +2,29 @@
 
 ## Open
 
-- **2026-05-21: 3b candidate-1 kill-test (chunk 5g) — labels
-  confidently wrong on contested heads; stronger-MCTS demoted from
-  cheap-first.** Chunk 5f FALSIFIED candidate-3 (BC-on-relabel
-  regressed −0.0179 outside ±0.022 noise). Chunk 5g read-only
-  label-divergence audit on the 11798 relabel rows then identified
-  the binding sub-case: Case B — relabel `policyTargets` decisively
-  diverge from the untrained 96-d ref on the same states, with wide
-  margins on the three heads (`pass`/`playTrainer`/`retreatAttack`)
-  where BC val acc cratered. Direction call: stronger-MCTS
-  re-relabel is no longer the cheap-first candidate-1 test;
-  superseded by a 3-step diagnostic ladder (value-eval audit on
-  contested-confident rows → 400-sim argmax-flip test → only then
-  escalate sims). Canonical: `docs/ai-research/progress/r16.md` §
-  "3b — BC-on-relabel probe (chunk 5f)" / sub-§ "Candidate-1
-  kill-test (chunk 5g)". Ladder step-2 brief now concrete
-  (rule-bot-mirror @ 400 sims, ~20-40 min); step-1 deferred pending
-  CRN-paired clarification — see sub-§ "Step ordering refined
-  (chunk 5h scoping)".
+- **2026-05-21: chunk 5i candidate-1 ladder step 2 = DIES; next
+  direction call needed.** Step 2 (rule-bot-mirror @ 400 sims) ran
+  end-to-end; argmax flip 17.3% (n=365) on contested-head + max-prob
+  ≥0.8 subset — below the 30% LIVES threshold AND the 20% sticky
+  cutoff. Sim count is not the binding lever. Candidate-1
+  (stronger-MCTS-fixes-corpus) eliminated. Forward direction is
+  either (a) reframed step 1 (rollout-leaf return audit on contested
+  states, no CRN-paired ambiguity) OR (b) pivot to user-gated W6
+  HP-sweep (CEILING PATH A) since the 3a corpus arm is exhausted by
+  evidence. Secondary finding: relabel-MCTS RNG bleed via global
+  `random()` proxy invalidates sim-count A/B determinism (tracked as
+  P3 queue item `mcts-relabel-rng-bleed`). Canonical:
+  `docs/ai-research/progress/r16.md` sub-§ "Step 2 verdict (chunk 5i)".
 
 ## Resolved Pointers
 
+- 2026-05-21: 3b candidate-1 forward-line direction call RESOLVED
+  (DIES at step 2). Chunk 5g labels-confidently-wrong + chunk 5h
+  ladder scoping + chunk 5i argmax-flip @ 400 sims (17.3%, n=365)
+  collectively eliminate candidate-1 (stronger-MCTS fixes corpus).
+  Sim count not the lever. Canonical:
+  `docs/ai-research/progress/r16.md` sub-§§ "Candidate-1 kill-test
+  (chunk 5g)" / "Step 2 verdict (chunk 5i)".
 - 2026-05-18: R16 contested-coverage pilot (Fork A cheap tier, W6
   predecessor #1) DONE = POSITIVE slope. Option1 resample sweep at fixed
   retained-count/capacity: legal_action_count 0.20/0.30/0.45 →

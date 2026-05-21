@@ -386,3 +386,66 @@ re-tested candidate-1 with a read-only label-divergence check
 (rather than the proposed expensive stronger-MCTS re-relabel)
 and found labels confidently wrong on contested heads — see
 the chunk-5g ladder in `r16.md`.
+
+## Chunk 5g — per-kind table + disagreement confidence
+
+Compact summary lives in `r16.md` sub-§ "Candidate-1 kill-test (chunk 5g)".
+
+Per-action-kind agreement (binned on relabel argmax kind), full
+table from the 11798-row label-divergence audit:
+
+| kind | n | agree | KL(rel‖ref) |
+| --- | ---: | ---: | ---: |
+| playTrainer | 4732 | **0.499** | 0.415 |
+| pass | 2353 | **0.479** | 0.424 |
+| retreatAttack | 140 | **0.464** | 0.327 |
+| attachEnergy | 2572 | 0.848 | 0.241 |
+| evolve | 700 | 0.863 | 0.117 |
+| playBasic | 554 | 0.986 | 0.095 |
+| attack | 471 | 0.781 | 0.225 |
+| useAbility | 276 | 0.822 | 0.152 |
+
+Disagreement confidence (n=4,320 disagreeing rows): relabel max-prob
+when disagreeing mean **0.579**, median 0.54, **p90 0.91** —
+hyper-confident different picks. Relabel prob on ref's choice:
+mean 0.227, p10 0.03 — ref's pick often near-zero under relabel.
+27% of all rows (n=3,121) have relabel confidence ≥0.8; in that
+bucket ref/relabel still only agree 70% of the time. Mean JSD
+**0.0739 nats**.
+
+## Chunk 5h ladder scoping (full prose)
+
+Compact summary lives in `r16.md` sub-§ "Step ordering refined
+(chunk 5h scoping) — superseded by 5i".
+
+- **Step order FLIPPED — step 2 first.** Step 2 (argmax-flip at
+  400 sims) is cheaper than step 1 (value-eval audit needs ~200
+  LOC across `mcts.ts` + `evaluateModelVsHeuristic.ts`; the
+  "CRN-paired variance across actions" framing is ambiguous —
+  current MCTS uses within-leaf K=3 CRN seeds, across-action
+  paired CRN does not exist). Step 1 deferred pending CRN-paired
+  clarification.
+- **Step 2 recipe constraint: `rule-bot-mirror` ONLY.** Server-free,
+  baseline-selected, so visited states at 400 sims are IDENTICAL
+  to 100-sim row-for-row (only `policyTargets` differs).
+  `policy-vs-rule` / `search-vs-rule` use served-checkpoint +
+  MCTS-driven moves → trajectories diverge at 4× sims, no
+  row-by-row diff possible. (Chunk 5i invalidated the
+  rule-bot-mirror determinism assumption — see r16.md § "Step 2
+  verdict (chunk 5i)" secondary finding.)
+- **Step 2 mechanics.** Re-run rule-bot-mirror at
+  `--mcts-simulations 400`, same seed range (10000-…), produces a
+  new `traces.jsonl` keyed identically by `(seed, modelSide,
+  step)`. Small ~30 LOC Python join compares argmax across the
+  100/400-sim corpora on the kill-test confident-disagreement
+  subset (contested-head rows, relabel max-prob ≥ 0.8 from
+  `candidate1-killtest/metrics-confidence.json`).
+- **Wall-clock**: ~20-40 min foreground at 16 workers
+  (rule-bot-mirror at 100 sims was ~5-10 min; MCTS linear in sims).
+- **Verdict criteria**: >30% argmax flip on confident-disagree rows
+  → sim count load-bearing, candidate-1 lives, escalate to
+  full-corpus 400-sim relabel + BC retrain; >80% argmax sticky →
+  bug upstream of sim count (rollout policy / leaf eval / CRN),
+  candidate-1 dies, abandon stronger-MCTS line. Step 1 reopens
+  only if step 2 negative AND across-action CRN statistic
+  clarified.
