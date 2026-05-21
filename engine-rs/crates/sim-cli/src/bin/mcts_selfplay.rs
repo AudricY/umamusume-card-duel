@@ -126,6 +126,15 @@ impl Args {
     }
 }
 
+/// Per-game wrapper. Emitted to `--out` ONLY when `--record-rows` is OFF.
+/// When `--record-rows` is ON, the orchestrator's distill consumer expects
+/// the TS-flat per-decision shape (`SelfPlayRow`), so we bypass this
+/// wrapper and write rows one-per-line instead — see
+/// `flush_rows_with_game_result` for the post-hoc fill of `valueTarget` +
+/// `result` after the game ends. The wrapper itself stays around so any
+/// caller that opted out of `--record-rows` still gets the per-game summary
+/// the binary's earlier callers (sim-cli throughput probe, ad-hoc trace
+/// inspection) consumed.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GameRecord {
@@ -140,14 +149,40 @@ struct GameRecord {
     rows: Vec<SelfPlayRow>,
 }
 
-/// Mirror of TS `SelfPlayRow` in `backend/src/sim/mctsSelfPlay.ts:485`.
-/// Subset of fields populated today; full parity in a follow-up.
+/// `{ winner, pointsP, pointsO }` — mirrors TS `mctsSelfPlay.ts:530`'s
+/// post-hoc `result` object. `null` until the game ends, at which point
+/// `flush_rows_with_game_result` fills every row from the same game with a
+/// reference to the SAME terminal result. Per-game scope is sufficient
+/// since the loader never cross-references across games.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct GameResult {
+    winner: Option<String>,
+    #[serde(rename = "pointsP")]
+    points_p: u8,
+    #[serde(rename = "pointsO")]
+    points_o: u8,
+}
+
+/// TS-flat per-decision row, byte-shape-compatible with
+/// `backend/src/sim/mctsSelfPlay.ts:78-101` `SelfPlayRow` and consumed by
+/// `training/uma_ai/selfplay_dataset.py:load_mcts_selfplay_samples` (the
+/// distill input). All TS-flat keys are required; `value_target` + `result`
+/// are filled in post-hoc when the game terminates so the Python loader's
+/// `valueTarget ∈ {-1, 0, 1}` check passes (smoke
+/// `training/r12_selfplay_smoke.py:135-137`). `seed` is serialized as a
+/// string to match TS `seed: string` (TS passes the seed-base string down
+/// from the orchestrator and never reparses it as a number).
+///
+/// The `kind: "mcts-selfplay"` discriminator is the binding constraint —
+/// the Python loader raises `RowSchemaError` if it's missing (this is what
+/// blew up Slice 2 of `rust-port-orchestrator-wiring`).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SelfPlayRow {
     schema_version: u32,
     kind: &'static str,
-    seed: u32,
+    seed: String,
     side_id: String,
     step: u32,
     turn_number: u32,
@@ -155,12 +190,50 @@ struct SelfPlayRow {
     legal_actions: Vec<LegalAiAction>,
     selected_action_index: usize,
     visit_distribution: Vec<f64>,
+    root_priors: Vec<f64>,
     root_value: f64,
+    root_prior_entropy: f64,
+    root_prior_argmax: usize,
+    visited_hashes: u32,
     expansions: u32,
     leaf_evaluations: u32,
+    /// `null` at emit time; filled in by `flush_rows_with_game_result`
+    /// after the game terminates: +1 if this side won, -1 if lost, 0 on
+    /// draw. Mirrors TS `mctsSelfPlay.ts:532`.
+    value_target: Option<i8>,
+    /// `null` at emit time; filled in post-hoc with `{ winner, pointsP,
+    /// pointsO }` once the game terminates. Same per-row reference for
+    /// every row in the same game.
+    result: Option<GameResult>,
 }
 
 const ROW_SCHEMA_VERSION: u32 = 1;
+
+/// Post-hoc fill: identical structure to TS `mctsSelfPlay.ts:530-534` —
+/// after the game terminates, every row's `valueTarget` is computed from
+/// the row's `sideId` against the terminal `winner` (+1 / -1 / 0), and
+/// `result` carries the same `{ winner, pointsP, pointsO }` for every row
+/// of the same game.
+fn fill_terminal_result(
+    rows: &mut [SelfPlayRow],
+    winner: Option<&str>,
+    points_p: u8,
+    points_o: u8,
+) {
+    let result = GameResult {
+        winner: winner.map(|s| s.to_string()),
+        points_p,
+        points_o,
+    };
+    for row in rows.iter_mut() {
+        row.value_target = Some(match winner {
+            None => 0,
+            Some(w) if w == row.side_id => 1,
+            Some(_) => -1,
+        });
+        row.result = Some(result.clone());
+    }
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,7 +332,7 @@ fn drive_one_game(
                 rows.push(SelfPlayRow {
                     schema_version: ROW_SCHEMA_VERSION,
                     kind: "mcts-selfplay",
-                    seed,
+                    seed: seed_str.clone(),
                     side_id: match side {
                         SideId::Player => "player".into(),
                         SideId::Opponent => "opponent".into(),
@@ -270,9 +343,16 @@ fn drive_one_game(
                     legal_actions: legal.clone(),
                     selected_action_index: idx,
                     visit_distribution,
+                    root_priors: mcts_result.diagnostics.root_priors.clone(),
                     root_value: mcts_result.diagnostics.root_value,
+                    root_prior_entropy: mcts_result.diagnostics.root_prior_entropy,
+                    root_prior_argmax: mcts_result.diagnostics.root_prior_argmax,
+                    visited_hashes: mcts_result.diagnostics.visited_hashes,
                     expansions: mcts_result.diagnostics.expansions,
                     leaf_evaluations: mcts_result.diagnostics.leaf_evaluations,
+                    // Post-hoc backfill below once the game terminates.
+                    value_target: None,
+                    result: None,
                 });
             }
 
@@ -308,6 +388,15 @@ fn drive_one_game(
         SideId::Player => "player".to_string(),
         SideId::Opponent => "opponent".to_string(),
     });
+
+    // Post-hoc backfill of `valueTarget` + `result` on every row of this
+    // game, mirroring TS `mctsSelfPlay.ts:531-534`. The Python loader
+    // (`training/r12_selfplay_smoke.py:135-137`) hard-asserts
+    // `valueTarget ∈ {-1, 0, 1}`, so this fill is non-optional any time
+    // `record_rows` is on. Cheap: rows is small per game.
+    let points_p = state.side(SideId::Player).points;
+    let points_o = state.side(SideId::Opponent).points;
+    fill_terminal_result(&mut rows, winner.as_deref(), points_p, points_o);
 
     GameRecord {
         seed,
@@ -395,8 +484,23 @@ fn main() -> Result<()> {
             _ => draws += 1,
         }
         if let Some(w) = writer.as_mut() {
-            let line = serde_json::to_string(&record)?;
-            writeln!(w, "{}", line)?;
+            if args.record_rows {
+                // TS-flat shape: one line per decision row. This is what
+                // `training/uma_ai/selfplay_dataset.py:load_mcts_selfplay_samples`
+                // expects (Slice 2 schema gap — `kind`/`schemaVersion`/
+                // `sideId`/`observation`/`legalActions`/`visitDistribution`/
+                // `rootPriors`/`rootValue`/`valueTarget`/`result` per row).
+                for row in record.rows.iter() {
+                    let line = serde_json::to_string(row)?;
+                    writeln!(w, "{}", line)?;
+                }
+            } else {
+                // Per-game wrapper retained for callers that opted out of
+                // `--record-rows` (e.g., wall-clock probe runs that just
+                // want game summaries).
+                let line = serde_json::to_string(&record)?;
+                writeln!(w, "{}", line)?;
+            }
         }
     }
 
@@ -427,4 +531,138 @@ fn main() -> Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Schema-parity lock for the TS-flat per-decision row shape.
+    //!
+    //! The Python loader
+    //! (`training/uma_ai/selfplay_dataset.py:load_mcts_selfplay_samples`)
+    //! and its smoke
+    //! (`training/r12_selfplay_smoke.py:122-126`) require the EXACT key
+    //! set asserted below. Slice 2 of `rust-port-orchestrator-wiring`
+    //! blew up because the Rust path was emitting a per-game wrapper
+    //! with no `kind` discriminator instead. Pin the key set so a future
+    //! schema drift is caught at `cargo test` instead of at distill-stage
+    //! crash time mid-iteration.
+    use super::*;
+    use engine::core::random::{with_rng, Rng};
+    use engine::headless_setup::setup_ai_vs_ai_game;
+    use engine::policy::observation::build_public_observation;
+
+    #[test]
+    fn selfplay_row_serialization_matches_ts_flat_key_set() {
+        let rng = Rng::from_seed("schema-test:selfplay", "selfplay");
+        let (state, _used) = with_rng(rng, || setup_ai_vs_ai_game());
+        let observation = build_public_observation(&state, SideId::Player);
+        let row = SelfPlayRow {
+            schema_version: ROW_SCHEMA_VERSION,
+            kind: "mcts-selfplay",
+            seed: "0".to_string(),
+            side_id: "player".to_string(),
+            step: 0,
+            turn_number: state.turn_number,
+            observation,
+            legal_actions: Vec::new(),
+            selected_action_index: 0,
+            visit_distribution: vec![1.0],
+            root_priors: vec![1.0],
+            root_value: 0.0,
+            root_prior_entropy: 0.0,
+            root_prior_argmax: 0,
+            visited_hashes: 0,
+            expansions: 0,
+            leaf_evaluations: 0,
+            value_target: Some(0),
+            result: Some(GameResult {
+                winner: None,
+                points_p: 0,
+                points_o: 0,
+            }),
+        };
+        let value = serde_json::to_value(&row).expect("serialize row");
+        let object = value.as_object().expect("row is a JSON object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort();
+        // Canonical TS-flat key set — keep IN SYNC with
+        // `backend/src/sim/mctsSelfPlay.ts:78-101` (`SelfPlayRow`) and
+        // `training/r12_selfplay_smoke.py:122-126` (`required`).
+        let mut expected = vec![
+            "schemaVersion",
+            "kind",
+            "seed",
+            "sideId",
+            "step",
+            "turnNumber",
+            "observation",
+            "legalActions",
+            "selectedActionIndex",
+            "visitDistribution",
+            "rootPriors",
+            "rootValue",
+            "rootPriorEntropy",
+            "rootPriorArgmax",
+            "visitedHashes",
+            "expansions",
+            "leafEvaluations",
+            "valueTarget",
+            "result",
+        ];
+        expected.sort();
+        assert_eq!(
+            keys, expected,
+            "TS-flat key set drift; sync with mctsSelfPlay.ts SelfPlayRow"
+        );
+        assert_eq!(object.get("kind").and_then(|v| v.as_str()), Some("mcts-selfplay"));
+        assert_eq!(object.get("schemaVersion").and_then(|v| v.as_u64()), Some(1));
+        assert!(object.get("seed").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[test]
+    fn fill_terminal_result_assigns_signed_value_targets() {
+        let rng = Rng::from_seed("fill-test:selfplay", "selfplay");
+        let (state, _used) = with_rng(rng, || setup_ai_vs_ai_game());
+        let observation = build_public_observation(&state, SideId::Player);
+        let make = |side: &str| SelfPlayRow {
+            schema_version: ROW_SCHEMA_VERSION,
+            kind: "mcts-selfplay",
+            seed: "0".to_string(),
+            side_id: side.to_string(),
+            step: 0,
+            turn_number: 0,
+            observation: observation.clone(),
+            legal_actions: Vec::new(),
+            selected_action_index: 0,
+            visit_distribution: vec![],
+            root_priors: vec![],
+            root_value: 0.0,
+            root_prior_entropy: 0.0,
+            root_prior_argmax: 0,
+            visited_hashes: 0,
+            expansions: 0,
+            leaf_evaluations: 0,
+            value_target: None,
+            result: None,
+        };
+        let mut rows = vec![make("player"), make("opponent"), make("player")];
+        fill_terminal_result(&mut rows, Some("opponent"), 1, 3);
+        assert_eq!(rows[0].value_target, Some(-1));
+        assert_eq!(rows[1].value_target, Some(1));
+        assert_eq!(rows[2].value_target, Some(-1));
+        for row in &rows {
+            let result = row.result.as_ref().expect("result filled");
+            assert_eq!(result.winner.as_deref(), Some("opponent"));
+            assert_eq!(result.points_p, 1);
+            assert_eq!(result.points_o, 3);
+        }
+
+        let mut draw_rows = vec![make("player"), make("opponent")];
+        fill_terminal_result(&mut draw_rows, None, 0, 0);
+        assert_eq!(draw_rows[0].value_target, Some(0));
+        assert_eq!(draw_rows[1].value_target, Some(0));
+        for row in &draw_rows {
+            assert!(row.result.as_ref().unwrap().winner.is_none());
+        }
+    }
 }

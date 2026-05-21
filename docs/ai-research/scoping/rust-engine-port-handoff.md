@@ -852,3 +852,41 @@ events incl. `iteration_error`), `runs/R110-rust-parity/driver.log`
 (full driver transcript). TS side directory `runs/R110-rust-parity-ts/`
 is empty (TS side never launched — Rust failure was sequential-blocker).
 
+**Resolution (2026-05-21 09:16Z, option a landed):** Rust
+`sim-mcts-selfplay --record-rows` now emits TS-flat per-decision rows. The
+per-game `GameRecord` wrapper stays for `--record-rows=false` callers;
+`true` writes one TS-flat row per line. Key set is identical to TS
+(`schemaVersion`/`kind="mcts-selfplay"`/`seed`/`sideId`/`step`/
+`turnNumber`/`observation`/`legalActions`/`selectedActionIndex`/
+`visitDistribution`/`rootPriors`/`rootValue`/`rootPriorEntropy`/
+`rootPriorArgmax`/`visitedHashes`/`expansions`/`leafEvaluations`/
+`valueTarget`/`result`); `valueTarget` + `result` are post-hoc backfilled
+once the game terminates (mirrors `mctsSelfPlay.ts:531-534`). `seed` is
+serialized as a string for TS parity. Two cargo unit tests inside
+`engine-rs/crates/sim-cli/src/bin/mcts_selfplay.rs` (`#[cfg(test)] mod
+tests`) pin the canonical key set and `fill_terminal_result` semantics so
+future schema drift is caught at `cargo test` instead of distill-stage
+crash time.
+
+**Schema-parity smoke (one-shot, not committed):** Rust + TS
+`sim:mcts-selfplay` at `--games 2 --seed-start 30120 --mcts-prior uniform
+--mcts-leaf rollout` (uniform prior avoids needing a serve_onnx for a
+schema-only check); first-row top-level + nested `observation` + nested
+`legalActions[0]` key sets matched exactly; `kind==='mcts-selfplay'` on
+both; Python loader `load_mcts_selfplay_samples` accepted 18 Rust rows
+cleanly into `MctsSelfPlaySample`s. Numeric outcomes diverge (uniform-
+prior simulations diverge between engines) — out of scope for schema
+parity.
+
+**Slice 2 parity-driver re-launched** 09:16Z in background (`nohup bash
+runs/R110-rust-parity/driver.sh > runs/R110-rust-parity/driver.log 2>&1
+&`). Cleared partial `runs/R110-rust-parity-rust/iter-0/` (no prior
+`orchestrator-state.json` existed); `events.jsonl` preserved for
+historical comparison but is being overwritten by the re-run. Rust side
+in-flight: 191 rows at +20s (60-game target; ETA ~30-40min); TS side
+sequential after (~90-100min).
+
+**Secondary follow-up unchanged:** Rust binary `--workers` is documented
+single-process; orchestrator forwards `--workers 24` but only TS path
+fans out. Not load-bearing yet — track for after the parity verdict.
+
