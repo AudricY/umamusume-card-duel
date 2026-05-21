@@ -22,6 +22,7 @@ use engine::dispatcher::{
 use engine::headless_setup::setup_ai_vs_ai_game;
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
 use engine::mcts::driver::run_mcts;
+use engine::mcts::sample::pick_from_visits;
 use engine::policy::actions::enumerate_legal_ai_actions;
 use engine::policy::observation::build_public_observation;
 use engine::policy::types::{LegalAiAction, PublicObservation};
@@ -179,38 +180,6 @@ struct TerminalReasons {
     game_over: u32,
     max_steps: u32,
     stalled: u32,
-}
-
-/// Mirror of TS `pickFromVisits` in backend/src/sim/mctsSelfPlay.ts:546.
-/// Argmax when `temperature` <= 0 or only one action; otherwise resample
-/// proportional to visits^(1/T).
-fn pick_from_visits(
-    visits: &[u32],
-    argmax_idx: usize,
-    temperature: f64,
-    pick_rng: &mut Rng,
-) -> usize {
-    if temperature <= 0.0 || visits.len() <= 1 {
-        return argmax_idx;
-    }
-    let inv_t = 1.0 / temperature;
-    let weights: Vec<f64> = visits
-        .iter()
-        .map(|&n| (n as f64).max(0.0).powf(inv_t))
-        .collect();
-    let total: f64 = weights.iter().sum();
-    if total <= 0.0 {
-        return argmax_idx;
-    }
-    let r = pick_rng.next_f64() * total;
-    let mut cum = 0.0;
-    for (i, w) in weights.iter().enumerate() {
-        cum += *w;
-        if r <= cum {
-            return i;
-        }
-    }
-    weights.len() - 1
 }
 
 fn drive_one_game(

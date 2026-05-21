@@ -58,6 +58,45 @@ pub fn sample_gamma(alpha: f64, rng: &mut Rng) -> f64 {
     }
 }
 
+/// AlphaZero temperature sampling. Mirror of TS `pickFromVisits` at
+/// `backend/src/sim/mctsSelfPlay.ts:546`.
+///
+/// When `temperature <= 0` or only one action is available, returns
+/// `argmax_idx` (greedy). Otherwise resamples proportional to
+/// `visits^(1/T)` using one `rng.next_f64()` draw.
+///
+/// Sampling order is deterministic given the RNG: same seed yields
+/// the same index, so callers that need a "stochastic but reproducible"
+/// trace can fork from a per-step seed.
+pub fn pick_from_visits(
+    visits: &[u32],
+    argmax_idx: usize,
+    temperature: f64,
+    rng: &mut Rng,
+) -> usize {
+    if temperature <= 0.0 || visits.len() <= 1 {
+        return argmax_idx;
+    }
+    let inv_t = 1.0 / temperature;
+    let weights: Vec<f64> = visits
+        .iter()
+        .map(|&n| (n as f64).max(0.0).powf(inv_t))
+        .collect();
+    let total: f64 = weights.iter().sum();
+    if total <= 0.0 {
+        return argmax_idx;
+    }
+    let r = rng.next_f64() * total;
+    let mut cum = 0.0;
+    for (i, w) in weights.iter().enumerate() {
+        cum += *w;
+        if r <= cum {
+            return i;
+        }
+    }
+    weights.len() - 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +139,70 @@ mod tests {
         let b = sample_dirichlet(5, 0.3, &mut rng_b);
         for (x, y) in a.iter().zip(b.iter()) {
             assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+
+    // ---- pick_from_visits properties -----------------------------------
+
+    #[test]
+    fn pick_from_visits_temp_zero_is_argmax() {
+        let mut rng = Rng::from_seed(1u32, "pick-zero");
+        let visits = vec![3, 17, 5, 2];
+        // argmax_idx = 1; with T=0 we must always return it regardless of RNG.
+        for _ in 0..50 {
+            assert_eq!(pick_from_visits(&visits, 1, 0.0, &mut rng), 1);
+        }
+    }
+
+    #[test]
+    fn pick_from_visits_single_action_is_argmax() {
+        let mut rng = Rng::from_seed(2u32, "pick-single");
+        let visits = vec![42];
+        // visits.len() == 1 short-circuits to argmax even with T > 0.
+        for _ in 0..20 {
+            assert_eq!(pick_from_visits(&visits, 0, 1.0, &mut rng), 0);
+        }
+    }
+
+    #[test]
+    fn pick_from_visits_deterministic_given_seed() {
+        let mut rng_a = Rng::from_seed(7u32, "pick-det");
+        let mut rng_b = Rng::from_seed(7u32, "pick-det");
+        let visits = vec![10, 5, 30, 7, 20];
+        let a: Vec<_> = (0..30)
+            .map(|_| pick_from_visits(&visits, 2, 1.0, &mut rng_a))
+            .collect();
+        let b: Vec<_> = (0..30)
+            .map(|_| pick_from_visits(&visits, 2, 1.0, &mut rng_b))
+            .collect();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pick_from_visits_explores_when_temperature_positive() {
+        // With non-trivial visits and T=1.5, samples must NOT all equal
+        // argmax — otherwise temperature is a no-op.
+        let mut rng = Rng::from_seed(99u32, "pick-explore");
+        let visits = vec![20, 18, 22, 19, 21]; // close enough to encourage sampling spread
+        let argmax = 2;
+        let samples: Vec<_> = (0..200)
+            .map(|_| pick_from_visits(&visits, argmax, 1.5, &mut rng))
+            .collect();
+        let non_argmax = samples.iter().filter(|&&i| i != argmax).count();
+        assert!(
+            non_argmax > 50,
+            "expected substantial exploration; only {}/200 non-argmax",
+            non_argmax
+        );
+    }
+
+    #[test]
+    fn pick_from_visits_all_zero_falls_back_to_argmax() {
+        let mut rng = Rng::from_seed(11u32, "pick-zero-total");
+        let visits = vec![0, 0, 0];
+        // total == 0 → fallback to argmax.
+        for _ in 0..20 {
+            assert_eq!(pick_from_visits(&visits, 1, 1.0, &mut rng), 1);
         }
     }
 }
