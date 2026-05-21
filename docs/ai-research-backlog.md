@@ -242,16 +242,12 @@ section).
    retained rows are bottlenecked by contested decision-state coverage, not
    schema/card-id loss or generic row count.
 
-2. **Rule-bot-covered state corpus recipe** — SUPERSEDED 2026-05-21 by
-   `training-data-deep-program` done-negative (chunks 5a-i). See
-   `docs/ai-research/progress/r16.md`. **High-sim-regime caveat**: the
-   deep-program kill criterion (argmax-flip at 4x sims) was measured at
-   400-800 sims; at 50,000 sims the answer may differ — see queue
-   `high-sim-mcts-regime-probe`.
-
-3. **Preference pairs on rule-bot-covered states (DPO/BT)** — SUPERSEDED
-   2026-05-21 by `training-data-deep-program` done-negative (chunks 5a-i).
-   See `docs/ai-research/progress/r16.md`. **Same caveat as item 2 above.**
+2. **Rule-bot-covered state corpus recipe** + **3. Preference pairs on
+   rule-bot-covered states (DPO/BT)** — both SUPERSEDED 2026-05-21 by
+   `training-data-deep-program` done-negative (chunks 5a-i,
+   `docs/ai-research/progress/r16.md`). High-sim-regime caveat: kill
+   criterion (argmax-flip at 4x sims) measured at 400-800 sims; at 50,000
+   sims may differ — queue `high-sim-mcts-regime-probe`.
 
 4. **Side-conditioned retained-data balancing — P2.**
    If side weakness is data-linked, balance retained player/opponent decision
