@@ -148,7 +148,7 @@ def main() -> None:
         # Plumbing PASSED — endpoint validates inputs and returns sane errors.
         print(json.dumps({
             "status": "PASS",
-            "note": "/ai/decide endpoint is reachable and validates inputs. Full real-state decision call is a TODO for the next W5 milestone (requires UI runtime hook).",
+            "note": "/ai/decide endpoint is reachable and validates inputs. Real-state decision coverage lives in r14_ai_decide_e2e_smoke.py (R14.E).",
         }, indent=2))
     finally:
         serve.terminate()
