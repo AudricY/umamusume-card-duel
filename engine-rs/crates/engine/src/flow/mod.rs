@@ -6,6 +6,7 @@
 //! hand-off doc.
 
 pub mod ability_rules;
+pub mod ai;
 pub mod board;
 pub mod combat;
 pub mod eligibility;
