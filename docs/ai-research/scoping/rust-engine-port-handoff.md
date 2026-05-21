@@ -28,7 +28,8 @@
 | MCTS self-play, no rows | 5 seeds | 3.07 g/s | 1.63 sec |
 | MCTS self-play, +row recording | 100 seeds | 3.89 g/s | 25.7 sec, 639 rows, 0 stalls |
 | MCTS vs heuristic eval-gate | 10 seeds | 3.05 g/s | 90% WR, Wilson 60-98% |
-| **MCTS vs heuristic eval-gate** | **50 seeds** | **4.43 g/s** | **64% WR, Wilson 50-76% (p<0.05 vs 50%)** |
+| MCTS vs heuristic eval-gate | 50 seeds | 4.43 g/s | 64% WR, Wilson 50-76% (p<0.05) |
+| **MCTS vs heuristic eval-gate** | **100 seeds** | **4.62 g/s** | **62% WR, Wilson 52-71% (p<0.01)** |
 | **MCTS selfplay + row recording** | **50 seeds** | **3.53 g/s** | **14.2 sec, 337 rows, 1.8 MB JSONL, Python parse ✅** |
 
 The 50-seed eval-gate result confirms MCTS provides a measurable
