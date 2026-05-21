@@ -36,7 +36,7 @@ use engine::core::state::{CurrentSide, GameState};
 use engine::dispatcher::{advance_modeled_turn_step, get_forced_attack_coin_results};
 use engine::headless_setup::setup_ai_vs_ai_game;
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
-use engine::mcts::driver::{reset_rollout_stats, rollout_stats, run_mcts};
+use engine::mcts::driver::{reset_rollout_stats, rollout_stats, run_mcts, set_verbose_first_rollout};
 use engine::policy::actions::enumerate_legal_ai_actions;
 use engine::policy::types::{AiPhase, LegalAiAction};
 use serde::Deserialize;
@@ -233,10 +233,13 @@ fn v4_replay_for_seed(
         // Rust MCTS's selected_index to the recorded selectedIndex.
         if legal.len() > 1 {
             reset_rollout_stats();
+            // Only first multi-action step prints per-advance trace.
+            set_verbose_first_rollout(i == 1);
             let mcts_seed = format!("{}:{}:{}:mcts", trace.seed, step.side_id, i);
             let (_mcts_result, used_rng) = with_rng(step_rng.clone(), || {
                 run_mcts(&state, side_id, &config, "", mcts_seed.as_str())
             });
+            set_verbose_first_rollout(false);
             step_rng = used_rng;
             let s = rollout_stats();
             if i < 5 {

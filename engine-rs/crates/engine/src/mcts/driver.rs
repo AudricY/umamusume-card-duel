@@ -625,6 +625,14 @@ thread_local! {
     /// Reset via `reset_rollout_stats()`; readable via `rollout_stats()`.
     pub static ROLLOUT_STATS: std::cell::RefCell<RolloutStats> =
         std::cell::RefCell::new(RolloutStats::default());
+    /// When set, the FIRST rollout of each MCTS call prints per-advance
+    /// (phase, side, rng-delta) to stderr.
+    pub static VERBOSE_FIRST_ROLLOUT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+pub fn set_verbose_first_rollout(on: bool) {
+    VERBOSE_FIRST_ROLLOUT.with(|c| c.set(on));
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -652,7 +660,12 @@ pub fn rollout_stats() -> RolloutStats {
 }
 
 fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameState {
-    ROLLOUT_STATS.with(|s| s.borrow_mut().rollouts_started += 1);
+    let rollout_idx = ROLLOUT_STATS.with(|s| {
+        let mut st = s.borrow_mut();
+        st.rollouts_started += 1;
+        st.rollouts_started
+    });
+    let verbose = VERBOSE_FIRST_ROLLOUT.with(|c| c.get()) && rollout_idx == 1;
     let outer_draws_before = peek_active_outer_draws().unwrap_or(0);
     let mut next = state.clone();
     let mut before: Option<String> = None;
@@ -672,6 +685,8 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
             CurrentSide::Opponent => SideId::Opponent,
             CurrentSide::Done => break 'rollout 1, // current_side_done
         };
+        let pre_advance_draws = peek_active_outer_draws().unwrap_or(0);
+        let pre_opponent_step = next.opponent_turn_step;
         // get_forced_attack_coin_results: TS calls with INNER rng explicitly
         // (mcts.ts:653 rolloutHeuristic). Keep the inner-rng install here.
         let forced = with_rng_borrow(rng, || get_forced_attack_coin_results(&next));
@@ -686,6 +701,14 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
             advance_opponent_turn_step(&mut next, forced.clone());
         }
         ROLLOUT_STATS.with(|s| s.borrow_mut().total_advance_calls += 1);
+        if verbose {
+            let post_advance_draws = peek_active_outer_draws().unwrap_or(pre_advance_draws);
+            let advance_draws = post_advance_draws.saturating_sub(pre_advance_draws);
+            eprintln!(
+                "    [rollout 1 advance {}] side={:?} step={:?} draws+={} turn={}",
+                step_idx, side_id, pre_opponent_step, advance_draws, next.turn_number
+            );
+        }
         let after = state_hash(&next);
         if Some(&after) == before.as_ref() {
             break 'rollout 2; // state_unchanged
