@@ -792,3 +792,63 @@ npm --workspace backend run sim:replay-golden-traces -- --in /tmp/smoke.jsonl
 cargo run --manifest-path engine-rs/Cargo.toml -p golden-replay -- \
   --input /tmp/smoke.jsonl --schema-only
 ```
+
+---
+
+## Phase 1h follow-up — Slice 2 parity-run finding (2026-05-21)
+
+**Filed from `rust-port-orchestrator-wiring` Slice 2 parity launch
+(`runs/R110-rust-parity/driver.log`):** Rust `sim-mcts-selfplay`
+`selfplay.jsonl` schema is **NOT** drop-in compatible with the orchestrator's
+distill consumer (`training/uma_ai/selfplay_dataset.py:load_mcts_selfplay_samples`
+expects `kind="mcts-selfplay"` flat per-decision rows). Rust emits ONE record
+per game with a nested `rows` array (keys `[seed, terminalReason, turnNumber,
+winner, totalSteps, modelDecisions, rows]`, no `kind` tag); TS emits N flat
+records per game (keys include `schemaVersion, kind="mcts-selfplay", seed,
+sideId, step, observation, legalActions, selectedActionIndex, visitDistribution,
+rootPriors, rootValue, valueTarget, result, …`).
+
+**Where the gap escaped Slice 1 smoke:** Slice 1's 2-game smoke covered the
+`sim-eval-gate` dispatch path only (which produces no trajectory rows fed
+back into training). The `sim-mcts-selfplay` -> `train_bc --data-mode
+mcts-distill` interface was never exercised end-to-end under `--engine rust`.
+The `--record-rows` opt-in on the Rust path produces rows nested in game
+objects, not the TS-flat schema the orchestrator's distill consumer
+deserializes.
+
+**Concrete failure:** `runs/R110-rust-parity-rust/iter-0/` selfplay completed
+cleanly (60 game records, 2.0 MB JSONL, 60.76 sec wall on a single Rust
+process at sims=100 / K=3 / rollout=200) — `events.jsonl` records
+`selfplay:completed rows=60 elapsed=60.76s`. Distill stage then raised
+`uma_ai.dataset.RowSchemaError: Expected kind='mcts-selfplay' at
+selfplay.jsonl:1, got None`. Orchestrator exited non-zero before TS side
+launched.
+
+**Secondary observation:** Rust `--workers` is documented as IGNORED
+("Rust runs single-process; orchestrator parallelises by spawning multiple
+Rust binaries"). The current orchestrator wiring forwards `--workers 24`
+but the Rust binary runs one process. The TS path in contrast spawns
+`--workers` parallel workers. This is a separate orchestration gap
+(no fan-out wrapper for the Rust path) that becomes load-bearing the
+moment Rust selfplay wall-clock exceeds a single iter's GPU distill time.
+
+**Disposition (for next slice):** two options to retire the schema gap
+before the TS escape hatch can be removed —
+(a) flatten Rust `sim-mcts-selfplay --record-rows` output to the TS
+per-decision flat-row format (drop the per-game wrapper, emit each row
+with the `kind`/`schemaVersion`/`sideId`/`observation`/… keys the
+selfplay-dataset loader expects), OR
+(b) teach `load_mcts_selfplay_samples` to accept the Rust per-game-with-
+nested-rows format as a second input shape.
+
+Option (a) is the clean fix (TS is the established schema; Rust is the
+follower per Phase 0). Option (b) is the cheap unblock if (a) is
+expensive. Both gate the Slice 2 parity re-launch.
+
+**Artefacts:** `runs/R110-rust-parity-rust/iter-0/selfplay.jsonl` (Rust
+schema, 60 records), `runs/R110-rust-parity-rust/iter-0/distill.log`
+(RowSchemaError), `runs/R110-rust-parity-rust/events.jsonl` (orchestrator
+events incl. `iteration_error`), `runs/R110-rust-parity/driver.log`
+(full driver transcript). TS side directory `runs/R110-rust-parity-ts/`
+is empty (TS side never launched — Rust failure was sequential-blocker).
+
