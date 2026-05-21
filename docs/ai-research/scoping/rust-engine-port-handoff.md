@@ -366,6 +366,15 @@ to-end depends on the legal-action enumerator + heuristic-opponent ports
 Run all (release): `cargo test --manifest-path engine-rs/Cargo.toml -p engine --release`
 Run cross-CLI smoke: `bash engine-rs/scripts/smoke-all-clis.sh` (exercises the full r12_orchestrator.py flag set against all 4 binaries; ~30 seconds end-to-end).
 
+## Merged into feat/ai (2026-05-21)
+
+Engine-rust-port branch merged into feat/ai as commit `4e86ea7` on 2026-05-21
+via `--no-ff` three-way merge with `git merge-base d0f7c0d`. The only file
+touched on both sides was `package.json` (disjoint script additions, clean
+auto-merge). Forward work tracked in queue (`docs/ai-agent-state/queue.json`):
+`rust-port-v32-schema-verification`, `rust-port-orchestrator-wiring`,
+`rust-port-backend-napi-consumer`.
+
 ## What is left (priority order)
 
 ### P0 — Finish 500-seed corpus + replay
@@ -704,9 +713,11 @@ binary's at every shipping checkpoint.
 
 ### P7 — Phase 2: NAPI binding + optional WASM
 
-Per scoping doc §3 Phase 2. Don't open this until Phase 1 lands. WASM
-for the frontend is **only** worth doing if rules churn rate over the
-preceding 90 days warrants it (risk #5 in scoping doc).
+**DONE 2026-05-21**. Phase 2 NAPI bridge complete and merged. 8 functions
+exposed (driveHeuristicGameJson, driveMctsGameJson, runMctsJson, mctsStepJson,
+advanceStepJson, legalActionsJson, createGameJson, stateHashForJson). 11.2×
+speedup over subprocess at small-game scale. See
+`engine-rs/crates/napi-bridge/README.md`.
 
 ---
 

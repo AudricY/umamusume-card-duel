@@ -51,15 +51,9 @@ As of 2026-05-18:
 
 ## Active Search-Wrapped Frontier
 
-0. **Contested-state coverage pilot — TOP PRIORITY (training-data
-   upgrade).** The R16-P1 NO-GO resolved the pre-registered contingency: the
-   cheap single-variable coverage pilot is now the highest-leverage forward
-   line, and the 2026-05-19 user reprioritization confirms training-data and
-   model-feature upgrades land before any HP tuning. No new data — a
-   `training/uma_ai/dataset.py` loader/loss change only. Canonical:
-   Training-Data / State-Coverage Backlog item 2 below and
-   `docs/ai-research/scoping/r16-training-data-backlog-refinement.md`; queue
-   `training-data-coverage-pilot`.
+0. **Contested-state coverage pilot (R16-TD)** — DONE-FALSIFIED 2026-05-21
+   (chunk 5j n=1000 confirmation, monotonicity broken + margin sign-flipped
+   −1.8pp). See `docs/ai-research/progress/r16.md`.
 
 0a. **R16-P2 per-Uma slot tokens — model-feature upgrade, user-gate now
    OPEN.** The 2026-05-19 "land all model feature upgrade items first"
@@ -136,13 +130,6 @@ As of 2026-05-18:
    pinned 96-d. Null strength signal. Canonical:
    `docs/ai-research/progress/r16.md`.
 
-2b. **R16-P2 per-Uma slot tokens — user-gated larger lift, NOT auto.**
-   Dependency-unblocked (P0/P1 done) and fully scoped, but P1's strength
-   signal was **null**, so P2 no longer has a cheap-P1-baseline rationale.
-   It remains a 3–4-day model/ONNX migration (signature churn,
-   old-checkpoint incompatibility); do not start unless the user explicitly
-   calls for it. Scope: r16 scoping doc § "P2 - Per-Uma Slot Tokens".
-
 3. **GPU-fed stronger MCTS — P1 scoping, not implementation.**
    First prove which search configs can use GPU inference for strength:
    batched predict, hybrid learned leaves, larger sim budgets, ensembles, or
@@ -196,6 +183,17 @@ As of 2026-05-18:
    beyond a corpus-pointer flag); ~4h GPU. Stages 2 and 3 remain
    user-gated for scope. Queue: `value-head-data-program`.
 
+### 4b. Rust engine port follow-ups (post Phase-2-merge, 2026-05-21)
+
+Engine-rust-port branch merged into feat/ai as commit `4e86ea7`. Phases 0/1/2
+all complete (canonical home: `docs/ai-research/scoping/rust-engine-port-handoff.md`).
+Forward items:
+
+- **v3.2 schema verification** (P2, gated on C8 promotion): Rust `/predict` client emits `schemaVersion=3` with `cardIdsByZone` only; no `uma_slot_*`. Verify whether `serve_onnx.py` v3.2 path synthesizes slot tensors server-side from `PublicObservation`; if not, extend Rust observation builder.
+- **Orchestrator wiring** (P2, user-gated pilot): `r12_orchestrator.py` (+ppo+dagger) still invoke TS `npm run sim:*`. Flag-compatible Rust CLIs offer 140-220× speedup; add opt-in `--engine rust|ts` with A/B parity gate.
+- **Backend NAPI consumer** (P3, exploratory): no `backend/src/` consumer yet; pick a target after orchestrator wiring lands.
+- **Engine residual TODO** (P4): `has_consecutive_no_attack_streak: u8` field on `SideState` (V4 RNG-gap reframed as benign behavioral variance, but field still missing if anyone wants exact parity).
+
 5. **Side-conditioned sim budget — P2.**
    Run only after a larger-n rollout-leaf side split separates CIs or a
    search variant shows side-specific regression.
@@ -236,17 +234,13 @@ section).
    retained rows are bottlenecked by contested decision-state coverage, not
    schema/card-id loss or generic row count.
 
-2. **Rule-bot-covered state corpus recipe — P1.**
-   Generate deployment-relevant states, side-balanced and rule-bot-covered,
-   then relabel those exact contested states with rollout-leaf MCTS or the
-   strongest feasible oracle. Acceptance: retained contested-row rate >=80%,
-   audit slice floors, and held-out value targets before training starts.
+2. **Rule-bot-covered state corpus recipe** — SUPERSEDED 2026-05-21 by
+   `training-data-deep-program` done-negative (chunks 5a-i). See
+   `docs/ai-research/progress/r16.md`.
 
-3. **Preference pairs on rule-bot-covered states — P2.**
-   Build DPO/BT pairs only after the coverage recipe proves enough contested
-   states. Acceptance: pair manifest with source-state coverage, kept-pair
-   count, margin/variance filters, held-out pair/ranking accuracy, and a gate
-   only after pair quality clears a pre-registered floor.
+3. **Preference pairs on rule-bot-covered states (DPO/BT)** — SUPERSEDED
+   2026-05-21 by `training-data-deep-program` done-negative (chunks 5a-i).
+   See `docs/ai-research/progress/r16.md`.
 
 4. **Side-conditioned retained-data balancing — P2.**
    If side weakness is data-linked, balance retained player/opponent decision
