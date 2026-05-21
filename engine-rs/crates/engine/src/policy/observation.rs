@@ -315,3 +315,57 @@ fn special_condition_str(c: SpecialCondition) -> &'static str {
         SpecialCondition::Poisoned => "poisoned",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::random::{with_rng, Rng};
+    use crate::headless_setup::setup_ai_vs_ai_game;
+
+    /// Build a fresh post-setup game state with a deterministic seed.
+    fn setup(seed: &str) -> GameState {
+        let rng = Rng::from_seed(format!("{}:selfplay", seed).as_str(), "selfplay");
+        let (state, _used) = with_rng(rng, || setup_ai_vs_ai_game());
+        state
+    }
+
+    #[test]
+    fn observation_schema_version_is_three() {
+        // R16-P1 fixed the schema at 3; anything else means a contract
+        // change that must propagate to every Python trainer consumer.
+        let state = setup("0");
+        let obs = build_public_observation(&state, SideId::Player);
+        assert_eq!(obs.schema_version, 3);
+    }
+
+    #[test]
+    fn observation_deterministic_given_seed() {
+        let a = build_public_observation(&setup("42"), SideId::Player);
+        let b = build_public_observation(&setup("42"), SideId::Player);
+        // Compare via JSON since PublicObservation has lots of nested fields.
+        let ja = serde_json::to_string(&a).expect("a serializes");
+        let jb = serde_json::to_string(&b).expect("b serializes");
+        assert_eq!(ja, jb);
+    }
+
+    #[test]
+    fn observation_swaps_perspective_when_side_changes() {
+        // From Player perspective, `own` is the player's data; from
+        // Opponent perspective, `own` must be the opponent's data.
+        // The two observations of the same state must NOT JSON-match.
+        let state = setup("7");
+        let from_player = build_public_observation(&state, SideId::Player);
+        let from_opponent = build_public_observation(&state, SideId::Opponent);
+        let jp = serde_json::to_string(&from_player).expect("p serializes");
+        let jo = serde_json::to_string(&from_opponent).expect("o serializes");
+        assert_ne!(
+            jp, jo,
+            "observation must change when sideId swaps — own/opponent fields are symmetric"
+        );
+        // Sanity: each perspective's `own.id` reflects who's looking.
+        assert_eq!(from_player.own.id, SideId::Player);
+        assert_eq!(from_opponent.own.id, SideId::Opponent);
+        assert_eq!(from_player.opponent.id, SideId::Opponent);
+        assert_eq!(from_opponent.opponent.id, SideId::Player);
+    }
+}
