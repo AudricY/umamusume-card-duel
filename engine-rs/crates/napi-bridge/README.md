@@ -52,6 +52,30 @@ const v = bridge.engineVersion();  // "rust-port v0.1.0 — catalog=106 cards"
 
 See `index.d.ts` for the full TypeScript interface.
 
+## Bulk vs composable surface — which to use
+
+For **driving a full game** in pure Rust (matches sim-cli output bit-for-bit):
+
+```ts
+bridge.driveHeuristicGameJson(seed, maxSteps)
+bridge.driveMctsGameJson(seed, "player", maxSteps, mctsArgsJson)
+```
+
+These return only a summary, never expose the GameState across the FFI per-step.
+
+For **interactive use** — replaying a recorded trace, inspecting state mid-game, hand-picking actions, integrating with a UI — use the composable functions:
+
+```ts
+bridge.createGameJson(seed)
+bridge.advanceStepJson(stateJson, rngStateJson)
+bridge.legalActionsJson(stateJson, rngStateJson)
+bridge.mctsStepJson(stateJson, rngStateJson, mctsArgsJson, mctsSeed)
+bridge.runMctsJson(stateJson, rngStateJson, mctsArgsJson, mctsSeed)
+bridge.stateHashForJson(stateJson)
+```
+
+⚠️ Per-step composable invocations **may produce slightly different traces than the bulk drivers for some seeds** (the multi-step JSON roundtrip can interact with the heuristic AI's log-reading checks). For training-data generation or eval-gate workloads where you need parity with sim-cli, prefer the bulk drivers.
+
 ## Performance
 
 Measured at N=100 short heuristic games:
