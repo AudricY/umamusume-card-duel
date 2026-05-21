@@ -12,6 +12,7 @@
 //! "mcts-root")` separately from any outer recorder/selfplay RNG.
 
 pub mod config;
+pub mod driver;
 pub mod math;
 pub mod node;
 pub mod sample;

@@ -7,5 +7,6 @@
 
 pub mod actions;
 pub mod card_vocab;
+pub mod observation;
 pub mod phase;
 pub mod types;

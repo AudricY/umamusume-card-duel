@@ -15,6 +15,7 @@ serde_json.workspace = true
 xxhash-rust.workspace = true
 indexmap.workspace = true
 arrayvec.workspace = true
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 
 [dev-dependencies]
 anyhow.workspace = true

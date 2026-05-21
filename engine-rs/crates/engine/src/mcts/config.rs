@@ -33,6 +33,13 @@ pub struct MctsConfig {
     pub collapse_max_steps: u32,
     pub adaptive_ratio: f64,
     pub adaptive_min_sims: u32,
+    /// Optional `/predict` server URL. Defaults to empty; `run_mcts` takes
+    /// the URL as a separate argument matching the TS `runMcts(state,
+    /// modelSide, config, modelUrl, seed)` signature, but having a field
+    /// here lets callers carry the URL alongside the config when building
+    /// CLI argument structures.
+    #[serde(default)]
+    pub model_url: String,
 }
 
 impl Default for MctsConfig {
@@ -52,6 +59,7 @@ impl Default for MctsConfig {
             collapse_max_steps: 64,
             adaptive_ratio: 0.0,
             adaptive_min_sims: 20,
+            model_url: String::new(),
         }
     }
 }
