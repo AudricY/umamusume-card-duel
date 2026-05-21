@@ -1,20 +1,18 @@
 //! Bit-identical port of `frontend/src/game/engine/flow/playRules.ts`.
 //!
-//! **PARTIAL**: trainer-card resolution and the rainbow uncap crystal
-//! evolution branch call into `flow::trainers` (Phase 1d remaining work).
-//! Both are stubbed below with `#[allow(unused_variables)]` placeholders
-//! marked TODO so the next session can land them without restructuring.
-//!
-//! The bench/evolve/attach-tool branches are fully ported.
+//! Trainer dispatch and the rainbow uncap crystal evolution branch are
+//! wired through `flow::trainers` and `use_rainbow_uncap_crystal` below
+//! (Phase 1d).
 
 use crate::core::card_id::CardId;
 use crate::core::catalog::{catalog, Card, UmamusumeCard};
-use crate::core::constants::{MAX_BENCH, MAX_HAND};
+use crate::core::constants::{SideId, TrainerType, MAX_BENCH, MAX_HAND};
 use crate::core::play_types::{PlayActionKind, PlayActionOutcome, PlayChoices};
-use crate::core::state::{GameState, SideState, UmamusumeInstance};
+use crate::core::state::{GameState, SideState, SwitchResume, UmamusumeInstance};
 use crate::core::umamusume::{find_own_umamusume_by_uid, get_all_umamusume};
 use crate::flow::evolution::{evolve_umamusume, find_evolution_target, is_valid_evolution_target};
 use crate::flow::setup::create_umamusume;
+use crate::flow::trainers;
 
 /// Mirror of `getPlayableAction`.
 pub fn get_playable_action(state: &GameState, side: &SideState, card_id: CardId) -> PlayActionOutcome {
@@ -166,8 +164,8 @@ pub fn get_rainbow_uncap_evolution_hand_options<'a>(
 
 /// Mirror of `resolveCardPlay`.
 ///
-/// **PARTIAL**: trainer + rainbow-uncap branches require `flow::trainers`
-/// (not yet ported). The bench/evolve/attachTool branches are full.
+/// Trainer + rainbow-uncap branches dispatch into `flow::trainers` and
+/// `use_rainbow_uncap_crystal` below.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_card_play(
     state: &mut GameState,
@@ -176,7 +174,6 @@ pub fn resolve_card_play(
     card: &Card,
     play: &PlayActionKind,
     choices: &PlayChoices,
-    // TODO Phase 1d: thread a closure for trainers when that module lands.
 ) {
     match (card, play) {
         (Card::Umamusume(u), PlayActionKind::BenchBasic) if u.stage == 0 => {
@@ -226,17 +223,114 @@ pub fn resolve_card_play(
                 }
             }
         }
-        (Card::Trainer(_t), PlayActionKind::Trainer) => {
-            // TODO Phase 1d: dispatch into flow::trainers::play_stadium or
-            // flow::trainers::apply_trainer (with the rainbow-uncap branch).
-            // For now, no-op + side.discard.push(card_id) to keep the deck
-            // accounting roughly sane in tests. Production gate requires
-            // the full trainer logic.
-            let side = state.side_mut(side_id);
-            let _ = side.discard.try_push(card_id);
+        (Card::Trainer(t), PlayActionKind::Trainer) => {
+            // Stadium cards install on the board; they do NOT discard
+            // the card (TS `playStadium` early-returns before
+            // `side.discard.push`).
+            if t.trainer_type == TrainerType::Stadium {
+                trainers::play_stadium(state, side_id, card_id, t);
+                return;
+            }
+            // Non-stadium trainers: rainbow-uncap evolves; everything else
+            // dispatches into apply_trainer. Both paths still go to
+            // discard, and supporters mark the once-per-turn flag.
+            if t.effect.rainbow_uncap_crystal == Some(true) {
+                use_rainbow_uncap_crystal(
+                    state,
+                    side_id,
+                    choices.umamusume_target_uid,
+                    choices.rainbow_evolution_hand_index,
+                );
+            } else {
+                trainers::apply_trainer(
+                    state,
+                    side_id,
+                    card_id,
+                    t,
+                    choices,
+                    SwitchResume::None,
+                );
+            }
+            if t.trainer_type == TrainerType::Supporter {
+                state.side_mut(side_id).used_supporter_this_turn = true;
+            }
+            let _ = state.side_mut(side_id).discard.try_push(card_id);
         }
         _ => {}
     }
+}
+
+/// Mirror of `playRules.ts:144` `useRainbowUncapCrystal`. Skips Stage 1 by
+/// splicing a Stage 2 evolution card directly out of the hand. Returns
+/// true if the evolution applied.
+pub fn use_rainbow_uncap_crystal(
+    state: &mut GameState,
+    side_id: SideId,
+    target_uid: Option<u32>,
+    evolution_hand_index: Option<usize>,
+) -> bool {
+    // Resolve target uid from the eligible list.
+    let target_uid_resolved: Option<u32> = {
+        let side = state.side(side_id);
+        let targets = get_rainbow_uncap_targets(state, side);
+        if let Some(uid) = target_uid {
+            targets.iter().find(|u| u.uid == uid).map(|u| u.uid)
+        } else {
+            targets.first().map(|u| u.uid)
+        }
+    };
+    let Some(target_uid) = target_uid_resolved else {
+        return false;
+    };
+
+    // Resolve the evolution-card hand index + card.
+    let (hand_index, evolution_card): (usize, UmamusumeCard) = {
+        let side = state.side(side_id);
+        // We need to look up the target instance for species. The side may
+        // currently hold it as active or bench.
+        let target = get_all_umamusume(side)
+            .into_iter()
+            .find(|u| u.uid == target_uid);
+        let Some(target) = target else {
+            return false;
+        };
+        let options = get_rainbow_uncap_evolution_hand_options(side, target);
+        let chosen = match evolution_hand_index {
+            Some(i) => options.iter().find(|(idx, _)| *idx == i).cloned(),
+            None => options.first().cloned(),
+        };
+        match chosen {
+            Some((idx, card)) => (idx, card.clone()),
+            None => return false,
+        }
+    };
+
+    // Remove the evolution card from hand and apply the evolution to the
+    // target instance in place.
+    let cat = catalog();
+    let evolution_card_id = match cat.id_for(&evolution_card.id) {
+        Some(c) => c,
+        None => return false,
+    };
+    let turn_number = state.turn_number;
+    let side = state.side_mut(side_id);
+    if hand_index >= side.hand.len() {
+        return false;
+    }
+    let _ = side.hand.remove(hand_index);
+    if let Some(active) = side.active.as_mut() {
+        if active.uid == target_uid {
+            evolve_umamusume(turn_number, active, evolution_card_id, &evolution_card);
+            return true;
+        }
+    }
+    for u in side.bench.iter_mut() {
+        if u.uid == target_uid {
+            evolve_umamusume(turn_number, u, evolution_card_id, &evolution_card);
+            return true;
+        }
+    }
+    false
 }
 
 fn has_basic_umamusume_in_discard(side: &SideState) -> bool {

@@ -7,6 +7,7 @@
 
 pub mod ability_rules;
 pub mod board;
+pub mod combat;
 pub mod eligibility;
 pub mod energy;
 pub mod evolution;
@@ -14,4 +15,5 @@ pub mod play_rules;
 pub mod retreat;
 pub mod setup;
 pub mod special_conditions;
+pub mod trainers;
 pub mod turn;
