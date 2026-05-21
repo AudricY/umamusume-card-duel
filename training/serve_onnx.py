@@ -18,6 +18,8 @@ from uma_ai.features import (
     STATE_DIM_V2,
     STATE_DIM_V3,
     STATE_DIM_V3_1,
+    UMA_SLOT_COUNT,
+    UMA_SLOT_FEATURE_DIM,
     ZONE_ORDER,
     action_card_idx_pair,
     card_vocab_metadata,
@@ -26,6 +28,7 @@ from uma_ai.features import (
     observation_to_features,
     observation_to_features_v2,
     observation_to_features_v3_1,
+    observation_to_uma_slots,
 )
 
 # R7.b.2 Phase 3: fixed per-zone width for the embedding inputs — mirrors
@@ -108,70 +111,159 @@ class PolicyServer(ThreadingHTTPServer):
         self.default_temperature = default_temperature
 
 
-def _graph_signature(session: ort.InferenceSession) -> tuple[int | None, bool]:
-    """Return (state_features last dim or None, has_embedding_inputs).
+def _graph_signature(session: ort.InferenceSession) -> tuple[int | None, bool, bool]:
+    """Return (state_features last dim or None, has_embedding_inputs, has_uma_slot_inputs).
 
     `has_embedding_inputs` is True iff the graph declares a
     `card_ids_by_zone` input (the v3 embedding pass). The state-features
     last dim distinguishes 96-d (v2) from 110-d (v3).
+
+    `has_uma_slot_inputs` is True iff the graph declares BOTH the v3.2
+    per-Uma slot tensors (`uma_slot_card_ids` AND `uma_slot_features`). We
+    require BOTH names (not either-or) because the export contract is a
+    tensor pair — a graph with only one is internally inconsistent and is
+    caught by the cross-input fail-fast guard in `_resolve_feature_schema`.
     """
     state_dim: int | None = None
     has_embedding = False
+    has_slot_ids = False
+    has_slot_feats = False
     for inp in session.get_inputs():
         if inp.name == "card_ids_by_zone":
             has_embedding = True
+        elif inp.name == "uma_slot_card_ids":
+            has_slot_ids = True
+        elif inp.name == "uma_slot_features":
+            has_slot_feats = True
         if inp.name == "state_features":
             shape = inp.shape or []
             if shape:
                 last = shape[-1]
                 if isinstance(last, int):
                     state_dim = last
-    return state_dim, has_embedding
+    # The pair-completeness check happens in `_resolve_feature_schema` so
+    # the error message can name both the resolved schema and the actual
+    # input set. `has_uma_slot_inputs` reports the conjunction: True only
+    # when the graph declares both halves of the v3.2 contract.
+    has_uma_slot_inputs = has_slot_ids and has_slot_feats
+    # Surface the asymmetric "only one of the pair" case via a sentinel
+    # path: we treat it as truthy-but-broken below (the resolver checks
+    # both halves separately by re-reading get_inputs()).
+    return state_dim, has_embedding, has_uma_slot_inputs
 
 
-# --- Serving-schema 96/110/164 guard (r16 P1 prerequisite) ----------------
-# The feature builder is resolved STRICTLY from the loaded ONNX graph's
-# `state_features` last dim against this explicit table. This replaces the
-# old binary "96 -> v2 else -> v3" rule, which would have silently paired a
-# future 164-d v3.1 graph with the frozen 110-d v3.0 builder once STATE_DIM
-# is bumped for P1. Each entry: graph_state_dim -> (schema token, requires
-# `card_ids_by_zone` embedding input, human label). The schema token is the
-# internal selector consumed by `request_to_arrays` ("v2" = frozen 96-d, no
-# embedding feeds; "v3" = frozen 110-d v3.0, embedding feeds; "v3.1" =
-# 164-d temporal/turn-state, embedding feeds — its head is the v3.0 encoding
-# so it carries the same `card_ids_by_zone` input). R16-P1 made 164 a REAL
-# builder, so it moved out of `_PLACEHOLDER_DIMS` into the schema table.
+def _graph_has_partial_uma_slot_inputs(session: ort.InferenceSession) -> bool:
+    """True if the graph declares exactly one of the v3.2 slot inputs.
+
+    `uma_slot_card_ids` and `uma_slot_features` are a CONTRACTUAL pair (C4
+    tensor contract + C5 export); a graph that declares only one is broken
+    by construction. The resolver uses this as a dedicated fail-fast case
+    so the error message is unambiguous (vs the generic v3.2-mismatch
+    branch).
+    """
+    has_ids = False
+    has_feats = False
+    for inp in session.get_inputs():
+        if inp.name == "uma_slot_card_ids":
+            has_ids = True
+        elif inp.name == "uma_slot_features":
+            has_feats = True
+    return has_ids != has_feats  # XOR — exactly one present
+
+
+# --- Serving-schema 96/110/164 + v3.2 dispatch (r16 P2 C5) ----------------
+# R16-P2 C5 refactor: the resolver key changed from `state_dim` to
+# `(state_dim, has_uma_slot_tokens)` because v3.2 reuses state_dim=110 and
+# is distinguished ONLY by ONNX input-set presence. Option A was chosen
+# (extend the value tuple with `expects_uma_slot_inputs: bool`) over Option
+# B (tuple-key dict) because:
+#   - the dispatch logic is a STRICT lookup chain (probe `(110, True)`
+#     first, then `(110, False)`) that reads better as two explicit branches
+#     than as a tuple-key dict lookup; the value-extension keeps the table
+#     scannable by state_dim;
+#   - the existing fail-fast pattern at the v3.1 `card_ids_by_zone` guard
+#     (the "expected vs got embedding" branch) generalizes cleanly to a
+#     second boolean field — same shape, two checks instead of one.
 #
-# `_SCHEMA_BY_STATE_DIM` enumerates only schemas that have a real builder.
-# `_PLACEHOLDER_DIMS` (now empty) are declared-but-unimplemented dims that
-# must fail loud (never silently fall back) so a future bump cannot corrupt
-# serving — the contract anchor stays even with no current placeholder.
-_SCHEMA_BY_STATE_DIM: dict[int, tuple[str, bool, str]] = {
-    STATE_DIM_V2: ("v2", False, "frozen 96-d v2 (no embedding inputs)"),
-    STATE_DIM_V3: ("v3", True, "frozen 110-d v3.0 (embedding inputs)"),
-    STATE_DIM_V3_1: (
-        "v3.1",
+# Each entry: graph_state_dim -> (schema token, requires `card_ids_by_zone`,
+# requires `uma_slot_*`, human label).
+#   - "v2"   = frozen 96-d v2 (no embedding feeds, no slot feeds)
+#   - "v3"   = frozen 110-d v3.0 (embedding feeds, no slot feeds)
+#   - "v3.1" = 164-d v3.1 temporal (embedding feeds, no slot feeds; v3.0 head)
+#   - "v3.2" = 110-d v3.0 head + per-Uma slot tokens (embedding feeds AND
+#              slot feeds; SAME builder as v3.0 — distinguished by input-set)
+#
+# The 110-d row is now AMBIGUOUS by state_dim alone — the resolver must
+# disambiguate by the graph's slot-input presence. This is the C5 landmine:
+# a v3.0 server packing inputs into a v3.2 graph (or vice-versa) would
+# silently mis-route tensors. The guard catches every cross-input mismatch
+# at resolver time (before any `request_to_arrays` call).
+_SCHEMA_TABLE: tuple[tuple[int, bool, bool, str, str], ...] = (
+    # (state_dim, expects_card_ids_by_zone, expects_uma_slot_inputs,
+    #  schema_token, human_label)
+    (STATE_DIM_V2, False, False, "v2", "frozen 96-d v2 (no embedding inputs)"),
+    (STATE_DIM_V3, True, False, "v3", "frozen 110-d v3.0 (embedding inputs)"),
+    (
+        STATE_DIM_V3,
         True,
+        True,
+        "v3.2",
+        "110-d v3.2 per-Uma slot tokens (embedding + slot inputs; v3.0 head)",
+    ),
+    (
+        STATE_DIM_V3_1,
+        True,
+        False,
+        "v3.1",
         "164-d v3.1 temporal/turn-state (embedding inputs; v3.0 head)",
     ),
-}
+)
 _PLACEHOLDER_DIMS: dict[int, str] = {}
 
 
-def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:
-    """Resolve the serving feature builder STRICTLY by graph state dim.
+def _lookup_schema(
+    state_dim: int, has_uma_slot_inputs: bool
+) -> tuple[str, bool, bool, str] | None:
+    """Return the (schema, expects_emb, expects_slot, label) entry, or None.
 
-    Resolution is keyed off the ONNX graph's `state_features` last dim
-    against `_SCHEMA_BY_STATE_DIM` (96 -> v2, 110 -> v3.0). Any dim that is
-    not a known *implemented* schema fails fast at startup: declared-but-
-    unimplemented dims (e.g. the 164-d v3.1 P1 placeholder) raise with a
-    specific message; anything else raises generically. The guard never
-    silently defaults to v3 — that silent fallback is exactly what would let
-    a STATE_DIM 164 bump corrupt 96-d/110-d serving. An explicit
-    `v2`/`v3` request is asserted consistent with the resolved schema and
-    exits non-zero at startup if not. Exactly one startup line is logged.
+    Matches on `(state_dim, expects_uma_slot_inputs == has_uma_slot_inputs)`.
+    The embedding-input presence is validated SEPARATELY by the resolver so
+    the error message can distinguish "wrong schema family" from "schema
+    family right, internally inconsistent ONNX graph".
     """
-    state_dim, has_embedding = _graph_signature(session)
+    for row in _SCHEMA_TABLE:
+        s_dim, exp_emb, exp_slot, token, label = row
+        if s_dim == state_dim and exp_slot == has_uma_slot_inputs:
+            return token, exp_emb, exp_slot, label
+    return None
+
+
+_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2"}
+
+
+def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:
+    """Resolve the serving feature builder by `(state_dim, has_uma_slot_inputs)`.
+
+    R16-P2 C5 LANDMINE: 110-d graphs are no longer uniquely identified by
+    state_dim; v3.0 and v3.2 share state_dim=110 and differ ONLY by the
+    presence of `uma_slot_card_ids` / `uma_slot_features` inputs. The
+    resolver:
+      1. reads the ONNX input set (state_dim, has_embedding, has_uma_slot);
+      2. fails fast on partial slot pairs (only one of the two slot inputs);
+      3. looks up `(state_dim, has_uma_slot)` in `_SCHEMA_TABLE` — refuses
+         to serve if no entry matches (e.g. a 96-d graph carrying slot
+         inputs; v3.2 only exists at state_dim=110);
+      4. validates `has_embedding` against the resolved schema's
+         `expects_embedding` field — refuses to serve on mismatch (preserves
+         the v3.1 placeholder-dim fail-loud pattern at the pre-C5
+         `serve_onnx.py:184-191` line range).
+
+    Any silent fallback would let a v3.0 server pack v3.2-shaped requests
+    into a 5-input graph (or vice-versa); both crash deep in ORT with
+    less-actionable error messages. Fail at resolve time, before any
+    request packing.
+    """
+    state_dim, has_embedding, has_uma_slot = _graph_signature(session)
 
     if state_dim is None:
         sys.stderr.write(
@@ -181,7 +273,22 @@ def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> st
         )
         raise SystemExit(2)
 
-    if state_dim not in _SCHEMA_BY_STATE_DIM:
+    # Partial-pair guard: `uma_slot_card_ids` and `uma_slot_features` are a
+    # contractual pair. A graph with exactly one is broken by construction;
+    # surface it as a distinct error so the operator knows the export side
+    # is at fault (not the dispatch).
+    if _graph_has_partial_uma_slot_inputs(session):
+        graph_inputs = sorted(inp.name for inp in session.get_inputs())
+        sys.stderr.write(
+            f"[serve_onnx] FATAL: ONNX graph declares exactly one of "
+            f"`uma_slot_card_ids` / `uma_slot_features` "
+            f"(graph inputs: {graph_inputs}). The v3.2 slot tensors are a "
+            f"contractual pair; refusing to serve a partial v3.2 graph.\n"
+        )
+        raise SystemExit(2)
+
+    resolved = _lookup_schema(state_dim, has_uma_slot)
+    if resolved is None:
         placeholder = _PLACEHOLDER_DIMS.get(state_dim)
         if placeholder is not None:
             sys.stderr.write(
@@ -189,39 +296,60 @@ def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> st
                 f"declared-but-unimplemented schema. {placeholder}.\n"
             )
             raise SystemExit(2)
-        known = ", ".join(str(d) for d in sorted(_SCHEMA_BY_STATE_DIM))
+        known = ", ".join(
+            f"({d}, uma_slot={s})"
+            for (d, _e, s, _t, _l) in _SCHEMA_TABLE
+        )
+        graph_inputs = sorted(inp.name for inp in session.get_inputs())
+        # The most common path into this branch in the v3.2 era is a
+        # non-110 graph (96-d or 164-d) carrying `uma_slot_*` inputs.
+        # Name it explicitly so the operator can locate the bad export.
+        if has_uma_slot and state_dim not in (STATE_DIM_V3,):
+            sys.stderr.write(
+                f"[serve_onnx] FATAL: graph state_dim={state_dim} carries "
+                f"`uma_slot_card_ids`/`uma_slot_features` but v3.2 only "
+                f"exists at state_dim={STATE_DIM_V3}. Graph inputs: "
+                f"{graph_inputs}. Refusing to serve.\n"
+            )
+            raise SystemExit(2)
         sys.stderr.write(
-            f"[serve_onnx] FATAL: graph state_dim={state_dim} matches no "
-            f"known feature schema (known: {known}). Refusing to serve an "
-            f"unrecognized encoding.\n"
+            f"[serve_onnx] FATAL: graph (state_dim={state_dim}, "
+            f"has_uma_slot_inputs={has_uma_slot}) matches no known feature "
+            f"schema (known: {known}). Graph inputs: {graph_inputs}. "
+            f"Refusing to serve an unrecognized encoding.\n"
         )
         raise SystemExit(2)
 
-    schema, expects_embedding, label = _SCHEMA_BY_STATE_DIM[state_dim]
+    schema, expects_embedding, expects_uma_slot, label = resolved
 
-    # The state dim alone selects the schema, but the embedding-input
-    # presence must agree with that schema or the feeds will not match the
-    # graph (v3 needs `card_ids_by_zone`; v2 must NOT receive it).
+    # The slot-input presence is already locked in by the lookup
+    # (`expects_uma_slot == has_uma_slot`); the remaining cross-input guard
+    # is the embedding-input presence. v3.0 / v3.1 / v3.2 all need
+    # `card_ids_by_zone`; v2 must NOT receive it.
     if has_embedding != expects_embedding:
+        graph_inputs = sorted(inp.name for inp in session.get_inputs())
         sys.stderr.write(
             f"[serve_onnx] FATAL: graph state_dim={state_dim} resolves to "
             f"schema {schema} ({label}) but `card_ids_by_zone` input "
             f"presence={has_embedding} contradicts it "
-            f"(expected {expects_embedding}). The ONNX graph signature is "
-            f"internally inconsistent; refusing to serve.\n"
+            f"(expected {expects_embedding}). Graph inputs: {graph_inputs}. "
+            f"The ONNX graph signature is internally inconsistent; "
+            f"refusing to serve.\n"
         )
         raise SystemExit(2)
 
     if requested == "auto":
         source = "auto-graph"
-    elif requested in {"v2", "v3", "v3.1"}:
+    elif requested in _VALID_SCHEMA_TOKENS:
         source = "--feature-schema/env"
         if requested != schema:
+            graph_inputs = sorted(inp.name for inp in session.get_inputs())
             sys.stderr.write(
                 f"[serve_onnx] FATAL: --feature-schema={requested} is "
                 f"inconsistent with the loaded ONNX graph signature "
                 f"(state_dim={state_dim}, card_ids_by_zone input="
-                f"{has_embedding} -> graph is {schema}). Refusing to "
+                f"{has_embedding}, uma_slot_inputs={has_uma_slot} -> graph "
+                f"is {schema}). Graph inputs: {graph_inputs}. Refusing to "
                 f"serve a mismatched encoding.\n"
             )
             raise SystemExit(2)
@@ -230,7 +358,8 @@ def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> st
 
     print(
         f"[serve_onnx] feature schema = {schema} "
-        f"(graph state_dim={state_dim}, {label}) [source: {source}]"
+        f"(graph state_dim={state_dim}, has_uma_slot_inputs={has_uma_slot}, "
+        f"{label}) [source: {source}]"
     )
     return schema
 
@@ -376,13 +505,18 @@ def request_to_arrays(
     # v2 = the FROZEN 96-d production encoding (no embedding inputs); v3 =
     # the HEAD-trained 110-d v3.0 additive embedding encoding; v3.1 = the
     # 164-d temporal/turn-state encoding (v3.0 head + 54 temporal slots,
-    # SAME embedding feeds as v3). The pinned schema is resolved once at
-    # startup (see _resolve_feature_schema); here it only selects the
-    # encoder + which feed keys are emitted. ORT hard-rejects unknown feed
-    # keys, so v2 MUST omit (not zero) the embedding inputs. v3 and v3.1
-    # both carry them.
+    # SAME embedding feeds as v3); v3.2 = 110-d v3.0 head + per-Uma slot
+    # tokens (`uma_slot_card_ids` int64[B,10] + `uma_slot_features`
+    # float32[B,10,F]). v3.2 reuses the SAME state builder as v3 — the
+    # difference is the auxiliary slot-tensor feeds, not the state vector
+    # width. The pinned schema is resolved once at startup (see
+    # _resolve_feature_schema); here it only selects the encoder + which
+    # feed keys are emitted. ORT hard-rejects unknown feed keys, so v2 MUST
+    # omit (not zero) the embedding inputs; v3.0 / v3.1 MUST omit the slot
+    # inputs; v3.2 MUST carry them.
     is_v2 = feature_schema == "v2"
     is_v3_1 = feature_schema == "v3.1"
+    is_v3_2 = feature_schema == "v3.2"
     if is_v2:
         expected_state_dim = STATE_DIM_V2
         encode_state = observation_to_features_v2
@@ -390,6 +524,10 @@ def request_to_arrays(
         expected_state_dim = STATE_DIM_V3_1
         encode_state = observation_to_features_v3_1
     else:
+        # Both v3 (110-d v3.0) and v3.2 (110-d v3.0 head + slot tokens) use
+        # the SAME 110-d state builder. The v3.2 lift lives entirely in the
+        # auxiliary `uma_slot_*` tensors that flow through the
+        # `uma_slot_encoder` branch (see C2's model forward).
         expected_state_dim = STATE_DIM
         encode_state = observation_to_features
     if "observation" in payload and "legalActions" in payload:
@@ -416,6 +554,15 @@ def request_to_arrays(
             action_card_idx = np.zeros((1, len(actions), 2), dtype=np.int64)
             for action_index, action in enumerate(actions):
                 action_card_idx[0, action_index, :] = action_card_idx_pair(action)
+        if is_v3_2:
+            # R16-P2 C5: build the per-Uma slot tensors via C1's builder.
+            # `observation_to_uma_slots` returns the FROZEN
+            # `(int64[10], float32[10, UMA_SLOT_FEATURE_DIM])` contract;
+            # we add the leading batch dim to match the ONNX graph shape
+            # `[B, 10]` / `[B, 10, F]`.
+            slot_ids, slot_feats = observation_to_uma_slots(observation)
+            uma_slot_card_ids = slot_ids[None, :].astype(np.int64)
+            uma_slot_features = slot_feats[None, :, :].astype(np.float32)
     else:
         state_features = np.asarray(payload["state_features"], dtype=np.float32)
         action_features = np.asarray(payload["action_features"], dtype=np.float32)
@@ -437,6 +584,28 @@ def request_to_arrays(
             else:
                 action_card_idx = np.zeros(
                     (action_features.shape[0], action_features.shape[1], 2), dtype=np.int64
+                )
+        if is_v3_2:
+            # R16-P2 C5: raw-arrays callers (training/debug paths) can
+            # pre-pack the new slot tensors. Default to zero so the slot
+            # branch collapses to the structural-null residual (verified
+            # <1e-6 in C2's smoke vs omitted kwargs).
+            if "uma_slot_card_ids" in payload:
+                uma_slot_card_ids = np.asarray(
+                    payload["uma_slot_card_ids"], dtype=np.int64
+                )
+            else:
+                uma_slot_card_ids = np.zeros(
+                    (state_features.shape[0], UMA_SLOT_COUNT), dtype=np.int64
+                )
+            if "uma_slot_features" in payload:
+                uma_slot_features = np.asarray(
+                    payload["uma_slot_features"], dtype=np.float32
+                )
+            else:
+                uma_slot_features = np.zeros(
+                    (state_features.shape[0], UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM),
+                    dtype=np.float32,
                 )
     if state_features.ndim != 2:
         raise ValueError("state_features must have shape [batch,state_dim]")
@@ -472,6 +641,29 @@ def request_to_arrays(
         # zeroed.
         feed["card_ids_by_zone"] = card_ids_by_zone.astype(np.int64)
         feed["action_card_idx"] = action_card_idx.astype(np.int64)
+    if is_v3_2:
+        expected_slot_ids = (state_features.shape[0], UMA_SLOT_COUNT)
+        if uma_slot_card_ids.shape != expected_slot_ids:
+            raise ValueError(
+                f"uma_slot_card_ids shape mismatch: got {uma_slot_card_ids.shape}, "
+                f"expected {expected_slot_ids}"
+            )
+        expected_slot_feats = (
+            state_features.shape[0],
+            UMA_SLOT_COUNT,
+            UMA_SLOT_FEATURE_DIM,
+        )
+        if uma_slot_features.shape != expected_slot_feats:
+            raise ValueError(
+                f"uma_slot_features shape mismatch: got {uma_slot_features.shape}, "
+                f"expected {expected_slot_feats}"
+            )
+        # ORT hard-rejects unknown feed keys: v3.0/v3.1 graphs must NOT
+        # receive these (v3.2 ONLY). The resolver's cross-input guard
+        # ensures `is_v3_2` is true iff the graph declares the slot
+        # inputs, so by reaching this branch the feed is safe to attach.
+        feed["uma_slot_card_ids"] = uma_slot_card_ids.astype(np.int64)
+        feed["uma_slot_features"] = uma_slot_features.astype(np.float32)
     return feed, action_ids
 
 
@@ -570,19 +762,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--feature-schema",
-        choices=["auto", "v2", "v3", "v3.1"],
+        choices=["auto", "v2", "v3", "v3.1", "v3.2"],
         default=os.environ.get("UMA_FEATURE_SCHEMA", "auto"),
         help=(
             "State-feature encoding pin. 'auto' (default; env "
-            "UMA_FEATURE_SCHEMA overrides the default) selects v2/v3/v3.1 "
-            "from the loaded ONNX graph signature: v2 = the FROZEN 96-d "
-            "production encoding (no embedding inputs, e.g. "
-            "runs/R13-W6-phase-d/iter-2/policy.onnx); v3 = the HEAD 110-d "
-            "v3.0 additive embedding encoding; v3.1 = the 164-d "
-            "temporal/turn-state encoding (v3.0 head + 54 temporal slots). "
-            "An explicit pin is asserted consistent with the graph and the "
-            "server exits at startup if not. 'Promote later' = serve a "
-            "110-d/164-d model under v3/v3.1/auto."
+            "UMA_FEATURE_SCHEMA overrides the default) selects "
+            "v2/v3/v3.1/v3.2 from the loaded ONNX graph signature: "
+            "v2 = the FROZEN 96-d production encoding (no embedding "
+            "inputs, e.g. runs/R13-W6-phase-d/iter-2/policy.onnx); "
+            "v3 = the HEAD 110-d v3.0 additive embedding encoding; "
+            "v3.1 = the 164-d temporal/turn-state encoding (v3.0 head + "
+            "54 temporal slots); v3.2 = 110-d v3.0 head + per-Uma slot "
+            "tokens (R16-P2; adds `uma_slot_card_ids` + `uma_slot_features` "
+            "ONNX inputs; same state_dim as v3 but distinguished by "
+            "input-set). An explicit pin is asserted consistent with the "
+            "graph and the server exits at startup if not."
         ),
     )
     parser.add_argument(

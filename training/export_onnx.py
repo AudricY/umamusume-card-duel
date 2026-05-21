@@ -9,6 +9,9 @@ import torch
 from uma_ai.features import (
     ACTION_DIM,
     CARD_ID_SHAPES,
+    STATE_FEATURE_SCHEMA_VERSION_V3_2,
+    UMA_SLOT_COUNT,
+    UMA_SLOT_FEATURE_DIM,
     card_vocab_metadata,
     feature_builder_for_state_dim,
     schema_version_for_state_dim,
@@ -80,24 +83,66 @@ def main() -> None:
     # validated in Phase 2's smoke contract (4).
     card_ids_by_zone = torch.zeros((1, NUM_ZONES, MAX_CARDS_PER_ZONE), dtype=torch.int64)
     action_card_idx = torch.zeros((1, args.max_actions, 2), dtype=torch.int64)
-    torch.onnx.export(
-        model,
-        # Positional args mirror the model's `forward` signature; the two
-        # new int inputs must be passed as positional tensors (not kwargs)
-        # to participate in the traced graph. Phase 2's optional-kwarg
-        # design keeps every other caller (PPO/DPO/value-retrain) working
-        # unchanged because they still pass only the three originals.
-        (state, actions, mask, card_ids_by_zone, action_card_idx),
-        out,
-        input_names=[
+
+    # R16-P2 C5: per-Uma slot-token branch gates the 7-input ONNX graph.
+    # When `model_config.uses_uma_slot_tokens` is False (v3.0/v3.1), the
+    # export is byte-identical to pre-C5 (5 inputs, 5 input_names, same
+    # dynamic_axes, same sidecar fields). When True, two NEW inputs are
+    # added positionally AFTER `action_card_idx` to mirror the model's
+    # `forward` signature ordering, and the sidecar gains
+    # `uses_uma_slot_tokens` + `uma_slot_feature_dim`. The two slot tensors
+    # are zero-initialized — at init the `uma_slot_encoder` final Linear is
+    # zero-weighted (see C2), so the export trace through the slot branch
+    # contributes a structural zero residual; the graph still exercises the
+    # Gather/Concat/MatMul ops so ORT shape-inference matches export-time.
+    if config.uses_uma_slot_tokens:
+        uma_slot_card_ids = torch.zeros((1, UMA_SLOT_COUNT), dtype=torch.int64)
+        uma_slot_features = torch.zeros(
+            (1, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), dtype=torch.float32
+        )
+        positional_inputs = (
+            state,
+            actions,
+            mask,
+            card_ids_by_zone,
+            action_card_idx,
+            uma_slot_card_ids,
+            uma_slot_features,
+        )
+        input_names = [
             "state_features",
             "action_features",
             "action_mask",
             "card_ids_by_zone",
             "action_card_idx",
-        ],
-        output_names=["logits", "value"],
-        dynamic_axes={
+            "uma_slot_card_ids",
+            "uma_slot_features",
+        ]
+        # Only the batch dim is dynamic on the new inputs. UMA_SLOT_COUNT
+        # (=10) and UMA_SLOT_FEATURE_DIM (=23) are FROZEN this chunk; making
+        # them dynamic would (a) silently absorb a future layout drift and
+        # (b) cost ORT shape-inference time for no real flexibility.
+        dynamic_axes = {
+            "state_features": {0: "batch"},
+            "action_features": {0: "batch", 1: "actions"},
+            "action_mask": {0: "batch", 1: "actions"},
+            "card_ids_by_zone": {0: "batch"},
+            "action_card_idx": {0: "batch", 1: "actions"},
+            "uma_slot_card_ids": {0: "batch"},
+            "uma_slot_features": {0: "batch"},
+            "logits": {0: "batch", 1: "actions"},
+            "value": {0: "batch"},
+        }
+    else:
+        positional_inputs = (state, actions, mask, card_ids_by_zone, action_card_idx)
+        input_names = [
+            "state_features",
+            "action_features",
+            "action_mask",
+            "card_ids_by_zone",
+            "action_card_idx",
+        ]
+        dynamic_axes = {
             "state_features": {0: "batch"},
             "action_features": {0: "batch", 1: "actions"},
             "action_mask": {0: "batch", 1: "actions"},
@@ -108,27 +153,52 @@ def main() -> None:
             "action_card_idx": {0: "batch", 1: "actions"},
             "logits": {0: "batch", 1: "actions"},
             "value": {0: "batch"},
-        },
+        }
+    torch.onnx.export(
+        model,
+        # Positional args mirror the model's `forward` signature; the two
+        # new int inputs must be passed as positional tensors (not kwargs)
+        # to participate in the traced graph. Phase 2's optional-kwarg
+        # design keeps every other caller (PPO/DPO/value-retrain) working
+        # unchanged because they still pass only the three originals.
+        positional_inputs,
+        out,
+        input_names=input_names,
+        output_names=["logits", "value"],
+        dynamic_axes=dynamic_axes,
         opset_version=args.opset,
     )
+    sidecar_payload: dict[str, object] = {
+        "state_dim": graph_state_dim,
+        # R16-P2 C5: v3.2 graphs reuse state_dim=110 but stamp schema 3.2
+        # so downstream consumers can distinguish v3.0 from v3.2 by
+        # sidecar (in addition to the ONNX input-set). The
+        # `schema_version_for_state_dim(110)` table returns 3.0 by default
+        # — override to 3.2 only when the slot-token branch is active.
+        "state_feature_schema_version": (
+            STATE_FEATURE_SCHEMA_VERSION_V3_2
+            if config.uses_uma_slot_tokens
+            else schema_version_for_state_dim(graph_state_dim)
+        ),
+        "action_dim": ACTION_DIM,
+        "card_vocab": expected_vocab,
+        "checkpoint_vocab": checkpoint_vocab,
+        # R7.b.2 Phase 3: surface the embedding graph shape so
+        # downstream consumers (serve_onnx) can shape-validate.
+        "num_zones": NUM_ZONES,
+        "max_cards_per_zone": MAX_CARDS_PER_ZONE,
+        "card_vocab_table_size": CARD_VOCAB_TABLE_SIZE,
+    }
+    if config.uses_uma_slot_tokens:
+        # R16-P2 C5: only emit these fields under v3.2 so v3.0/v3.1
+        # sidecars stay byte-identical to pre-C5 (no spurious key churn
+        # in existing checkpoints' meta.json under re-export).
+        sidecar_payload["uses_uma_slot_tokens"] = True
+        sidecar_payload["uma_slot_feature_dim"] = UMA_SLOT_FEATURE_DIM
+        sidecar_payload["uma_slot_count"] = UMA_SLOT_COUNT
     sidecar = out.with_suffix(out.suffix + ".meta.json")
     sidecar.write_text(
-        json.dumps(
-            {
-                "state_dim": graph_state_dim,
-                "state_feature_schema_version": schema_version_for_state_dim(graph_state_dim),
-                "action_dim": ACTION_DIM,
-                "card_vocab": expected_vocab,
-                "checkpoint_vocab": checkpoint_vocab,
-                # R7.b.2 Phase 3: surface the embedding graph shape so
-                # downstream consumers (serve_onnx) can shape-validate.
-                "num_zones": NUM_ZONES,
-                "max_cards_per_zone": MAX_CARDS_PER_ZONE,
-                "card_vocab_table_size": CARD_VOCAB_TABLE_SIZE,
-            },
-            indent=2,
-        )
-        + "\n",
+        json.dumps(sidecar_payload, indent=2) + "\n",
         encoding="utf8",
     )
     print(f"Exported {out} (vocab hash={expected_vocab.get('hash')})")
