@@ -2,7 +2,19 @@
 
 ## Open
 
-- _(none)_
+- **2026-05-21: 3b DPO hit a ceiling — direction call needed.** Four
+  probes (5a/5b/5c-long/5e) over 8093-pair runner-up and 13419-pair
+  diversified corpora all land within ±0.022 noise band of 96-d ref
+  baseline. Best: 5b +0.0043 pair_acc / +0.0006 top1 (inside noise).
+  Diversification (chunk 5d, top_k + rule_bot, +65.8%) didn't help.
+  Offline gate (scoping § P2 step 5) HOLDS — no n=1000 spend. Root-
+  cause candidates: (1) relabel-MCTS too weak vs ref, (2) ref too
+  strong vs rule-bot, (3) DPO objective mismatch vs soft-CE BC, (4)
+  held-out split correlation. Recommend (3) cheapest — train BC on
+  the 11798 relabel rows + eval against same floor; if BC also flat,
+  (1) is the binding constraint. Then W6 HP-sweep per user CEILING
+  PATH. Canonical: `docs/ai-research/progress/r16.md` § "3b —
+  Cumulative Verdict".
 
 ## Resolved Pointers
 
