@@ -1,6 +1,7 @@
 pub mod card_id;
 pub mod catalog;
 pub mod constants;
+pub mod decks;
 pub mod effects;
 pub mod labels;
 pub mod packed;
