@@ -51,6 +51,18 @@ from dagger_orchestrator import (
     wilson_lower_bound,
 )
 
+# Throughput-spike Slice 2 (2026-05-21): default location of the bundled
+# ORT 1.22 dynamic library, used by the Rust sim-cli's in-process ORT
+# session (see `engine-rs/crates/engine/src/inference/mod.rs`). The
+# orchestrator passes this as the `ORT_DYLIB_PATH` env var to the spawned
+# Rust binaries. Overridable via the `ORT_DYLIB_PATH` env var on the
+# orchestrator's own process (we honor whatever is already exported);
+# this constant is the fallback that matches the Python venv libonnxruntime.
+DEFAULT_ORT_DYLIB_PATH = (
+    Path(__file__).resolve().parent
+    / ".venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.22.0"
+)
+
 # --- W6 recipe-fix (r110.md §4a) -------------------------------------------
 # The W6 loop's iter-2-peak-then-rot was diagnosed as MONOTONE policy-prior
 # representation drift from iter-0, driven by two confirmed mechanisms:
@@ -213,7 +225,9 @@ def run_iteration(
                              "iteration": iteration, "games": args.selfplay_games,
                              "mcts_simulations": args.mcts_simulations, "ts": time.time()})
     t0 = time.time()
-    with serve_onnx_context(repo_root, promoted_onnx, args) as model_url:
+    # Throughput-spike Slice 2: inference_context skips serve_onnx on the
+    # Rust path (in-process ORT) and keeps the HTTP server on the TS path.
+    with inference_context(repo_root, promoted_onnx, args) as model_url:
         run_selfplay(repo_root, iter_dir, model_url, args, selfplay_path, selfplay_manifest, iteration)
     selfplay_elapsed = time.time() - t0
     n_rows = count_lines(selfplay_path)
@@ -261,7 +275,9 @@ def run_iteration(
                              "iteration": iteration, "games": args.eval_games,
                              "mcts_simulations": args.mcts_simulations, "ts": time.time()})
     t0 = time.time()
-    with serve_onnx_context(repo_root, new_onnx, args) as model_url:
+    # Throughput-spike Slice 2: see selfplay call site above for the
+    # inference_context contract.
+    with inference_context(repo_root, new_onnx, args) as model_url:
         gate_rc = run_gate(repo_root, iter_dir, model_url, args, gate_manifest, iteration)
     gate_elapsed = time.time() - t0
     summary = load_summary(gate_manifest)
@@ -359,6 +375,59 @@ def resolve_engine_command(engine: str, sim_name: str, repo_root: Path) -> list[
     raise ValueError(f"unknown engine: {engine!r} (expected 'rust' or 'ts')")
 
 
+@contextlib.contextmanager
+def inference_context(
+    repo_root: Path,
+    onnx_path: Path,
+    args: argparse.Namespace,
+) -> Iterator[str]:
+    """Throughput-spike Slice 2 (2026-05-21): unified inference setup.
+
+    For ``args.engine == "rust"`` the Rust sim-cli loads ONNX in-process
+    via the bundled ``ort`` crate (Slice 1, commit ``c1b6b0a``), so no
+    serve_onnx subprocess is spun up at all — we yield an empty
+    ``model_url`` and the run_selfplay / run_gate sites read
+    ``onnx_path`` instead. For ``args.engine == "ts"`` we keep the legacy
+    serve_onnx HTTP path so the TS sim CLIs (which don't grok
+    ``--onnx-path``) continue to work as the opt-out escape hatch.
+
+    Keeping a single context-manager lets the call sites stay shaped the
+    same regardless of engine — the run_iteration step body doesn't need
+    a per-engine branch around the ``with`` block.
+    """
+    if args.engine == "rust":
+        # Yield the onnx path as the "model url" payload so the
+        # downstream subprocess builder doesn't need to know how
+        # the inference layer was wired. The sim-cli command builder
+        # below branches on args.engine to put it on --onnx-path.
+        yield str(onnx_path)
+        return
+    with serve_onnx_context(repo_root, onnx_path, args) as model_url:
+        yield model_url
+
+
+def rust_subprocess_env(args: argparse.Namespace) -> dict[str, str]:
+    """Throughput-spike Slice 2 (2026-05-21): subprocess env carrying
+    ``ORT_DYLIB_PATH`` so the spawned sim-cli binary's ``ort`` session
+    (load-dynamic, api-21) can resolve ``libonnxruntime.so.1.22.0`` at
+    runtime. The Rust binary aborts at session-load time without it.
+
+    Resolution order (first non-empty wins):
+      1. Caller's exported ``ORT_DYLIB_PATH`` (lets an operator pin a
+         custom ORT build without editing the orchestrator).
+      2. ``DEFAULT_ORT_DYLIB_PATH`` constant (training venv's bundled
+         libonnxruntime.so.1.22.0 — matches the Python serve_onnx side
+         used for parity smokes).
+
+    We splice into ``os.environ`` rather than constructing a fresh dict
+    so the child inherits PATH, HOME, locale, NCCL config, etc.
+    """
+    env = os.environ.copy()
+    if not env.get("ORT_DYLIB_PATH"):
+        env["ORT_DYLIB_PATH"] = str(DEFAULT_ORT_DYLIB_PATH)
+    return env
+
+
 def run_selfplay(
     repo_root: Path,
     iter_dir: Path,
@@ -369,8 +438,11 @@ def run_selfplay(
     iteration: int,
 ) -> None:
     log_path = iter_dir / "selfplay.log"
+    # Throughput-spike Slice 2: on the Rust path, inference_context yields
+    # the onnx path as `model_url` (no serve_onnx subprocess); on the TS
+    # path it stays a real http:// URL. The sim-cli accepts --onnx-path on
+    # the Rust binary (Slice 1) and --model-url on the TS npm script.
     cmd = resolve_engine_command(args.engine, "mcts-selfplay", repo_root) + [
-        "--model-url", model_url,
         "--games", str(args.selfplay_games),
         "--seed-start", str(args.selfplay_seed_start + iteration * args.selfplay_games),
         "--mcts-simulations", str(args.mcts_simulations),
@@ -399,8 +471,23 @@ def run_selfplay(
     # are non-optional here — append the flag on the Rust path only.
     if args.engine == "rust":
         cmd.append("--record-rows")
+    # Throughput-spike Slice 2: dispatch the inference handle.
+    #   - Rust: in-process ORT, read ONNX directly (model_url here IS the
+    #     onnx path from inference_context). Skip --model-url entirely
+    #     (it's the legacy/ignored flag post-Slice-1; passing nothing is
+    #     cleaner than passing an empty string).
+    #   - TS: serve_onnx HTTP path (model_url is the http://... URL).
+    env: dict[str, str] | None = None
+    if args.engine == "rust":
+        cmd.extend(["--onnx-path", model_url])
+        env = rust_subprocess_env(args)
+    else:
+        cmd.extend(["--model-url", model_url])
     with log_path.open("w") as logf:
-        subprocess.run(cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True)
+        subprocess.run(
+            cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT,
+            check=True, env=env,
+        )
 
 
 def run_distill(
@@ -556,7 +643,6 @@ def run_gate(
         "--max-steps", "500",
         "--seed-start", str(args.eval_seed_start),
         "--model-side", "both",
-        "--model-url", model_url,
         "--manifest-out", str(manifest_out),
         "--mcts-simulations", str(args.mcts_simulations),
         "--mcts-c-puct", str(args.mcts_c_puct),
@@ -571,9 +657,20 @@ def run_gate(
         "--progress-out", str(iter_dir / "gate-progress.jsonl"),
         "--workers", str(args.workers),
     ]
+    # Throughput-spike Slice 2 (mirror run_selfplay): on the Rust path,
+    # `model_url` is actually the onnx path (yielded by inference_context)
+    # and we use --onnx-path + ORT_DYLIB_PATH env; on the TS path keep the
+    # legacy --model-url/serve_onnx HTTP wiring.
+    env: dict[str, str] | None = None
+    if args.engine == "rust":
+        cmd.extend(["--onnx-path", model_url])
+        env = rust_subprocess_env(args)
+    else:
+        cmd.extend(["--model-url", model_url])
     with log_path.open("w") as logf:
         result = subprocess.run(
-            cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=False,
+            cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT,
+            check=False, env=env,
         )
     return int(result.returncode)
 
