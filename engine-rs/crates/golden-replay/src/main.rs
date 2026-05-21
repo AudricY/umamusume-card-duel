@@ -196,7 +196,7 @@ fn v4_replay_for_seed(
         c_puct: 1.5,
         leaf: MctsLeaf::Rollout,
         prior: MctsPrior::Uniform,
-        rollout_crn_samples: 1,
+        rollout_crn_samples: 3,
         rollout_steps: 200,
         add_root_dirichlet: false,
         dirichlet_alpha: 0.3,
