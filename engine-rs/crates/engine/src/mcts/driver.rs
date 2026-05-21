@@ -490,10 +490,12 @@ fn step_from_model_decision(
     // uses. `get_forced_attack_coin_results` consumes one rand per non-
     // guaranteed-heads flip needed by the eligible attack with the most
     // forced flips.
+    //
+    // Match TS: forced uses INNER rng; advance reads AMBIENT outer rng via
+    // random_float(). Same fix as rollout_heuristic + collapse — see
+    // their comments for the rationale.
     let forced_coins = with_rng_borrow(rng, || get_forced_attack_coin_results(state));
-    let next_state = with_rng_borrow(rng, || {
-        advance_modeled_turn_step(state, model_side, action, forced_coins.clone())
-    });
+    let next_state = advance_modeled_turn_step(state, model_side, action, forced_coins.clone());
     if state_hash(&next_state) == state_hash(state) {
         return None;
     }
