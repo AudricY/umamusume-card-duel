@@ -14,11 +14,14 @@ from .features import (
     ACTION_DIM,
     CARD_ID_SHAPES,
     STATE_DIM,
+    UMA_SLOT_COUNT,
+    UMA_SLOT_FEATURE_DIM,
     ZONE_ORDER,
     action_card_idx_pair,
     feature_builder_for_state_dim,
     legal_actions_to_features,
     observation_to_card_ids,
+    observation_to_uma_slots,
 )
 
 # R7.b.2 Phase 2 NOTE on schema versions:
@@ -72,6 +75,19 @@ class PolicySample:
     # branch disabled.
     card_ids_by_zone: dict[str, np.ndarray] | None = None
     action_card_idx: np.ndarray | None = None
+    # R16-P2 C4: per-Uma slot-token tensors. Populated only when the dataset
+    # is loaded with `uses_uma_slot_tokens=True`. When None the collator
+    # omits both keys from the batch dict (all-or-nothing pattern, mirrors
+    # `card_ids_by_zone` / `action_card_idx`), so v3.0/v3.1 callers see the
+    # exact pre-C4 batch shape. Shapes when populated:
+    #   uma_slot_card_ids: int64[UMA_SLOT_COUNT]                 (= [10])
+    #   uma_slot_features: float32[UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM]
+    #                                                            (= [10, 23])
+    # Absent slots have card_id=0 and an all-zero feature row, matching the
+    # C1 builder's "absence is zero" contract; the model's mask source is
+    # `(uma_slot_card_ids != 0)`.
+    uma_slot_card_ids: np.ndarray | None = None
+    uma_slot_features: np.ndarray | None = None
 
 
 class JsonlPolicyDataset(Dataset[PolicySample]):
@@ -87,11 +103,17 @@ class JsonlPolicyDataset(Dataset[PolicySample]):
         contested_min_legal: int = 4,
         contested_resample_fraction: float | None = None,
         contested_resample_seed: int = 0,
+        uses_uma_slot_tokens: bool = False,
     ) -> None:
         # `state_dim` selects the frozen builder (96=v2, 110=v3.0, 164=v3.1)
         # via the same dim-keyed mechanism serve_onnx uses. Default is the
         # module STATE_DIM (110 = v3.0) so existing callers are byte-stable;
         # v3.1 training opts in by passing state_dim=STATE_DIM_V3_1.
+        # R16-P2 C4: `uses_uma_slot_tokens` opts into per-Uma slot-token
+        # packing (additive `uma_slot_card_ids` / `uma_slot_features` fields
+        # on every loaded sample). Default False so v3.0/v3.1 callers AND
+        # pre-C4 BC corpora are byte-identical; v3.2 training opts in by
+        # passing the flag through. Mirrors `state_dim` kwarg-plumbing style.
         self.path = Path(path)
         self.ablations = ablations or set()
         self.samples = list(
@@ -105,6 +127,7 @@ class JsonlPolicyDataset(Dataset[PolicySample]):
                 contested_min_legal=contested_min_legal,
                 contested_resample_fraction=contested_resample_fraction,
                 contested_resample_seed=contested_resample_seed,
+                uses_uma_slot_tokens=uses_uma_slot_tokens,
             )
         )
         if not self.samples:
@@ -128,6 +151,7 @@ def load_policy_samples(
     contested_min_legal: int = 4,
     contested_resample_fraction: float | None = None,
     contested_resample_seed: int = 0,
+    uses_uma_slot_tokens: bool = False,
 ) -> Iterable[PolicySample]:
     """Load retained (>=`min_actions`-legal) policy rows.
 
@@ -170,6 +194,7 @@ def load_policy_samples(
             weight_contested=weight_contested,
             contested_loss_weight=contested_loss_weight,
             contested_min_legal=contested_min_legal,
+            uses_uma_slot_tokens=uses_uma_slot_tokens,
         )
         return
 
@@ -189,6 +214,7 @@ def load_policy_samples(
             weight_contested=weight_contested,
             contested_loss_weight=contested_loss_weight,
             contested_min_legal=contested_min_legal,
+            uses_uma_slot_tokens=uses_uma_slot_tokens,
         )
     )
     total = len(buffered)
@@ -235,6 +261,7 @@ def _stream_policy_samples(
     weight_contested: bool,
     contested_loss_weight: float,
     contested_min_legal: int,
+    uses_uma_slot_tokens: bool = False,
 ) -> Iterable[PolicySample]:
     with Path(path).open("r", encoding="utf8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -272,6 +299,24 @@ def _stream_policy_samples(
             except ValueError as exc:
                 raise ValueError(f"{path}:{line_number}: {exc}") from exc
             action_card_idx = np.stack([action_card_idx_pair(action) for action in actions], axis=0)
+            # R16-P2 C4: per-Uma slot-token packing. Default OFF (fields stay
+            # None → collator omits the keys, batch dict is byte-identical to
+            # pre-C4). When `uses_uma_slot_tokens=True` we call the C1 builder
+            # directly; it raises `ValueError` on rows that lack the required
+            # PublicObservation `own`/`opponent` side dicts — fail-loud guard
+            # so a corpus-schema mismatch surfaces at load time rather than as
+            # silent zero tensors. Mirrors the existing
+            # `observation_to_card_ids` fail-loud pattern above.
+            uma_slot_card_ids: np.ndarray | None
+            uma_slot_features: np.ndarray | None
+            if uses_uma_slot_tokens:
+                try:
+                    uma_slot_card_ids, uma_slot_features = observation_to_uma_slots(observation)
+                except ValueError as exc:
+                    raise ValueError(f"{path}:{line_number}: {exc}") from exc
+            else:
+                uma_slot_card_ids = None
+                uma_slot_features = None
             sample_weight = _sample_weight(example)
             # Option 3 — legal-action-count loss weighting. Scale the policy
             # sample weight for contested (>= contested_min_legal-legal)
@@ -289,6 +334,8 @@ def _stream_policy_samples(
                 policy_target=policy_target,
                 card_ids_by_zone=card_ids_by_zone,
                 action_card_idx=action_card_idx,
+                uma_slot_card_ids=uma_slot_card_ids,
+                uma_slot_features=uma_slot_features,
             )
 
 
@@ -351,6 +398,31 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
         else None
     )
 
+    # R16-P2 C4: per-Uma slot-token packing. Same ALL-OR-NOTHING emit pattern
+    # as `card_ids_by_zone` above (the template lives ~10 lines up; if even
+    # one sample in the batch lacks both fields the batch dict silently
+    # omits both keys, never partial-emit). v3.0/v3.1 batches that never
+    # set `uses_uma_slot_tokens=True` see `None` on every sample, so both
+    # keys are absent from the emitted dict — byte-identical to pre-C4.
+    # Cross-data-path note: MctsSelfPlaySample also carries these as
+    # `getattr(..., None)`-default optional fields, so the same all-or-
+    # nothing branch fires uniformly across BC and mcts-distill collators.
+    all_have_uma_slots = all(
+        getattr(sample, "uma_slot_card_ids", None) is not None
+        and getattr(sample, "uma_slot_features", None) is not None
+        for sample in samples
+    )
+    uma_slot_card_ids_buffer = (
+        np.zeros((batch_size, UMA_SLOT_COUNT), dtype=np.int64)
+        if all_have_uma_slots
+        else None
+    )
+    uma_slot_features_buffer = (
+        np.zeros((batch_size, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), dtype=np.float32)
+        if all_have_uma_slots
+        else None
+    )
+
     # R7 step 3: emit a padded `policy_targets` tensor only when *every*
     # sample in the batch carries a soft target. Mixed batches (some rows
     # from a single-teacher / legacy trace, some from a multi-teacher trace
@@ -386,6 +458,15 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
             # Action source/target idx: pad parallel to action_features.
             pair = sample.action_card_idx  # type: ignore[assignment]
             action_card_idx_buffer[row, :count, :] = pair
+        if (
+            uma_slot_card_ids_buffer is not None
+            and uma_slot_features_buffer is not None
+        ):
+            # R16-P2 C4: slot tensors are fixed-shape (UMA_SLOT_COUNT=10)
+            # per sample by the C1 builder contract, so we write the full
+            # row directly with no per-zone walk / padding logic.
+            uma_slot_card_ids_buffer[row] = sample.uma_slot_card_ids  # type: ignore[assignment]
+            uma_slot_features_buffer[row] = sample.uma_slot_features  # type: ignore[assignment]
 
     batch: dict[str, torch.Tensor] = {
         "state_features": torch.from_numpy(state_features),
@@ -400,6 +481,12 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
     if card_ids_buffer is not None and action_card_idx_buffer is not None:
         batch["card_ids_by_zone"] = torch.from_numpy(card_ids_buffer)
         batch["action_card_idx"] = torch.from_numpy(action_card_idx_buffer)
+    if (
+        uma_slot_card_ids_buffer is not None
+        and uma_slot_features_buffer is not None
+    ):
+        batch["uma_slot_card_ids"] = torch.from_numpy(uma_slot_card_ids_buffer)
+        batch["uma_slot_features"] = torch.from_numpy(uma_slot_features_buffer)
     return batch
 
 

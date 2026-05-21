@@ -31,11 +31,14 @@ from .features import (
     ACTION_DIM,
     CARD_ID_SHAPES,
     STATE_DIM,
+    UMA_SLOT_COUNT,
+    UMA_SLOT_FEATURE_DIM,
     ZONE_ORDER,
     action_card_idx_pair,
     feature_builder_for_state_dim,
     legal_actions_to_features,
     observation_to_card_ids,
+    observation_to_uma_slots,
 )
 
 
@@ -61,6 +64,16 @@ class MctsSelfPlaySample:
     # embedding branch disabled.
     card_ids_by_zone: dict[str, np.ndarray] | None = None
     action_card_idx: np.ndarray | None = None
+    # R16-P2 C4: per-Uma slot-token tensors. Mirrors the same optional fields
+    # on `PolicySample` (BC path). Populated only when the dataset is loaded
+    # with `uses_uma_slot_tokens=True`; otherwise None and the collator omits
+    # both batch keys (all-or-nothing pattern). The MCTS self-play observation
+    # is the SAME `PublicObservation` shape the BC path consumes (both go
+    # through `relabelDecisionTrace.ts` / `mctsSelfPlay.ts` in TS, which write
+    # the v3 nested `own`/`opponent` schema), so `observation_to_uma_slots()`
+    # works without any payload-shape divergence.
+    uma_slot_card_ids: np.ndarray | None = None
+    uma_slot_features: np.ndarray | None = None
 
 
 class MctsSelfPlayDataset(Dataset[MctsSelfPlaySample]):
@@ -72,12 +85,16 @@ class MctsSelfPlayDataset(Dataset[MctsSelfPlaySample]):
         ablations: set[str] | None = None,
         allow_missing_card_ids: bool = False,
         state_dim: int = STATE_DIM,
+        uses_uma_slot_tokens: bool = False,
     ) -> None:
         # `state_dim` selects the frozen builder (96=v2, 110=v3.0, 164=v3.1)
         # via the same dim-keyed mechanism `JsonlPolicyDataset` (BC path) and
         # serve_onnx use. Default is the module STATE_DIM (110 = v3.0) so the
         # mcts-distill path is byte-stable for existing callers; v3.1 distill
         # opts in by passing state_dim=STATE_DIM_V3_1.
+        # R16-P2 C4: `uses_uma_slot_tokens` mirrors `JsonlPolicyDataset` —
+        # default False keeps v3.0/v3.1 distill batches byte-identical to
+        # pre-C4; v3.2 distill opts in by passing the flag.
         self.path = Path(path)
         self.ablations = ablations or set()
         self.allow_missing_card_ids = allow_missing_card_ids
@@ -89,6 +106,7 @@ class MctsSelfPlayDataset(Dataset[MctsSelfPlaySample]):
                 ablations=self.ablations,
                 allow_missing_card_ids=allow_missing_card_ids,
                 state_dim=state_dim,
+                uses_uma_slot_tokens=uses_uma_slot_tokens,
             )
         )
         if not self.samples:
@@ -108,6 +126,7 @@ def load_mcts_selfplay_samples(
     ablations: set[str] | None = None,
     allow_missing_card_ids: bool = False,
     state_dim: int = STATE_DIM,
+    uses_uma_slot_tokens: bool = False,
 ) -> Iterable[MctsSelfPlaySample]:
     """Load mcts-selfplay rows as `MctsSelfPlaySample`s.
 
@@ -180,6 +199,25 @@ def load_mcts_selfplay_samples(
                 action_card_idx = np.stack(
                     [action_card_idx_pair(action) for action in actions], axis=0
                 )
+            # R16-P2 C4: per-Uma slot-token packing — mirrors the BC dataset
+            # path (`dataset.py`). The MCTS self-play observation is the same
+            # `PublicObservation` shape (own/opponent nested sides with
+            # `active` + `bench` Umas carrying `cardId`/`hp`/`energies`/…),
+            # so `observation_to_uma_slots()` works against it unchanged.
+            # Fail-loud: a row that lacks the v3-era nested side dicts raises
+            # in the C1 builder; we wrap with the `{path}:{line}` prefix the
+            # `observation_to_card_ids` branch above uses so error sources
+            # are uniformly locatable.
+            uma_slot_card_ids: np.ndarray | None
+            uma_slot_features: np.ndarray | None
+            if uses_uma_slot_tokens:
+                try:
+                    uma_slot_card_ids, uma_slot_features = observation_to_uma_slots(observation)
+                except ValueError as exc:
+                    raise ValueError(f"{path}:{line_number}: {exc}") from exc
+            else:
+                uma_slot_card_ids = None
+                uma_slot_features = None
             yield MctsSelfPlaySample(
                 state_features=state_features,
                 action_features=action_features,
@@ -190,6 +228,8 @@ def load_mcts_selfplay_samples(
                 example=example,
                 card_ids_by_zone=card_ids_by_zone,
                 action_card_idx=action_card_idx,
+                uma_slot_card_ids=uma_slot_card_ids,
+                uma_slot_features=uma_slot_features,
             )
 
 
@@ -236,6 +276,28 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
         else None
     )
 
+    # R16-P2 C4: per-Uma slot-token packing — same ALL-OR-NOTHING emit
+    # pattern as `card_ids_by_zone` directly above. If even one sample in
+    # the batch lacks both slot fields the dict omits both keys; never
+    # partial-emit. v3.0/v3.1 distill batches (default
+    # `uses_uma_slot_tokens=False`) see None on every sample, so both keys
+    # stay absent from the emitted dict — byte-identical to pre-C4.
+    all_have_uma_slots = all(
+        getattr(sample, "uma_slot_card_ids", None) is not None
+        and getattr(sample, "uma_slot_features", None) is not None
+        for sample in samples
+    )
+    uma_slot_card_ids_buffer = (
+        np.zeros((batch_size, UMA_SLOT_COUNT), dtype=np.int64)
+        if all_have_uma_slots
+        else None
+    )
+    uma_slot_features_buffer = (
+        np.zeros((batch_size, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), dtype=np.float32)
+        if all_have_uma_slots
+        else None
+    )
+
     for row, sample in enumerate(samples):
         count = sample.action_features.shape[0]
         state_features[row] = sample.state_features
@@ -251,6 +313,14 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
                 width = zone_arr.shape[0]
                 card_ids_buffer[row, zone_index, :width] = zone_arr
             action_card_idx_buffer[row, :count, :] = sample.action_card_idx  # type: ignore[index]
+        if (
+            uma_slot_card_ids_buffer is not None
+            and uma_slot_features_buffer is not None
+        ):
+            # R16-P2 C4: slot tensors are fixed-shape per sample (10,) and
+            # (10, 23) per the C1 builder contract — write the row directly.
+            uma_slot_card_ids_buffer[row] = sample.uma_slot_card_ids  # type: ignore[assignment]
+            uma_slot_features_buffer[row] = sample.uma_slot_features  # type: ignore[assignment]
 
     batch: dict[str, torch.Tensor] = {
         "state_features": torch.from_numpy(state_features),
@@ -264,4 +334,10 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
     if card_ids_buffer is not None and action_card_idx_buffer is not None:
         batch["card_ids_by_zone"] = torch.from_numpy(card_ids_buffer)
         batch["action_card_idx"] = torch.from_numpy(action_card_idx_buffer)
+    if (
+        uma_slot_card_ids_buffer is not None
+        and uma_slot_features_buffer is not None
+    ):
+        batch["uma_slot_card_ids"] = torch.from_numpy(uma_slot_card_ids_buffer)
+        batch["uma_slot_features"] = torch.from_numpy(uma_slot_features_buffer)
     return batch
