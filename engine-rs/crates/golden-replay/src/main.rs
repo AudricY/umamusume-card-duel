@@ -35,6 +35,9 @@ use engine::core::random::{with_rng, Rng};
 use engine::core::state::{CurrentSide, GameState};
 use engine::dispatcher::{advance_modeled_turn_step, get_forced_attack_coin_results};
 use engine::headless_setup::setup_ai_vs_ai_game;
+use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+use engine::mcts::driver::run_mcts;
+use engine::policy::actions::enumerate_legal_ai_actions;
 use engine::policy::types::{AiPhase, LegalAiAction};
 use serde::Deserialize;
 
@@ -59,6 +62,11 @@ struct Args {
     /// debug iteration.
     #[arg(long, default_value_t = 0)]
     limit_seeds: usize,
+
+    /// In V4 (mcts) mode, stop after this many steps per seed (0 = all).
+    /// One MCTS decision is ~seconds, so limit during debug iteration.
+    #[arg(long, default_value_t = 0)]
+    limit_steps: usize,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +170,117 @@ fn parse_side_id(s: &str) -> Option<SideId> {
         "opponent" => Some(SideId::Opponent),
         _ => None,
     }
+}
+
+/// V4: drive Rust MCTS at each step (matching the recorder's per-step
+/// MCTS config) and compare the chosen action + post-state to the
+/// recorded trace.
+///
+/// MCTS config matches the recorder's default: sims=100, K=3,
+/// rollout_steps=200, prior=uniform, leaf=rollout, collapseMaxSteps=64.
+/// Inner MCTS rng seed: `${seed}:${sideId}:${step}:mcts` (matching TS
+/// recordGoldenTraces.ts).
+fn v4_replay_for_seed(
+    trace: &Trace,
+    initial_rng: Rng,
+    resolve: &impl Fn(engine::core::card_id::CardId) -> String,
+    max_steps_to_replay: usize,
+) -> Vec<String> {
+    let mut diffs: Vec<String> = Vec::new();
+    let (mut state, mut step_rng) = with_rng(initial_rng, || setup_ai_vs_ai_game());
+
+    let config = MctsConfig {
+        simulations: 100,
+        c_puct: 1.5,
+        leaf: MctsLeaf::Rollout,
+        prior: MctsPrior::Uniform,
+        rollout_crn_samples: 1,
+        rollout_steps: 200,
+        add_root_dirichlet: false,
+        dirichlet_alpha: 0.3,
+        dirichlet_epsilon: 0.25,
+        max_nodes: 5_000,
+        collapse_max_steps: 64,
+        adaptive_ratio: 0.0,
+        adaptive_min_sims: 100,
+        model_url: String::new(),
+    };
+
+    let limit = if max_steps_to_replay == 0 {
+        trace.actions.len()
+    } else {
+        max_steps_to_replay.min(trace.actions.len())
+    };
+
+    for i in 0..limit {
+        let step = &trace.actions[i];
+        let Some(side_id) = parse_side_id(&step.side_id) else {
+            diffs.push(format!("step[{}]: unrecognized sideId {:?}", i, step.side_id));
+            break;
+        };
+
+        let legal = enumerate_legal_ai_actions(&state, side_id);
+
+        let chosen_action: LegalAiAction = if legal.len() <= 1 {
+            match legal.into_iter().next() {
+                Some(a) => a,
+                None => LegalAiAction {
+                    id: "__none__".to_string(),
+                    phase: parse_ai_phase(&step.action.phase),
+                    kind: "__none__".to_string(),
+                    payload: serde_json::Value::Null,
+                    features: Vec::new(),
+                    action_source_card_idx: None,
+                    action_target_card_idx: None,
+                },
+            }
+        } else {
+            let mcts_seed = format!("{}:{}:{}:mcts", trace.seed, step.side_id, i);
+            let (mcts_result, used_rng) = with_rng(step_rng.clone(), || {
+                run_mcts(&state, side_id, &config, "", mcts_seed.as_str())
+            });
+            step_rng = used_rng;
+            let selected_index = mcts_result.selected_index.min(legal.len() - 1);
+            legal[selected_index].clone()
+        };
+
+        if chosen_action.kind != step.action.kind {
+            diffs.push(format!(
+                "step[{}] action.kind: rust={:?} ts={:?}",
+                i, chosen_action.kind, step.action.kind
+            ));
+            break;
+        }
+
+        let (next_state, used_rng) = with_rng(step_rng.clone(), || {
+            let forced = get_forced_attack_coin_results(&state);
+            advance_modeled_turn_step(&state, side_id, &chosen_action, forced)
+        });
+        step_rng = used_rng;
+        state = next_state;
+
+        let target_fp = if i + 1 < trace.actions.len() {
+            trace.actions[i + 1].fingerprint_before.as_str()
+        } else {
+            continue;
+        };
+        let target: TsFingerprint = match serde_json::from_str(target_fp) {
+            Ok(v) => v,
+            Err(e) => {
+                diffs.push(format!("step[{}] parse next fp: {}", i, e));
+                break;
+            }
+        };
+        let card_id_diffs = compare_card_id_fields(&state, &target, resolve);
+        if !card_id_diffs.is_empty() {
+            diffs.push(format!("step[{}] post-advance:", i));
+            for d in card_id_diffs {
+                diffs.push(format!("    - {}", d));
+            }
+            break;
+        }
+    }
+    diffs
 }
 
 /// V3: remap a recorded action's TS uids → Rust uids via position.
@@ -520,6 +639,22 @@ fn main() -> Result<()> {
             );
             let step_diffs = replay_steps_for_seed(&trace, step_rng, &resolve);
             diffs.extend(step_diffs);
+        }
+
+        // V4 MCTS replay: run Rust MCTS at each step (slow but the real
+        // bit-identity gate).
+        if args.mode == "mcts" {
+            let mcts_rng = Rng::from_seed(
+                format!("{}:selfplay", trace.seed).as_str(),
+                "selfplay",
+            );
+            let max_steps = if args.limit_steps == 0 {
+                0
+            } else {
+                args.limit_steps
+            };
+            let mcts_diffs = v4_replay_for_seed(&trace, mcts_rng, &resolve, max_steps);
+            diffs.extend(mcts_diffs);
         }
 
         if diffs.is_empty() {
