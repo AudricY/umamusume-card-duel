@@ -33,26 +33,54 @@ use serde::Serialize;
     about = "Rust port of backend/src/sim/mctsSelfPlay.ts"
 )]
 struct Args {
-    #[arg(long, default_value_t = 100)]
+    /// MCTS simulations per decision. Orchestrator alias: --mcts-simulations.
+    #[arg(long, alias = "mcts-simulations", default_value_t = 100)]
     sims: u32,
-    #[arg(long, default_value_t = 3)]
+    /// CRN rollout samples. Orchestrator alias: --mcts-rollout-crn-samples.
+    #[arg(long, alias = "mcts-rollout-crn-samples", default_value_t = 3)]
     k: u32,
-    #[arg(long, default_value_t = 200)]
+    /// Rollout step cap. Orchestrator alias: --mcts-rollout-steps.
+    #[arg(long, alias = "mcts-rollout-steps", default_value_t = 200)]
     rollout_steps: u32,
-    #[arg(long, default_value_t = 64)]
+    /// Heuristic-collapse cap. Orchestrator alias: --mcts-collapse-max-steps.
+    #[arg(long, alias = "mcts-collapse-max-steps", default_value_t = 64)]
     collapse_max: u32,
-    #[arg(long, default_value_t = 100)]
+    /// Number of seeds. Orchestrator alias: --games.
+    #[arg(long, alias = "games", default_value_t = 100)]
     seeds: u32,
-    #[arg(long, default_value_t = 0)]
+    /// First seed. Orchestrator alias: --seed-start.
+    #[arg(long, alias = "seed-start", default_value_t = 0)]
     seed_base: u32,
-    /// Prior mode: "uniform" or "policy". Only uniform supported until
-    /// /predict integration is wired.
-    #[arg(long, default_value = "uniform")]
+    /// Prior mode: "uniform" or "policy". Orchestrator alias: --mcts-prior.
+    #[arg(long, alias = "mcts-prior", default_value = "uniform")]
     prior: String,
-    /// Leaf mode: "rollout" or "value-head". Only rollout supported
-    /// until /predict integration is wired.
-    #[arg(long, default_value = "rollout")]
+    /// Leaf mode. Orchestrator alias: --mcts-leaf.
+    #[arg(long, alias = "mcts-leaf", default_value = "rollout")]
     leaf: String,
+    /// Worker fan-out (ignored — Rust runs single-process; orchestrator
+    /// parallelises by spawning multiple Rust binaries).
+    #[arg(long, default_value_t = 1)]
+    workers: u32,
+    /// PUCT exploration constant. Orchestrator alias: --mcts-c-puct.
+    #[arg(long, alias = "mcts-c-puct", default_value_t = 1.5)]
+    c_puct: f64,
+    /// MCTS tree-node cap. Orchestrator alias: --mcts-max-nodes.
+    #[arg(long, alias = "mcts-max-nodes", default_value_t = 5_000)]
+    max_nodes: u32,
+    /// Root Dirichlet noise alpha. Orchestrator alias: --mcts-dirichlet-alpha.
+    #[arg(long, alias = "mcts-dirichlet-alpha", default_value_t = 0.3)]
+    dirichlet_alpha: f64,
+    /// Root Dirichlet noise epsilon. Orchestrator alias: --mcts-dirichlet-epsilon.
+    #[arg(long, alias = "mcts-dirichlet-epsilon", default_value_t = 0.25)]
+    dirichlet_epsilon: f64,
+    /// Temperature-sampling cutoff in moves (per side).
+    #[arg(long, default_value_t = 6)]
+    temperature_moves: u32,
+    #[arg(long, default_value_t = 1.0)]
+    temperature_value: f64,
+    /// Optional manifest JSON output (mirrors TS --manifest-out).
+    #[arg(long)]
+    manifest_out: Option<String>,
     #[arg(long, default_value_t = 1000)]
     max_steps: u32,
     #[arg(long)]
@@ -105,6 +133,7 @@ struct SelfPlayRow {
 const ROW_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RunSummary {
     games: u32,
     elapsed_secs: f64,
@@ -116,6 +145,7 @@ struct RunSummary {
 }
 
 #[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct TerminalReasons {
     game_over: u32,
     max_steps: u32,
@@ -252,20 +282,24 @@ fn main() -> Result<()> {
     };
     let config = MctsConfig {
         simulations: args.sims,
-        c_puct: 1.5,
+        c_puct: args.c_puct,
         leaf,
         prior,
         rollout_crn_samples: args.k,
         rollout_steps: args.rollout_steps,
         add_root_dirichlet: false,
-        dirichlet_alpha: 0.3,
-        dirichlet_epsilon: 0.25,
-        max_nodes: 5_000,
+        dirichlet_alpha: args.dirichlet_alpha,
+        dirichlet_epsilon: args.dirichlet_epsilon,
+        max_nodes: args.max_nodes,
         collapse_max_steps: args.collapse_max,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
         model_url: args.model_url.clone(),
     };
+    let _ = args.temperature_moves;
+    let _ = args.temperature_value;
+    let _ = args.workers;
+    let _ = args.manifest_out;
 
     let model_side = SideId::Player;
     eprintln!(
