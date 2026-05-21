@@ -390,6 +390,14 @@ def run_distill(
         anchor = kl_anchor_checkpoint if args.w6_fix_fixed_kl_anchor else init_checkpoint
         cmd.extend(["--kl-anchor-checkpoint", str(anchor),
                     "--kl-anchor-weight", str(args.kl_anchor_weight)])
+    # R16-P2 C6: opt the distill trainer into the per-Uma slot-token branch.
+    # Conditional append (mirroring the kl-anchor passthrough above) so unset
+    # is byte-identical to pre-C6 — no flag added to the cmd, no model_config
+    # field flip, the produced checkpoint stays v3.0/v3.1. When set, every
+    # distill invocation in the loop trains a v3.2 ckpt and the
+    # checkpoint-driven export auto-gates the 7-input ONNX graph.
+    if args.uma_slot_tokens:
+        cmd.append("--uma-slot-tokens")
     with log_path.open("w") as logf:
         subprocess.run(cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True)
 
@@ -762,6 +770,20 @@ def parse_args() -> argparse.Namespace:
                         "distilled ckpt yields a 164-d ONNX graph and serve_onnx "
                         "resolves v3.1 with no extra wiring. The 164-d init "
                         "checkpoint must match (--init-checkpoint).")
+    p.add_argument("--uma-slot-tokens", action="store_true",
+                   help="R16-P2 C6: opt the distill trainer into the per-Uma "
+                        "slot-token branch end-to-end (train_bc.py "
+                        "--uma-slot-tokens). Default OFF — unset is "
+                        "byte-identical to pre-C6 loops. When ON, the "
+                        "distilled checkpoint's model_config.uses_uma_slot_"
+                        "tokens=True is the source of truth read by "
+                        "export_onnx (auto-gates the 7-input v3.2 ONNX "
+                        "graph) and serve_onnx (schema dispatch). The init "
+                        "checkpoint must be v3.2-compatible (either a "
+                        "v3.2-trained ckpt or one scaffolded via C7's "
+                        "make_v32_slot_token_init.py from a v3.0 source). "
+                        "No exporter-side CLI flag — the pivot is the "
+                        "checkpoint config, per C5.")
     p.add_argument("--kl-anchor-weight", type=float, default=0.0,
                    help="Optional anti-forgetting anchor weight (init checkpoint as anchor).")
     # W6 recipe-fix (r110.md §4a). Default ON via the module constants above;

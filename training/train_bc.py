@@ -32,9 +32,22 @@ def main() -> None:
     # v3.0) so unset is byte-identical to pre-change behavior; v3.1
     # training opts in with `--state-dim 164`.
     state_dim = int(args.state_dim)
+    # R16-P2 C6: thread the slot-token flag into the dataset packer so
+    # `uma_slot_card_ids` + `uma_slot_features` get emitted per sample (and
+    # then through the all-or-nothing collator, into the batch dict). When
+    # the flag is OFF (default), both dataset paths skip the C1 builder call
+    # and the batch dict omits both keys — `.get(...)` in the training loop
+    # then returns None and the model's slot-encoder no-op branch fires.
+    uses_uma_slot_tokens = bool(args.uma_slot_tokens)
     if args.data_mode == "mcts-distill":
         # R12 phase C: soft policy target from MCTS visit distribution.
-        dataset = MctsSelfPlayDataset(args.data, min_actions=2, ablations=ablations, state_dim=state_dim)
+        dataset = MctsSelfPlayDataset(
+            args.data,
+            min_actions=2,
+            ablations=ablations,
+            state_dim=state_dim,
+            uses_uma_slot_tokens=uses_uma_slot_tokens,
+        )
         collate_fn = collate_mcts_selfplay_batch
     else:
         # R16 Fork A contested-coverage pilot knobs. Both default OFF
@@ -50,6 +63,7 @@ def main() -> None:
             contested_min_legal=args.contested_min_legal,
             contested_resample_fraction=args.contested_resample_fraction,
             contested_resample_seed=args.seed,
+            uses_uma_slot_tokens=uses_uma_slot_tokens,
         )
         collate_fn = collate_policy_batch
     train_indices, val_indices, split_metadata = split_dataset(dataset, args.seed, args.split_by)
@@ -67,7 +81,18 @@ def main() -> None:
         collate_fn=collate_fn,
     ) if val_indices else None
 
-    config = ModelConfig(state_dim=state_dim, hidden_dim=args.hidden_dim, depth=args.depth, dropout=args.dropout)
+    # R16-P2 C6: `uses_uma_slot_tokens` is recorded in the checkpoint's
+    # `model_config` dict and is the source of truth read by export_onnx
+    # (auto-gates 5-input vs 7-input ONNX graph) and serve_onnx (schema
+    # dispatch). No CLI flag on the exporter side — the pivot is the
+    # checkpoint config, per C5.
+    config = ModelConfig(
+        state_dim=state_dim,
+        hidden_dim=args.hidden_dim,
+        depth=args.depth,
+        dropout=args.dropout,
+        uses_uma_slot_tokens=uses_uma_slot_tokens,
+    )
     model = CandidatePolicyNet(config).to(device)
     # Item 11/17 KL-anchor anti-forgetting: if --kl-anchor-checkpoint is set,
     # load that checkpoint as a frozen anchor distribution and regularize the
@@ -327,24 +352,68 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
     # (`training/export_onnx.py:MAX_CARDS_PER_ZONE`). We re-import here
     # rather than at module scope to keep this smoke independent of
     # export-side import order.
-    from uma_ai.features import CARD_ID_SHAPES
+    from uma_ai.features import CARD_ID_SHAPES, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM
     from uma_ai.model import NUM_ZONES
     max_cards_per_zone = max(CARD_ID_SHAPES.values())
     card_ids_by_zone = torch.zeros((1, NUM_ZONES, max_cards_per_zone), dtype=torch.int64)
     action_card_idx = torch.zeros((1, 4, 2), dtype=torch.int64)
-    torch.onnx.export(
-        cpu_model,
-        (state, actions, mask, card_ids_by_zone, action_card_idx),
-        onnx_path,
-        input_names=[
+    # R16-P2 C6: gate the smoke graph's input set on the TRAINED
+    # checkpoint's `model_config.uses_uma_slot_tokens` (config arg here is
+    # the same ModelConfig the checkpoint records). When False this branch
+    # is a strict no-op — the exported smoke ONNX has 5 inputs (byte-
+    # identical to pre-C6), the populated/zero checks use 5-input feeds,
+    # and the production `export_onnx.py` (also auto-gated on the same
+    # config field) will produce the same 5-input v3.0/v3.1 graph at
+    # release time. When True, the smoke graph has 7 inputs mirroring the
+    # production `export_onnx.py` 7-input v3.2 layout, and the
+    # populated/zero checks include slot tensors. Mirroring the production
+    # exporter's input layout in the smoke guarantees the per-training-run
+    # ONNX deployability check exercises the same graph topology serve_onnx
+    # will load.
+    if config.uses_uma_slot_tokens:
+        uma_slot_card_ids = torch.zeros((1, UMA_SLOT_COUNT), dtype=torch.int64)
+        uma_slot_features = torch.zeros(
+            (1, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), dtype=torch.float32
+        )
+        positional_inputs = (
+            state,
+            actions,
+            mask,
+            card_ids_by_zone,
+            action_card_idx,
+            uma_slot_card_ids,
+            uma_slot_features,
+        )
+        input_names = [
             "state_features",
             "action_features",
             "action_mask",
             "card_ids_by_zone",
             "action_card_idx",
-        ],
-        output_names=["logits", "value"],
-        dynamic_axes={
+            "uma_slot_card_ids",
+            "uma_slot_features",
+        ]
+        dynamic_axes = {
+            "state_features": {0: "batch"},
+            "action_features": {0: "batch", 1: "actions"},
+            "action_mask": {0: "batch", 1: "actions"},
+            "card_ids_by_zone": {0: "batch"},
+            "action_card_idx": {0: "batch", 1: "actions"},
+            "uma_slot_card_ids": {0: "batch"},
+            "uma_slot_features": {0: "batch"},
+            "logits": {0: "batch", 1: "actions"},
+            "value": {0: "batch"},
+        }
+    else:
+        positional_inputs = (state, actions, mask, card_ids_by_zone, action_card_idx)
+        input_names = [
+            "state_features",
+            "action_features",
+            "action_mask",
+            "card_ids_by_zone",
+            "action_card_idx",
+        ]
+        dynamic_axes = {
             "state_features": {0: "batch"},
             "action_features": {0: "batch", 1: "actions"},
             "action_mask": {0: "batch", 1: "actions"},
@@ -352,7 +421,14 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
             "action_card_idx": {0: "batch", 1: "actions"},
             "logits": {0: "batch", 1: "actions"},
             "value": {0: "batch"},
-        },
+        }
+    torch.onnx.export(
+        cpu_model,
+        positional_inputs,
+        onnx_path,
+        input_names=input_names,
+        output_names=["logits", "value"],
+        dynamic_axes=dynamic_axes,
         opset_version=17,
     )
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
@@ -376,13 +452,39 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
         dtype=torch.int64,
         generator=gen,
     )
-    onnx_logits, onnx_value = session.run(None, {
+    # R16-P2 C6: populated-slot inputs when the slot branch is active. The
+    # `uma_slot_features` are randomized in [0, 1) so the per-slot encoder
+    # consumes a non-trivial concat (card embed + 23-d slot vector) and
+    # the populated-batch path exercises ORT's MatMul/GELU through the
+    # slot encoder. When False, both arrays stay None and the populated
+    # feed dict matches the pre-C6 5-input layout exactly.
+    if config.uses_uma_slot_tokens:
+        populated_uma_ids = torch.randint(
+            low=1,
+            high=cpu_model.card_embed.num_embeddings,
+            size=(1, UMA_SLOT_COUNT),
+            dtype=torch.int64,
+            generator=gen,
+        )
+        populated_uma_feat = torch.rand(
+            (1, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM),
+            dtype=torch.float32,
+            generator=gen,
+        )
+    else:
+        populated_uma_ids = None
+        populated_uma_feat = None
+    populated_feed: dict[str, Any] = {
         "state_features": state.numpy(),
         "action_features": actions.numpy(),
         "action_mask": mask.numpy(),
         "card_ids_by_zone": populated_czi.numpy(),
         "action_card_idx": populated_aci.numpy(),
-    })
+    }
+    if populated_uma_ids is not None and populated_uma_feat is not None:
+        populated_feed["uma_slot_card_ids"] = populated_uma_ids.numpy()
+        populated_feed["uma_slot_features"] = populated_uma_feat.numpy()
+    onnx_logits, onnx_value = session.run(None, populated_feed)
     with torch.no_grad():
         torch_logits, torch_value = cpu_model(
             state,
@@ -390,6 +492,8 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
             mask,
             card_ids_by_zone=populated_czi,
             action_card_idx=populated_aci,
+            uma_slot_card_ids=populated_uma_ids,
+            uma_slot_features=populated_uma_feat,
         )
     max_logit_diff = float((torch.from_numpy(onnx_logits) - torch_logits).abs().max())
     max_value_diff = float((torch.from_numpy(onnx_value) - torch_value).abs().max())
@@ -408,13 +512,31 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
     # signal in zero-cards states.
     zero_czi = torch.zeros_like(card_ids_by_zone)
     zero_aci = torch.zeros_like(action_card_idx)
-    onnx_logits_z, onnx_value_z = session.run(None, {
+    # R16-P2 C6: when the slot branch is active, also exercise the all-
+    # zero slot path. The C2 model uses `(uma_slot_card_ids != 0)` as the
+    # absent-slot mask AND zero-inits the slot encoder's final Linear, so
+    # an all-zero slot input contributes a structural zero residual —
+    # equivalent to the omitted-kwarg forward. This is the slot-branch
+    # analog of the existing `padding_idx=0` contract.
+    if config.uses_uma_slot_tokens:
+        zero_uma_ids = torch.zeros((1, UMA_SLOT_COUNT), dtype=torch.int64)
+        zero_uma_feat = torch.zeros(
+            (1, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), dtype=torch.float32
+        )
+    else:
+        zero_uma_ids = None
+        zero_uma_feat = None
+    zero_feed: dict[str, Any] = {
         "state_features": state.numpy(),
         "action_features": actions.numpy(),
         "action_mask": mask.numpy(),
         "card_ids_by_zone": zero_czi.numpy(),
         "action_card_idx": zero_aci.numpy(),
-    })
+    }
+    if zero_uma_ids is not None and zero_uma_feat is not None:
+        zero_feed["uma_slot_card_ids"] = zero_uma_ids.numpy()
+        zero_feed["uma_slot_features"] = zero_uma_feat.numpy()
+    onnx_logits_z, onnx_value_z = session.run(None, zero_feed)
     with torch.no_grad():
         torch_logits_z, torch_value_z = cpu_model(
             state,
@@ -422,6 +544,8 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
             mask,
             card_ids_by_zone=zero_czi,
             action_card_idx=zero_aci,
+            uma_slot_card_ids=zero_uma_ids,
+            uma_slot_features=zero_uma_feat,
         )
         # Reference: forward with the kwargs omitted entirely. Phase 2
         # `padding_idx=0` + `zone_projection(bias=False)` ensures
@@ -479,12 +603,19 @@ def run_epoch(
             # R7.b.2 Phase 2: forward the new embedding tensors when present
             # (post-Phase-1 datasets carry them; legacy or test paths may
             # omit them and the model.forward defaults to zero-tensors).
+            # R16-P2 C6: forward the per-Uma slot tensors when present.
+            # `.get(...)` (not bracket-indexing) is load-bearing: when the
+            # `--uma-slot-tokens` flag is OFF the collator omits BOTH keys,
+            # so `.get(...)` returns None and the model's slot-encoder no-op
+            # branch fires — byte-identical to pre-C6 forward.
             logits, values = model(
                 batch["state_features"],
                 batch["action_features"],
                 batch["action_mask"],
                 card_ids_by_zone=batch.get("card_ids_by_zone"),
                 action_card_idx=batch.get("action_card_idx"),
+                uma_slot_card_ids=batch.get("uma_slot_card_ids"),
+                uma_slot_features=batch.get("uma_slot_features"),
             )
             weights = normalized_weights(batch["sample_weights"])
             policy_targets = batch.get("policy_targets")
@@ -506,12 +637,21 @@ def run_epoch(
                     # so the KL is computed on the same input distribution
                     # (otherwise the anchor would see zero pooled features
                     # and KL would inflate spuriously).
+                    # R16-P2 C6: same `.get(...)` pattern threads slot
+                    # tensors through the anchor; when the anchor checkpoint
+                    # is v3.0/v3.1 (no slot encoder) the kwargs are absent
+                    # and the anchor's slot-branch stays inert as a no-op,
+                    # matching pre-C6 KL semantics. A v3.2 anchor will see
+                    # the slot tensors and KL stays on the same input
+                    # distribution as the target.
                     anchor_logits, _ = anchor_model(
                         batch["state_features"],
                         batch["action_features"],
                         batch["action_mask"],
                         card_ids_by_zone=batch.get("card_ids_by_zone"),
                         action_card_idx=batch.get("action_card_idx"),
+                        uma_slot_card_ids=batch.get("uma_slot_card_ids"),
+                        uma_slot_features=batch.get("uma_slot_features"),
                     )
                 kl_loss = masked_kl_divergence(anchor_logits, logits, batch["action_mask"])
             # R3 entropy bonus: subtract β·H(π) so loss minimization
@@ -565,12 +705,15 @@ def evaluate(
     for batch in loader:
         batch = move_batch(batch, model)
         # R7.b.2 Phase 2: forward the embedding tensors when present.
+        # R16-P2 C6: same `.get(...)` slot-tensor pattern as `run_epoch`.
         logits, values = model(
             batch["state_features"],
             batch["action_features"],
             batch["action_mask"],
             card_ids_by_zone=batch.get("card_ids_by_zone"),
             action_card_idx=batch.get("action_card_idx"),
+            uma_slot_card_ids=batch.get("uma_slot_card_ids"),
+            uma_slot_features=batch.get("uma_slot_features"),
         )
         weights = normalized_weights(batch["sample_weights"])
         policy_targets = batch.get("policy_targets")
@@ -943,6 +1086,22 @@ def parse_args() -> argparse.Namespace:
                              "holding total retained-row count FIXED. Unset "
                              "(default) is a bit-identical no-op. bc mode "
                              "only. Resample RNG seeded by --seed.")
+    parser.add_argument("--uma-slot-tokens", action="store_true",
+                        help="R16-P2 C6: opt into the per-Uma slot-token "
+                             "branch end-to-end. Drives the dataset packer "
+                             "(JsonlPolicyDataset/MctsSelfPlayDataset emit "
+                             "`uma_slot_card_ids` + `uma_slot_features` per "
+                             "row), the model's `ModelConfig.uses_uma_slot_"
+                             "tokens` (constructs the `uma_slot_encoder` "
+                             "branch with zero-init final Linear), and the "
+                             "training-loop forward (passes the new tensors). "
+                             "Default OFF -> byte-identical to pre-C6 (no "
+                             "slot keys in batch, no extra params, no graph "
+                             "input drift). When ON, the saved checkpoint's "
+                             "`model_config.uses_uma_slot_tokens=True` is "
+                             "the source of truth read by export_onnx (which "
+                             "auto-gates the 7-input ONNX graph) — no "
+                             "exporter-side CLI flag needed.")
     return parser.parse_args()
 
 
