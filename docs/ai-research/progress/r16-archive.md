@@ -817,3 +817,137 @@ eliminated. Either (a) reframed step 1 — rollout-leaf return audit
 on contested states, no CRN-paired ambiguity — or (b) pivot to the
 user-gated W6 HP-sweep (CEILING PATH A) since the 3a corpus arm is
 now exhausted by evidence. Direction call deferred to user.
+
+## R16-P2 — Per-Uma Slot Tokens v3.2 — C8 GATE NO-GO, +6.8pp iter-0 LIFT
+
+Rolled from `r16.md` 2026-05-21 to free headroom for the C8-W6FIX-ON
+vhleaf-loop verdict. Compact pointer in `r16.md` § "R16-P2 — Per-Uma Slot
+Tokens v3.2 (archived)". The +6.8pp iter-0 lift datapoint and the
+vhleaf-leaf falsification chain remain the evidence base for the
+downstream C8-W6FIX-ON and C8-W6FIX-ON VHLEAF LOOP sections in `r16.md`.
+
+### 1. Verdict — NO-GO at acceptance gate; iter-0 lift opens new forward line
+
+Three v3.2 experiments executed 2026-05-21, all killed pre-iter-5. Best v3.2
+Wilson-lower is **0.5955** (C8 rollout-leaf iter-0), **0.0087 BELOW** the
+0.6042 R110-W6-repro production ceiling — within gate noise, no Wilson win.
+**C8 gate result: NO-GO. 96-d production pin unchanged.** BUT C8 iter-0
+produced a **+6.8pp Wilson-lower lift over R110 iter-0** (0.5955 vs
+0.5273) — bit-exact init delta=0.0 confirms this is real learning from
+slot-token state representation, not variance. The lift did not survive
+W6 loop dynamics (iter-1 regressed bit-identically to R110 iter-0).
+**NEW POSITIVE DATAPOINT** that re-opens `w6-loop-anti-degradation` as the
+highest-leverage forward line: v3.2 + W6-fix-ON may preserve the iter-0
+lift across iters.
+
+### 2. Implementation status — IMPLEMENTED (C1-C7 bit-exact)
+
+Autonomous chain C1-C7 landed across two /work cycles, all delta=0.0 parity
+invariants verified bit-exact:
+
+- **C1** `features.py` F=23 frozen slot-token tensor (commit `c46b02f`).
+- **C2** `model.py` `uma_slot_encoder` + zero-output `Linear` head,
+  `delta_logits` 0.000e+00 vs v3.0 (commit `0d7d6a6`).
+- **C3** verified NO-OP.
+- **C4** dataset / selfplay packing for the new `uma_slot_*` tensors
+  (commit `43db81b`).
+- **C5** LANDMINE `serve_onnx` `_SCHEMA_TABLE` refactor + 10 cross-input
+  fail-fast guards + v3.2 ONNX roundtrip 2.38e-07 (commit `212ecde`).
+- **C6** `train_bc` + `r12_orchestrator` `--uma-slot-tokens` flag,
+  1-iter v3.2 smoke produced 7-input ONNX graph with schema 3.2 sidecar
+  (commit `dc3d23b`).
+- **C7** `make_v32_slot_token_init.py` + delta=0.0 parity smoke,
+  `logits`/`value` 0.000e+00 bit-exact vs v3.0 source (commit `103e2ce`).
+
+Chunk-plan landing commit `7330f0a`; queue refreshes `c475d30` / `7c3ca87`.
+Full scope and chunk plan: `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`
+§ "P2 - Per-Uma Slot Tokens" + § "P2 - Chunk Plan (kickoff 2026-05-21)".
+
+### 3. Trajectories (n=120 side-balanced, Wilson-lower vs rule-bot)
+
+**C8** — faithful R110-W6-repro mirror, `--mcts-leaf rollout`, v3.2 init from
+R110 iter-2 0.6042 ckpt. Launch: `runs/R16-P2-c8-ablation/launch.sh`.
+
+| Iter | Wilson-lower | Win-rate | vs R110 iter-N | Promoted? | Notes |
+|---|---|---|---|---|---|
+| 0 | **0.5955** | 0.6833 | **+6.8pp** vs 0.5273 | yes | best v3.2 ckpt overall |
+| 1 | 0.5273 | 0.6167 | bit-identical to R110 iter-0 | no | regress to v3.0 trajectory |
+| 2 | 0.5612 | 0.65 | — | yes (tolerance) | still below iter-0 floor |
+| 3 | — | — | — | — | KILLED at selfplay per user instruction |
+
+R14 crossover at iter-1: `val_mse` 0.81 / `pearson` 0.47 / ratio 1.42, NOT
+crossed. R14 crossover at iter-2: `val_mse` 1.09 / `pearson` 0.29 / ratio
+1.92, NOT crossed.
+
+**C8b** — same recipe but `--mcts-leaf value-head` from raw v3.2 init (C7
+builder output). Launch: `runs/R16-P2-c8b-vhleaf/launch.sh`.
+
+| Iter | Wilson-lower | Win-rate | Promoted? |
+|---|---|---|---|
+| 0 | 0.3798 | 0.4667 | yes (iter-0 floor squeak) |
+| 1 | 0.3090 | 0.3917 | no |
+
+R14 crossover at iter-1: `val_mse` 0.79 / `pearson` 0.42 / ratio 1.39, NOT
+crossed. KILLED after iter-1.
+
+**C8c** — `--mcts-leaf value-head` from C8 iter-0 ckpt (the 0.5955
+best-promoted v3.2 rollout-leaf ckpt). Launch:
+`runs/R16-P2-c8c-vhleaf-from-c8iter0/launch.sh`.
+
+| Iter | Wilson-lower | Win-rate | Promoted? |
+|---|---|---|---|
+| 0 | 0.3481 | 0.4333 | yes (iter-0 floor squeak) |
+
+KILLED after iter-0.
+
+### 4. Load-bearing interpretations
+
+1. **C8 iter-0 +6.8pp is REAL learning, not variance.** C7's
+   `make_v32_slot_token_init.py` produced `delta_logits=0.000e+00` and
+   `delta_value=0.000e+00` bit-exact against the v3.0 source (the
+   `uma_slot_encoder.2.weight` zero-init invariant guarantees additive-tail
+   output equivalence at t=0). The lift came entirely from the v3.2 vertical
+   training pulling signal through the new `uma_slot_encoder` branch — the
+   slot-token state representation can be learned.
+
+2. **W6 loop dynamics broke the iter-0 lift.** C8 iter-1 regressed −6.8pp to
+   0.5273, bit-identical to R110 iter-0; iter-2 only partially recovered to
+   0.5612. The faithful R110 mirror uses
+   `--no-w6-fix-cross-iter-replay --no-w6-fix-fixed-kl-anchor` (R110 pre-dated
+   the W6 recipe-fix flag system). The iter-0 lift is exactly the kind of
+   signal W6-fix-ON was designed to preserve — and was not tested on this
+   recipe.
+
+3. **Value-head-leaf is decisively broken for v3.2.** C8b iter-0=0.3798 and
+   C8c iter-0=0.3481 both well below C8 rollout-leaf's 0.5955. C8c (init from
+   stronger ckpt) being WORSE than C8b (init from raw ckpt) falsifies the
+   "trained-ckpt unlocks vhleaf" hypothesis. Consistent with R13.W8 history
+   (v3.0 vhleaf regressed every iter: 0.452→0.404→0.340→0.380). The
+   remaining vhleaf hypothesis "value head needs better calibration" is what
+   `value-head-data-program` Stage 1 tests.
+
+4. **C8 acceptance gate result: NO-GO.** Best v3.2 Wilson-lower = 0.5955 (C8
+   iter-0), 0.0087 below the 0.6042 production ceiling. 96-d production pin
+   unchanged.
+
+5. **NEW FORWARD LINE OPENED.** The C8 iter-0 +6.8pp lift is the strongest
+   slot-tokens-or-anything signal in months. It re-opens
+   `w6-loop-anti-degradation` (queue item, Ceiling Path A) as the natural
+   next experiment: re-run the C8 recipe but DROP the `--no-w6-fix-*` flags
+   (let W6-fix defaults to ON: cross-iter replay + fixed KL anchor). If
+   W6-fix-ON over-damps (per R111 history), tune
+   `--kl-anchor-weight` (currently 0.05 default; consider 0.02 or anneal),
+   `--w6-replay-window`, `--w6-replay-old-fraction`. The 0b queue entry's
+   scope already covers this exact tuning.
+
+### 5. Cross-references
+
+- Scope / P2 contract + chunk plan:
+  `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`
+  § "P2 - Per-Uma Slot Tokens" + § "P2 - Chunk Plan (kickoff 2026-05-21)"
+- v3.0 R110-W6-repro baseline (0.6042 ceiling, schema-independent W6
+  pattern): `docs/ai-research/progress/r110.md`
+- Forward line: queue item `w6-loop-anti-degradation`
+- vhleaf fallout: queue item `value-head-leaf-recipe-axis` (vhleaf-needs-
+  better-state-rep hypothesis falsified; remaining hypothesis owned by
+  `value-head-data-program` Stage 1)
