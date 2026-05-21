@@ -3,13 +3,16 @@
 - **Date:** 2026-05-21 (updated mid-session, post-Phase-1d landing)
 - **Branch:** `engine-rust-port`
 - **Status:**
-  - Phase 0 ✅ (harness + 500-seed corpus complete)
+  - Phase 0 ✅ (harness + 500-seed corpus; TS-replay 1/16 chunks OK, 15 in flight)
   - Phase 1a ✅ (RNG bit-identical)
   - Phase 1b ✅ (catalog + types + Attack/Ability/TrainerEffect)
-  - Phase 1c ✅ (packed buffer + xxh3 fingerprint; benches confirm 24×/51× speedup)
-  - **Phase 1d ✅ (all 12 flow files ported, combat.rs + trainers.rs landed)**
-  - Phase 1e 🔄 (types + phase ported; 666-LOC actions enumerator blocked on Phase 1f)
-  - Phase 1f–1h not started, Phase 2 not started.
+  - Phase 1c ✅ (packed buffer + xxh3 fingerprint; **release-mode bench: 499ns clone / 299ns fingerprint = 44×/27× speedup**)
+  - Phase 1d ✅ (all 12 flow files ported)
+  - Phase 1e 🔄 (types + phase + card_vocab done; actions enumerator delegated to agent, in flight)
+  - **Phase 1f ✅ (all 14 ai/* files ported, 5,910 LOC; known divergence: `has_consecutive_no_attack_turns`)**
+  - Phase 1g 🔄 (throughput-probe done; MCTS math + sample + node scaffolded; eval-gate / mcts-selfplay / export-training pending Phase 1e)
+  - Phase 1h pending, Phase 2 not started.
+  - **53 unit + cross-lang tests passing**
 - **Authoritative scoping doc:** `rust-engine-port-plan.md` (same dir).
 - **This doc:** the concrete delta between scoping and current state, and
   what the next session needs to do to keep the port moving.
