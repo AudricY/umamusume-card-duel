@@ -22,6 +22,7 @@ struct GameOutcome {
     terminal_reason: &'static str,
     steps_taken: u32,
     final_turn_number: u32,
+    winner: Option<SideId>,
 }
 
 fn drive_one_game(seed: &str, max_steps: u32) -> GameOutcome {
@@ -67,6 +68,7 @@ fn drive_one_game(seed: &str, max_steps: u32) -> GameOutcome {
         terminal_reason,
         steps_taken,
         final_turn_number: state.turn_number,
+        winner: state.winner,
     }
 }
 
@@ -80,8 +82,12 @@ fn drives_games_for_a_handful_of_seeds_without_stalling() {
     for seed in &seeds {
         let outcome = drive_one_game(seed, 500);
         eprintln!(
-            "seed={:>6} terminal={} steps={} turn={}",
-            outcome.seed, outcome.terminal_reason, outcome.steps_taken, outcome.final_turn_number,
+            "seed={:>6} terminal={} steps={} turn={} winner={:?}",
+            outcome.seed,
+            outcome.terminal_reason,
+            outcome.steps_taken,
+            outcome.final_turn_number,
+            outcome.winner,
         );
         outcomes.push(outcome);
     }
@@ -113,4 +119,44 @@ fn determinism_same_seed_same_outcome() {
     assert_eq!(a.terminal_reason, b.terminal_reason);
     assert_eq!(a.steps_taken, b.steps_taken);
     assert_eq!(a.final_turn_number, b.final_turn_number);
+    assert_eq!(a.winner, b.winner);
+}
+
+/// Broader sweep — first 32 seeds — to flush out any stall a single
+/// seed might miss. Marked `#[ignore]` by default to keep the standard
+/// `cargo test` fast; enable with `cargo test -- --ignored`.
+#[test]
+#[ignore]
+fn no_stalls_across_first_32_seeds() {
+    let mut player_wins = 0u32;
+    let mut opponent_wins = 0u32;
+    let mut draws = 0u32;
+    for seed_num in 0..32 {
+        let seed = seed_num.to_string();
+        let outcome = drive_one_game(&seed, 1000);
+        assert_ne!(
+            outcome.terminal_reason, "stalled",
+            "seed {} stalled at step {} turn {}",
+            outcome.seed, outcome.steps_taken, outcome.final_turn_number,
+        );
+        assert_ne!(
+            outcome.terminal_reason, "max_steps",
+            "seed {} hit max_steps at turn {}",
+            outcome.seed, outcome.final_turn_number,
+        );
+        match outcome.winner {
+            Some(SideId::Player) => player_wins += 1,
+            Some(SideId::Opponent) => opponent_wins += 1,
+            None => draws += 1,
+        }
+    }
+    eprintln!(
+        "32-seed sweep: player={} opponent={} draws={}",
+        player_wins, opponent_wins, draws
+    );
+    // Sanity: at least SOME games end with a winner.
+    assert!(
+        player_wins + opponent_wins > 0,
+        "32 games and no winners — heuristic AI is misbehaving",
+    );
 }
