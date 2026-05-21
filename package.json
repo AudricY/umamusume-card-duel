@@ -28,7 +28,8 @@
     "test:f1-hp-sweep": "training/.venv/bin/python training/f1_hp_sweep_smoke.py",
     "test:data-coverage-audit": "training/.venv/bin/python training/data_coverage_audit_smoke.py",
     "test:r16-mcts-embedding": "training/.venv/bin/python training/r16_mcts_embedding_smoke.py",
-    "test:pair-builder": "training/.venv/bin/python training/pair_builder_smoke.py"
+    "test:pair-builder": "training/.venv/bin/python training/pair_builder_smoke.py",
+    "test:pair-corpus": "training/.venv/bin/python training/pair_corpus_smoke.py"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
