@@ -6,6 +6,7 @@ members = [
     "crates/golden-replay",
     "crates/codegen",
     "crates/xtask",
+    "crates/napi-bridge",
 ]
 
 [workspace.package]

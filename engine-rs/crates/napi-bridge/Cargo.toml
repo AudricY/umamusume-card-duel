@@ -1,0 +1,22 @@
+[package]
+name = "napi-bridge"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# Phase 2: NAPI bindings exposing the Rust engine as a Node-callable
+# native module. Built as a cdylib so node can dlopen the .node file.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+engine = { path = "../engine" }
+napi = { version = "2.16", default-features = false, features = ["napi8", "serde-json"] }
+napi-derive = "2.16"
+serde_json = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"
