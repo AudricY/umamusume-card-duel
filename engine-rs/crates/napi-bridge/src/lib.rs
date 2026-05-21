@@ -303,19 +303,24 @@ pub fn mcts_step_json(
     };
     let model_url = config.model_url.clone();
     let mcts_seed_owned = mcts_seed.clone();
-    let (result, used_rng_after_mcts) = with_rng(rng, || {
-        run_mcts(&state, side, &config, model_url.as_str(), mcts_seed_owned.as_str())
-    });
-    // Re-enumerate legal actions to pick by index.
-    let (legal, used_rng_after_legal) = with_rng(used_rng_after_mcts, || {
+    // RNG-call order MATCHES the pure-Rust drivers (sim-mcts-selfplay,
+    // headless_drive_smoke): enumerate → run_mcts → advance. Previously
+    // this fn did run_mcts → enumerate → advance, which is also valid
+    // but produces a different rng advance schedule than production
+    // sim-cli. Aligning them means goldens captured one path apply to
+    // the other.
+    let (legal, used_rng_after_legal) = with_rng(rng, || {
         enumerate_legal_ai_actions(&state, side)
     });
     if legal.is_empty() {
         return Err(napi::Error::from_reason("no legal actions"));
     }
+    let (result, used_rng_after_mcts) = with_rng(used_rng_after_legal, || {
+        run_mcts(&state, side, &config, model_url.as_str(), mcts_seed_owned.as_str())
+    });
     let chosen_idx = result.selected_index.min(legal.len() - 1);
     let chosen = legal[chosen_idx].clone();
-    let (next, used_rng_after_step) = with_rng(used_rng_after_legal, || {
+    let (next, used_rng_after_step) = with_rng(used_rng_after_mcts, || {
         let forced = get_forced_attack_coin_results(&state);
         advance_modeled_turn_step(&state, side, &chosen, forced)
     });
