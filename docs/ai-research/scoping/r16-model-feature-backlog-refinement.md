@@ -587,3 +587,68 @@ P0 is not just a research idea; it is data-path parity work. P1 is the lowest
 risk new signal. P2 is the largest representation lift and should not be
 evaluated until the MCTS/self-play path can actually exercise embedding inputs.
 
+## P2 - Chunk Plan (kickoff 2026-05-21)
+
+User gate OPENED 2026-05-21 after both autonomous P1 data-side arms closed
+(`training-data-coverage-pilot` done-falsified at n=1000, `training-data-deep-
+program` done-negative chunks 5a-i). Initiative is 3-4 eng-days; chunked
+small to ride autonomously on the `/work` loop with C8 user-gated.
+
+### Architectural shape (load-bearing)
+
+- `STATE_DIM` **stays 110**; v3.2 is distinguished by ONNX input-set, not
+  state-vector width. Bump `STATE_FEATURE_SCHEMA_VERSION` to `3.2`.
+- Two new ONNX inputs: `uma_slot_card_ids: int64[B,10]`,
+  `uma_slot_features: float32[B,10,F]` (F frozen in C1, recommend ~23).
+- New `uma_slot_encoder` branch in `CandidatePolicyNet`; output Linear
+  **zero-initialized** so residual is null at init (the v3.1 `delta=0.0`
+  parity trick analog). Zero the 4 board-zone lanes
+  (`ownActive`/`oppActive`/`ownBench`/`oppBench`) when slot tokens active to
+  avoid double-counting board identity.
+- C7 `make_v32_slot_token_init.py` mirrors `make_v31_additive_init.py`
+  contract: load v3.0 baseline init, copy verbatim, inject zero-tensors for
+  `uma_slot_encoder.*`, stamp schema 3.2. Smoke = logits/value delta vs
+  source == 0.0.
+
+### Chunks (C1-C8)
+
+| # | Scope | Smoke | Auto? | Deps |
+|---|---|---|---|---|
+| C1 | `training/uma_ai/features.py` constants + `observation_to_uma_slots()` + `r16_p2_slot_tokens_smoke.py` (~80-120 LOC) | empty-bench zero row; swapped bench rows differ; zero pool ≡ omit ≤1e-6 | YES | — |
+| C2 | `training/uma_ai/model.py` `uma_slot_encoder` branch + zero-output-Linear init (~50 LOC) | zero uma tensors ≡ v3.1 forward, delta = 0.0 | YES | C1 |
+| C3 | TS observation derived fields — **likely NO-OP** (verify against live dump); contingency = `schemaVersion 3→4` | `npm run test:train` green; hidden-info regression green | YES (flag if forced) | C1 |
+| C4 | `training/uma_ai/dataset.py` + `selfplay_dataset.py` slot-tensor packing (~80 LOC each), gated on `uses_uma_slot_tokens` | `--uma-slot-tokens` unset → byte-identical to pre-change | YES | C1,C2 |
+| C5 | **LANDMINE.** `export_onnx.py` 7-input graph + `serve_onnx.py` v3.2 schema dispatch (state_dim → (state_dim, has_uma_slot_tokens)) + fail-fast on cross-input mismatch | `serve_schema_guard_smoke.py` extended; ONNX roundtrip 1e-3 | YES + human review of serve diff | C1,C2,C4 |
+| C6 | `train_bc.py` + `r12_orchestrator.py` `--uma-slot-tokens` flag (~40 LOC total) | `test:train`/`test:python-train`/`test:dagger-orchestrator` green | YES | C5 |
+| C7 | `training/make_v32_slot_token_init.py` (~150 LOC, copy v3.1 scaffold) | logits/value delta vs source = 0.0 | YES | C6 |
+| C8 | Faithful R110-W6-repro mirror ablation @ `--state-dim 110 --uma-slot-tokens`, n=120 side-balanced gate vs 0.6042 | **Wilson-lower > 0.6042 AND CPU p95 within 10%** | **USER-GATED** | C1-C7 |
+
+### Biggest landmines (in order)
+
+1. **C5 serve schema dispatch.** Today's `_SCHEMA_BY_STATE_DIM` is a pure
+   `state_dim → schema` lookup. v3.2 keeps `state_dim=110` and is
+   distinguished ONLY by input-set presence; the resolver must refuse
+   v3.0-graph-on-v3.2-server and vice-versa (mirror the v3.1 placeholder-dim
+   fail-loud pattern at `serve_onnx.py:184-191`).
+2. **ONNX graph signature 5→7 inputs.** Old v3.0/v3.1 ORT consumers without
+   v3.2 awareness cannot load v3.2 graphs at all. Forwards-incompat is
+   fine; backwards-compat is preserved by the input-set-aware dispatch.
+3. **Embedding-table growth.** First real architecture lift since
+   R7.b.2 Phase 2 (~23k new params in `uma_slot_encoder`). Old checkpoints
+   are not load-compatible without C7's init builder.
+
+### Init parity is achievable
+
+The v3.1 `delta=0.0` trick generalizes: initialize the **final Linear of
+`uma_slot_encoder` to zero** → `uma_slot_encoder(any) → 0` → residual
+`state_encoded + uma_slot_encoder(...) ≡ state_encoded` at init. This is a
+strict generalization of how `zone_projection` operates (`bias=False`,
+zero-weights ⇒ zero). C7 contract = "warm-start v3.0 weights verbatim + zero
+output Linear of new encoder".
+
+### Canonical evidence destinations
+
+- Per-chunk verdicts → `docs/ai-research/progress/r16.md` § "P2 - Per-Uma Slot Tokens" (new sub-section).
+- Chunk progress + next-action pointer → `docs/ai-agent-state/queue.json` (`r16-p2-per-uma-slot-tokens`).
+- This Chunk Plan is the canonical recipe; do not duplicate elsewhere.
+
