@@ -534,14 +534,15 @@ fn collapse_until_model_or_terminal(
             CurrentSide::Opponent => SideId::Opponent,
             CurrentSide::Done => break,
         };
+        // Same convention as rollout_heuristic: forced uses inner rng
+        // (TS passes rng explicitly to getForcedAttackCoinResults); advance
+        // internals call random_float() reading the ambient outer rng.
         let forced = with_rng_borrow(rng, || get_forced_attack_coin_results(&current));
-        with_rng_borrow(rng, || {
-            if side_id == SideId::Player {
-                advance_player_ai_turn_step(&mut current, forced.clone());
-            } else {
-                advance_opponent_turn_step(&mut current, forced.clone());
-            }
-        });
+        if side_id == SideId::Player {
+            advance_player_ai_turn_step(&mut current, forced.clone());
+        } else {
+            advance_opponent_turn_step(&mut current, forced.clone());
+        }
         let after = state_hash(&current);
         if Some(&after) == before.as_ref() {
             break;
@@ -632,14 +633,19 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
             CurrentSide::Opponent => SideId::Opponent,
             CurrentSide::Done => break,
         };
+        // get_forced_attack_coin_results: TS calls with INNER rng explicitly
+        // (mcts.ts:653 rolloutHeuristic). Keep the inner-rng install here.
         let forced = with_rng_borrow(rng, || get_forced_attack_coin_results(&next));
-        with_rng_borrow(rng, || {
-            if side_id == SideId::Player {
-                advance_player_ai_turn_step(&mut next, forced.clone());
-            } else {
-                advance_opponent_turn_step(&mut next, forced.clone());
-            }
-        });
+        // advance_*_turn_step internals call random_float() which reads the
+        // AMBIENT outer rng — matching TS where engine.ts's
+        // advance functions ignore the passed `random` param and use
+        // randomFloat() from the storage provider. Do NOT re-install the
+        // inner rng here; let the recorder's outer with_rng remain active.
+        if side_id == SideId::Player {
+            advance_player_ai_turn_step(&mut next, forced.clone());
+        } else {
+            advance_opponent_turn_step(&mut next, forced.clone());
+        }
         let after = state_hash(&next);
         if Some(&after) == before.as_ref() {
             break;
