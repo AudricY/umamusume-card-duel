@@ -487,3 +487,333 @@ Compact summary lives in `r16.md` sub-§ "Step ordering refined
   candidate-1 dies, abandon stronger-MCTS line. Step 1 reopens
   only if step 2 negative AND across-action CRN statistic
   clarified.
+
+## R16 Training-Data — Online MCTS Relabel Infra (3a emit-path) — full prose
+
+Rolled from `r16.md` 2026-05-21 to free headroom for the R16-P2 v3.2 verdict.
+All sub-sections (3a emit-path, multi-worker harness, production corpus,
+3b chunks 1-5e DPO probes, 3b cumulative verdict, chunk 5f BC-on-relabel,
+chunk 5g candidate-1 kill-test, chunk 5h scoping, chunk 5i verdict) are
+DONE-NEGATIVE with no remaining autonomous action; the active forward
+direction from this arm is the user-gated W6 HP-sweep (Ceiling Path A),
+tracked at queue item `w6-loop-anti-degradation`. Compact summary in
+`r16.md` § "R16 Training-Data — Online MCTS Relabel Infra (3a) — rolled".
+
+### Corrected cost finding (reprioritization basis — archived)
+
+Read-only sizing pass (2026-05-18) showed the prior "INFRA-BLOCKED /
+heavy expensive arm" framing was wrong: MCTS already runs on the live
+`GameState` at the decision point and all diagnostics + audits
+already exist; only the discarded `MctsResult.visits/diagnostics`
+needed wiring (~2-4 eng-day emit-path, not a serializer). 3a was
+therefore reprioritized ahead of `r16-p2`.
+
+### What landed (3a emit-path, this chunk only)
+
+- New `--relabel-mcts` mode + `--relabel-state-source` tag in
+  `backend/src/sim/evaluateModelVsHeuristic.ts`. A sibling
+  `runMctsRelabel` runs rollout-leaf, no-Dirichlet MCTS on the live
+  `GameState` at the decision point and threads the full `MctsResult`
+  (`visits` + `diagnostics`) into three new optional `DecisionTraceRow`
+  fields: normalized `policyTargets`, an `oracle` block, and a
+  `stateSource` tag. Forced states (`legalActions.length <= 1`) suppress
+  row emission entirely (do not fall through unlabeled).
+- `backend/src/sim/dagger/relabelDecisionTrace.ts`: a
+  `--label-source rollout-leaf-mcts` pass-through branch forwards the
+  evaluator-emitted `policyTargets`/`oracle` verbatim and reuses the
+  existing leak / index-range / sum-to-1 / length gates (no new audit
+  logic, no mixture recomputation).
+- No-op invariant VERIFIED: with `--relabel-mcts` off, trace rows carry
+  none of the new fields and are deterministic/bit-identical across runs;
+  full `npm run test:train` (incl. `multiTeacherTraceSmoke`,
+  `daggerRoundSmoke`) passes; `npm run build` clean. ~0 functional
+  `mcts.ts` change (one type re-export only).
+
+### Pilot smoke + Audit-v2 (superseded by prod corpus)
+
+50-game rule-bot-mirror pilot (modelSide=both = 100 games, 50 sims, 14m23s
+wall-clock single-thread): 2127 contested rows, Audit-v2 ALL PASS (100%
+retained, oracle present, no leaks). Superseded by the 3-recipe production
+corpus run below (§ "Production Corpus — Audit-v2 ALL PASS"); pilot kept
+here as the cost-validation reference for the multi-worker harness spike.
+
+### Source-Recipe Matrix
+
+The three source recipes from scoping § P1 are achieved via the existing
+`--selection` + `--relabel-state-source` flags on
+`backend/src/sim/evaluateModelVsHeuristic.ts`; **no new flag is needed**.
+`runMctsRelabel` operates on the live `GameState` independent of which
+selection played the action, so the recipe is fully determined by the played
+selection (`--selection`) plus the corpus tag (`--relabel-state-source`).
+
+Per-recipe cost (per decision; CPU cost dominated by MCTS sims × rollout
+steps):
+
+| Recipe | `--selection` | Played-action cost | Relabel cost | Model server required? |
+| --- | --- | --- | --- | --- |
+| `rule-bot-mirror` | `baseline` | 0 NN, 0 MCTS | 1 MCTS call | **No** |
+| `policy-vs-rule` | `policy` | 1 NN forward | 1 MCTS call | Yes |
+| `search-vs-rule` / `mcts-vs-rule` | `search` or `mcts` | 1 MCTS call (played) | 1 MCTS call (relabel) | Yes if `--mcts-prior policy` (preferred — uniform priors degrade played-search quality, so `search-vs-rule` is effectively serve-required) |
+
+Smoke landed: `backend/src/tests/relabelMctsSmoke.ts` codifies the matrix in
+three sub-cases — (a) `--relabel-mcts` ON + rule-bot-mirror with full
+`policyTargets` / `oracle` / `stateSource` audit + relabel pass-through; (b)
+same with `policy-vs-rule` tag (proves the state-source tag wires through
+independently of played selection); (c) `--relabel-mcts` OFF as the no-op
+regression guard (no `policyTargets` / `oracle` / `stateSource` field leakage
+when the mode is unset). Wall-clock ~2.5s; wired into `npm run test:train`.
+
+Next user-gated chunk (intentionally not auto-launched): the 200-400-game
+production corpus + Audit-v2 acceptance gate against the recipe matrix.
+
+### Multi-Worker Corpus Harness (compute optimization spike — compressed)
+
+`evalGate.ts` (which already implements work-stealing dispatch over
+`runModelVsHeuristicGame`) extended to host the corpus generator:
+parses `--relabel-mcts`/`--relabel-state-source`, owns the trace
+file, buffers `result.decisionTraces` by `taskIndex`, flushes in
+deterministic order at run end (verified bit-identical across N=1/16/24).
+Smoke `evalGateCorpusGenSmoke.ts` locks the contract. Wall-clock on
+pilot-equivalent recipe: N=1 873s → **N=16 150s (5.83×)** → N=24
+154s (past the knee). Speedup sub-linear because per-game variance
+× ~6 games/worker = straggler tail dominates. Full benchmark table
++ design notes earlier in this archive § "Multi-Worker Corpus Harness".
+
+### Production Corpus — Audit-v2 ALL PASS
+
+3-recipe production corpus generated 2026-05-21 (start 09:54, end
+10:30, total wall-clock ~35.5 min on the 16-worker harness against
+the 96-d production pin):
+
+| Recipe | Played-side WR | Total contested rows | Per-recipe Audit-v2 |
+| --- | ---: | ---: | --- |
+| rule-bot-mirror | n/a (both sides rule-bot) | 4196 | PASS 100% retained |
+| policy-vs-rule | **0.319** (raw policy weak vs rule-bot) | 3664 | PASS 100% retained |
+| search-vs-rule | **0.490** (search lifts model to near-parity) | 3938 | PASS 100% retained |
+| **AGGREGATE** | — | **11798** | **PASS 100% retained** |
+
+`stateSource` tags match recipe; every row carries the full 11-key
+`oracle` block + simplex `policyTargets`; no forced-state row
+emitted; ~50% of rows ≥3 legal (the contested signal 3b consumes).
+Promote criterion (scoping § P1 acceptance, retained
+contested-row rate ≥80%) MET trivially.
+
+Pre-launch served-recipe smokes (`policy-vs-rule` 16 rows /
+`search-vs-rule` 28 rows, both PASS oracle+simplex+stateSource
+against `runs/R13-W6-phase-d/iter-2/policy.onnx`) and the BC
+loader-retention check (`JsonlPolicyDataset` accepts 100% of these
+rows, exercises the soft `policyTargets` path in
+`train_bc.py:490-498`, `oracle`/`stateSource`/`selectedOriginalRank`
+silently ignored) live earlier in this archive §§ "R16-TD 3a — Loader
+Verification full detail" / "R16-TD 3a — Served-Recipe Smokes full
+detail" / "R16-TD 3a — Production Corpus per-slice coverage".
+Launch script: `runs/R16-TD-3a-prod-corpus/launch.sh` (3-phase
+sequential, trap-handled server lifecycle).
+
+Latent forward-looking risk: `dataset.py:34-43` notes
+`ROW_SCHEMA_VERSION` was deliberately held at 1 across Phase 2 to
+keep TS-produced corpora loadable. A future phase bumping it
+without coordinating the TS writer at
+`backend/src/sim/evaluateModelVsHeuristic.ts:367` would retroactively
+break this corpus.
+
+### 3b Chunks 1-4 — Pair-builder + DPO wiring + offline floor
+
+- **Chunk 1 (`training/pair_builder.py`, 324 LOC stdlib)**: reads
+  3a relabel rows, emits preference-pair JSONL in `runner-up` mode
+  (winner=argmax visits, loser=second-highest,
+  `sourceKind="mcts-relabel"`). 7 drop predicates counted in
+  manifest; only `margin_below_floor` (default 0.05) fired against
+  prod corpus. Aggregate: 11798 rows → **8093 pairs** (31.4%
+  drop); search-vs-rule drop rate **~4× lower** (9.8%) than the
+  other recipes — calibration evidence that played-MCTS sharpens
+  relabel visit distributions. Margin histogram: 79% decisive
+  (≥0.20). Smoke `pair_builder_smoke.py` wired as
+  `npm run test:pair-builder`. Output:
+  `runs/R16-TD-3a-prod-corpus/pairs/pairs{.jsonl,.manifest.json}`.
+- **Chunks 2+3** (commits `5960cc3` / `1a071b9`): extended
+  `pair_corpus.py` for the explicit pair schema and wired
+  `card_ids_by_zone` / `action_card_idx` through `train_dpo.py`
+  (v3 embedding branch now LIVE under DPO; grouped per-pair
+  metrics across 5 axes).
+- **Chunk 4 (`training/dpo_quality_eval.py`, 617 LOC)**: offline
+  pair-quality gate per scoping § P2 step 5 ("no n=1000 gate until
+  offline pair quality clears pre-registered floors"). Deterministic
+  split (blake2b on `sourceEpisodeId:sourceStep`, 20% holdout, seed
+  17), ranking metrics (top-1/2/3 + MRR, strict-> tie semantics
+  over masked legal actions). Reference-baseline against 96-d
+  production pin (1620 held-out rows): **`pair_accuracy` 0.6981 /
+  `top1` 0.6512 / `top2` 0.8716 / `top3` 0.9321 / `MRR` 0.7921 /
+  loss 0.6931 (= log 2, expected ref==self)**. JSON at
+  `runs/R16-TD-3a-prod-corpus/baseline-eval.json` (gitignored).
+  Trained DPO must improve on these before any closed-loop spend.
+  Smoke wired as `npm run test:dpo-quality-eval`.
+- **Compat**: `training/pad_checkpoint_to_v3.py` (numerically null
+  pad) makes the pre-v3 96-d checkpoint usable as both ref and
+  init for the v3-card-embedding-aware `train_dpo.py`.
+
+### 3b Chunks 5a-5e — DPO probe series (collapsed)
+
+Per-chunk landings + commits (dc68ac8 / c243fd8 / 7448b14 /
+059f2a7) live earlier in this archive § "R16-TD 3b chunks 5a-5e —
+per-chunk landings". Headline numbers preserved in the
+Cumulative Verdict table below.
+
+### 3b — Cumulative Verdict
+
+Four DPO probes against the 8093/13419-pair offline corpus all
+land within the ±0.022 noise band of the baseline floor:
+
+|  | corpus | epochs | β | lr | Δ pair_acc | Δ top1 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 5a | 8093 runner-up | 3 | 0.1 | 1e-5 | −0.0167 | −0.0321 |
+| 5b | 8093 runner-up | 1 | 0.5 | 3e-6 | **+0.0043** | **+0.0006** |
+| 5c-long | 8093 runner-up | 5 | 0.5 | 3e-6 | −0.0012 | −0.0117 |
+| 5e | 13419 diversified | 1 | 0.5 | 3e-6 | +0.0031 | −0.0043 |
+
+Best result is 5b at +0.0043 pair_acc / +0.0006 top1, well inside
+noise. **DPO with this corpus + HP regime cannot extract a
+statistically significant lift over the 96-d production
+reference.** The offline gate (scoping § P2 step 5) holds — no
+closed-loop n=1000 spend.
+
+**Root-cause candidates + forward-line proposal** (4-candidate
+list, original orchestrator recommendation): live earlier in this
+archive § "R16-TD 3b Cumulative Verdict — root-cause candidates".
+Superseded by chunk 5f (candidate-3 falsified) + chunk 5g
+(candidate-1 kill-test, see below).
+
+### Cross-references
+
+- Pre-registered design + corrected cost basis (not restated here):
+  `docs/ai-research/scoping/r16-training-data-backlog-refinement.md`
+  § "P1 - Rule-Bot-Covered States Relabeled By Rollout-Leaf MCTS"
+
+### 3b — BC-on-relabel probe (chunk 5f) — FALSIFIES candidate-3
+
+Direct soft-CE BC on the 11798-row 3a relabel corpus (the
+cumulative-verdict candidate-3 test). HP: `--state-dim 110
+--hidden-dim 64 --depth 2 --dropout 0.05 --epochs 3 --batch-size 32
+--lr 3e-4 --split-by seed --seed 17 --data-mode bc`. Splits: 244
+train seeds / 60 val seeds, 9379 train / 2419 val rows. Soft-CE
+branch confirmed taken: `train_bc.py:490-498` keys on the batch
+`policy_targets` tensor and every row in `relabel-all.jsonl`
+carries `policyTargets`.
+
+**Training trajectory**: 3-epoch trajectory peaked val acc 0.7234
+at epoch 2 (train 1.074, val 1.106) with mild epoch-3 overfit;
+full per-epoch table in `bc-relabel-e3/manifest.json` /
+`train.log`.
+
+**Eval against the same 1620-row pair floor** (seed 17, identical
+DPO holdout): all five metrics regress vs ref; `pair_accuracy`
+0.6802 vs base 0.6981 (Δ −0.0179, **outside ±0.022 noise band**);
+`ranking_top1` 0.6198 vs 0.6512 (Δ −0.0314); top2/top3/MRR all
+negative. Full table in `bc-relabel-e3/trained-eval.json`. BC is
+meaningfully worse than the untrained 96-d ref, not flat.
+
+Per-action-kind val accuracy (from `manifest.json`): routine actions
+high (`playBasic` 0.938 / `attachEnergy` 0.856 / `evolve` 0.831 /
+`attack` 0.805) but the contested heads drag the headline — `pass`
+0.632 / `playTrainer` 0.591 / `retreatAttack` 0.484, exactly the
+decisions the relabel corpus was supposed to teach.
+
+**Verdict**: candidate-3 (soft-CE BC fixes the DPO ceiling) is
+**FALSIFIED** — BC actively regresses below the untrained ref, not
+flat. By elimination, candidate-1 (relabel-MCTS too weak vs ref) is
+**strengthened**: the corpus's `policyTargets` actively mislead
+training, consistent with rollout-leaf 100-sim MCTS producing labels
+worse than the ref's own policy on contested states. Forward line
+superseded by chunk 5g kill-test below, then chunk 5h ladder
+refinement.
+
+#### Candidate-1 kill-test (chunk 5g) — labels diverge decisively
+
+Read-only label-divergence audit on the 11798-row 3a relabel corpus:
+forward the untrained 96-d ref (`runs/R13-W6-phase-d/iter-2/checkpoint.pt`)
+on each row's `observation`, softmax over `legalActions`, compare to MCTS
+`policyTargets`. No MCTS, no training. Output:
+`runs/R16-TD-3a-prod-corpus/candidate1-killtest/{metrics,metrics-bc-val-slice,metrics-confidence}.json`.
+
+**Verdict: Case B — labels confidently wrong, not insufficient.**
+Headlines: top-1 agreement **0.6338**; KL(rel‖ref) **0.331 nats** /
+KL(ref‖rel) **0.766 nats** (asymmetric); mean entropy relabel 0.766
+< ref 0.876 → relabel is *more* committed, not budget-starved.
+Disagreement (n=4,320) p90 max-prob **0.91**; 27% of rows have
+relabel confidence ≥0.8 yet still only 70% agree with ref. Contested
+heads `playTrainer`/`pass`/`retreatAttack` agreement 0.499/0.479/0.464
+— the same three heads where BC val acc cratered (0.562/0.581/0.111
+from `bc-relabel-e3/trained-eval.json`). Full per-kind table +
+disagreement-confidence percentiles live earlier in this archive §
+"Chunk 5g — per-kind table + disagreement confidence".
+
+**Sharpened diagnostic ladder** (supersedes the cumulative-verdict
+4-candidate forward-line): step 1 = rollout-leaf value-eval audit
+on contested states; step 2 = argmax-flip test at 400 sims; step 3
+= skip more-sims BC unless step 2 positive. Chunk 5h flipped the
+order (step 2 first; cheaper, no CRN-paired ambiguity); chunk 5i
+ran step 2 — see verdict below.
+
+#### Step ordering refined (chunk 5h scoping) — superseded by 5i
+
+Doc-only scoping flipped the ladder (step 2 first, `rule-bot-mirror`
+only, ~30 LOC Python join on confident-disagree subset, ~20-40 min
+@ 16 workers; >30% flip = LIVES / >80% sticky = DIES). Now superseded
+by the chunk 5i verdict below. Full chunk-5h scoping prose lives earlier
+in this archive § "Chunk 5h ladder scoping".
+
+#### Step 2 verdict (chunk 5i) — candidate-1 DIES; sim count not the lever
+
+**Step 2 ran end-to-end.** Re-ran rule-bot-mirror at
+`--mcts-simulations 400` (same seed range, 16 workers); joined
+against the 100-sim corpus on `(seed, modelSide, step)` via
+`training/killtest_argmax_flip.py`. Artifacts:
+`runs/R16-TD-3a-prod-corpus-400sim-rulebot/{flip-analysis.json,
+launch.log,rule-bot-mirror/traces.jsonl}`.
+
+**VERDICT: candidate-1 DIES.** On the contested-head + 100-sim
+max-prob ≥0.8 + state-identical subset (n=365):
+
+- Flip rate **17.3% (63/365)** — below the 30% LIVES threshold AND
+  the 20% sticky cutoff. 95% binomial CI ≈13.6-21.7%.
+- KL(400‖100) mean **1.85 nats** — large distributional drift,
+  argmax sticks → 100-sim MCTS is argmax-converged on this subset.
+- Entropy 100 / 400 = 0.351 / 0.543 (Δ +0.193) — 400-sim
+  distributions slightly fuzzier; visit mass redistributes within
+  the same modal action's basin.
+- Confidence redistribution gained/lost/flat = 33.4 / 33.4 / 33.2%
+  (symmetric).
+- Per kind: `pass` 17.4% flip (n=195), `playTrainer` 17.7% (n=164),
+  `retreatAttack` 0% (n=6 — sample too small to weight).
+
+**Implication.** Sim count is not the binding lever. The contested-
+head disagreement with the untrained ref is upstream of MCTS budget
+— most plausibly the leaf signal source (rule-bot-mirror rollouts
+may systematically misvalue `pass`/`playTrainer`/`retreatAttack`
+against rule-bot). Step 1 (value-eval audit) becomes the next
+candidate experiment with **sharpened framing**: "do rollout-leaf
+returns vary systematically across actions on contested states?" —
+NOT the chunk-5h "CRN-paired variance" framing (across-action paired
+CRN does not exist in current `mcts.ts`).
+
+**Secondary finding — recipe-divergence bug.** Rule-bot-mirror at
+400 sims produced 4233 rows vs 4196 at 100 sims (state-identical
+intersection = 63.8% of 100-sim rows). Trajectories diverged despite
+`--selection baseline` being deterministic. Root-cause hypothesis:
+relabel MCTS consumes the shared `AsyncLocalStorage` RNG via the
+global `random()` proxy in `frontend/src/game/engine/core/random.ts`
+(`storageProvider.get()?.next() ?? Math.random()`); extra MCTS sims
+perturb the game's RNG before the next baseline move. The chunk 5h
+"deterministic row-by-row diff at 4× sims" design assumption is
+INVALID; salvageable here because the 365-row state-identical subset
+still yields a 95% CI well below the 30% LIVES threshold, but any
+future sim-count A/B needs (a) a separate relabel-MCTS RNG context
+or (b) a two-pass design (generate corpus once at low sims, then
+re-relabel `policyTargets` only without re-running games). Tracked
+as queue item `mcts-relabel-rng-bleed` (P3, scoped).
+
+**Forward direction.** Candidate-1 (stronger-MCTS-fixes-corpus) is
+eliminated. Either (a) reframed step 1 — rollout-leaf return audit
+on contested states, no CRN-paired ambiguity — or (b) pivot to the
+user-gated W6 HP-sweep (CEILING PATH A) since the 3a corpus arm is
+now exhausted by evidence. Direction call deferred to user.
