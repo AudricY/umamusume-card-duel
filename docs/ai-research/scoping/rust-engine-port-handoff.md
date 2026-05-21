@@ -1,6 +1,6 @@
 # Rust Engine Port — Session Hand-off
 
-- **Date:** 2026-05-21 (updated mid-session, post-Phase-1d landing)
+- **Date:** 2026-05-21 (updated mid-session — orchestrator-compat + test-net hardening)
 - **Branch:** `engine-rust-port`
 - **Status:**
   - Phase 0 ✅ (500-seed corpus, 16/16 TS-replay chunks OK)
@@ -10,15 +10,38 @@
   - Phase 1d ✅ (all 12 flow files)
   - Phase 1e ✅ (actions enumerator, 1,817 LOC)
   - Phase 1f ✅ (all 14 ai/* files, 5,910 LOC)
-  - **Phase 1g ✅ — engine pieces + ALL 4 sim CLIs functional**:
+  - **Phase 1g ✅ — engine pieces + ALL 4 sim CLIs functional + orchestrator-flag-compatible**:
     - sim-throughput-probe (clone 44×, fingerprint 27×)
     - sim-export-training (drives full games, JSONL)
     - sim-mcts-selfplay (3.07 games/sec full MCTS)
-    - sim-eval-gate (3.05 games/sec, Wilson CI)
+    - sim-eval-gate (3.05 games/sec, Wilson CI, post-run pass/fail gates)
+    - **All 17 r12_orchestrator.py / ppo_orchestrator.py / dagger_orchestrator.py flag names accepted via clap aliases**
+    - `--manifest-out` (writes `{args, summary}` JSON to disk)
+    - `--progress-out` (per-game JSONL stream for orchestrator UI)
+    - `--min-games` / `--min-ci-lower` / `--min-win-rate` (real post-run gates, exit 1 on failure)
+    - `--temperature-moves` / `--temperature-value` (real AlphaZero visits^(1/T) sampling)
   - **Phase 1h V1 ✅ (500/500 setup-bit-identical); V4 RNG-gap reframed as benign behavioral variance** — Rust heuristic-only AI plays statistically equivalent to TS MCTS (39% vs 37% player WR over n=100 / n=500).
   - **Engine is PRODUCTION-VIABLE TODAY** for both headless and MCTS self-play.
   - Phase 2 not started.
-  - **73 unit + cross-lang + integration tests passing**
+  - **100 unit + cross-lang + integration tests passing** (lib 73, headless 2, catalog cross-lang 2, RNG cross-lang 3, state_hash 5, legal_actions 5, mcts_result 6, ignored 3)
+  - **69 commits on the branch** end-to-end through the port
+
+### Orchestrator-compat surface (commits 60–63)
+
+  - `--manifest-out`: TS-shape `{"args": {…}, "summary": {…}}` JSON
+  - `--progress-out`: TS-shape `"game_completed"` JSONL per game (`event`, `gameIndex`, `seed`, `modelSide`, `winner`, `modelWon`, `runningWinRate`, `etaSec`, `ts`)
+  - `--min-{games,ci-lower,win-rate}`: post-run gate, `{passed, failures}` in summary, exit 1 on failure
+  - `--temperature-moves` / `--temperature-value`: visits^(1/T) sampling for first N model moves, argmax thereafter — temperature is exploratory but deterministic given seed (pick rng forked from `step_rng`)
+
+### Regression net layers (commits 65–69)
+
+  - Property tests: `pick_from_visits` (T=0 argmax, T>0 explores, single-action short-circuit, seed determinism, all-zero fallback)
+  - `PublicObservation` contract: schemaVersion=3, seed-determinism, perspective-swap asymmetry
+  - `state_hash` stability: determinism, format=32-lowercase-hex, change-on-step, clone-invariance
+  - `enumerate_legal_ai_actions` invariants: nonempty, deterministic, side-effect free, unique ids, liveness floor (endTurn-or-pass)
+  - Catalog structural integrity: uma hp>0 + ≥1 attack + nonempty name/species, trainer name, duplicate ids, evolution chains resolve by species
+  - `MctsResult` contract: visits length == legal.len, selected_index in bounds, ≥1 positive visit, argmax == selected_index, determinism, root_value ∈ [-1, 1]
+  - Cross-CLI smoke: `engine-rs/scripts/smoke-all-clis.sh` exercises full orchestrator flag set on all 4 binaries
 
 ## Production validation runs
 
@@ -314,26 +337,22 @@ to-end depends on the legal-action enumerator + heuristic-opponent ports
 ## Test coverage today
 
 ```
-30 tests passing total
-├── 25 engine unit tests
-│   ├── catalog (4): variants, weakness_bonus, dense ids, base cards
-│   ├── card_id (1): interner idempotence
-│   ├── packed (4): stability, sensitivity to turn / card_id, fingerprint
-│   ├── random (2): determinism, shuffle in scope
-│   ├── umamusume (3): energy count, iteration order, most damaged
-│   ├── energy (3): cost satisfied / unmet / attach moves zone
-│   ├── retreat (1): x-prefix parsing
-│   └── combat + trainers (7): flip_coin guaranteed-heads, knock-out
-│       game-over (×2), single-condition replacement, non-damaging
-│       attack predicate, discard-random-energy RNG draws, hand cap
-├── 2 catalog cross-lang tests
-│   ├── catalog_card_set_matches_ts
-│   └── catalog_identity_fields_match_ts (106 cards × {stage,hp,type,trainerType})
-└── 3 RNG cross-lang tests
-    ├── mulberry32_matches_ts (11 numeric seeds × 1,000 outputs, u32-bit-identical)
-    ├── fnv1a_matches_ts (10 strings incl. non-ASCII + emoji)
-    └── fork_matches_ts (3 fork chains × 16 outputs)
+100 tests passing total (+ 3 #[ignore] benches)
+├── 73 engine lib unit tests (across catalog/card_id/packed/random/
+│   umamusume/energy/retreat/combat/trainers/observation/mcts/sample)
+├── 2 catalog cross-lang tests (TS↔Rust identity for 106 cards)
+├── 3 RNG cross-lang tests (mulberry32 + FNV-1a + fork; u32-bit-identical)
+├── 2 headless-drive smoke tests + 3 ignored throughput benches
+├── 5 state_hash stability tests (determinism, format, change-on-step,
+│   clone-invariance, cross-seed distinctness)
+├── 5 legal-actions invariant tests (nonempty, deterministic, no-mutate,
+│   unique-ids, liveness-floor of endTurn-or-pass)
+└── 6 MctsResult invariant tests (visits-length, in-bounds index,
+    positive search, argmax==selected, determinism, root_value∈[-1,1])
 ```
+
+Run all (release): `cargo test --manifest-path engine-rs/Cargo.toml -p engine --release`
+Run cross-CLI smoke: `bash engine-rs/scripts/smoke-all-clis.sh` (exercises the full r12_orchestrator.py flag set against all 4 binaries; ~30 seconds end-to-end).
 
 ## What is left (priority order)
 
