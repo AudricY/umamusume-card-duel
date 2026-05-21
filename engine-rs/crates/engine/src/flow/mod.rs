@@ -10,6 +10,7 @@ pub mod board;
 pub mod eligibility;
 pub mod energy;
 pub mod evolution;
+pub mod play_rules;
 pub mod retreat;
 pub mod setup;
 pub mod special_conditions;

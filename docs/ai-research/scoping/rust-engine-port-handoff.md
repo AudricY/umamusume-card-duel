@@ -1,22 +1,29 @@
-# Rust Engine Port — Session Hand-off (Phase 0 + 1a-c done)
+# Rust Engine Port — Session Hand-off
 
-- **Date:** 2026-05-21
+- **Date:** 2026-05-21 (last updated end of long port session)
 - **Branch:** `engine-rust-port`
-- **Status:** Phase 0 ✅, Phase 1a ✅, Phase 1b 🔄, Phase 1c 🔄,
-  Phase 1d–1h not started, Phase 2 not started.
+- **Status:**
+  - Phase 0 ✅ (harness + smoke validated; 500-seed corpus running)
+  - Phase 1a ✅ (RNG bit-identical)
+  - Phase 1b ✅ (catalog + types + Attack/Ability/TrainerEffect)
+  - Phase 1c ✅ (packed buffer + xxh3 fingerprint)
+  - Phase 1d 🔄 (10 of 13 flow files done; trainers.rs + combat.rs pending)
+  - Phase 1e–1h not started, Phase 2 not started.
 - **Authoritative scoping doc:** `rust-engine-port-plan.md` (same dir).
 - **This doc:** the concrete delta between scoping and current state, and
   what the next session needs to do to keep the port moving.
 
 ## What landed this session
 
-Three commits on `engine-rust-port`:
+Commits on `engine-rust-port` (most recent first):
 
-1. **`feat(rust-port): Phase 0 — golden-trace harness`** (507272e)
-2. **`feat(rust-port): Phase 1a — workspace + bit-identical RNG port`**
-   (96012b0)
-3. **`feat(rust-port): Phase 1b+1c — core types + packed state buffer`**
-   (3b12292)
+1. **`feat(rust-port): board + turn + setup + evolution + labels`** (dbd4e03)
+2. **`feat(rust-port): catalog + effects + initial flow/ helpers`** (c8c4094)
+3. **`feat(rust-port): Phase 1b+1c — core types + packed state buffer`** (3b12292)
+4. **`feat(rust-port): Phase 1a — workspace + bit-identical RNG port`** (96012b0)
+5. **`feat(rust-port): Phase 0 — golden-trace harness`** (507272e)
+6. **`docs(rust-port): session hand-off`** (75d1ddd)
+7. **`feat(rust-port): play_rules + corpus launch`** (this session, pending)
 
 ### Phase 0 — Golden-trace harness (TS) — DONE
 
@@ -82,40 +89,145 @@ npx tsx engine-rs/scripts/dump-ts-rng.ts > engine-rs/crates/engine/tests/rng-ref
 cargo run -p xtask -- dump-rng-reference
 ```
 
-### Phase 1b — Core types — PARTIAL
+### Phase 1b — Core types — DONE
 
-- `core/constants.rs` enums and magic numbers — done.
-- `core/card_id.rs` interner — done.
-- `core/state.rs` GameState/SideState/UmamusumeInstance/SetupState — done.
-- **TODO**: `core/catalog_gen.rs` from `crates/codegen` is still a stub.
-  See "Open work" below.
+- `core/constants.rs` enums and magic numbers.
+- `core/card_id.rs` interner.
+- `core/state.rs` GameState/SideState/UmamusumeInstance/SetupState.
+- `core/catalog.rs` — runtime catalog loader. Embeds
+  `shared/src/data/cards.json` via `include_str!`, applies variant
+  expansion (FullArt / FullArtGold / UncommonPlus) bit-for-bit matching
+  `shared/src/gameData.ts`, interns ids to `CardId(u16)`. **106 cards
+  expanded** (64 base + 24 FullArt + 2 FullArtGold + 16 UncommonPlus).
+- `core/effects.rs` — typed `Attack`, `Ability`, `TrainerEffect`,
+  `EnergyCost` (fixed `[u8; 10]` array indexed by `EnergyType`). Replaces
+  the placeholder `serde_json::Value` payloads.
+- `core/play_types.rs` — `PlayChoices`, `PlayActionKind`, with
+  `adjust_for_hand_removal` mirroring TS `adjustHandChoices`.
+- **Cross-language parity test passes**: `catalog_card_set_matches_ts`
+  and `catalog_identity_fields_match_ts`. Generate the reference dump
+  with `npx tsx engine-rs/scripts/dump-ts-catalog.ts > engine-rs/crates/engine/tests/catalog-reference.json`.
 
-### Phase 1c — Packed buffer + structural hash — PARTIAL
+### Phase 1c — Packed buffer + structural hash — DONE (validated by trace)
 
 - `core/packed.rs` byte serializer — done. Includes
   `PACKED_SCHEMA_VERSION=1` header for invalidation; tag-first ordering
   for cheap reject; `[T; 2]` for sides indexed by `SideId as usize`;
   ArrayVec lengths prefixed for every collection.
-- `fingerprint.rs` exposes `xxh3_128` over the packed buffer — done.
-- **TODO**: validate fingerprint changes correspond to all engine-relevant
-  state changes. The packed buffer hashes strings via xxh3_64 so the
-  digest depends on every byte; but only the 4 unit tests in `packed.rs`
-  cover that today. Phase 1h's bit-identity gate over the 500-seed corpus
-  is the real validator.
-- **Note on fingerprint cross-language identity**: the Rust xxh3 digest
-  will *not* match the TS `JSON.stringify` fingerprint byte-for-byte —
-  different algorithms. The golden-trace harness handles this by
-  recording the TS fingerprint string; the Rust replay tool compares the
-  Rust digest against an *independent* expected-Rust-digest column added
-  later, OR the replay tool reconstructs a TS-shape JSON view and hashes
-  that for cross-language comparison. **Decision needed** — see Open
-  questions #1.
+- `fingerprint.rs` exposes `xxh3_128` over the packed buffer.
+- **TODO**: end-to-end fingerprint coverage validates only when Phase 1h
+  runs the 500-seed corpus through the Rust engine. Until then, sensitivity
+  is covered by 4 unit tests in `packed.rs`.
+- **Decision made (Q1)**: bump golden trace to `traceVersion=2` and
+  record BOTH the TS `JSON.stringify` fingerprint (per-step) and a Rust
+  xxh3 digest in the same trace line. Diff each independently. Preserves
+  the per-step early-divergence signal without requiring byte-identity
+  across hash algorithms.
+
+### Phase 1d — flow/* port — PARTIAL (10 of 13 files)
+
+| TS file | Rust file | Status |
+| ------- | --------- | ------ |
+| `flow/ability_rules.ts` | `flow/ability_rules.rs` | ✅ done |
+| `flow/board.ts` | `flow/board.rs` | ✅ done (refresh, normalize, switch_out, choose_preferred_active) |
+| `flow/eligibility.ts` | `flow/eligibility.rs` | ✅ done (predicate-only) |
+| `flow/energy.ts` | `flow/energy.rs` | ✅ done (attach, has_enough, ability_move_types) |
+| `flow/evolution.ts` | `flow/evolution.rs` | ✅ done; `evolve_umamusume` takes `turn_number: u32` instead of `&GameState` to avoid borrow conflicts |
+| `flow/play_rules.ts` | `flow/play_rules.rs` | 🔄 PARTIAL — trainer & rainbow-uncap branches stubbed (require trainers.rs) |
+| `flow/retreat.ts` | `flow/retreat.rs` | ✅ done |
+| `flow/setup.ts` | `flow/setup.rs` | ✅ done; uid counter thread-local |
+| `flow/special_conditions.ts` | `flow/special_conditions.rs` | ✅ done |
+| `flow/turn.ts` | `flow/turn.rs` | ✅ done; RNG site at `rollEnergyFromPool` reproduced |
+| `flow/trainers.ts` | `flow/trainers.rs` | ❌ not started (231 LOC; many RNG sites) |
+| `flow/combat.ts` | `flow/combat.rs` | ❌ not started (532 LOC; hot path) |
+| `core/labels.ts` | `core/labels.rs` | ✅ done (display only — not in fingerprint) |
+| `core/umamusume.ts` | `core/umamusume.rs` | ✅ done |
+
+Composition notes:
+- `flow::turn::start_turn` and `end_turn` take a `refresh_continuous_effects`
+  callback so the engine assembles the pieces without a circular module
+  graph.
+- Logs are intentionally not written. `backend/src/sim/stateFingerprint.ts`
+  excludes `state.log`, so the fingerprint contract holds. Add a log
+  buffer if a future trace schema needs it.
+
+### Phase 0 corpus run — LAUNCHED
+
+The 500-seed corpus is recording in background as 16 parallel chunks
+(each running `--seeds 32 --seed-base K*32`, with the last chunk capped
+at 20 to total 500). Output is at `backend/runs/rust-port-golden-traces/chunks/`
+because the npm script's cwd is the backend workspace.
+
+**Merge script provided** at `engine-rs/scripts/merge-corpus.sh`:
+
+```bash
+bash engine-rs/scripts/merge-corpus.sh
+# → writes runs/rust-port-golden-traces/traces-500.jsonl
+```
+
+After merge, replay the corpus through the TS-side gate to confirm 500/500
+bit-identical:
+
+```bash
+npm --workspace backend run sim:replay-golden-traces -- \
+  --in runs/rust-port-golden-traces/traces-500.jsonl
+```
+
+If any seed diverges, Phase 1d is paused per the scoping-doc kill signal.
 
 ---
 
+## Test coverage today
+
+```
+28 tests passing total
+├── 23 engine unit tests
+│   ├── catalog (4): variants, weakness_bonus, dense ids, base cards
+│   ├── card_id (1): interner idempotence
+│   ├── packed (4): stability, sensitivity to turn / card_id, fingerprint
+│   ├── random (2): determinism, shuffle in scope
+│   ├── umamusume (3): energy count, iteration order, most damaged
+│   ├── energy (3): cost satisfied / unmet / attach moves zone
+│   ├── retreat (1): x-prefix parsing
+│   └── core::random::tests (5 above already counted)
+├── 2 catalog cross-lang tests
+│   ├── catalog_card_set_matches_ts
+│   └── catalog_identity_fields_match_ts (106 cards × {stage,hp,type,trainerType})
+└── 3 RNG cross-lang tests
+    ├── mulberry32_matches_ts (11 numeric seeds × 1,000 outputs, u32-bit-identical)
+    ├── fnv1a_matches_ts (10 strings incl. non-ASCII + emoji)
+    └── fork_matches_ts (3 fork chains × 16 outputs)
+```
+
 ## What is left (priority order)
 
-### P0 — Launch 500-seed corpus
+### P0 — Finish 500-seed corpus + replay
+
+500-seed corpus was launched in this session as 16 parallel chunks.
+Per-seed wall ~71 s, so 32 seeds/chunk × 16 chunks at 16-way parallelism
+≈ 38 minutes. Check progress with:
+
+```bash
+total=0
+for f in backend/runs/rust-port-golden-traces/chunks/*.jsonl; do
+  total=$((total + $(wc -l < "$f")))
+done
+echo "$total / 500"
+```
+
+When all 500 are recorded, merge then replay:
+
+```bash
+bash engine-rs/scripts/merge-corpus.sh
+npm --workspace backend run sim:replay-golden-traces -- \
+  --in runs/rust-port-golden-traces/traces-500.jsonl
+```
+
+Expected: `OK 500/500 seeds bit-identical`. Any divergence is the Phase 0
+kill signal — Phase 1d is paused until the TS-side nondeterminism is
+located and fixed.
+
+### P0 (alternate) — Single command if corpus is fresh
 
 Already-built TS harness. Single command:
 
@@ -139,27 +251,22 @@ npm --workspace backend run sim:replay-golden-traces -- \
   --in runs/rust-port-golden-traces/traces-500.jsonl
 ```
 
-### P1 — Phase 1b: catalog codegen
+### P1 — Phase 1d remainder: `trainers.rs` + `combat.rs`
 
-Audit `shared/src/` (and any sibling `cards/` directory) to find the
-authoritative card-catalog representation. Likely candidates:
-`shared/src/cards/*.ts` or `shared/src/catalog.json`. Once located:
+`flow/trainers.ts` (231 LOC) and `flow/combat.ts` (532 LOC). Together
+they're the heart of the engine state mutations.
 
-1. Write the codegen (`engine-rs/crates/codegen/src/main.rs`) to parse it
-   and emit `engine-rs/crates/engine/src/core/catalog_gen.rs` with:
-   - Const `CARD_DEFS: &[CardDef]` indexed by `CardId.0`.
-   - Const `INTERNER_ENTRIES: &[(&str, CardId)]` for the id table.
-   - Const `ATTACK_DEFS`, `ABILITY_DEFS`, `TRAINER_EFFECT_DEFS`.
-2. Add a `build.rs` to the `engine` crate that invokes the codegen if
-   the input is newer than the output (skip the regeneration on most
-   builds).
-3. Lift the placeholder `serde_json::Value` payloads in `core/state.rs`
-   (`AttackDef(serde_json::Value)`, etc.) to typed structs once the
-   on-disk shape is known.
+- `trainers.rs`: card-effect resolution. **Many RNG sites**: 45, 71, 134,
+  169, 178, 196 in the TS source. Each `randomInt` / `rollEnergyFromPool` /
+  `shuffle` advances the PRNG and is bit-identity load-bearing.
+- `combat.rs`: attack resolution. RNG sites at 202, 289, 292, 335, 507.
+  Damage / coin / weakness / status-condition application. The biggest
+  single file in the engine.
 
-**Why typed instead of `serde_json::Value`**: float math in the
-heuristic opponent (§5 risk #2) needs predictable IEEE 754 ordering.
-Untyped `Value` paths defer that decision and can hide divergence.
+After both land, `flow/play_rules.rs` needs three lines unblocked: the
+`PlayActionKind::Trainer` branch calls `flow::trainers::apply_trainer` or
+`flow::trainers::play_stadium`. The rainbow uncap branch calls
+`use_rainbow_uncap_crystal`.
 
 ### P2 — Phase 1d: `flow/*` rules port
 
@@ -268,52 +375,27 @@ preceding 90 days warrants it (risk #5 in scoping doc).
 
 ---
 
-## Open questions for the next session
+## Open questions — resolved or carried forward
 
-1. **Fingerprint cross-language identity.** Pick one:
-   - **(a)** Make Rust emit a TS-equivalent JSON-shape view and hash that;
-     fingerprints become byte-equal across languages, at the cost of
-     re-implementing `backend/src/sim/stateFingerprint.ts` exactly.
-   - **(b)** Record both TS-string and Rust-digest in the golden trace
-     and compare each side independently. The schema becomes:
-     `{ fingerprintTs, fingerprintRustExpected }`. Bumps trace to v2.
-   - **(c)** Drop the per-step fingerprint check; rely on terminal-state
-     diff + per-step action-id diff + rngDrawsThisStep diff. Cheapest;
-     loses the early-divergence detection that per-step fingerprint
-     gives.
-
-   Recommendation: **(b)** — it's a one-time schema bump and preserves
-   the most signal.
-
-2. **Heuristic-opponent float-math policy.** Pick one:
-   - **(a)** Full bit-identical port. Match `Math.pow`/IEEE-754
-     intermediate-precision exactly. Highest cost; possible.
-   - **(b)** Engine-mutations bit-identical, AI scoring allowed to
-     diverge. Requires reframing the golden-trace gate: assert state
-     bit-identical, allow action choice to differ on a small-tolerance
-     basis. Substantially cheaper and almost certainly viable.
-   - **(c)** TS-RPC for `abilityUtils.ts`/`attachUtils.ts`/
-     `combatPlanner.ts` only (the §2 escape hatch).
-
-   Recommendation: **(a)** with **(b)** as the in-pocket fallback if any
-   one heuristic resists. **(c)** is third because the language boundary
-   in the hot loop erases the speedup.
-
-3. **Catalog source-of-truth.** Audit `shared/src/cards/`,
-   `shared/src/types.ts`, `shared/src/gameData.ts`, etc. and identify
-   the on-disk authoritative format. Currently `engine-rs/crates/codegen/`
-   is a stub waiting on this.
-
-4. **Worker model for Rust binary.** Single-process-per-task (preserves
-   bit-identity through `r12_workstealing_determinism_gate.py`) vs
-   internal Rayon parallelism (re-needs gate-clearing). Stick to single
-   process unless throughput requires otherwise.
-
-5. **RNG-tree-split bit-identity.** Per the Phase 0 agent finding,
-   `mcts.ts` creates `createSeededRng(seed, "mcts-root")` separately
-   from the outer recorder RNG. The Rust port must instantiate *both*
-   trees with the same seed strings. Verify the seed-string convention
-   in `mcts.ts:177` and any other inner-tree creation site.
+1. **Fingerprint cross-language identity** — **DECIDED (b)**: record both
+   TS string and Rust digest in the golden trace, bump to
+   `traceVersion=2`. Implementation pending in next session.
+2. **Heuristic-opponent float-math policy** — **DECIDED (a)**: full
+   bit-identical, with (b) as in-pocket fallback for any one heuristic
+   that resists. Rationale: engine audit shows no transcendentals, only
+   `*` / `+` of small constants — IEEE 754 round-to-nearest-even is
+   deterministic given identical op-order.
+3. **Catalog source-of-truth** — **RESOLVED**: `shared/src/data/cards.json`.
+   Variant expansion logic in `shared/src/gameData.ts:52,109-128` is
+   ported in `core/catalog.rs`.
+4. **Worker model for Rust binary** — **DECIDED**: single-process per
+   task. Preserves the existing R12 work-stealing determinism gate.
+   Revisit if throughput becomes the limiter post-Phase-1.
+5. **RNG-tree-split bit-identity** — **CARRY FORWARD**: `mcts.ts:177`
+   creates a separate `createSeededRng(seed, "mcts-root")` distinct from
+   the recorder's outer RNG. Both trees must be reproduced bit-for-bit
+   in the Rust MCTS port (Phase 1g). The recorder's existing per-step
+   `rngDrawsThisStep` count covers only the outer tree.
 
 ---
 
@@ -323,8 +405,11 @@ preceding 90 days warrants it (risk #5 in scoping doc).
 | --- | --- | --- |
 | JSON decimal-to-f64 parser disagreement between JS and Rust serde_json at half-ULP boundaries | `rng_cross_lang.rs` test failure | Compare in u32 space, not f64. Documented in test. |
 | `npm exec`'s stderr leaking into stdout-redirected files | `dump-ts-rng.ts` reference vector generation | Use `> file` not `2>&1 > file`; pin `tsx` in devDeps to skip the install warning. |
-| TS-side nondeterminism (the Phase 0 kill signal) | Did not fire at 5 seeds | Re-check at 500 seeds before committing to Phase 1d. |
+| TS-side nondeterminism (the Phase 0 kill signal) | Did not fire at 5 seeds | Re-check at 500 seeds before committing to Phase 1d remainder. |
 | MCTS internal RNG tree distinct from outer | Phase 0 agent found this | Document in `mcts.rs` when it lands. Both trees need bit-identity. |
+| Corpus chunk output path: cwd is `backend/`, so relative `runs/...` lands at `backend/runs/...` not repo-root `runs/` | Caught while inspecting the corpus job | `engine-rs/scripts/merge-corpus.sh` repositions chunks to canonical path. |
+| Rust borrow checker: `evolve_umamusume` wanted `&GameState` while caller held `&mut SideState` | `flow::play_rules.rs` evolve branch | Refactored `evolve_umamusume(turn_number: u32, …)` to take just the field it needs by value. Pattern: when a helper only reads `state.turn_number`, pass `u32` not `&GameState`. |
+| TS `Math.imul`'s i32-mod-2^32 semantics in Rust | Anticipated, not actually bit | `u32::wrapping_mul` is bit-equivalent on the low 32 bits. Documented in `core/random.rs`. |
 
 ---
 

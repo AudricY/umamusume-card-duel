@@ -64,15 +64,16 @@ pub fn is_valid_evolution_target(
 }
 
 /// Mutate the umamusume instance in place. The caller must hold a `&mut`
-/// to the right instance (active or one of bench).
+/// to the right instance (active or one of bench). `turn_number` is
+/// passed by value so the caller doesn't have to hold a `&GameState` and
+/// a `&mut SideState` simultaneously.
 pub fn evolve_umamusume(
-    state: &GameState,
+    turn_number: u32,
     umamusume: &mut UmamusumeInstance,
     evolution_card_id: CardId,
     evolution_card: &UmamusumeCard,
 ) {
     let damage = umamusume.max_hp - umamusume.hp;
-    // Push the previous card_id into the evolution chain.
     let prev_card_id = umamusume.card_id;
     let _ = umamusume.evolution_card_ids.try_push(prev_card_id);
     umamusume.card_id = evolution_card_id;
@@ -80,8 +81,8 @@ pub fn evolve_umamusume(
     umamusume.stage = evolution_card.stage;
     umamusume.max_hp = evolution_card.hp;
     umamusume.hp = evolution_card.hp - damage;
-    umamusume.evolved_turn = Some(state.turn_number);
-    umamusume.entered_turn = umamusume.entered_turn.min(state.turn_number.saturating_sub(1));
+    umamusume.evolved_turn = Some(turn_number);
+    umamusume.entered_turn = umamusume.entered_turn.min(turn_number.saturating_sub(1));
     clear_special_conditions(umamusume);
 }
 

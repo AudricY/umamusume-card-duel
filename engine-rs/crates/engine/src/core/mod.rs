@@ -4,6 +4,7 @@ pub mod constants;
 pub mod effects;
 pub mod labels;
 pub mod packed;
+pub mod play_types;
 pub mod random;
 pub mod state;
 pub mod umamusume;
