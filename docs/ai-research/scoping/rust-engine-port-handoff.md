@@ -330,6 +330,35 @@ rollout_steps=200, prior=uniform, leaf=rollout, collapseMaxSteps=64).
 Rust MCTS uses identical engine + heuristic + RNG, so it should pick
 identical actions and consume identical outer-RNG draws as TS.
 
+**Critical V4 fix in `engine::mcts::driver::rollout_heuristic`:**
+
+The Rust impl wraps each advance in `with_rng_borrow(rng, ...)` which
+installs the MCTS-inner rng as the active provider during the advance.
+This **diverges from TS**. The TS engine's `advancePlayerAiTurnStep`
+takes a `random: () => number = randomFloat` parameter, but its
+internals (`combat.ts flipCoin`, `trainers.ts randomInt`, etc.) ignore
+the parameter and call `randomFloat()` directly, which reads the
+**ambient outer rng** installed by `recordTraceForSeed`'s outer
+`withRng`. So TS rolloutHeuristic consumes from the OUTER rng during
+all rollouts.
+
+Concretely:
+- TS rolloutHeuristic at `mcts.ts:653` calls `advancePlayerAiTurnStep(state, forced, rng.next)`.
+  The `rng.next` is the inner rng's draw fn but internal `randomFloat()` calls bypass it.
+- Rust `rollout_heuristic` at `engine-rs/crates/engine/src/mcts/driver.rs:636`
+  installs the inner rng via `with_rng_borrow`, so internal `random_float()`
+  calls use the INNER rng. Bit-divergent.
+
+Fix: in `rollout_heuristic`, remove the `with_rng_borrow` wrap around
+`advance_*_turn_step`. The advances should run with whatever rng the
+caller installed (which during the recorder loop is the outer
+instrumented rng). The inner rng is only used directly for
+`sample_dirichlet` at the root.
+
+After this fix, per-step outer-RNG draw counts should match the
+recorder's recorded values, and coin flips at every step should land
+identically.
+
 If the Rust MCTS port is also bit-identical, V4 reaches 500/500 game
 parity. If V4 still diverges, the divergence will be in one of:
 - Rust MCTS's PUCT selection (math::puct_select)
