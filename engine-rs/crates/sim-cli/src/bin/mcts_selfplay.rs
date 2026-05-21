@@ -23,6 +23,8 @@ use engine::headless_setup::setup_ai_vs_ai_game;
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
 use engine::mcts::driver::run_mcts;
 use engine::policy::actions::enumerate_legal_ai_actions;
+use engine::policy::observation::build_public_observation;
+use engine::policy::types::{LegalAiAction, PublicObservation};
 use serde::Serialize;
 
 #[derive(Parser, Debug)]
@@ -55,6 +57,11 @@ struct Args {
     max_steps: u32,
     #[arg(long)]
     out: Option<String>,
+    /// Record per-decision trajectory rows (observation + legal actions
+    /// + visit distribution) inside each game record. Off by default
+    /// since rows can be large.
+    #[arg(long, default_value_t = false)]
+    record_rows: bool,
 }
 
 #[derive(Serialize)]
@@ -64,7 +71,32 @@ struct GameRecord {
     turn_number: u32,
     winner: Option<String>,
     total_steps: u32,
+    model_decisions: u32,
+    /// Per-MCTS-decision trajectory rows. Empty when no MCTS decisions
+    /// fired (e.g., game ended in single-action-only steps).
+    rows: Vec<SelfPlayRow>,
 }
+
+/// Mirror of TS `SelfPlayRow` in `backend/src/sim/mctsSelfPlay.ts:485`.
+/// Subset of fields populated today; full parity in a follow-up.
+#[derive(Serialize)]
+struct SelfPlayRow {
+    schema_version: u32,
+    kind: &'static str,
+    seed: u32,
+    side_id: String,
+    step: u32,
+    turn_number: u32,
+    observation: PublicObservation,
+    legal_actions: Vec<LegalAiAction>,
+    selected_action_index: usize,
+    visit_distribution: Vec<f64>,
+    root_value: f64,
+    expansions: u32,
+    leaf_evaluations: u32,
+}
+
+const ROW_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Serialize)]
 struct RunSummary {
@@ -84,12 +116,20 @@ struct TerminalReasons {
     stalled: u32,
 }
 
-fn drive_one_game(seed: u32, max_steps: u32, config: &MctsConfig, model_side: SideId) -> GameRecord {
+fn drive_one_game(
+    seed: u32,
+    max_steps: u32,
+    config: &MctsConfig,
+    model_side: SideId,
+    record_rows: bool,
+) -> GameRecord {
     let seed_str = seed.to_string();
     let rng = Rng::from_seed(format!("{}:selfplay", seed_str).as_str(), "selfplay");
     let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
     let mut step = 0u32;
     let mut terminal = "max_steps";
+    let mut model_decisions = 0u32;
+    let mut rows: Vec<SelfPlayRow> = Vec::new();
 
     for s in 0..max_steps {
         step = s;
@@ -119,6 +159,36 @@ fn drive_one_game(seed: u32, max_steps: u32, config: &MctsConfig, model_side: Si
             step_rng = used_rng;
             let idx = mcts_result.selected_index.min(legal.len() - 1);
             let chosen = legal[idx].clone();
+            model_decisions += 1;
+
+            if record_rows {
+                let total_visits: u32 = mcts_result.visits.iter().sum();
+                let visit_distribution: Vec<f64> = if total_visits > 0 {
+                    mcts_result.visits.iter().map(|&n| n as f64 / total_visits as f64).collect()
+                } else {
+                    let n = legal.len();
+                    vec![1.0 / n.max(1) as f64; n]
+                };
+                rows.push(SelfPlayRow {
+                    schema_version: ROW_SCHEMA_VERSION,
+                    kind: "mcts-selfplay",
+                    seed,
+                    side_id: match side {
+                        SideId::Player => "player".into(),
+                        SideId::Opponent => "opponent".into(),
+                    },
+                    step: s,
+                    turn_number: state.turn_number,
+                    observation: build_public_observation(&state, side),
+                    legal_actions: legal.clone(),
+                    selected_action_index: idx,
+                    visit_distribution,
+                    root_value: mcts_result.diagnostics.root_value,
+                    expansions: mcts_result.diagnostics.expansions,
+                    leaf_evaluations: mcts_result.diagnostics.leaf_evaluations,
+                });
+            }
+
             let (ns, used_rng) = with_rng(step_rng.clone(), || {
                 let forced = get_forced_attack_coin_results(&state);
                 advance_modeled_turn_step(&state, side, &chosen, forced)
@@ -158,6 +228,8 @@ fn drive_one_game(seed: u32, max_steps: u32, config: &MctsConfig, model_side: Si
         turn_number: state.turn_number,
         winner,
         total_steps: step + 1,
+        model_decisions,
+        rows,
     }
 }
 
@@ -213,7 +285,7 @@ fn main() -> Result<()> {
 
     for i in 0..args.seeds {
         let seed = args.seed_base + i;
-        let record = drive_one_game(seed, args.max_steps, &config, model_side);
+        let record = drive_one_game(seed, args.max_steps, &config, model_side, args.record_rows);
         match record.terminal_reason.as_str() {
             "game_over" => terminal_reasons.game_over += 1,
             "stalled" => terminal_reasons.stalled += 1,
