@@ -50,13 +50,34 @@ assert n > 0, 'no training examples produced'
 "
 
 echo
-echo ">>> sim-mcts-selfplay (full MCTS, 3 games, --record-rows)"
-"$BIN_DIR/sim-mcts-selfplay" --seeds 3 --record-rows --out "$TMP_DIR/selfplay.jsonl" >/dev/null
+echo ">>> sim-mcts-selfplay (full MCTS, 3 games, --record-rows, ORCHESTRATOR FLAG SET)"
+"$BIN_DIR/sim-mcts-selfplay" \
+  --games 3 --seed-start 0 \
+  --mcts-simulations 100 --mcts-c-puct 1.5 \
+  --mcts-rollout-crn-samples 3 --mcts-rollout-steps 200 \
+  --mcts-collapse-max-steps 64 --mcts-max-nodes 5000 \
+  --mcts-prior uniform --mcts-leaf rollout \
+  --mcts-dirichlet-alpha 0.3 --mcts-dirichlet-epsilon 0.25 \
+  --temperature-moves 6 --temperature-value 1.0 \
+  --workers 1 \
+  --record-rows --out "$TMP_DIR/selfplay.jsonl" >/dev/null
 python3 engine-rs/scripts/check-rust-jsonl-pyparse.py "$TMP_DIR/selfplay.jsonl"
 
 echo
-echo ">>> sim-eval-gate (MCTS-vs-heuristic, 4 seeds)"
-"$BIN_DIR/sim-eval-gate" --seeds 4 --seed-base 0 >"$TMP_DIR/gate.json"
+echo ">>> sim-eval-gate (MCTS-vs-heuristic, 4 seeds, ORCHESTRATOR FLAG SET)"
+"$BIN_DIR/sim-eval-gate" \
+  --selection mcts \
+  --games 4 --seed-start 0 \
+  --model-side both \
+  --max-steps 500 \
+  --mcts-simulations 100 --mcts-c-puct 1.5 \
+  --mcts-rollout-crn-samples 3 --mcts-rollout-steps 200 \
+  --mcts-collapse-max-steps 64 --mcts-max-nodes 5000 \
+  --mcts-prior uniform --mcts-leaf rollout \
+  --min-ci-lower 0.5 --min-games 100 \
+  --progress-out "$TMP_DIR/gate-progress.jsonl" \
+  --workers 1 \
+  >"$TMP_DIR/gate.json"
 python3 -c "
 import json
 d = json.load(open('$TMP_DIR/gate.json'))
