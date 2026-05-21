@@ -63,18 +63,27 @@ def main() -> None:
         tau=args.tau if args.tau >= 0 else None,
     )
     train_indices, val_indices = split_pair_indices(len(dataset), args.seed)
+    # R16-TD 3b chunk 3: wrap `collate_preference_batch` so it also stitches
+    # in `pair_meta` for the grouped-metrics consumer downstream. Keeping
+    # this in the trainer (not the collator) preserves the regression
+    # contract enforced by `pair_corpus_smoke.py` (exact `set(batch.keys())`).
+    def collate_with_meta(samples: list[Any]) -> dict[str, Any]:
+        batch = collate_preference_batch(samples)
+        batch["pair_meta"] = extract_pair_meta(samples)
+        return batch
+
     train_loader = DataLoader(
         Subset(dataset, train_indices),
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=collate_preference_batch,
+        collate_fn=collate_with_meta,
     )
     val_loader = (
         DataLoader(
             Subset(dataset, val_indices),
             batch_size=args.batch_size,
             shuffle=False,
-            collate_fn=collate_preference_batch,
+            collate_fn=collate_with_meta,
         )
         if val_indices
         else None
@@ -222,11 +231,25 @@ def dpo_loss_components(
     batch: dict[str, torch.Tensor],
     *,
     beta: float,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """Compute DPO loss + diagnostics for one batch.
 
     The loss is exposed via a helper so the smoke test can assert
     decreasing loss without re-implementing the math.
+
+    R16-TD 3b chunk 3: forwards the v3 card-embedding tensors
+    (`card_ids_by_zone`, `action_card_idx`) into BOTH the trainable policy
+    AND the frozen reference model when present on the batch. Without
+    these, `CandidatePolicyNet.forward` silently falls back to
+    `embed(0) = 0` via `padding_idx=0` and the v3 branch is inert. Legacy
+    synthetic batches that lack these keys still work (the `.get()` +
+    `None` guard preserves the pre-chunk-3 behaviour).
+
+    Additionally returns a ``grouped`` dict that stratifies per-pair loss
+    and per-pair accuracy by ``negative_kind`` / ``source_kind`` /
+    ``phase`` / ``action_kind`` / ``margin_bucket`` so downstream analysis
+    can locate regressions to a stratum. Reporting only — never used in
+    the gradient.
     """
 
     state = batch["state_features"]
@@ -236,13 +259,27 @@ def dpo_loss_components(
     y_l = batch["y_l_index"]
     weights = normalized_weights(batch["sample_weights"])
 
-    logits, _ = model(state, actions, mask)
+    # R16-TD 3b chunk 3: full-padded `card_ids_by_zone` / `action_card_idx`
+    # — these are the action-axis-full versions emitted by
+    # `collate_preference_batch`, matching the BC collator's contract. The
+    # `_w` / `_l` suffixed variants are pre-gathered for downstream
+    # winner/loser stratification and are NOT used here because the policy
+    # net consumes the full legal-action set before we gather log-probs.
+    card_ids_by_zone = batch.get("card_ids_by_zone")
+    action_card_idx = batch.get("action_card_idx")
+
+    model_kwargs: dict[str, torch.Tensor] = {}
+    if card_ids_by_zone is not None and action_card_idx is not None:
+        model_kwargs["card_ids_by_zone"] = card_ids_by_zone
+        model_kwargs["action_card_idx"] = action_card_idx
+
+    logits, _ = model(state, actions, mask, **model_kwargs)
     log_probs = masked_log_softmax_logits(logits, mask)
     logp_w = log_probs.gather(1, y_w.unsqueeze(1)).squeeze(1)
     logp_l = log_probs.gather(1, y_l.unsqueeze(1)).squeeze(1)
 
     with torch.no_grad():
-        ref_logits, _ = reference(state, actions, mask)
+        ref_logits, _ = reference(state, actions, mask, **model_kwargs)
         ref_log_probs = masked_log_softmax_logits(ref_logits, mask)
         refp_w = ref_log_probs.gather(1, y_w.unsqueeze(1)).squeeze(1)
         refp_l = ref_log_probs.gather(1, y_l.unsqueeze(1)).squeeze(1)
@@ -253,14 +290,193 @@ def dpo_loss_components(
     # Accuracy: fraction of pairs where the policy already prefers y_w
     # over y_l (a cheap progress signal — at init, this is the reference
     # policy's preference rate).
-    accuracy = (logp_w > logp_l).float().mean()
+    per_row_correct = (logp_w > logp_l).float()
+    accuracy = per_row_correct.mean()
     margin_signed = (logp_w - logp_l).mean()
+
+    grouped = compute_dpo_grouped_metrics(batch, per_row_loss, per_row_correct)
+
     return {
         "loss": loss,
         "accuracy": accuracy,
         "policy_margin": margin_signed,
         "logits_diff_mean": logits_diff.mean(),
+        "grouped": grouped,
     }
+
+
+# R16-TD 3b chunk 3: warn-once flags for missing pair metadata. We don't
+# want a noisy log line per batch when a corpus lacks one of the axes —
+# emit one warning per axis per process and then default to "unknown".
+_GROUPED_METRIC_WARNED: set[str] = set()
+
+
+def _warn_missing_axis_once(axis: str) -> None:
+    if axis in _GROUPED_METRIC_WARNED:
+        return
+    _GROUPED_METRIC_WARNED.add(axis)
+    print(
+        f"[train_dpo] grouped-metric axis {axis!r} missing on batch; "
+        "stratifying as 'unknown'. Suppressing further warnings for this axis.",
+        flush=True,
+    )
+
+
+def _action_kind_for_row(example: dict[str, Any], winner_index: int) -> str:
+    """Lift the action-kind helper from `data_coverage_audit._action_kind`.
+
+    Reads the winner action's `kind` field off `legalActions[winner_index]`.
+    Returns "unknown" for malformed rows so a stray entry never crashes
+    the metrics reporter.
+    """
+    la = example.get("legalActions") or []
+    if 0 <= winner_index < len(la):
+        action = la[winner_index]
+        if isinstance(action, dict):
+            return str(action.get("kind") or "unknown")
+    return "unknown"
+
+
+def extract_pair_meta(pairs: list[Any]) -> list[dict[str, Any]]:
+    """Build the per-row metadata list used by `compute_dpo_grouped_metrics`.
+
+    R16-TD 3b chunk 3: this is the bridge between `PreferencePair` (which
+    carries the raw `example` dict from the JSONL plus `pair_source_kind`)
+    and the grouped-metrics consumer. Callers (smoke + training loop) wire
+    it in by setting ``batch["pair_meta"] = extract_pair_meta(pairs)``
+    AFTER calling `collate_preference_batch`. Keeping it out of the
+    collator preserves the regression smoke contract in
+    `pair_corpus_smoke.py` (which asserts an exact `set(batch.keys())`).
+    """
+    meta: list[dict[str, Any]] = []
+    for pair in pairs:
+        example = getattr(pair, "example", {}) or {}
+        winner = example.get("winner") or {}
+        loser = example.get("loser") or {}
+        observation = example.get("observation") or {}
+        phase = example.get("phase") or observation.get("phase") or "unknown"
+        try:
+            winner_index = int(winner.get("index"))
+        except (TypeError, ValueError):
+            winner_index = int(getattr(pair, "y_w_index", -1))
+        meta.append(
+            {
+                "negative_kind": loser.get("negativeKind"),
+                "source_kind": getattr(pair, "pair_source_kind", None)
+                or example.get("sourceKind"),
+                "phase": phase,
+                "action_kind": _action_kind_for_row(example, winner_index),
+                "margin": float(getattr(pair, "margin", 0.0) or 0.0),
+                "margin_bucket": _margin_bucket(
+                    float(getattr(pair, "margin", 0.0) or 0.0)
+                ),
+            }
+        )
+    return meta
+
+
+def _margin_bucket(margin: float) -> str:
+    """Match the histogram convention from
+    `pair_builder._bucket_for_margin` but with an explicit `<0.05` bucket
+    for legacy outcome-v2 rows whose tau-gated margins can be below 0.05.
+    """
+    try:
+        m = float(margin)
+    except (TypeError, ValueError):
+        return "unknown"
+    if not (m == m):  # NaN
+        return "unknown"
+    if m < 0.05:
+        return "<0.05"
+    if m < 0.10:
+        return "0.05-0.10"
+    if m < 0.20:
+        return "0.10-0.20"
+    return ">=0.20"
+
+
+def compute_dpo_grouped_metrics(
+    batch: dict[str, torch.Tensor],
+    per_pair_loss: torch.Tensor,
+    per_pair_correct: torch.Tensor,
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Stratify per-pair loss / accuracy by pair metadata axes.
+
+    R16-TD 3b chunk 3 scoping § P2 step 4: reporting-only axes so that
+    downstream analysis can locate regressions. The axes are:
+
+      - ``negative_kind`` (from pair-builder's
+        ``loser.negativeKind``; defaults to "unknown" / warn-once).
+      - ``source_kind`` (from ``PreferencePair.pair_source_kind``; falls
+        back to "outcome-v2" for legacy rows pre-Phase-1).
+      - ``phase`` (from the pair row's ``phase`` field or
+        ``observation.phase``; default "unknown").
+      - ``action_kind`` (kind of the winner action via the lifted helper).
+      - ``margin_bucket`` (per `_margin_bucket`).
+
+    The pair metadata is carried by the batch under ``"pair_meta"`` (a
+    list-of-dicts, one per row, same length as ``per_pair_loss``). When
+    that key is absent (legacy synthetic batches), an empty dict is
+    returned and the caller's downstream consumer treats it as "no axes
+    fired".
+    """
+
+    meta_rows: list[dict[str, Any]] | None = batch.get("pair_meta")  # type: ignore[assignment]
+    if not meta_rows:
+        return {}
+
+    loss_cpu = per_pair_loss.detach().to("cpu", dtype=torch.float32).tolist()
+    correct_cpu = per_pair_correct.detach().to("cpu", dtype=torch.float32).tolist()
+    n = min(len(meta_rows), len(loss_cpu), len(correct_cpu))
+
+    # Pre-compute the bucket label for each row per axis. `buckets` is
+    # `{axis: [label_for_row_0, label_for_row_1, ...]}`.
+    axis_names = ("negative_kind", "source_kind", "phase", "action_kind", "margin_bucket")
+    buckets: dict[str, list[str]] = {axis: [] for axis in axis_names}
+    for row in range(n):
+        meta = meta_rows[row] if isinstance(meta_rows[row], dict) else {}
+        # negative_kind
+        nk = meta.get("negative_kind")
+        if nk is None:
+            _warn_missing_axis_once("negative_kind")
+            nk = "unknown"
+        buckets["negative_kind"].append(str(nk))
+        # source_kind
+        sk = meta.get("source_kind") or "outcome-v2"
+        buckets["source_kind"].append(str(sk))
+        # phase
+        ph = meta.get("phase") or "unknown"
+        buckets["phase"].append(str(ph))
+        # action_kind
+        ak = meta.get("action_kind") or "unknown"
+        buckets["action_kind"].append(str(ak))
+        # margin_bucket
+        mb = meta.get("margin_bucket")
+        if mb is None:
+            mb = _margin_bucket(meta.get("margin", 0.0))
+        buckets["margin_bucket"].append(str(mb))
+
+    grouped: dict[str, dict[str, dict[str, float]]] = {}
+    for axis in axis_names:
+        per_bucket: dict[str, dict[str, float]] = {}
+        for row in range(n):
+            label = buckets[axis][row]
+            entry = per_bucket.setdefault(
+                label, {"count": 0.0, "_loss_sum": 0.0, "_acc_sum": 0.0}
+            )
+            entry["count"] += 1.0
+            entry["_loss_sum"] += float(loss_cpu[row])
+            entry["_acc_sum"] += float(correct_cpu[row])
+        # Finalize means and drop the intermediate sums.
+        for label, entry in per_bucket.items():
+            count = max(1.0, entry["count"])
+            per_bucket[label] = {
+                "count": entry["count"],
+                "mean_loss": entry["_loss_sum"] / count,
+                "mean_acc": entry["_acc_sum"] / count,
+            }
+        grouped[axis] = per_bucket
+    return grouped
 
 
 def run_epoch(
@@ -271,7 +487,7 @@ def run_epoch(
     *,
     beta: float,
     device: torch.device,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     model.train()
     totals = {
         "loss": 0.0,
@@ -280,6 +496,7 @@ def run_epoch(
         "logits_diff_mean": 0.0,
         "count": 0.0,
     }
+    grouped_totals: dict[str, dict[str, dict[str, float]]] = {}
     for batch in loader:
         batch = move_batch(batch, device)
         components = dpo_loss_components(model, reference, batch, beta=beta)
@@ -289,7 +506,10 @@ def run_epoch(
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
         optimizer.step()
         accumulate_metrics(totals, components, batch_size=batch["y_w_index"].shape[0])
-    return finalize_metrics(totals)
+        _merge_grouped_totals(grouped_totals, components.get("grouped") or {})
+    out = finalize_metrics(totals)
+    out["grouped"] = _finalize_grouped_totals(grouped_totals)
+    return out
 
 
 @torch.no_grad()
@@ -300,7 +520,7 @@ def evaluate(
     *,
     beta: float,
     device: torch.device,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     if loader is None:
         return {}
     model.eval()
@@ -311,21 +531,66 @@ def evaluate(
         "logits_diff_mean": 0.0,
         "count": 0.0,
     }
+    grouped_totals: dict[str, dict[str, dict[str, float]]] = {}
     for batch in loader:
         batch = move_batch(batch, device)
         components = dpo_loss_components(model, reference, batch, beta=beta)
         accumulate_metrics(totals, components, batch_size=batch["y_w_index"].shape[0])
-    return finalize_metrics(totals)
+        _merge_grouped_totals(grouped_totals, components.get("grouped") or {})
+    out = finalize_metrics(totals)
+    out["grouped"] = _finalize_grouped_totals(grouped_totals)
+    return out
+
+
+def _merge_grouped_totals(
+    accum: dict[str, dict[str, dict[str, float]]],
+    batch_grouped: dict[str, dict[str, dict[str, float]]],
+) -> None:
+    """In-place merge of per-batch grouped metrics into the per-epoch
+    running totals. We re-derive ``_loss_sum`` / ``_acc_sum`` from the
+    batch's ``count`` × ``mean_loss`` so the final per-epoch mean is a
+    correct sample-size-weighted average across batches.
+    """
+    for axis, per_bucket in batch_grouped.items():
+        accum_axis = accum.setdefault(axis, {})
+        for label, entry in per_bucket.items():
+            slot = accum_axis.setdefault(
+                label, {"count": 0.0, "_loss_sum": 0.0, "_acc_sum": 0.0}
+            )
+            count = float(entry.get("count", 0.0))
+            slot["count"] += count
+            slot["_loss_sum"] += float(entry.get("mean_loss", 0.0)) * count
+            slot["_acc_sum"] += float(entry.get("mean_acc", 0.0)) * count
+
+
+def _finalize_grouped_totals(
+    accum: dict[str, dict[str, dict[str, float]]],
+) -> dict[str, dict[str, dict[str, float]]]:
+    out: dict[str, dict[str, dict[str, float]]] = {}
+    for axis, per_bucket in accum.items():
+        finalized: dict[str, dict[str, float]] = {}
+        for label, slot in per_bucket.items():
+            count = max(1.0, slot.get("count", 0.0))
+            finalized[label] = {
+                "count": slot.get("count", 0.0),
+                "mean_loss": slot.get("_loss_sum", 0.0) / count,
+                "mean_acc": slot.get("_acc_sum", 0.0) / count,
+            }
+        out[axis] = finalized
+    return out
 
 
 def accumulate_metrics(
     totals: dict[str, float],
-    components: dict[str, torch.Tensor],
+    components: dict[str, Any],
     *,
     batch_size: int,
 ) -> None:
     count = float(batch_size)
     totals["count"] += count
+    # R16-TD 3b chunk 3: `components["grouped"]` is a dict-of-dicts (reporting
+    # only) — skip it here; per-batch grouped metrics are emitted by the
+    # caller via the training-step log dict directly off `components`.
     for key in ("loss", "accuracy", "policy_margin", "logits_diff_mean"):
         totals[key] += float(components[key].item()) * count
 
@@ -342,9 +607,17 @@ def finalize_metrics(totals: dict[str, float]) -> dict[str, float]:
 
 
 def move_batch(
-    batch: dict[str, torch.Tensor], device: torch.device
-) -> dict[str, torch.Tensor]:
-    return {key: value.to(device) for key, value in batch.items()}
+    batch: dict[str, Any], device: torch.device
+) -> dict[str, Any]:
+    # R16-TD 3b chunk 3: `pair_meta` is a list of dicts (reporting metadata)
+    # carried alongside the tensor fields — pass it through unchanged.
+    out: dict[str, Any] = {}
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor):
+            out[key] = value.to(device)
+        else:
+            out[key] = value
+    return out
 
 
 def split_pair_indices(size: int, seed: int) -> tuple[list[int], list[int]]:

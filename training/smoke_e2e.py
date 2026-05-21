@@ -226,6 +226,7 @@ def main() -> None:
     assert_card_embedding_forward(repo_root, run_dir, examples_path)
     assert_r7b2_extractor_roundtrip(repo_root, run_dir, examples_path)
     assert_dpo_smoke(repo_root, run_dir, reference_checkpoint=model_dir / "checkpoint.pt")
+    assert_dpo_explicit_pair_smoke(repo_root, run_dir, reference_checkpoint=model_dir / "checkpoint.pt")
     assert_amp_overflow_regression()
 
     print(json.dumps({
@@ -955,6 +956,287 @@ def assert_dpo_smoke(repo_root: Path, run_dir: Path, *, reference_checkpoint: Pa
             f"DPO smoke (d): loss did not decrease overall: "
             f"start={losses[0]} end={losses[-1]}"
         )
+
+
+def assert_dpo_explicit_pair_smoke(
+    repo_root: Path, run_dir: Path, *, reference_checkpoint: Path
+) -> None:
+    """R16-TD 3b chunk 3: end-to-end DPO smoke through the explicit-pair
+    loader → collator → trainer contract.
+
+    The legacy `assert_dpo_smoke` constructs a synthetic tensor batch
+    directly and bypasses `collate_preference_batch`, so it can't exercise
+    the v3 embedding branch wired in chunk 3. This sub-case:
+
+      (a) writes a 3-row `kind: preference-pair` JSONL fixture under
+          `run_dir/dpo-explicit/pairs.jsonl`;
+      (b) loads through `PreferencePairDataset` and emits a batch via the
+          real `collate_preference_batch` (locks the loader-to-trainer
+          contract);
+      (c) calls `dpo_loss_components(model, reference, batch, beta=0.1)`
+          and asserts a finite loss + gradient flow on policy params;
+      (d) asserts the embedding tensors actually changed the policy
+          logits — proves the v3 branch is no longer silently inert under
+          DPO. Compares `model(state, action, mask, **embed_kwargs)`
+          against `model(state, action, mask)` (omit kwargs); a non-zero
+          difference confirms the wiring;
+      (e) asserts the returned `grouped` dict has all 5 expected axes
+          fired (negative_kind, source_kind, phase, action_kind,
+          margin_bucket).
+    """
+
+    import tempfile
+
+    from train_dpo import (
+        dpo_loss_components,
+        extract_pair_meta,
+        load_reference_policy,
+    )
+    from pair_corpus import PreferencePairDataset, collate_preference_batch
+    from train_bc import load_init_from_checkpoint
+    from uma_ai.features import ACTION_DIM
+    from uma_ai.model import ModelConfig, CandidatePolicyNet
+
+    # Build a tiny 3-row explicit-pair fixture. Card-id seeds 1/2/3 so each
+    # row's cardIdsByZone tensor is uniquely identifiable in the embedding
+    # pass — guards against the "all-zero ids ≡ no-op" degenerate case.
+    fixture_dir = run_dir / "dpo-explicit"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    fixture_path = fixture_dir / "pairs.jsonl"
+
+    def _mk_action(action_id: str, kind: str, src_idx: int, tgt_idx: int) -> dict:
+        return {
+            "id": action_id,
+            "kind": kind,
+            "phase": "main",
+            "payload": {},
+            "features": [0.0] * ACTION_DIM,
+            "actionSourceCardIdx": src_idx,
+            "actionTargetCardIdx": tgt_idx,
+        }
+
+    def _mk_observation(seed: int) -> dict:
+        from uma_ai.features import CARD_ID_SHAPES
+        from uma_ai.model import CARD_VOCAB_TABLE_SIZE
+
+        # Card ids must be in `[1, CARD_VOCAB_TABLE_SIZE-1]` (0 is pad/unk).
+        # Build per-zone unique non-zero ids hashed via modulo so each row's
+        # tensor is identifiable without ever exceeding the embed table.
+        vocab_cap = CARD_VOCAB_TABLE_SIZE - 1  # 107
+        card_ids = {
+            zone: [
+                ((seed * 7 + slot + 1) % vocab_cap) + 1
+                for slot in range(max(1, width // 2 + 1))
+            ]
+            for zone, width in CARD_ID_SHAPES.items()
+        }
+        return {
+            "phase": "main",
+            "sideToAct": "player",
+            "turnNumber": 1,
+            "own": {"points": 0, "handCount": 0, "deckCount": 0, "discard": [], "energyZone": []},
+            "opponent": {"points": 0, "handCount": 0, "deckCount": 0, "discard": []},
+            "shared": {},
+            "cardIdsByZone": card_ids,
+        }
+
+    def _mk_pair_row(
+        seed_id: str,
+        n_actions: int,
+        winner_idx: int,
+        loser_idx: int,
+        margin: float,
+        card_id_seed: int,
+        phase: str,
+        action_kind: str,
+    ) -> dict:
+        # Action src/tgt indices share the embed table; clamp to vocab cap.
+        from uma_ai.model import CARD_VOCAB_TABLE_SIZE
+        vocab_cap = CARD_VOCAB_TABLE_SIZE - 1  # 107
+        actions = [
+            _mk_action(
+                f"act-{i}",
+                action_kind,
+                src_idx=((card_id_seed * 11 + i) % vocab_cap) + 1,
+                tgt_idx=((card_id_seed * 11 + i + 1) % vocab_cap) + 1,
+            )
+            for i in range(n_actions)
+        ]
+        return {
+            "schemaVersion": 1,
+            "kind": "preference-pair",
+            "sourceKind": "mcts-relabel",
+            "sourceEpisodeId": seed_id,
+            "sourceStep": 1,
+            "seed": seed_id,
+            "sideId": "player",
+            "phase": phase,
+            "observation": _mk_observation(card_id_seed),
+            "legalActions": actions,
+            "winner": {
+                "index": winner_idx,
+                "actionId": actions[winner_idx]["id"],
+                "score": 0.6,
+            },
+            "loser": {
+                "index": loser_idx,
+                "actionId": actions[loser_idx]["id"],
+                "score": 0.3,
+                "negativeKind": "runner_up",
+            },
+            "margin": margin,
+            "confidence": {"visitShareWinner": 0.6, "visitShareLoser": 0.3, "sampleCount": 100},
+            "sampleWeight": 1.0,
+        }
+
+    rows = [
+        _mk_pair_row("A", 5, 2, 0, 0.30, 1, "main", "playSupporter"),
+        _mk_pair_row("B", 4, 1, 3, 0.07, 2, "trainerBefore", "playTrainer"),
+        _mk_pair_row("C", 3, 0, 2, 0.15, 3, "main", "pass"),
+    ]
+    with fixture_path.open("w", encoding="utf8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row))
+            handle.write("\n")
+
+    dataset = PreferencePairDataset(fixture_path, tau=0.02, log_manifest=False)
+    if len(dataset) != 3:
+        raise AssertionError(
+            f"R16-TD 3b chunk 3: explicit-pair smoke expected 3 loaded pairs, got {len(dataset)}"
+        )
+    samples = [dataset[i] for i in range(len(dataset))]
+    batch = collate_preference_batch(samples)
+    batch["pair_meta"] = extract_pair_meta(samples)
+    # Sanity: the v3 embedding tensors must be on the batch with the
+    # full-padded shape the trainer expects.
+    if "card_ids_by_zone" not in batch or "action_card_idx" not in batch:
+        raise AssertionError(
+            "R16-TD 3b chunk 3: collate_preference_batch did not emit the "
+            "embedding tensors required by chunk-3 trainer wiring"
+        )
+    if int(batch["card_ids_by_zone"].abs().sum().item()) == 0:
+        raise AssertionError(
+            "R16-TD 3b chunk 3: card_ids_by_zone is all zeros on the fixture — "
+            "the embedding path would be a no-op and the test would not detect "
+            "regression of the model forward kwargs"
+        )
+
+    # Load the trainable policy + frozen reference (same warm-start path
+    # the legacy DPO smoke uses).
+    payload = torch.load(reference_checkpoint, map_location="cpu", weights_only=False)
+    config = ModelConfig.from_dict(payload.get("model_config"))
+    device = torch.device("cpu")
+    model = CandidatePolicyNet(config).to(device)
+    load_init_from_checkpoint(reference_checkpoint, model)
+    model.train()
+    reference = load_reference_policy(str(reference_checkpoint), config, device)
+
+    # (c) end-to-end loss is finite and gradient flows on policy params.
+    components = dpo_loss_components(model, reference, batch, beta=0.1)
+    loss_value = float(components["loss"].item())
+    if not np.isfinite(loss_value):
+        raise AssertionError(
+            f"R16-TD 3b chunk 3: explicit-pair DPO loss not finite ({loss_value})"
+        )
+    components["loss"].backward()
+    has_any_grad = any(
+        p.grad is not None and p.grad.abs().sum().item() > 0.0
+        for p in model.parameters()
+    )
+    if not has_any_grad:
+        raise AssertionError(
+            "R16-TD 3b chunk 3: no policy parameter received gradient on the "
+            "explicit-pair batch"
+        )
+    # (c-bis) Reference must remain frozen.
+    for name, p in reference.named_parameters():
+        if p.grad is not None and p.grad.abs().sum().item() > 0.0:
+            raise AssertionError(
+                f"R16-TD 3b chunk 3: reference param {name!r} accumulated grad "
+                "on the explicit-pair batch — frozen contract violated"
+            )
+
+    # (d) Embedding kwargs actually move the logits — prove the v3 branch
+    # is no longer silently inert. We compare a fresh forward WITH the
+    # embedding kwargs against one WITHOUT them on the SAME state/action
+    # tensors. The card-embed weights are non-zero (warm-started) and the
+    # fixture's card ids are non-zero, so the two forwards must differ.
+    with torch.no_grad():
+        logits_with, _ = model(
+            batch["state_features"],
+            batch["action_features"],
+            batch["action_mask"],
+            card_ids_by_zone=batch["card_ids_by_zone"],
+            action_card_idx=batch["action_card_idx"],
+        )
+        logits_without, _ = model(
+            batch["state_features"],
+            batch["action_features"],
+            batch["action_mask"],
+        )
+    max_diff = float((logits_with - logits_without).abs().max().item())
+    if max_diff <= 1e-6:
+        raise AssertionError(
+            f"R16-TD 3b chunk 3: embedding-on vs embedding-off logits identical "
+            f"(max_diff={max_diff:.2e}); v3 branch silently inert — chunk-3 "
+            "wiring regressed back to omitted kwargs"
+        )
+
+    # (e) Grouped-metrics axes all fire on the 3-row fixture (we set
+    # distinct `phase` / `action_kind` / `negative_kind` / margin values).
+    grouped = components.get("grouped") or {}
+    expected_axes = {"negative_kind", "source_kind", "phase", "action_kind", "margin_bucket"}
+    if set(grouped.keys()) != expected_axes:
+        raise AssertionError(
+            f"R16-TD 3b chunk 3: grouped axes {set(grouped.keys())} != {expected_axes}"
+        )
+    # Margin bucket axis must include `<0.05` for the 0.07 row? No — 0.07
+    # falls in `0.05-0.10`. The 3 rows produce margins 0.30 / 0.07 / 0.15,
+    # which bucket to `>=0.20`, `0.05-0.10`, `0.10-0.20`.
+    margin_labels = set(grouped["margin_bucket"].keys())
+    expected_margins = {">=0.20", "0.05-0.10", "0.10-0.20"}
+    if margin_labels != expected_margins:
+        raise AssertionError(
+            f"R16-TD 3b chunk 3: margin_bucket labels {margin_labels} != {expected_margins}"
+        )
+    # phase axis must include both `main` and `trainerBefore` (2:1 split).
+    if set(grouped["phase"].keys()) != {"main", "trainerBefore"}:
+        raise AssertionError(
+            f"R16-TD 3b chunk 3: phase axis labels {set(grouped['phase'].keys())} "
+            "!= {'main', 'trainerBefore'}"
+        )
+    # action_kind must include the three distinct kinds we constructed.
+    if set(grouped["action_kind"].keys()) != {"playSupporter", "playTrainer", "pass"}:
+        raise AssertionError(
+            f"R16-TD 3b chunk 3: action_kind labels {set(grouped['action_kind'].keys())} "
+            "!= {'playSupporter', 'playTrainer', 'pass'}"
+        )
+    # All rows share `mcts-relabel` source and `runner_up` negative.
+    if set(grouped["source_kind"].keys()) != {"mcts-relabel"}:
+        raise AssertionError(
+            f"R16-TD 3b chunk 3: source_kind labels {set(grouped['source_kind'].keys())} "
+            "!= {'mcts-relabel'}"
+        )
+    if set(grouped["negative_kind"].keys()) != {"runner_up"}:
+        raise AssertionError(
+            f"R16-TD 3b chunk 3: negative_kind labels {set(grouped['negative_kind'].keys())} "
+            "!= {'runner_up'}"
+        )
+    # Each bucket entry must carry `count`, `mean_loss`, `mean_acc` and
+    # the counts must sum to the batch size on every axis.
+    for axis, per_bucket in grouped.items():
+        total = sum(entry["count"] for entry in per_bucket.values())
+        if int(total) != 3:
+            raise AssertionError(
+                f"R16-TD 3b chunk 3: grouped axis {axis!r} bucket counts sum to "
+                f"{total}, expected 3 (one per fixture pair)"
+            )
+        for label, entry in per_bucket.items():
+            if not {"count", "mean_loss", "mean_acc"}.issubset(entry.keys()):
+                raise AssertionError(
+                    f"R16-TD 3b chunk 3: grouped axis {axis!r} bucket {label!r} missing "
+                    f"required keys; got {entry}"
+                )
 
 
 def assert_amp_overflow_regression() -> None:
