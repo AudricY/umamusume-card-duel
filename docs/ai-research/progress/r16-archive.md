@@ -1,5 +1,50 @@
 # R16 Archive — Rolled Detail
 
+## Multi-Worker Corpus Harness — full benchmark + design notes
+
+Compact summary lives in `r16.md` § "Multi-Worker Corpus Harness".
+
+### Wall-clock benchmark (full, pilot's exact recipe)
+
+50 games × modelSide=both, baseline selection, 50 sims, 200 rollout steps,
+CRN 3, rule-bot-mirror:
+
+| `--workers` | Wall-clock | Speedup vs N=1 |
+| ---: | ---: | ---: |
+| 1 | 873.73s (14m34s) | 1.0× (matches the 14m23s pilot) |
+| 16 | 149.85s (2m30s) | **5.83×** |
+| 24 | 154.31s (2m34s) | 5.66× (past the parallel knee) |
+
+### Design notes (full)
+
+- `evalGate.ts` already implemented the full work-stealing harness
+  (`MCTS_WORK_STEALING_ENABLED`, `WORK_STEALING_PREFETCH`, deterministic
+  slot ordering) using the same `runModelVsHeuristicGame` per-game
+  function — but it hardcoded `relabelMcts: false` and never serialized
+  worker `decisionTraces`. Closing those two gaps lifted evalGate into
+  the corpus generator with no new harness.
+- Trace contract: orchestrator owns the trace file, buffers
+  `result.decisionTraces` by `taskIndex`, flushes in ascending order at
+  run end. Byte-deterministic across `--workers` (verified bit-identical
+  at N=1/16/24, sorted multisets byte-equal across all 2088 rows).
+- Corpus-mode bypass: when `--relabel-mcts` is set, gate floors
+  (`--min-games` / `--min-win-rate` / `--min-ci-lower`) become
+  informational (still reported, no non-zero exit). A weak-model corpus
+  run does not need to override floors per recipe.
+- Smoke `evalGateCorpusGenSmoke.ts` locks: (1) flag pass-through;
+  (2) `--workers 4` vs `--workers 1` produce identical sorted multisets
+  of trace rows; (3) corpus-mode bypass exits PASS under absurd floors.
+  Wired into `npm run test:train`.
+- Why sub-linear: per-game wall-time variance (~5-30s/game) × small
+  per-worker queue depth (~6 games each) → straggler tail dominates.
+  N=24 is slightly worse than N=16, confirming the parallel knee. No
+  serve_onnx contention (rule-bot-mirror is server-free); no IPC
+  backpressure observed on the per-task IPC trace flush path.
+- Projected prod-corpus wall-clock at N=16: ~25 min total (rule-bot-
+  mirror ~5 min + each served recipe ~10 min, ~2× slower per recipe due
+  to served + 2 MCTS calls per decision for search-vs-rule). Down from
+  the naive ~2h sequential single-thread.
+
 ## R16-P1 v3.1 trajectory + reasoning (full prose)
 
 Compact summary lives in `r16.md` § "R16-P1 step 3". Full trajectory
