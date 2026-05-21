@@ -2,6 +2,7 @@ pub mod card_id;
 pub mod catalog;
 pub mod constants;
 pub mod effects;
+pub mod labels;
 pub mod packed;
 pub mod random;
 pub mod state;
