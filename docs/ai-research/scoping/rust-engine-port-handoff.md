@@ -3,16 +3,17 @@
 - **Date:** 2026-05-21 (updated mid-session, post-Phase-1d landing)
 - **Branch:** `engine-rust-port`
 - **Status:**
-  - Phase 0 ✅ (harness + 500-seed corpus; TS-replay 1/16 chunks OK, 15 in flight)
+  - Phase 0 ✅ (500-seed corpus, **16/16 TS-replay chunks OK**, kill signal clear)
   - Phase 1a ✅ (RNG bit-identical)
   - Phase 1b ✅ (catalog + types + Attack/Ability/TrainerEffect)
-  - Phase 1c ✅ (packed buffer + xxh3 fingerprint; **release-mode bench: 499ns clone / 299ns fingerprint = 44×/27× speedup**)
-  - Phase 1d ✅ (all 12 flow files ported)
-  - Phase 1e 🔄 (types + phase + card_vocab done; actions enumerator delegated to agent, in flight)
-  - **Phase 1f ✅ (all 14 ai/* files ported, 5,910 LOC; known divergence: `has_consecutive_no_attack_turns`)**
-  - Phase 1g 🔄 (throughput-probe done; MCTS math + sample + node scaffolded; eval-gate / mcts-selfplay / export-training pending Phase 1e)
-  - Phase 1h pending, Phase 2 not started.
-  - **53 unit + cross-lang tests passing**
+  - Phase 1c ✅ (packed buffer + xxh3; **release: 499ns clone / 299ns fingerprint = 44×/27× speedup**)
+  - Phase 1d ✅ (all 12 flow files)
+  - Phase 1e ✅ (actions enumerator, 1,817 LOC, via agent)
+  - Phase 1f ✅ (all 14 ai/* files, 5,910 LOC, via agent; known divergence: `has_consecutive_no_attack_turns`)
+  - **Phase 1g ✅ engine pieces** (dispatcher 1,850 LOC + MCTS driver 820 LOC + observation 317 LOC, via agent); **🔄 3 sim CLIs remaining** (eval-gate / mcts-selfplay / export-training)
+  - Phase 1h: ready to attempt — engine is feature-complete end-to-end
+  - Phase 2 not started.
+  - **64 unit + cross-lang tests passing**
 - **Authoritative scoping doc:** `rust-engine-port-plan.md` (same dir).
 - **This doc:** the concrete delta between scoping and current state, and
   what the next session needs to do to keep the port moving.
@@ -306,22 +307,62 @@ npm --workspace backend run sim:replay-golden-traces -- \
   --in runs/rust-port-golden-traces/traces-500.jsonl
 ```
 
-### P1 — Phase 1d remainder: `trainers.rs` + `combat.rs`
+### P1 — Phase 1h: bit-identity gate at N=500 (now runnable)
 
-`flow/trainers.ts` (231 LOC) and `flow/combat.ts` (532 LOC). Together
-they're the heart of the engine state mutations.
+Engine is feature-complete. Steps for next session:
 
-- `trainers.rs`: card-effect resolution. **Many RNG sites**: 45, 71, 134,
-  169, 178, 196 in the TS source. Each `randomInt` / `rollEnergyFromPool` /
-  `shuffle` advances the PRNG and is bit-identity load-bearing.
-- `combat.rs`: attack resolution. RNG sites at 202, 289, 292, 335, 507.
-  Damage / coin / weakness / status-condition application. The biggest
-  single file in the engine.
+1. **Wire `engine-rs/crates/golden-replay/src/main.rs`** for real replay
+   driven by the new `engine::dispatcher` + `engine::mcts::driver`. The
+   TS-side recorder (`backend/src/sim/recordGoldenTraces.ts`) uses:
+   - Outer seed string: `${seed}:selfplay`, label `selfplay`.
+   - `setupAiVsAiGame()` (`backend/src/sim/headlessAiVsAi.ts:96`):
+     `createGame(undefined, undefined, "Opponent", "hard", false, "Player AI")`
+     → default decks, both sides AI, opening coin via
+     `randomFloat() >= 0.5`, then `dealOpeningHands` (shuffle per side),
+     then `chooseAiSetupSelection` + `completePregameSetup` +
+     `autoCompleteOpponentSetup` + 5 ticks.
+   - MCTS config: `sims=100, K=3, rollout_steps=200, prior=uniform,
+     leaf=rollout, collapseMaxSteps=64`.
 
-After both land, `flow/play_rules.rs` needs three lines unblocked: the
-`PlayActionKind::Trainer` branch calls `flow::trainers::apply_trainer` or
-`flow::trainers::play_stadium`. The rainbow uncap branch calls
-`use_rainbow_uncap_crystal`.
+2. **Default deck lists**: port `shared/src/data/premadeDecks.json`
+   loader. Recommend a small `engine::core::default_decks` module
+   exposing `default_player_deck() -> Vec<CardId>` and
+   `default_ai_opponent_deck() -> Vec<CardId>`. The TS deck-id
+   defaults are at `shared/src/gameData.ts:158-159`.
+
+3. **Per-step replay loop**: for each step in a recorded trace,
+   re-run the Rust sim and assert:
+   - `fingerprintBefore` matches (Rust digest vs Rust digest — TS
+     digest stays as a separate diff column per Q1(b)).
+   - `action.id` / `action.kind` / `action.payload` JSON-equal.
+   - `rngDrawsThisStep` count equal.
+   - Terminal `winner` + `turnNumber` + final `fingerprint` equal.
+
+4. **Schema bump to `traceVersion=2`**: add a
+   `rust_fingerprint_expected` field. First-run bootstrap writes Rust
+   digests back to the trace JSONL; subsequent gate runs assert
+   byte-equality.
+
+**Known divergence to expect**: `flow::ai::turn_plan::has_consecutive_no_attack_turns`
+returns `false` always (Rust doesn't carry `state.log` which TS reads).
+This affects AI move scoring in stall situations. Fix: add a
+`consecutive_no_attack_streak: u8` field to `SideState` that
+`flow::combat::perform_attack` resets to 0 and `flow::turn::end_turn`
+increments at turn-end (when no attack happened this turn). Bump
+`packed::PACKED_SCHEMA_VERSION` to 2 if you add this to the
+fingerprint.
+
+### P2 — Phase 1g remainder: 3 sim CLI binaries
+
+| Rust binary | TS source | LOC |
+| --- | --- | ---: |
+| `sim-eval-gate` | `backend/src/sim/evalGate.ts` | 589 |
+| `sim-mcts-selfplay` | `backend/src/sim/mctsSelfPlay.ts` | 648 |
+| `sim-export-training` | `backend/src/sim/exportTrainingExamples.ts` | 61 |
+
+All three are thin wrappers over `dispatcher` + `mcts::driver`. Match
+TS flag-for-flag so Python orchestrators (`r12_orchestrator.py`, etc.)
+can swap in unchanged.
 
 ### P2 — Phase 1d: `flow/*` rules port
 
