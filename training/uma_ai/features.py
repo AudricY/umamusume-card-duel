@@ -440,6 +440,271 @@ def schema_version_for_state_dim(state_dim: int) -> float:
         ) from exc
 
 
+# ---------------------------------------------------------------------------
+# R16-P2 C1: per-Uma slot-token feature builder (additive, no v3.0/v3.1 churn).
+#
+# This is the foundation chunk for r16-p2-per-uma-slot-tokens (8-chunk
+# initiative, kickoff 2026-05-21). v3.2 keeps STATE_DIM=110 — it is
+# distinguished from v3.0/v3.1 by ONNX input-set, not state-vector width. The
+# per-Uma slot tensors are a NEW auxiliary tensor pair consumed alongside the
+# existing 110-d state vector by a future `uma_slot_encoder` branch (C2).
+#
+# UMA_SLOT_ORDER is a FROZEN enumeration. The 4th bench slot per side
+# (`own_bench_3`, `opp_bench_3`) is currently always absent in TS observations
+# because `MAX_BENCH = 3` in `shared/src/gameData.ts`; the slot is reserved
+# so that the layout stays byte-stable if MAX_BENCH ever grows. This mirrors
+# the existing 4-bench-slot over-provisioning in `_identity_features` /
+# `_tool_card_features` (slots 32–48 and 100–110 of the v3.0 builder both
+# already iterate `bench[:4]`). Absent slots emit card_id=0 and an all-zero
+# feature row — the same "absence is zero" contract that drives v3.0
+# `card_ids_by_zone` padding (index 0 = padding_idx in the card vocab).
+UMA_SLOT_ORDER: tuple[str, ...] = (
+    "own_active",
+    "own_bench_0",
+    "own_bench_1",
+    "own_bench_2",
+    "own_bench_3",
+    "opp_active",
+    "opp_bench_0",
+    "opp_bench_1",
+    "opp_bench_2",
+    "opp_bench_3",
+)
+UMA_SLOT_COUNT = len(UMA_SLOT_ORDER)  # = 10 (2 active + 8 bench placeholders)
+
+# UMA_SLOT_FEATURE_DIM = 23 — FROZEN this commit. Downstream chunks (C2 model
+# branch, C4 dataset packing, C5 ONNX graph) depend on this width being
+# stable. Per-slot layout (in column order; helper indices match):
+#
+#   [ 0]  polarity                 own=+1, opp=-1  (mirrors slot 96 v2.1)
+#   [ 1]  role_active              active=1, bench=0
+#   [ 2]  slot_idx_norm            active=-1; bench i ∈ {0..MAX_BENCH-1}
+#                                  encoded as i / max(1, MAX_BENCH-1) so
+#                                  the 4th reserved bench placeholder
+#                                  (index 3) stays in [0,1] under MAX_BENCH=3
+#                                  by clamping to 1.0 if ever instantiated.
+#   [ 3]  present_mask             1 if the slot is occupied, else 0
+#   [ 4]  hp_norm                  hp / max(1, maxHp), clipped [0, 1]
+#   [ 5]  damage_norm              (maxHp - hp) / max(1, maxHp), clipped
+#   [ 6]  stage_norm               stage / 2.0
+#   [ 7]  energyTotal_norm         energyTotal / 6.0
+#   [ 8:18]  typed_energy ×10      grass, fire, water, lightning, psychic,
+#                                  fighting, darkness, steel, colorless,
+#                                  dragon (each / 4.0; order matches
+#                                  `_energy_vector` and EnergyType in
+#                                  `shared/src/types.ts:5`)
+#   [18]  tool_attached            1 if toolCardId is set, else 0
+#   [19]  condition_paralysis      1 if "paralysed" ∈ specialConditions
+#                                  (legality-affecting: attack-blocking)
+#   [20]  condition_count_norm     |specialConditions| / 5.0  (5 = the full
+#                                  SpecialCondition union: asleep/burned/
+#                                  frozen/paralysed/poisoned)
+#   [21]  ability_used_this_turn   1 if usedAbilityThisTurn, else 0
+#   [22]  evolved                  1 if stage > 0, else 0  (hard-threshold
+#                                  redundant-with-stage_norm bit, useful for
+#                                  "is this an evolution stage Uma?"
+#                                  predicates that the network would
+#                                  otherwise have to learn from stage_norm)
+#
+# Deviation from the chunk-plan recommendation (F=23 enumeration in
+# docs/ai-research/scoping/r16-model-feature-backlog-refinement.md §
+# "P2 - Chunk Plan"): the enumerated list there sums to 22, not 23. I added
+# `condition_count_norm` (slot 20) to make the count match while keeping
+# the legality-load-bearing `condition_paralysis` bit. Documented here so
+# C2/C4/C5 freeze against the 23-wide layout.
+UMA_SLOT_FEATURE_DIM = 23
+STATE_FEATURE_SCHEMA_VERSION_V3_2 = 3.2
+
+# Internal feature-index constants (used by both the builder and any future
+# C2 model-side mask / ablation logic). Keep these as module-level names so
+# external consumers (e.g. zone-zeroing in C2) can reference them by name
+# instead of magic numbers.
+_UMA_SLOT_F_POLARITY = 0
+_UMA_SLOT_F_ROLE_ACTIVE = 1
+_UMA_SLOT_F_SLOT_IDX = 2
+_UMA_SLOT_F_PRESENT = 3
+_UMA_SLOT_F_HP = 4
+_UMA_SLOT_F_DAMAGE = 5
+_UMA_SLOT_F_STAGE = 6
+_UMA_SLOT_F_ENERGY_TOTAL = 7
+_UMA_SLOT_F_ENERGY_TYPED = slice(8, 18)
+_UMA_SLOT_F_TOOL = 18
+_UMA_SLOT_F_COND_PARALYSIS = 19
+_UMA_SLOT_F_COND_COUNT = 20
+_UMA_SLOT_F_ABILITY_USED = 21
+_UMA_SLOT_F_EVOLVED = 22
+
+# Per-Uma typed-energy order — MUST match `_energy_vector` (slots 48–58 of
+# v3.0) and the EnergyType union in `shared/src/types.ts:5`. Asserted at
+# import time so a future re-order of `_energy_vector` does not silently
+# desync the per-slot encoding.
+_UMA_SLOT_ENERGY_TYPES: tuple[str, ...] = (
+    "grass",
+    "fire",
+    "water",
+    "lightning",
+    "psychic",
+    "fighting",
+    "darkness",
+    "steel",
+    "colorless",
+    "dragon",
+)
+assert len(_UMA_SLOT_ENERGY_TYPES) == (
+    _UMA_SLOT_F_ENERGY_TYPED.stop - _UMA_SLOT_F_ENERGY_TYPED.start
+), "uma slot typed-energy width must match the 10-wide energy slice"
+
+# Bench placeholder cap = 4 (matches existing v3.0 `bench[:4]` slicing in
+# `_identity_features` and `_tool_card_features`). The real MAX_BENCH is 3
+# today (`shared/src/gameData.ts:7`); the 4th slot is reserved.
+_UMA_SLOT_BENCH_PER_SIDE = 4
+
+
+def _uma_slot_feature_row(
+    uma: dict[str, Any] | None,
+    *,
+    polarity: float,
+    role_active: bool,
+    slot_idx_norm: float,
+) -> np.ndarray:
+    """Emit one [UMA_SLOT_FEATURE_DIM]-wide feature row for a single slot.
+
+    Absent slot (`uma is None` or `card_id` empty) → all zeros (polarity and
+    role bits zeroed too, so the present-mask is the sole "this slot exists"
+    signal and downstream pooling on absent slots is exactly null).
+    """
+
+    row = np.zeros(UMA_SLOT_FEATURE_DIM, dtype=np.float32)
+    if not uma:
+        return row
+    card_id = str(uma.get("cardId") or "")
+    if not card_id:
+        # Treat a missing/blank cardId as an absent slot — consistent with
+        # the card-vocab `padding_idx=0` convention.
+        return row
+
+    row[_UMA_SLOT_F_POLARITY] = polarity
+    row[_UMA_SLOT_F_ROLE_ACTIVE] = 1.0 if role_active else 0.0
+    row[_UMA_SLOT_F_SLOT_IDX] = slot_idx_norm
+    row[_UMA_SLOT_F_PRESENT] = 1.0
+
+    max_hp = max(1.0, float(uma.get("maxHp", 0) or 0))
+    hp = float(uma.get("hp", 0) or 0)
+    row[_UMA_SLOT_F_HP] = max(0.0, min(1.0, hp / max_hp))
+    row[_UMA_SLOT_F_DAMAGE] = max(0.0, min(1.0, (max_hp - hp) / max_hp))
+    row[_UMA_SLOT_F_STAGE] = float(uma.get("stage", 0) or 0) / 2.0
+    row[_UMA_SLOT_F_ENERGY_TOTAL] = float(uma.get("energyTotal", 0) or 0) / 6.0
+
+    energies = uma.get("energies") or {}
+    for offset, energy_type in enumerate(_UMA_SLOT_ENERGY_TYPES):
+        row[_UMA_SLOT_F_ENERGY_TYPED.start + offset] = (
+            float(energies.get(energy_type, 0) or 0) / 4.0
+        )
+
+    row[_UMA_SLOT_F_TOOL] = 1.0 if uma.get("toolCardId") else 0.0
+
+    conditions = uma.get("specialConditions") or []
+    row[_UMA_SLOT_F_COND_PARALYSIS] = 1.0 if "paralysed" in conditions else 0.0
+    # Full SpecialCondition union has 5 members (asleep/burned/frozen/
+    # paralysed/poisoned per shared/src/types.ts:10), so divide by 5.0.
+    row[_UMA_SLOT_F_COND_COUNT] = float(len(conditions)) / 5.0
+
+    row[_UMA_SLOT_F_ABILITY_USED] = 1.0 if uma.get("usedAbilityThisTurn") else 0.0
+    row[_UMA_SLOT_F_EVOLVED] = 1.0 if float(uma.get("stage", 0) or 0) > 0 else 0.0
+
+    return row
+
+
+def observation_to_uma_slots(
+    observation: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """R16-P2 C1: extract per-Uma slot tokens from a `PublicObservation`.
+
+    Returns `(card_ids: int64[UMA_SLOT_COUNT], features:
+    float32[UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM])`. The slot iteration order
+    is FROZEN in `UMA_SLOT_ORDER` — index 0 is own active, indices 1..4 are
+    own bench 0..3, index 5 is opp active, indices 6..9 are opp bench 0..3.
+
+    Absent slots (engine `bench[i]` is `null`, side has no `active`, or
+    `cardId` is empty) emit `card_id=0` and an all-zero feature row. This
+    matches the existing v3.0 `cardIdsByZone` convention (index 0 doubles as
+    `unknownIndex` / `padding_idx`).
+
+    Fail-loud guard (mirroring `observation_to_card_ids` ~L478): if the
+    observation lacks the v3-era nested `own` / `opponent` side dicts, raise
+    `ValueError`. The PublicObservation schema has carried these since v1
+    (predates the R7.b.2 v3 bump), so a missing key indicates the caller is
+    feeding a non-`PublicObservation` payload, not just an old corpus.
+    """
+
+    if "own" not in observation or "opponent" not in observation:
+        raise ValueError(
+            "observation_to_uma_slots: observation is missing 'own' and/or "
+            "'opponent' side dicts — payload is not a PublicObservation. "
+            "The per-Uma slot builder requires the nested side schema."
+        )
+
+    own = observation.get("own") or {}
+    opponent = observation.get("opponent") or {}
+
+    card_ids = np.zeros(UMA_SLOT_COUNT, dtype=np.int64)
+    features = np.zeros((UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), dtype=np.float32)
+
+    # Active slots: own at slot 0, opp at slot 5. slot_idx_norm=-1.0 marks
+    # the active role (per chunk-plan recommendation).
+    for side_dict, polarity, slot_idx in (
+        (own, 1.0, 0),
+        (opponent, -1.0, 5),
+    ):
+        active = side_dict.get("active")
+        if active:
+            card_ids[slot_idx] = card_vocab_index(str(active.get("cardId") or ""))
+            features[slot_idx] = _uma_slot_feature_row(
+                active,
+                polarity=polarity,
+                role_active=True,
+                slot_idx_norm=-1.0,
+            )
+
+    # Bench slots: own bench i at slot 1+i, opp bench i at slot 6+i.
+    # bench_idx_norm = i / max(1, _UMA_SLOT_BENCH_PER_SIDE - 1) (= i/3 for
+    # the 4-slot placeholder; the 4th slot is always absent under
+    # MAX_BENCH=3 today). Empty bench entries (null) → zero card_id + row.
+    bench_denom = max(1.0, float(_UMA_SLOT_BENCH_PER_SIDE - 1))
+    for side_dict, polarity, slot_base in (
+        (own, 1.0, 1),
+        (opponent, -1.0, 6),
+    ):
+        bench = side_dict.get("bench") or []
+        for bench_pos in range(_UMA_SLOT_BENCH_PER_SIDE):
+            entry = bench[bench_pos] if bench_pos < len(bench) else None
+            if not entry:
+                continue
+            card_ids[slot_base + bench_pos] = card_vocab_index(
+                str(entry.get("cardId") or "")
+            )
+            features[slot_base + bench_pos] = _uma_slot_feature_row(
+                entry,
+                polarity=polarity,
+                role_active=False,
+                slot_idx_norm=float(bench_pos) / bench_denom,
+            )
+
+    # Frozen-shape guards (paranoia parity with the v3.0 / v3.1 builder
+    # asserts — any future refactor that perturbs the slot count or
+    # feature width fails here before reaching downstream collators / ONNX).
+    assert card_ids.shape == (UMA_SLOT_COUNT,), (
+        f"observation_to_uma_slots: card_ids shape {card_ids.shape} != "
+        f"({UMA_SLOT_COUNT},). UMA_SLOT_ORDER layout is frozen."
+    )
+    assert features.shape == (UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), (
+        f"observation_to_uma_slots: features shape {features.shape} != "
+        f"({UMA_SLOT_COUNT}, {UMA_SLOT_FEATURE_DIM}). The 23-wide per-slot "
+        f"layout is frozen this commit; downstream chunks depend on it."
+    )
+    return card_ids, features
+
+
 def legal_actions_to_features(actions: list[dict[str, Any]], ablations: set[FeatureAblation] | None = None) -> np.ndarray:
     rows = []
     for action in actions:
