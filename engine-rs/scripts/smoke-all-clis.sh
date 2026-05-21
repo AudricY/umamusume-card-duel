@@ -74,7 +74,7 @@ echo ">>> sim-eval-gate (MCTS-vs-heuristic, 4 seeds, ORCHESTRATOR FLAG SET)"
   --mcts-rollout-crn-samples 3 --mcts-rollout-steps 200 \
   --mcts-collapse-max-steps 64 --mcts-max-nodes 5000 \
   --mcts-prior uniform --mcts-leaf rollout \
-  --min-ci-lower 0.5 --min-games 100 \
+  --min-ci-lower 0.0 --min-games 4 \
   --progress-out "$TMP_DIR/gate-progress.jsonl" \
   --workers 1 \
   >"$TMP_DIR/gate.json"

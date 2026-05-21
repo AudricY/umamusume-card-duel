@@ -86,14 +86,18 @@ struct Args {
     /// "player", or "opponent". Accepted for orchestrator-flag parity.
     #[arg(long, default_value = "both")]
     model_side: String,
-    /// Early-stop Wilson-lower threshold. If overall WR's Wilson lower
-    /// bound crosses this AFTER --min-games, the gate halts and returns
-    /// the partial summary. 0.0 disables early-stop.
+    /// Wilson-lower pass threshold. After all games run, if overall
+    /// Wilson lower bound < min_ci_lower the gate fails (TS parity:
+    /// evalGate.ts:139). 0.0 disables.
     #[arg(long, default_value_t = 0.0)]
     min_ci_lower: f64,
-    /// Minimum games before early-stop is allowed.
+    /// Minimum games required to pass. Fewer games → gate fails
+    /// (TS parity: evalGate.ts:137).
     #[arg(long, default_value_t = 0)]
     min_games: u32,
+    /// Minimum overall win rate to pass. TS parity: evalGate.ts:138.
+    #[arg(long, default_value_t = 0.0)]
+    min_win_rate: f64,
     /// Per-game progress JSONL output.
     #[arg(long)]
     progress_out: Option<String>,
@@ -127,6 +131,10 @@ struct GateSummary {
     terminal_game_over: u32,
     terminal_stalled: u32,
     terminal_max_steps: u32,
+    /// TS-parity gate pass/fail; populated from --min-* flags
+    /// (evalGate.ts:136-152).
+    passed: bool,
+    failures: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -365,6 +373,28 @@ fn main() -> Result<()> {
         }
     };
 
+    let overall = mk_stat(total_wins, total_games);
+    let mut failures: Vec<String> = Vec::new();
+    if total_games < args.min_games {
+        failures.push(format!(
+            "games {} < minGames {}",
+            total_games, args.min_games
+        ));
+    }
+    if overall.win_rate < args.min_win_rate {
+        failures.push(format!(
+            "winRate {:.4} < minWinRate {:.4}",
+            overall.win_rate, args.min_win_rate
+        ));
+    }
+    if overall.wilson_lower < args.min_ci_lower {
+        failures.push(format!(
+            "wilsonLower {:.4} < minCiLower {:.4}",
+            overall.wilson_lower, args.min_ci_lower
+        ));
+    }
+    let passed = failures.is_empty();
+
     let summary = GateSummary {
         challenger: args.challenger.clone(),
         baseline: args.baseline.clone(),
@@ -377,12 +407,14 @@ fn main() -> Result<()> {
         },
         elapsed_secs,
         games_per_sec: total_games as f64 / elapsed_secs.max(1e-9),
-        overall: mk_stat(total_wins, total_games),
+        overall,
         player_side: mk_stat(player_wins, player_games),
         opponent_side: mk_stat(opp_wins, opp_games),
         terminal_game_over,
         terminal_stalled,
         terminal_max_steps,
+        passed,
+        failures: failures.clone(),
     };
 
     let json = serde_json::to_string_pretty(&summary)?;
@@ -395,6 +427,15 @@ fn main() -> Result<()> {
         }
         let mut f = fs::File::create(&p).with_context(|| format!("create {}", path))?;
         writeln!(f, "{}", json)?;
+    }
+
+    if !passed {
+        eprintln!(
+            "gate FAILED: {} condition(s) unmet:\n  - {}",
+            failures.len(),
+            failures.join("\n  - "),
+        );
+        std::process::exit(1);
     }
 
     Ok(())
