@@ -54,6 +54,10 @@ struct Args {
     max_steps: u32,
     #[arg(long)]
     manifest_out: Option<String>,
+    /// Leaf mode: "rollout" (default) or "value-head" (queries /predict
+    /// via the --challenger URL).
+    #[arg(long, default_value = "rollout")]
+    leaf: String,
 }
 
 #[derive(Serialize)]
@@ -136,8 +140,9 @@ fn drive_one_game(
         let pre_hash = state_hash(&state);
         let next_state = if side == model_side && legal.len() > 1 {
             let mcts_seed = format!("{}:{:?}:{}:mcts", seed_str, side, s);
+            let model_url = config.model_url.clone();
             let (mcts_result, used_rng) = with_rng(step_rng.clone(), || {
-                run_mcts(&state, side, config, "", mcts_seed.as_str())
+                run_mcts(&state, side, config, model_url.as_str(), mcts_seed.as_str())
             });
             step_rng = used_rng;
             let idx = mcts_result.selected_index.min(legal.len() - 1);
@@ -174,10 +179,15 @@ fn drive_one_game(
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let leaf = match args.leaf.as_str() {
+        "value-head" => MctsLeaf::ValueHead,
+        _ => MctsLeaf::Rollout,
+    };
+    let model_url = args.challenger.clone().unwrap_or_default();
     let config = MctsConfig {
         simulations: args.sims,
         c_puct: 1.5,
-        leaf: MctsLeaf::Rollout,
+        leaf,
         prior: MctsPrior::Uniform,
         rollout_crn_samples: args.k,
         rollout_steps: args.rollout_steps,
@@ -188,7 +198,7 @@ fn main() -> Result<()> {
         collapse_max_steps: 64,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
-        model_url: String::new(),
+        model_url: model_url.clone(),
     };
 
     eprintln!(

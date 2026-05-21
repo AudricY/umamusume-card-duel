@@ -62,6 +62,10 @@ struct Args {
     /// since rows can be large.
     #[arg(long, default_value_t = false)]
     record_rows: bool,
+    /// `/predict` server URL. When set with --leaf=value-head, MCTS
+    /// queries it for leaf values + policy priors.
+    #[arg(long, default_value = "")]
+    model_url: String,
 }
 
 #[derive(Serialize)]
@@ -153,8 +157,9 @@ fn drive_one_game(
         let pre_hash = state_hash(&state);
         let next_state = if side == model_side && legal.len() > 1 {
             let mcts_seed = format!("{}:{:?}:{}:mcts", seed_str, side, s);
+            let model_url = config.model_url.clone();
             let (mcts_result, used_rng) = with_rng(step_rng.clone(), || {
-                run_mcts(&state, side, config, "", mcts_seed.as_str())
+                run_mcts(&state, side, config, model_url.as_str(), mcts_seed.as_str())
             });
             step_rng = used_rng;
             let idx = mcts_result.selected_index.min(legal.len() - 1);
@@ -257,7 +262,7 @@ fn main() -> Result<()> {
         collapse_max_steps: args.collapse_max,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
-        model_url: String::new(),
+        model_url: args.model_url.clone(),
     };
 
     let model_side = SideId::Player;
