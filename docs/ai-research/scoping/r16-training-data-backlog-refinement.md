@@ -403,7 +403,11 @@ understands soft `policyTargets`.
    - Emit rows only for contested states unless a diagnostic flag requests all
      states.
 
-2. Add source-generation recipes.
+2. Add source-generation recipes. [STATUS 2026-05-21: source-recipe selection
+   is satisfied by the existing `--selection` flag (baseline / policy /
+   search / mcts) + `--relabel-state-source` tag; smoke
+   `relabelMctsSmoke.ts` codifies the matrix; cost table in
+   progress/r16.md.]
    - Wire evaluator/orchestrator flags for rule-bot mirror, policy-vs-rule,
      and search/mcts-vs-rule.
    - Use `modelSide=both` or equivalent side-balanced collection.
