@@ -181,12 +181,46 @@ struct TerminalReasons {
     stalled: u32,
 }
 
+/// Mirror of TS `pickFromVisits` in backend/src/sim/mctsSelfPlay.ts:546.
+/// Argmax when `temperature` <= 0 or only one action; otherwise resample
+/// proportional to visits^(1/T).
+fn pick_from_visits(
+    visits: &[u32],
+    argmax_idx: usize,
+    temperature: f64,
+    pick_rng: &mut Rng,
+) -> usize {
+    if temperature <= 0.0 || visits.len() <= 1 {
+        return argmax_idx;
+    }
+    let inv_t = 1.0 / temperature;
+    let weights: Vec<f64> = visits
+        .iter()
+        .map(|&n| (n as f64).max(0.0).powf(inv_t))
+        .collect();
+    let total: f64 = weights.iter().sum();
+    if total <= 0.0 {
+        return argmax_idx;
+    }
+    let r = pick_rng.next_f64() * total;
+    let mut cum = 0.0;
+    for (i, w) in weights.iter().enumerate() {
+        cum += *w;
+        if r <= cum {
+            return i;
+        }
+    }
+    weights.len() - 1
+}
+
 fn drive_one_game(
     seed: u32,
     max_steps: u32,
     config: &MctsConfig,
     model_side: SideId,
     record_rows: bool,
+    temperature_moves: u32,
+    temperature_value: f64,
 ) -> GameRecord {
     let seed_str = seed.to_string();
     let rng = Rng::from_seed(format!("{}:selfplay", seed_str).as_str(), "selfplay");
@@ -194,6 +228,7 @@ fn drive_one_game(
     let mut step = 0u32;
     let mut terminal = "max_steps";
     let mut model_decisions = 0u32;
+    let mut model_moves = 0u32;
     let mut rows: Vec<SelfPlayRow> = Vec::new();
 
     for s in 0..max_steps {
@@ -223,9 +258,26 @@ fn drive_one_game(
                 run_mcts(&state, side, config, model_url.as_str(), mcts_seed.as_str())
             });
             step_rng = used_rng;
-            let idx = mcts_result.selected_index.min(legal.len() - 1);
+            let argmax_idx = mcts_result.selected_index.min(legal.len() - 1);
+            // Temperature schedule (TS parity, mctsSelfPlay.ts:478-481):
+            // exploratory for first `temperature_moves` model decisions,
+            // greedy thereafter. Use a forked RNG so the outer game-rng
+            // draw count doesn't shift between temp on/off runs.
+            let temp = if model_moves < temperature_moves {
+                temperature_value
+            } else {
+                0.0
+            };
+            let idx = if temp > 0.0 {
+                let mut pick_rng = step_rng.fork(format!("pick:{}", s).as_str());
+                pick_from_visits(&mcts_result.visits, argmax_idx, temp, &mut pick_rng)
+                    .min(legal.len() - 1)
+            } else {
+                argmax_idx
+            };
             let chosen = legal[idx].clone();
             model_decisions += 1;
+            model_moves += 1;
 
             if record_rows {
                 let total_visits: u32 = mcts_result.visits.iter().sum();
@@ -325,9 +377,9 @@ fn main() -> Result<()> {
         adaptive_min_sims: 100,
         model_url: args.model_url.clone(),
     };
-    let _ = args.temperature_moves;
-    let _ = args.temperature_value;
     let _ = args.workers;
+    let temperature_moves = args.temperature_moves;
+    let temperature_value = args.temperature_value;
 
     let model_side = SideId::Player;
     eprintln!(
@@ -354,7 +406,15 @@ fn main() -> Result<()> {
 
     for i in 0..args.seeds {
         let seed = args.seed_base + i;
-        let record = drive_one_game(seed, args.max_steps, &config, model_side, args.record_rows);
+        let record = drive_one_game(
+            seed,
+            args.max_steps,
+            &config,
+            model_side,
+            args.record_rows,
+            temperature_moves,
+            temperature_value,
+        );
         match record.terminal_reason.as_str() {
             "game_over" => terminal_reasons.game_over += 1,
             "stalled" => terminal_reasons.stalled += 1,
