@@ -88,4 +88,18 @@ assert d['terminalGameOver'] == d['config']['seeds'], 'some games did not reach 
 "
 
 echo
-echo "✅ All 4 sim CLIs healthy."
+echo ">>> Phase 2 NAPI bridge (libnapi_bridge.so loaded from Node)"
+cargo build --manifest-path engine-rs/Cargo.toml -p napi-bridge --release --lib >/dev/null 2>&1
+cp "$BIN_DIR/libnapi_bridge.so" "$BIN_DIR/napi_bridge.node"
+node engine-rs/scripts/napi-smoke.mjs > "$TMP_DIR/napi.log" 2>&1
+if ! grep -q "napi-bridge smoke OK" "$TMP_DIR/napi.log"; then
+  echo "NAPI smoke FAILED. Log tail:"
+  tail -20 "$TMP_DIR/napi.log"
+  exit 1
+fi
+# Show the success line plus the MCTS lines so the user sees evidence
+# the bridge actually exercised the engine, not just loaded.
+grep -E "runMctsJson|mctsStepJson|advanceStepJson drove|napi-bridge smoke OK" "$TMP_DIR/napi.log" | sed 's/^/  /'
+
+echo
+echo "✅ All 4 sim CLIs + NAPI bridge healthy."

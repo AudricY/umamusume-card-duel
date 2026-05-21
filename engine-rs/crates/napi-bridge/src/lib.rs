@@ -14,10 +14,12 @@ use engine::core::constants::SideId;
 use engine::core::random::{with_rng, Rng};
 use engine::core::state::{CurrentSide, GameState};
 use engine::dispatcher::{
-    advance_opponent_turn_step, advance_player_ai_turn_step, get_forced_attack_coin_results,
-    state_hash,
+    advance_modeled_turn_step, advance_opponent_turn_step, advance_player_ai_turn_step,
+    get_forced_attack_coin_results, state_hash,
 };
 use engine::headless_setup::setup_ai_vs_ai_game;
+use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+use engine::mcts::driver::run_mcts;
 use engine::policy::actions::enumerate_legal_ai_actions;
 
 /// Result of a successful setup or step call: serialized state plus
@@ -126,4 +128,150 @@ pub fn engine_version() -> String {
         "rust-port v0.1.0 — catalog={} cards",
         engine::core::catalog::catalog().len()
     )
+}
+
+/// MCTS config the TS caller passes in. Mirrors the subset of
+/// MctsConfig orchestrators tune; defaults match sim-mcts-selfplay.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct McTsArgs {
+    simulations: Option<u32>,
+    c_puct: Option<f64>,
+    /// "rollout" | "value-head"
+    leaf: Option<String>,
+    /// "uniform" | "policy"
+    prior: Option<String>,
+    rollout_crn_samples: Option<u32>,
+    rollout_steps: Option<u32>,
+    add_root_dirichlet: Option<bool>,
+    dirichlet_alpha: Option<f64>,
+    dirichlet_epsilon: Option<f64>,
+    max_nodes: Option<u32>,
+    collapse_max_steps: Option<u32>,
+    model_url: Option<String>,
+}
+
+fn build_config(args: &McTsArgs) -> MctsConfig {
+    let leaf = match args.leaf.as_deref() {
+        Some("value-head") => MctsLeaf::ValueHead,
+        _ => MctsLeaf::Rollout,
+    };
+    let prior = match args.prior.as_deref() {
+        Some("policy") => MctsPrior::Policy,
+        _ => MctsPrior::Uniform,
+    };
+    MctsConfig {
+        simulations: args.simulations.unwrap_or(100),
+        c_puct: args.c_puct.unwrap_or(1.5),
+        leaf,
+        prior,
+        rollout_crn_samples: args.rollout_crn_samples.unwrap_or(3),
+        rollout_steps: args.rollout_steps.unwrap_or(200),
+        add_root_dirichlet: args.add_root_dirichlet.unwrap_or(false),
+        dirichlet_alpha: args.dirichlet_alpha.unwrap_or(0.3),
+        dirichlet_epsilon: args.dirichlet_epsilon.unwrap_or(0.25),
+        max_nodes: args.max_nodes.unwrap_or(5_000),
+        collapse_max_steps: args.collapse_max_steps.unwrap_or(64),
+        adaptive_ratio: 0.0,
+        adaptive_min_sims: 100,
+        model_url: args.model_url.clone().unwrap_or_default(),
+    }
+}
+
+/// Run MCTS at the given state. Returns `{stateJson, rngStateJson, mctsResult}`
+/// where mctsResult is the serialized MctsResult (selectedIndex,
+/// visits, diagnostics). State is unchanged; this is search-only.
+///
+/// `mcts_seed` is the fork label (TS parity: `format!("{seed}:{side}:{step}:mcts")`).
+#[napi]
+pub fn run_mcts_json(
+    state_json: String,
+    rng_state_json: String,
+    mcts_args_json: String,
+    mcts_seed: String,
+) -> Result<String> {
+    let state = parse_state(&state_json)?;
+    let rng = parse_rng(&rng_state_json)?;
+    let args: McTsArgs = serde_json::from_str(&mcts_args_json)
+        .map_err(|e| napi::Error::from_reason(format!("parse mcts args: {e}")))?;
+    let config = build_config(&args);
+    let side = match state.current_side {
+        CurrentSide::Player => SideId::Player,
+        CurrentSide::Opponent => SideId::Opponent,
+        CurrentSide::Done => {
+            return Err(napi::Error::from_reason("game is already over"));
+        }
+    };
+    let model_url = config.model_url.clone();
+    let (result, used_rng) = with_rng(rng, || {
+        run_mcts(&state, side, &config, model_url.as_str(), mcts_seed.as_str())
+    });
+    let result_json = serde_json::to_string(&result)
+        .map_err(|e| napi::Error::from_reason(format!("serialize mcts result: {e}")))?;
+    let state_json2 = serde_json::to_string(&state)
+        .map_err(|e| napi::Error::from_reason(format!("serialize state: {e}")))?;
+    let rng_state_json2 = serde_json::to_string(&used_rng)
+        .map_err(|e| napi::Error::from_reason(format!("serialize rng: {e}")))?;
+    let wrapper = serde_json::json!({
+        "stateJson": state_json2,
+        "rngStateJson": rng_state_json2,
+        "mctsResult": result_json,
+    });
+    serde_json::to_string(&wrapper)
+        .map_err(|e| napi::Error::from_reason(format!("serialize wrapper: {e}")))
+}
+
+/// Run MCTS, take the most-visited action, apply it. The full
+/// "MCTS decision → state advance" cycle. Returns `{stateJson,
+/// rngStateJson, mctsResult, chosenActionIndex, chosenActionJson}`.
+#[napi]
+pub fn mcts_step_json(
+    state_json: String,
+    rng_state_json: String,
+    mcts_args_json: String,
+    mcts_seed: String,
+) -> Result<String> {
+    let state = parse_state(&state_json)?;
+    let rng = parse_rng(&rng_state_json)?;
+    let args: McTsArgs = serde_json::from_str(&mcts_args_json)
+        .map_err(|e| napi::Error::from_reason(format!("parse mcts args: {e}")))?;
+    let config = build_config(&args);
+    let side = match state.current_side {
+        CurrentSide::Player => SideId::Player,
+        CurrentSide::Opponent => SideId::Opponent,
+        CurrentSide::Done => {
+            return Err(napi::Error::from_reason("game is already over"));
+        }
+    };
+    let model_url = config.model_url.clone();
+    let mcts_seed_owned = mcts_seed.clone();
+    let (result, used_rng_after_mcts) = with_rng(rng, || {
+        run_mcts(&state, side, &config, model_url.as_str(), mcts_seed_owned.as_str())
+    });
+    // Re-enumerate legal actions to pick by index.
+    let (legal, used_rng_after_legal) = with_rng(used_rng_after_mcts, || {
+        enumerate_legal_ai_actions(&state, side)
+    });
+    if legal.is_empty() {
+        return Err(napi::Error::from_reason("no legal actions"));
+    }
+    let chosen_idx = result.selected_index.min(legal.len() - 1);
+    let chosen = legal[chosen_idx].clone();
+    let (next, used_rng_after_step) = with_rng(used_rng_after_legal, || {
+        let forced = get_forced_attack_coin_results(&state);
+        advance_modeled_turn_step(&state, side, &chosen, forced)
+    });
+    let wrapper = serde_json::json!({
+        "stateJson": serde_json::to_string(&next)
+            .map_err(|e| napi::Error::from_reason(format!("serialize state: {e}")))?,
+        "rngStateJson": serde_json::to_string(&used_rng_after_step)
+            .map_err(|e| napi::Error::from_reason(format!("serialize rng: {e}")))?,
+        "mctsResult": serde_json::to_string(&result)
+            .map_err(|e| napi::Error::from_reason(format!("serialize mcts result: {e}")))?,
+        "chosenActionIndex": chosen_idx,
+        "chosenActionJson": serde_json::to_string(&chosen)
+            .map_err(|e| napi::Error::from_reason(format!("serialize action: {e}")))?,
+    });
+    serde_json::to_string(&wrapper)
+        .map_err(|e| napi::Error::from_reason(format!("serialize wrapper: {e}")))
 }

@@ -101,4 +101,32 @@ if (replayHash !== finalHash) {
 }
 console.log(`deterministic replay: ${steps} steps, final hash ${finalHash} matches`);
 
-console.log("✅ napi-bridge smoke OK (engineVersion, createGameJson, advanceStepJson, legalActionsJson, stateHashForJson)");
+// MCTS surface: run_mcts at the initial state and verify shape.
+const mctsArgs = JSON.stringify({
+  simulations: 30,
+  cPuct: 1.5,
+  rolloutCrnSamples: 2,
+  rolloutSteps: 100,
+  prior: "uniform",
+  leaf: "rollout",
+  maxNodes: 1000,
+});
+const mctsRaw = bridge.runMctsJson(init.stateJson, init.rngStateJson, mctsArgs, "0:Player:0:mcts");
+const mctsBundle = JSON.parse(mctsRaw);
+const mctsResult = JSON.parse(mctsBundle.mctsResult);
+if (!Array.isArray(mctsResult.visits) || mctsResult.visits.length === 0) {
+  throw new Error(`MCTS produced no visits: ${mctsRaw.slice(0, 200)}`);
+}
+const totalVisits = mctsResult.visits.reduce((a, b) => a + b, 0);
+console.log(`runMctsJson -> selectedIndex=${mctsResult.selectedIndex} visits=${mctsResult.visits.join(",")} (total=${totalVisits}) rootValue=${mctsResult.diagnostics.rootValue.toFixed(3)}`);
+
+// mctsStepJson: full search-and-apply.
+const stepRaw = bridge.mctsStepJson(init.stateJson, init.rngStateJson, mctsArgs, "0:Player:0:mcts");
+const stepBundle = JSON.parse(stepRaw);
+const stepHash = bridge.stateHashForJson(stepBundle.stateJson);
+if (stepHash === hash) {
+  throw new Error("mctsStepJson did not change state");
+}
+console.log(`mctsStepJson -> chosenActionIndex=${stepBundle.chosenActionIndex} new state_hash=${stepHash}`);
+
+console.log("✅ napi-bridge smoke OK (engineVersion, createGameJson, advanceStepJson, legalActionsJson, stateHashForJson, runMctsJson, mctsStepJson)");
