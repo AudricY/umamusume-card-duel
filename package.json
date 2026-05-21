@@ -29,7 +29,8 @@
     "test:data-coverage-audit": "training/.venv/bin/python training/data_coverage_audit_smoke.py",
     "test:r16-mcts-embedding": "training/.venv/bin/python training/r16_mcts_embedding_smoke.py",
     "test:pair-builder": "training/.venv/bin/python training/pair_builder_smoke.py",
-    "test:pair-corpus": "training/.venv/bin/python training/pair_corpus_smoke.py"
+    "test:pair-corpus": "training/.venv/bin/python training/pair_corpus_smoke.py",
+    "test:dpo-quality-eval": "training/.venv/bin/python training/dpo_quality_eval_smoke.py"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
