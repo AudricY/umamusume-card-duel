@@ -1,6 +1,6 @@
 # Throughput Optimization Spike
 
-> STATUS: **Slice 1 LANDED 2026-05-21** — in-process ORT (Option A) parity gate green. Orchestrator-wiring follow-up gated next.
+> STATUS: **Slice 2 ACCEPTANCE PASSED 4.18× 2026-05-21** — 7.99 min wall vs 33.4 min baseline on 10-iter R110-faithful recipe. Slice 4 scale-up relook landed at `docs/ai-research/scoping/post-throughput-scale-up-directions.md`. Slice 3 (v3.2 featurizer port) now optional — required only for fast-path vhleaf loop.
 
 Routing: `docs/ai-research/README.md`. Source-of-truth analysis:
 `docs/ai-research/analysis/r12-loop-throughput.md` (commit `f19cb4c`).
@@ -101,12 +101,30 @@ Both runs produced identical JSONL (`diff /tmp/run-a.jsonl /tmp/run-b.jsonl` emp
   now only pulled by the `sim-inference-parity` smoke binary (kept in
   sim-cli's Cargo.toml not the engine).
 
-## Next slice
+## Slice 2 acceptance — PASSED 4.18× (2026-05-21)
 
-`r12_orchestrator.py` wiring: orchestrator currently spawns serve_onnx
-and passes `--model-url <url>` to sim-mcts-selfplay / sim-eval-gate.
-Replace with `--onnx-path <path>` + `ORT_DYLIB_PATH` env on the worker
-processes. Skip the serve_onnx subprocess for the Rust path entirely.
-Acceptance: 10-iter recipe wall < 20 min (vs 33.4 min baseline) +
-strength within ±0.022. Tracked as the next concrete step under the
-`throughput-optimization-spike` queue entry.
+10-iter R110-faithful recipe (v3.0, W6-fix-OFF, seeded from R110-W6-repro iter-2 v3.0 ckpt wl=0.6042) ran end-to-end at `runs/throughput-spike-slice2-acceptance/`:
+
+- **Total wall 7.99 min** (13:02:07Z → 13:10:33Z) vs 33.4 min baseline = **4.18× speedup**. Clears both the ≥1.65× PASS gate and the ≥3× scale-up trigger.
+- Trajectory: 0.4773 / 0.5022 / 0.5273 / 0.4939 / 0.5189 / 0.4856 / 0.5442 / 0.5358 / 0.5189 / **0.5527** (iter-9 promoted).
+- 10 finite Wilson-lower iters, all promote=True, no crashes / no heuristic fallbacks.
+- Per-iter mean ~48s = selfplay ~16s + distill ~4s + gate ~28s. Gate dominates.
+- R14 value-head crossover crossed at iter-4 (ratio 0.787, pearson 0.727) and iter-9 (ratio 0.730, pearson 0.746) — two crossings without explicit W6-fix-ON, consistent with R110 chain.
+
+Canonical evidence: `runs/throughput-spike-slice2-acceptance/loop/orchestrator-state.json`, `launch.log`.
+
+## Slice 4 — scale-up research-direction relook (LANDED)
+
+Per user direction: if Slice 2 confirms ≥3× wall reduction, do a scale-up relook on what was previously infeasible that now becomes tractable. Condition met (4.18×). Relook landed at `docs/ai-research/scoping/post-throughput-scale-up-directions.md` (SCOPING, 51 lines).
+
+Re-prioritization summary:
+
+- PRIMARY: `tight-gate-reverdict-program` (P2→P1) — n=10,000 re-verdicts of R110-W6-repro iter-2 + R16-P1 v3.1 + 5g/5h/5i flips.
+- SECONDARY: multi-knob W6-fix HP sweep (10-cell diagonal, ~80 min wall).
+- TERTIARY: `high-sim-mcts-regime-probe` (P2→P1) — strength-vs-sim curve at 800/4k/20k/50k sims.
+- DEPRIORITIZED: larger-model arch sweep, 50+ iter long-horizon (gate on positive signal).
+- BACKGROUND: side-conditioned eval as default `sim-eval-gate` report shape.
+
+## Slice 3 (deferred, optional)
+
+Port v3.2 per-Uma slot featurizer (`uma_slot_card_ids` + `uma_slot_features`) + ONNX inputs to the Rust path so the v3.2 lineage best (`runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-3/`, wl=0.5538) can ride the in-process path. Required ONLY for the user-queued vhleaf loop on the fast path. Alternative: run vhleaf on the slower HTTP path now (~33 min/10 iters) and ride Slice 3 for any follow-up.
