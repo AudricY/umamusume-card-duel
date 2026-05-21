@@ -178,6 +178,115 @@ pub fn drive_heuristic_game_json(seed: String, max_steps: u32) -> Result<String>
         .map_err(|e| napi::Error::from_reason(format!("serialize summary: {e}")))
 }
 
+/// Drive a full MCTS-vs-heuristic game in pure Rust and return just
+/// the summary. Pattern matches sim-mcts-selfplay exactly:
+/// enumerate → MCTS (when legal.len > 1 and model_side) → advance,
+/// otherwise fall through to heuristic step.
+///
+/// Avoids the per-step JSON serialize-deserialize roundtrip the
+/// composable bridge functions go through, so a TS caller gets
+/// bit-identical output to a subprocess sim-mcts-selfplay invocation.
+///
+/// `model_side`: "player" or "opponent" — which side runs MCTS.
+#[napi]
+pub fn drive_mcts_game_json(
+    seed: String,
+    model_side: String,
+    max_steps: u32,
+    mcts_args_json: String,
+) -> Result<String> {
+    let args: McTsArgs = serde_json::from_str(&mcts_args_json)
+        .map_err(|e| napi::Error::from_reason(format!("parse mcts args: {e}")))?;
+    let config = build_config(&args);
+    let model_side = match model_side.as_str() {
+        "player" => SideId::Player,
+        "opponent" => SideId::Opponent,
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "model_side must be 'player' or 'opponent', got '{other}'"
+            )))
+        }
+    };
+
+    let rng = Rng::from_seed(format!("{}:selfplay", seed).as_str(), "selfplay");
+    let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
+    let mut prior_hash = state_hash(&state);
+    let mut terminal = "maxSteps";
+    let mut steps = 0u32;
+    let mut model_decisions = 0u32;
+
+    for step in 0..max_steps {
+        steps = step;
+        if state.game_over {
+            terminal = "gameOver";
+            break;
+        }
+        let side = match state.current_side {
+            CurrentSide::Player => SideId::Player,
+            CurrentSide::Opponent => SideId::Opponent,
+            CurrentSide::Done => {
+                terminal = "gameOver";
+                break;
+            }
+        };
+        let (legal, used_after_legal) = with_rng(step_rng.clone(), || {
+            enumerate_legal_ai_actions(&state, side)
+        });
+        step_rng = used_after_legal;
+
+        let (next, used) = if side == model_side && legal.len() > 1 {
+            let mcts_seed = format!(
+                "{}:{}:{}:mcts",
+                seed,
+                if model_side == SideId::Player { "player" } else { "opponent" },
+                step
+            );
+            let (result, used_after_mcts) = with_rng(step_rng.clone(), || {
+                run_mcts(&state, side, &config, "", mcts_seed.as_str())
+            });
+            let idx = result.selected_index.min(legal.len() - 1);
+            let chosen = legal[idx].clone();
+            model_decisions += 1;
+            with_rng(used_after_mcts, || {
+                let forced = get_forced_attack_coin_results(&state);
+                advance_modeled_turn_step(&state, side, &chosen, forced)
+            })
+        } else {
+            with_rng(step_rng.clone(), || {
+                let forced = get_forced_attack_coin_results(&state);
+                let mut s = state.clone();
+                match side {
+                    SideId::Player => advance_player_ai_turn_step(&mut s, forced),
+                    SideId::Opponent => advance_opponent_turn_step(&mut s, forced),
+                }
+                s
+            })
+        };
+        step_rng = used;
+        let nh = state_hash(&next);
+        if nh == prior_hash {
+            terminal = "stalled";
+            break;
+        }
+        prior_hash = nh;
+        state = next;
+    }
+    let winner = state.winner.map(|s| match s {
+        SideId::Player => "player",
+        SideId::Opponent => "opponent",
+    });
+    let summary = serde_json::json!({
+        "finalStateHash": state_hash(&state),
+        "steps": steps,
+        "modelDecisions": model_decisions,
+        "winner": winner,
+        "gameOver": state.game_over,
+        "terminalReason": terminal,
+    });
+    serde_json::to_string(&summary)
+        .map_err(|e| napi::Error::from_reason(format!("serialize summary: {e}")))
+}
+
 /// Sentinel function — Node can call this to confirm the bridge is
 /// loaded and that engine::core::catalog initializes correctly.
 #[napi]
