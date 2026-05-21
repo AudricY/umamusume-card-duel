@@ -122,6 +122,100 @@ fn determinism_same_seed_same_outcome() {
     assert_eq!(a.winner, b.winner);
 }
 
+/// MCTS-driven throughput: drives N games where the modeled side uses
+/// MCTS at each decision (sims=100, K=3, prior=uniform, leaf=rollout)
+/// — matching the recorder's config — and the opponent uses heuristic
+/// AI. Reports games/sec.
+#[test]
+#[ignore]
+fn throughput_mcts_games() {
+    use engine::core::constants::SideId;
+    use engine::dispatcher::{
+        advance_modeled_turn_step, advance_opponent_turn_step, get_forced_attack_coin_results,
+    };
+    use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+    use engine::mcts::driver::run_mcts;
+    use engine::policy::actions::enumerate_legal_ai_actions;
+
+    let config = MctsConfig {
+        simulations: 100,
+        c_puct: 1.5,
+        leaf: MctsLeaf::Rollout,
+        prior: MctsPrior::Uniform,
+        rollout_crn_samples: 3,
+        rollout_steps: 200,
+        add_root_dirichlet: false,
+        dirichlet_alpha: 0.3,
+        dirichlet_epsilon: 0.25,
+        max_nodes: 5_000,
+        collapse_max_steps: 64,
+        adaptive_ratio: 0.0,
+        adaptive_min_sims: 100,
+        model_url: String::new(),
+    };
+
+    let model_side = SideId::Player;
+    let n = 3u32;
+    let start = std::time::Instant::now();
+    let mut total_advances = 0u32;
+    for seed_num in 0..n {
+        let seed = seed_num.to_string();
+        let rng = Rng::from_seed(format!("{}:selfplay", seed).as_str(), "selfplay");
+        let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
+        let mut step = 0u32;
+        for _ in 0..1000 {
+            if state.game_over { break; }
+            let side = match state.current_side {
+                CurrentSide::Player => SideId::Player,
+                CurrentSide::Opponent => SideId::Opponent,
+                CurrentSide::Done => break,
+            };
+            // enumerate_legal_ai_actions may invoke RNG indirectly via the
+            // ai/* scoring path — wrap in the active rng.
+            let (legal, used_rng) = with_rng(step_rng.clone(), || {
+                enumerate_legal_ai_actions(&state, side)
+            });
+            step_rng = used_rng;
+            if side == model_side && legal.len() > 1 {
+                let mcts_seed = format!("{}:{:?}:{}:mcts", seed, side, step);
+                let (mcts_result, used_rng) = with_rng(step_rng.clone(), || {
+                    run_mcts(&state, side, &config, "", mcts_seed.as_str())
+                });
+                step_rng = used_rng;
+                let action_idx = mcts_result.selected_index.min(legal.len() - 1);
+                let chosen = legal[action_idx].clone();
+                let (next_state, used_rng) = with_rng(step_rng.clone(), || {
+                    let forced = get_forced_attack_coin_results(&state);
+                    advance_modeled_turn_step(&state, side, &chosen, forced)
+                });
+                step_rng = used_rng;
+                state = next_state;
+            } else {
+                let (next_state, used_rng) = with_rng(step_rng.clone(), || {
+                    let forced = get_forced_attack_coin_results(&state);
+                    let mut s = state.clone();
+                    if side == SideId::Player {
+                        engine::dispatcher::advance_player_ai_turn_step(&mut s, forced);
+                    } else {
+                        advance_opponent_turn_step(&mut s, forced);
+                    }
+                    s
+                });
+                step_rng = used_rng;
+                state = next_state;
+            }
+            step += 1;
+            total_advances += 1;
+        }
+    }
+    let elapsed = start.elapsed();
+    let games_per_sec = n as f64 / elapsed.as_secs_f64();
+    eprintln!(
+        "MCTS throughput: {} games in {:?} = {:.2} games/s; total_advances={} (avg {:.1}/game)",
+        n, elapsed, games_per_sec, total_advances, total_advances as f64 / n as f64,
+    );
+}
+
 /// Throughput benchmark — drive 100 games and report games/sec.
 /// Marked `#[ignore]` so it doesn't run by default. Enable with
 /// `cargo test --release -- --ignored throughput`.
