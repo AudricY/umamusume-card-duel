@@ -51,13 +51,28 @@ async function main() {
     mkdirSync(dirname(args.progressOut), { recursive: true });
     writeFileSync(args.progressOut, "", "utf8");
   }
+  // R16-TD 3a corpus harness: when --decision-trace-out is set the orchestrator
+  // owns the trace file. Workers populate `result.decisionTraces` (because
+  // they also see `--decision-trace-out`) but never touch disk; the
+  // orchestrator buffers rows by taskIndex and flushes in ascending order
+  // after all tasks complete. This gives deterministic output independent of
+  // worker count or completion interleaving and matches the slot-ordered
+  // GateResult contract already provided by the work-stealing path.
+  if (args.decisionTraceOut) {
+    mkdirSync(dirname(args.decisionTraceOut), { recursive: true });
+    writeFileSync(args.decisionTraceOut, "", "utf8");
+  }
+  const traceBuffer = new Map<number, unknown[]>();
   const runStartedAt = Date.now();
   let gamesCompleted = 0;
   let modelWinsSoFar = 0;
 
-  const handleResult = (result: GateResult, workerId: number, gameSec: number) => {
+  const handleResult = (result: GateResult, workerId: number, gameSec: number, taskIndex: number) => {
     gamesCompleted += 1;
     if (result.modelWon) modelWinsSoFar += 1;
+    if (args.decisionTraceOut && result.decisionTraces && result.decisionTraces.length > 0) {
+      traceBuffer.set(taskIndex, result.decisionTraces as unknown[]);
+    }
     const elapsedSec = (Date.now() - runStartedAt) / 1000;
     const runningWr = modelWinsSoFar / gamesCompleted;
     const etaSec = (elapsedSec / gamesCompleted) * (tasks.length - gamesCompleted);
@@ -93,12 +108,28 @@ async function main() {
     results = await runOrchestrator(args, tasks, handleResult);
   } else {
     results = [];
-    for (const task of tasks) {
+    for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
+      const task = tasks[taskIndex]!;
       const gameStart = Date.now();
       const result = await runModelVsHeuristicGame(args, task.seed, task.side);
       results.push(result);
-      handleResult(result, 0, (Date.now() - gameStart) / 1000);
+      handleResult(result, 0, (Date.now() - gameStart) / 1000, taskIndex);
     }
+  }
+
+  // Flush buffered traces in ascending taskIndex order. Determinism contract:
+  // the row stream is identical across --workers values because (a) taskIndex
+  // is assigned deterministically from (seedStart, modelSide) pairing in the
+  // task-construction loop above and (b) per-game RNG seeding ignores worker
+  // identity / completion order. The work-stealing dispatch is verified
+  // deterministic by r12_workstealing_determinism_gate.py.
+  if (args.decisionTraceOut && traceBuffer.size > 0) {
+    const orderedIndexes = Array.from(traceBuffer.keys()).sort((a, b) => a - b);
+    const lines: string[] = [];
+    for (const idx of orderedIndexes) {
+      for (const row of traceBuffer.get(idx)!) lines.push(JSON.stringify(row));
+    }
+    if (lines.length > 0) appendFileSync(args.decisionTraceOut, lines.join("\n") + "\n", "utf8");
   }
 
   const summary = summarize(results);
@@ -110,12 +141,19 @@ async function main() {
   if (args.requireZeroFallbacks && summary.heuristicFallbacks !== 0) failures.push(`heuristicFallbacks ${summary.heuristicFallbacks} != 0`);
   if (args.requireZeroNoOps && summary.selectedNoOps !== 0) failures.push(`selectedNoOps ${summary.selectedNoOps} != 0`);
 
-  const passed = failures.length === 0;
+  // R16-TD 3a corpus harness: when running as a corpus generator
+  // (--relabel-mcts), gate floors are informational only. A weak model may
+  // legitimately lose to the rule bot during early corpus collection; the
+  // failure list is still reported in the summary so an orchestrator can
+  // inspect it, but the process always exits 0 in this mode so downstream
+  // scripts don't have to fork on win-rate.
+  const corpusMode = args.relabelMcts;
+  const passed = corpusMode || failures.length === 0;
   const status = args.expectFail
     ? (passed ? "FAIL_UNEXPECTED_PASS" : "PASS")
     : (passed ? "PASS" : "FAIL");
   const exitNonZero = status !== "PASS";
-  const output = { status, failures, expectFail: args.expectFail, args, summary };
+  const output = { status, failures, expectFail: args.expectFail, corpusMode, args, summary };
   if (args.manifestOut) {
     mkdirSync(dirname(args.manifestOut), { recursive: true });
     writeFileSync(args.manifestOut, JSON.stringify(withGitMetadata(output), null, 2) + "\n", "utf8");
@@ -124,11 +162,12 @@ async function main() {
   if (exitNonZero) process.exit(1);
 }
 
-function partitionTasks(tasks: WorkerTask[], workers: number): WorkerTask[][] {
+function partitionTasks(tasks: WorkerTask[], workers: number): Array<Array<WorkerTask & { taskIndex: number }>> {
   const sliceSize = Math.ceil(tasks.length / workers);
-  const slices: WorkerTask[][] = [];
+  const indexed: Array<WorkerTask & { taskIndex: number }> = tasks.map((task, taskIndex) => ({ ...task, taskIndex }));
+  const slices: Array<Array<WorkerTask & { taskIndex: number }>> = [];
   for (let w = 0; w < workers; w += 1) {
-    const slice = tasks.slice(w * sliceSize, (w + 1) * sliceSize);
+    const slice = indexed.slice(w * sliceSize, (w + 1) * sliceSize);
     if (slice.length > 0) slices.push(slice);
   }
   return slices;
@@ -149,7 +188,7 @@ function buildWorkerArgv(parentArgv: string[]): string[] {
 async function runOrchestrator(
   args: Args,
   tasks: WorkerTask[],
-  onResult: (result: GateResult, workerId: number, gameSec: number) => void,
+  onResult: (result: GateResult, workerId: number, gameSec: number, taskIndex: number) => void,
 ): Promise<GateResult[]> {
   if (MCTS_WORK_STEALING_ENABLED) {
     return runOrchestratorWorkStealing(args, tasks, onResult);
@@ -161,7 +200,7 @@ async function runOrchestrator(
 async function runOrchestratorStatic(
   args: Args,
   tasks: WorkerTask[],
-  onResult: (result: GateResult, workerId: number, gameSec: number) => void,
+  onResult: (result: GateResult, workerId: number, gameSec: number, taskIndex: number) => void,
 ): Promise<GateResult[]> {
   const slices = partitionTasks(tasks, args.workers);
   const workerArgv = buildWorkerArgv(process.argv.slice(2));
@@ -173,13 +212,13 @@ async function runOrchestratorStatic(
     let workerReady = false;
     let workerDone = false;
     child.on("message", (msg: unknown) => {
-      const m = msg as { kind: string; result?: GateResult; gameSec?: number };
+      const m = msg as { kind: string; result?: GateResult; gameSec?: number; taskIndex?: number };
       if (m.kind === "ready") {
         workerReady = true;
         child.send({ kind: "tasks", workerId, tasks: slice });
       } else if (m.kind === "game_completed" && m.result) {
         collected.push(m.result);
-        onResult(m.result, workerId, m.gameSec ?? 0);
+        onResult(m.result, workerId, m.gameSec ?? 0, m.taskIndex ?? -1);
       } else if (m.kind === "done") {
         workerDone = true;
       }
@@ -211,7 +250,7 @@ async function runOrchestratorStatic(
 async function runOrchestratorWorkStealing(
   args: Args,
   tasks: WorkerTask[],
-  onResult: (result: GateResult, workerId: number, gameSec: number) => void,
+  onResult: (result: GateResult, workerId: number, gameSec: number, taskIndex: number) => void,
 ): Promise<GateResult[]> {
   const workerArgv = buildWorkerArgv(process.argv.slice(2));
   const workerCount = Math.min(tasks.length, args.workers);
@@ -246,7 +285,7 @@ async function runOrchestratorWorkStealing(
       } else if (m.kind === "game_completed" && m.result && m.taskIndex !== undefined) {
         slots[m.taskIndex] = m.result;
         inFlight -= 1;
-        onResult(m.result, workerId, m.gameSec ?? 0);
+        onResult(m.result, workerId, m.gameSec ?? 0, m.taskIndex);
         dispatchNext();
       } else if (m.kind === "done") {
         workerDone = true;
@@ -281,14 +320,17 @@ async function runWorker(args: Args): Promise<void> {
   if (!MCTS_WORK_STEALING_ENABLED) {
     process.send({ kind: "ready" });
     process.on("message", async (msg: unknown) => {
-      const m = msg as { kind: string; workerId?: number; tasks?: WorkerTask[] };
+      const m = msg as { kind: string; workerId?: number; tasks?: Array<WorkerTask & { taskIndex?: number }> };
       if (m.kind !== "tasks" || !m.tasks) return;
       try {
         for (const task of m.tasks) {
           const gameStart = Date.now();
           const result = await runModelVsHeuristicGame(args, task.seed, task.side);
           const gameSec = (Date.now() - gameStart) / 1000;
-          process.send!({ kind: "game_completed", result, gameSec });
+          // Forward the globally-assigned taskIndex (added in the orchestrator's
+          // partitionTasks step) so the orchestrator can sort trace rows
+          // deterministically across the static-chunking path too.
+          process.send!({ kind: "game_completed", result, gameSec, taskIndex: task.taskIndex });
         }
         process.send!({ kind: "done" });
         setTimeout(() => process.exit(0), 25);
@@ -449,8 +491,12 @@ function parseArgs(argv: string[]): Args {
     plannerFirstActionAggregate: parsePlannerFirstActionAggregate(get("--planner-first-action-aggregate", "max")),
     rolloutCrnSamples: Number(get("--rollout-crn-samples", "1")),
     traceTeacher: parseTraceTeacher(get("--trace-teacher", "none")),
-    relabelMcts: false,
-    relabelStateSource: "rule-bot-mirror",
+    // R16-TD 3a corpus harness: thread through the relabel-mcts payload so
+    // evalGate can host the production corpus generator (was hardcoded false
+    // pre-spike). When set, gate floors are treated as informational so a
+    // weak-model corpus run does not exit non-zero — see `main()` below.
+    relabelMcts: argv.includes("--relabel-mcts"),
+    relabelStateSource: get("--relabel-state-source", "rule-bot-mirror"),
     opponentModelUrl: get("--opponent-model-url", "") || null,
     mctsSimulations: Number(get("--mcts-simulations", "100")),
     mctsCPuct: Number(get("--mcts-c-puct", "1.5")),
