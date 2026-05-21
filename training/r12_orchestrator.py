@@ -302,6 +302,45 @@ def run_iteration(
     return record
 
 
+def resolve_engine_command(engine: str, sim_name: str, repo_root: Path) -> list[str]:
+    """Return the argv prefix that invokes the requested sim CLI under the
+    requested engine, BEFORE any flag arguments are appended.
+
+    `sim_name` is the kebab-case sim identifier (e.g. ``mcts-selfplay``,
+    ``eval-gate``) — the suffix shared between the TS npm script
+    (``sim:<name>``) and the Rust release binary (``sim-<name>``).
+
+    For ``engine="rust"`` we return the absolute path to the prebuilt
+    release binary at ``engine-rs/target/release/sim-<name>``. The binary
+    is NOT built lazily — if it is missing we raise ``RuntimeError`` with
+    a one-line build remediation so an operator can not silently fall
+    back to the TS path. Build with::
+
+        cd engine-rs && cargo build --release -p sim-cli
+
+    For ``engine="ts"`` we return the legacy ``npm --workspace backend
+    run sim:<name> --`` prefix unchanged. This is the opt-out escape
+    hatch — the engine port handoff doc (``docs/ai-research/scoping/
+    rust-engine-port-handoff.md``) covers when to reach for it.
+
+    Rust accepts every TS flag name via clap aliases (orchestrator-compat
+    surface, handoff doc Phase 1g) so the caller appends flags
+    unconditionally regardless of which engine answered.
+    """
+    if engine == "rust":
+        bin_path = repo_root / "engine-rs" / "target" / "release" / f"sim-{sim_name}"
+        if not bin_path.exists():
+            raise RuntimeError(
+                f"Rust sim CLI binary missing: {bin_path}. "
+                f"Build with: (cd engine-rs && cargo build --release -p sim-cli) "
+                f"or rerun the orchestrator with --engine ts to opt out."
+            )
+        return [str(bin_path)]
+    if engine == "ts":
+        return ["npm", "--workspace", "backend", "run", f"sim:{sim_name}", "--"]
+    raise ValueError(f"unknown engine: {engine!r} (expected 'rust' or 'ts')")
+
+
 def run_selfplay(
     repo_root: Path,
     iter_dir: Path,
@@ -312,35 +351,38 @@ def run_selfplay(
     iteration: int,
 ) -> None:
     log_path = iter_dir / "selfplay.log"
+    cmd = resolve_engine_command(args.engine, "mcts-selfplay", repo_root) + [
+        "--model-url", model_url,
+        "--games", str(args.selfplay_games),
+        "--seed-start", str(args.selfplay_seed_start + iteration * args.selfplay_games),
+        "--mcts-simulations", str(args.mcts_simulations),
+        "--mcts-c-puct", str(args.mcts_c_puct),
+        "--mcts-prior", "policy",
+        "--mcts-collapse-max-steps", str(args.mcts_collapse_max_steps),
+        "--mcts-max-nodes", str(args.mcts_max_nodes),
+        "--mcts-dirichlet-alpha", str(args.dirichlet_alpha),
+        "--mcts-dirichlet-epsilon", str(args.dirichlet_epsilon),
+        "--temperature-moves", str(args.temperature_moves),
+        "--temperature-value", str(args.temperature_value),
+        # selfplay generates the training distribution; the leaf
+        # evaluator should match the gate's so the targets the
+        # network learns to imitate are scored the same way the
+        # eval gate scores them.
+        "--mcts-leaf", args.mcts_leaf,
+        "--mcts-rollout-crn-samples", str(args.mcts_rollout_crn_samples),
+        "--mcts-rollout-steps", str(args.mcts_rollout_steps),
+        "--workers", str(args.workers),
+        "--out", str(out_path),
+        "--manifest-out", str(manifest_out),
+    ]
+    # The Rust sim-mcts-selfplay binary makes per-decision row recording
+    # opt-in via --record-rows (TS mctsSelfPlay.ts always records). The
+    # orchestrator consumes selfplay.jsonl as the distill input, so rows
+    # are non-optional here — append the flag on the Rust path only.
+    if args.engine == "rust":
+        cmd.append("--record-rows")
     with log_path.open("w") as logf:
-        subprocess.run(
-            [
-                "npm", "--workspace", "backend", "run", "sim:mcts-selfplay", "--",
-                "--model-url", model_url,
-                "--games", str(args.selfplay_games),
-                "--seed-start", str(args.selfplay_seed_start + iteration * args.selfplay_games),
-                "--mcts-simulations", str(args.mcts_simulations),
-                "--mcts-c-puct", str(args.mcts_c_puct),
-                "--mcts-prior", "policy",
-                "--mcts-collapse-max-steps", str(args.mcts_collapse_max_steps),
-                "--mcts-max-nodes", str(args.mcts_max_nodes),
-                "--mcts-dirichlet-alpha", str(args.dirichlet_alpha),
-                "--mcts-dirichlet-epsilon", str(args.dirichlet_epsilon),
-                "--temperature-moves", str(args.temperature_moves),
-                "--temperature-value", str(args.temperature_value),
-                # selfplay generates the training distribution; the leaf
-                # evaluator should match the gate's so the targets the
-                # network learns to imitate are scored the same way the
-                # eval gate scores them.
-                "--mcts-leaf", args.mcts_leaf,
-                "--mcts-rollout-crn-samples", str(args.mcts_rollout_crn_samples),
-                "--mcts-rollout-steps", str(args.mcts_rollout_steps),
-                "--workers", str(args.workers),
-                "--out", str(out_path),
-                "--manifest-out", str(manifest_out),
-            ],
-            cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True,
-        )
+        subprocess.run(cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True)
 
 
 def run_distill(
@@ -490,31 +532,30 @@ def run_gate(
     iteration: int,
 ) -> int:
     log_path = iter_dir / "gate.log"
+    cmd = resolve_engine_command(args.engine, "eval-gate", repo_root) + [
+        "--selection", "mcts",
+        "--games", str(args.eval_games),
+        "--max-steps", "500",
+        "--seed-start", str(args.eval_seed_start),
+        "--model-side", "both",
+        "--model-url", model_url,
+        "--manifest-out", str(manifest_out),
+        "--mcts-simulations", str(args.mcts_simulations),
+        "--mcts-c-puct", str(args.mcts_c_puct),
+        "--mcts-leaf", args.mcts_leaf,
+        "--mcts-rollout-crn-samples", str(args.mcts_rollout_crn_samples),
+        "--mcts-rollout-steps", str(args.mcts_rollout_steps),
+        "--mcts-prior", "policy",
+        "--mcts-collapse-max-steps", str(args.mcts_collapse_max_steps),
+        "--mcts-max-nodes", str(args.mcts_max_nodes),
+        "--min-ci-lower", str(args.eval_min_ci_lower),
+        "--min-games", str(args.eval_games),
+        "--progress-out", str(iter_dir / "gate-progress.jsonl"),
+        "--workers", str(args.workers),
+    ]
     with log_path.open("w") as logf:
         result = subprocess.run(
-            [
-                "npm", "--workspace", "backend", "run", "sim:eval-gate", "--",
-                "--selection", "mcts",
-                "--games", str(args.eval_games),
-                "--max-steps", "500",
-                "--seed-start", str(args.eval_seed_start),
-                "--model-side", "both",
-                "--model-url", model_url,
-                "--manifest-out", str(manifest_out),
-                "--mcts-simulations", str(args.mcts_simulations),
-                "--mcts-c-puct", str(args.mcts_c_puct),
-                "--mcts-leaf", args.mcts_leaf,
-                "--mcts-rollout-crn-samples", str(args.mcts_rollout_crn_samples),
-                "--mcts-rollout-steps", str(args.mcts_rollout_steps),
-                "--mcts-prior", "policy",
-                "--mcts-collapse-max-steps", str(args.mcts_collapse_max_steps),
-                "--mcts-max-nodes", str(args.mcts_max_nodes),
-                "--min-ci-lower", str(args.eval_min_ci_lower),
-                "--min-games", str(args.eval_games),
-                "--progress-out", str(iter_dir / "gate-progress.jsonl"),
-                "--workers", str(args.workers),
-            ],
-            cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=False,
+            cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=False,
         )
     return int(result.returncode)
 
@@ -805,6 +846,17 @@ def parse_args() -> argparse.Namespace:
                    help="W6 recipe-fix: # of most-recent prior iters mixed into the distill set.")
     p.add_argument("--w6-replay-old-fraction", type=float, default=W6_REPLAY_OLD_FRACTION,
                    help="W6 recipe-fix: fraction of the distill mixture drawn from older vintages.")
+    # Engine dispatch for the per-iter sim CLIs (selfplay + gate). Rust
+    # is the default since the engine port merged (handoff doc Phase 1g —
+    # ~140-220x MCTS throughput, flag-compatible via clap aliases). TS
+    # remains as an opt-out escape hatch for parity comparisons or if
+    # the Rust binaries are unavailable. The dispatch happens inside
+    # run_selfplay / run_gate via resolve_engine_command(); call sites
+    # otherwise stay byte-identical.
+    p.add_argument("--engine", choices=["rust", "ts"], default="rust",
+                   help="Sim CLI engine for selfplay + gate. 'rust' (default) "
+                        "calls engine-rs/target/release/sim-{mcts-selfplay,"
+                        "eval-gate}; 'ts' calls the legacy npm sim:* scripts.")
     # serve_onnx_context reads .device/.amp/etc indirectly; keep these
     # minimal Namespace fields so DAgger's helper doesn't crash on .get.
     p.add_argument("--device", default="cpu")

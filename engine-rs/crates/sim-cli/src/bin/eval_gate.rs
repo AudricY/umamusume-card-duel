@@ -38,7 +38,8 @@ use serde::Serialize;
 struct Args {
     /// Model URL (also serves as the value-head /predict endpoint when
     /// --leaf=value-head). Orchestrators pass this here.
-    #[arg(long)]
+    /// Orchestrator alias: --model-url (TS evalGate.ts flag name).
+    #[arg(long, alias = "model-url")]
     challenger: Option<String>,
     #[arg(long)]
     baseline: Option<String>,

@@ -375,6 +375,22 @@ auto-merge). Forward work tracked in queue (`docs/ai-agent-state/queue.json`):
 `rust-port-v32-schema-verification`, `rust-port-orchestrator-wiring`,
 `rust-port-backend-napi-consumer`.
 
+### Orchestrator wiring Slice 1 — Rust is the default (2026-05-21)
+
+`training/r12_orchestrator.py` now dispatches `run_selfplay` + `run_gate`
+through `resolve_engine_command(engine, sim_name, repo_root)`. The `--engine`
+flag defaults to `rust` (calls `engine-rs/target/release/sim-<name>`); pass
+`--engine ts` to fall back to `npm --workspace backend run sim:<name>`. The
+release binaries must be prebuilt (`cd engine-rs && cargo build --release -p
+sim-cli`) — the orchestrator fails loudly with a remediation if they are
+missing, rather than auto-building. One small alias gap was closed during
+wiring: `sim-eval-gate` now accepts `--model-url` as an alias for
+`--challenger` (TS evalGate.ts uses `--model-url`). The Rust selfplay path
+also appends `--record-rows`, since the Rust binary makes row recording
+opt-in whereas TS `mctsSelfPlay.ts` always emits rows. `ppo_orchestrator.py`
+and `dagger_orchestrator.py` invoke no sim CLIs directly — they were left
+alone. Slice 2 is the parity run, tracked in the queue.
+
 ## What is left (priority order)
 
 ### P0 — Finish 500-seed corpus + replay
