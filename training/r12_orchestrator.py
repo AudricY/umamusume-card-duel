@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import socket
 import subprocess
@@ -268,6 +269,23 @@ def run_iteration(
     win_rate = float(summary.get("modelWinRate", 0))
     games = int(summary.get("games", 0))
     fallbacks = int(summary.get("heuristicFallbacks", 0))
+    # Bug 1 of `rust-port-orchestrator-wiring` Slice 2 follow-ups: when a
+    # gate.manifest.json reports passed=true but the parser came back with
+    # wilson_lower=0/games=0, the manifest shape and the parser have
+    # diverged — silently writing zeros to orchestrator-state.json corrupts
+    # downstream promotion decisions and iteration tracking. Fail loud
+    # here so the next divergence is caught at gate-completion time, not
+    # at a later promotion-decision read.
+    if gate_manifest.exists():
+        raw_manifest = json.loads(gate_manifest.read_text(encoding="utf8"))
+        manifest_passed = bool(raw_manifest.get("passed", False)) if isinstance(raw_manifest, dict) else False
+        if manifest_passed and (games <= 0 or not math.isfinite(wilson_lower)):
+            raise RuntimeError(
+                f"gate.manifest.json reports passed=true at {gate_manifest} but parser "
+                f"extracted wilson_lower={wilson_lower!r} / games={games} — manifest shape "
+                f"and load_summary have diverged. Check the Rust sim-eval-gate emitter "
+                f"vs backend/src/sim/evalGate.ts::summarize."
+            )
     emit_event(events_path, {"stage": "mcts-gate", "event_type": "completed",
                              "iteration": iteration,
                              "wilson_lower": wilson_lower, "win_rate": win_rate, "games": games,
@@ -568,10 +586,45 @@ def ensure_onnx(repo_root: Path, ckpt: Path) -> Path:
 
 
 def load_summary(manifest_path: Path) -> dict[str, Any]:
+    """Return the canonical TS `summary` block from a gate manifest.
+
+    TS shape (`backend/src/sim/evalGate.ts:156`): top-level
+    `{ status, failures, ..., summary: { games, modelWinRate,
+    wilson95: { lower, upper }, heuristicFallbacks, ... } }`. The Rust
+    `sim-eval-gate` binary mirrors this shape (Bug fix 1 of
+    `rust-port-orchestrator-wiring` Slice 2 follow-ups).
+
+    Defense-in-depth: if a manifest lacks a `summary` wrapper but has a
+    `wilsonLower` / `winRate` / `games` flat shape (legacy Rust manifest
+    pre-fix at e.g. `runs/R110-rust-parity-rust/iter-0/gate.manifest.json`),
+    re-project it into the TS shape so historical artifacts re-parse
+    correctly. New runs must hit the wrapped shape; the legacy fallback
+    is for archive readability only and will be removed once no
+    pre-fix manifest is in use.
+    """
     if not manifest_path.exists():
         return {}
     payload = json.loads(manifest_path.read_text(encoding="utf8"))
-    return payload.get("summary", {}) if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and summary:
+        return summary
+    # Legacy Rust flat shape (pre-Bug-1 fix). Re-project into the TS
+    # contract so the orchestrator's consumers see non-zero values.
+    if "wilsonLower" in payload or "overall" in payload:
+        overall = payload.get("overall") if isinstance(payload.get("overall"), dict) else {}
+        wilson_lower = overall.get("wilsonLower", payload.get("wilsonLower", 0.0))
+        wilson_upper = overall.get("wilsonUpper", payload.get("wilsonUpper", 0.0))
+        win_rate = overall.get("winRate", payload.get("winRate", 0.0))
+        games = overall.get("games", payload.get("games", 0))
+        return {
+            "games": games,
+            "modelWinRate": win_rate,
+            "wilson95": {"lower": wilson_lower, "upper": wilson_upper},
+            "heuristicFallbacks": payload.get("heuristicFallbacks", 0),
+        }
+    return {}
 
 
 def count_lines(path: Path) -> int:

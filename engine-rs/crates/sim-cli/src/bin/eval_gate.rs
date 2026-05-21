@@ -118,24 +118,77 @@ struct SideStat {
     wilson_upper: f64,
 }
 
+/// Inner `summary` shape — the contract consumed by
+/// `training/r12_orchestrator.py::load_summary` (reads
+/// `summary.wilson95.lower`, `summary.modelWinRate`, `summary.games`,
+/// `summary.heuristicFallbacks`). The orchestrator parser is the canonical
+/// shape; this struct mirrors `backend/src/sim/evalGate.ts::summarize`
+/// (`evalGate.ts:392`). Keep IN SYNC with that function — drift here
+/// silently corrupts `orchestrator-state.json` (Bug 1 of
+/// `rust-port-orchestrator-wiring` Slice 2 follow-ups).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GateSummary {
-    challenger: Option<String>,
-    baseline: Option<String>,
-    config: ConfigEcho,
-    elapsed_secs: f64,
-    games_per_sec: f64,
+struct GateInnerSummary {
+    games: u32,
+    model_wins: u32,
+    model_win_rate: f64,
+    wilson95: Wilson95,
+    /// Rust eval-gate does not track heuristic-fallback counts (the
+    /// MCTS-rolling-loop path here has no "fall back to heuristic"
+    /// branch the way TS evaluateModelVsHeuristic does), so always 0.
+    /// Required for parser parity — promotion gates that key on
+    /// `requireZeroFallbacks` will trivially pass.
+    heuristic_fallbacks: u32,
+    /// Same situation as `heuristic_fallbacks` — Rust eval-gate doesn't
+    /// distinguish selected no-ops; emit 0 for parser parity.
+    selected_no_ops: u32,
     overall: SideStat,
     player_side: SideStat,
     opponent_side: SideStat,
     terminal_game_over: u32,
     terminal_stalled: u32,
     terminal_max_steps: u32,
-    /// TS-parity gate pass/fail; populated from --min-* flags
-    /// (evalGate.ts:136-152).
-    passed: bool,
+    elapsed_secs: f64,
+    games_per_sec: f64,
+}
+
+#[derive(Serialize)]
+struct Wilson95 {
+    lower: f64,
+    upper: f64,
+}
+
+/// Top-level manifest shape — mirrors TS `evalGate.ts:156`
+/// (`{ status, failures, expectFail, corpusMode, args, summary }`).
+/// Required by `training/r12_orchestrator.py::load_summary`, which reads
+/// `payload["summary"]`. Bug 1 of `rust-port-orchestrator-wiring` Slice 2
+/// follow-ups: prior shape was flat (no `summary` wrapper) so the parser
+/// silently fell back to 0.0/games=0 on every Rust-default iter record.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GateSummary {
+    /// TS `status`: "PASS" | "FAIL" | "FAIL_UNEXPECTED_PASS"
+    /// (`evalGate.ts:152`).
+    status: &'static str,
     failures: Vec<String>,
+    /// TS `expectFail` — Rust eval-gate has no `--expect-fail` flag, so
+    /// always false; left in the manifest for shape parity.
+    expect_fail: bool,
+    /// TS `corpusMode` — Rust eval-gate has no `--relabel-mcts` corpus
+    /// path, so always false.
+    corpus_mode: bool,
+    /// Echo of the resolved arg set, mirrors TS `args` block.
+    args: serde_json::Value,
+    summary: GateInnerSummary,
+    /// Inlined challenger/baseline/config left at top-level too for
+    /// backward compatibility with any reader of the previous shape
+    /// (e.g. older `runs/R110-rust-parity-rust/iter-0/gate.manifest.json`
+    /// inspectors). New consumers should read `summary.*`.
+    challenger: Option<String>,
+    baseline: Option<String>,
+    config: ConfigEcho,
+    /// TS-parity gate pass/fail; also lifted into `status` above.
+    passed: bool,
 }
 
 #[derive(Serialize)]
@@ -250,6 +303,12 @@ fn main() -> Result<()> {
         prior,
         rollout_crn_samples: args.k,
         rollout_steps: args.rollout_steps,
+        // TS parity (`backend/src/sim/evalGate.ts:509`):
+        // `mctsRootDirichlet: argv.includes("--mcts-root-dirichlet")` →
+        // false by default for evaluation determinism. Rust eval-gate
+        // matches: no opt-in flag wired here, so always false. Selfplay
+        // path (`mcts_selfplay.rs`) is the inverse (default ON; opt-out
+        // via `--no-root-dirichlet`) — see Bug fix 2 there.
         add_root_dirichlet: false,
         dirichlet_alpha: 0.3,
         dirichlet_epsilon: 0.25,
@@ -396,7 +455,66 @@ fn main() -> Result<()> {
     }
     let passed = failures.is_empty();
 
+    let games_per_sec = total_games as f64 / elapsed_secs.max(1e-9);
+    let model_win_rate = overall.win_rate;
+    let wilson_lower = overall.wilson_lower;
+    let wilson_upper = overall.wilson_upper;
+    let player_side = mk_stat(player_wins, player_games);
+    let opponent_side = mk_stat(opp_wins, opp_games);
+    // Echo of the resolved args set, mirrors TS `evalGate.ts:156` `args`
+    // block. Only fields the orchestrator looks at on a routine basis
+    // are included; the full clap-parsed set isn't serialized to avoid
+    // dragging in fields TS doesn't expose.
+    let args_echo = serde_json::json!({
+        "challenger": args.challenger,
+        "baseline": args.baseline,
+        "seeds": args.seeds,
+        "seedBase": args.seed_base,
+        "sims": args.sims,
+        "k": args.k,
+        "rolloutSteps": args.rollout_steps,
+        "maxSteps": args.max_steps,
+        "leaf": args.leaf,
+        "prior": args.prior,
+        "cPuct": args.c_puct,
+        "maxNodes": args.max_nodes,
+        "collapseMax": args.collapse_max,
+        "selection": args.selection,
+        "modelSide": args.model_side,
+        "minCiLower": args.min_ci_lower,
+        "minGames": args.min_games,
+        "minWinRate": args.min_win_rate,
+        "manifestOut": args.manifest_out,
+        "progressOut": args.progress_out,
+        "workers": args.workers,
+    });
+    let status = if passed { "PASS" } else { "FAIL" };
+    let inner = GateInnerSummary {
+        games: total_games,
+        model_wins: total_wins,
+        model_win_rate,
+        wilson95: Wilson95 {
+            lower: wilson_lower,
+            upper: wilson_upper,
+        },
+        heuristic_fallbacks: 0,
+        selected_no_ops: 0,
+        overall,
+        player_side,
+        opponent_side,
+        terminal_game_over,
+        terminal_stalled,
+        terminal_max_steps,
+        elapsed_secs,
+        games_per_sec,
+    };
     let summary = GateSummary {
+        status,
+        failures: failures.clone(),
+        expect_fail: false,
+        corpus_mode: false,
+        args: args_echo,
+        summary: inner,
         challenger: args.challenger.clone(),
         baseline: args.baseline.clone(),
         config: ConfigEcho {
@@ -406,16 +524,7 @@ fn main() -> Result<()> {
             seeds: args.seeds,
             seed_base: args.seed_base,
         },
-        elapsed_secs,
-        games_per_sec: total_games as f64 / elapsed_secs.max(1e-9),
-        overall,
-        player_side: mk_stat(player_wins, player_games),
-        opponent_side: mk_stat(opp_wins, opp_games),
-        terminal_game_over,
-        terminal_stalled,
-        terminal_max_steps,
         passed,
-        failures: failures.clone(),
     };
 
     let json = serde_json::to_string_pretty(&summary)?;

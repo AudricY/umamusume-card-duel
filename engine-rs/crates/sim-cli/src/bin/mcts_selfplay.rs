@@ -74,6 +74,14 @@ struct Args {
     /// Root Dirichlet noise epsilon. Orchestrator alias: --mcts-dirichlet-epsilon.
     #[arg(long, alias = "mcts-dirichlet-epsilon", default_value_t = 0.25)]
     dirichlet_epsilon: f64,
+    /// Opt OUT of root Dirichlet noise. Mirrors TS
+    /// `mctsSelfPlay.ts` default (`!argv.includes("--no-root-dirichlet")`):
+    /// selfplay enables Dirichlet by default for exploration diversity;
+    /// pass `--no-root-dirichlet` to disable. Eval-gate enables only via
+    /// explicit opt-in (`--mcts-root-dirichlet` in TS evalGate.ts:509) —
+    /// a separate flag lives on the `sim-eval-gate` binary.
+    #[arg(long, default_value_t = false)]
+    no_root_dirichlet: bool,
     /// Temperature-sampling cutoff in moves (per side).
     #[arg(long, default_value_t = 6)]
     temperature_moves: u32,
@@ -115,6 +123,7 @@ impl Args {
             "maxNodes": self.max_nodes,
             "dirichletAlpha": self.dirichlet_alpha,
             "dirichletEpsilon": self.dirichlet_epsilon,
+            "addRootDirichlet": !self.no_root_dirichlet,
             "temperatureMoves": self.temperature_moves,
             "temperatureValue": self.temperature_value,
             "manifestOut": self.manifest_out,
@@ -419,6 +428,12 @@ fn main() -> Result<()> {
         "policy" => MctsPrior::Policy,
         _ => MctsPrior::Uniform,
     };
+    // Mirror TS `mctsSelfPlay.ts:627` default (Dirichlet ON unless explicit
+    // `--no-root-dirichlet`). Bug fix 2 of `rust-port-orchestrator-wiring`
+    // Slice 2 follow-ups: prior code hard-coded false even though both
+    // alpha + epsilon were already plumbed, starving Rust selfplay of root
+    // exploration noise and hurting trajectory diversity vs TS.
+    let add_root_dirichlet = !args.no_root_dirichlet;
     let config = MctsConfig {
         simulations: args.sims,
         c_puct: args.c_puct,
@@ -426,7 +441,7 @@ fn main() -> Result<()> {
         prior,
         rollout_crn_samples: args.k,
         rollout_steps: args.rollout_steps,
-        add_root_dirichlet: false,
+        add_root_dirichlet,
         dirichlet_alpha: args.dirichlet_alpha,
         dirichlet_epsilon: args.dirichlet_epsilon,
         max_nodes: args.max_nodes,
@@ -664,5 +679,49 @@ mod tests {
         for row in &draw_rows {
             assert!(row.result.as_ref().unwrap().winner.is_none());
         }
+    }
+
+    /// Bug fix 2 of `rust-port-orchestrator-wiring` Slice 2 follow-ups:
+    /// `add_root_dirichlet` was hard-coded false despite the
+    /// `--mcts-dirichlet-alpha` / `--mcts-dirichlet-epsilon` flags being
+    /// plumbed end-to-end. Mirror TS `mctsSelfPlay.ts:627`
+    /// (`!argv.includes("--no-root-dirichlet")` — default ON). This pins
+    /// the resolved gate so a future regression to the hard-coded `false`
+    /// fails at `cargo test` instead of silently starving Rust selfplay
+    /// of root exploration noise.
+    #[test]
+    fn dirichlet_gate_mirrors_ts_selfplay_default() {
+        // Default selfplay: Dirichlet enabled (no `--no-root-dirichlet`).
+        let args = Args::parse_from(["sim-mcts-selfplay"]);
+        assert!(
+            !args.no_root_dirichlet,
+            "selfplay default: --no-root-dirichlet absent"
+        );
+        assert!(
+            !args.no_root_dirichlet == true,
+            "selfplay default add_root_dirichlet=true (TS mctsSelfPlay.ts:627)"
+        );
+        assert!((args.dirichlet_alpha - 0.3).abs() < 1e-12);
+        assert!((args.dirichlet_epsilon - 0.25).abs() < 1e-12);
+
+        // Opt-out flag flips the gate (mirrors TS
+        // `argv.includes("--no-root-dirichlet")`).
+        let args_off = Args::parse_from(["sim-mcts-selfplay", "--no-root-dirichlet"]);
+        assert!(args_off.no_root_dirichlet);
+        assert!(!args_off.no_root_dirichlet == false);
+
+        // Manifest echo surfaces the resolved flag so post-hoc audits
+        // can confirm Dirichlet was on. Bug 2 originally went unnoticed
+        // because the manifest emitted alpha/epsilon but not the gate.
+        let manifest = args.manifest_args_json();
+        assert_eq!(
+            manifest.get("addRootDirichlet").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let manifest_off = args_off.manifest_args_json();
+        assert_eq!(
+            manifest_off.get("addRootDirichlet").and_then(|v| v.as_bool()),
+            Some(false)
+        );
     }
 }
