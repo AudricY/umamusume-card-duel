@@ -13,5 +13,6 @@
 pub mod core;
 pub mod fingerprint;
 pub mod flow;
+pub mod policy;
 
 pub use crate::core::random;
