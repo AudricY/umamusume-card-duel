@@ -1,7 +1,7 @@
 # Fork B — Imitation-Target / Label-Quality (MCTS-distill search-recipe forward axis)
 
 - **Date:** 2026-05-18
-- **Status:** scoped — actionable; gated behind a cheap label-quality probe before any loop compute
+- **Status:** SCOPING — actionable; gated behind a cheap label-quality probe before any loop compute. Tracked in queue under `w6-loop-anti-degradation` (Ceiling Path A) and related label-quality forward lines.
 - **Owns:** the loop-recipe forward axis as a *label-quality* problem. The
   `w6-loop-anti-degradation` queue item / `r110.md` §4c own one mechanism
   (anti-degradation regularizer dose). This doc is the umbrella that frames

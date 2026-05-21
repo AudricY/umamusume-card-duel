@@ -1,7 +1,7 @@
 # GPU-Fed Stronger MCTS — Scoping Seed
 
 - **Date:** 2026-05-18
-- **Status:** scoping seed, no implementation yet
+- **Status:** SCOPING — seed only, no implementation. Compounds with `rust-port-orchestrator-wiring` (Rust 140× MCTS shrinks the cost of high-sim regimes); revisit when a load-bearing question requires the high-sim datapoint. Related queue item: `high-sim-mcts-regime-probe`.
 - **One-liner:** Use GPU inference to buy strictly stronger search-wrapped play
   than rollout-leaf MCTS @ W6 iter-2, not merely the same strength at lower
   latency.
