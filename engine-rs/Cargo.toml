@@ -23,6 +23,20 @@ clap = { version = "4", features = ["derive"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 indexmap = { version = "2", features = ["serde"] }
 arrayvec = { version = "0.7", features = ["serde"] }
+# R16-P3 throughput-optimization-spike Option A (commit: this slice). The
+# `ort` 2.x crate is a thin safe wrapper over ONNX Runtime; `load-dynamic`
+# resolves `libonnxruntime.so` at runtime (env `ORT_DYLIB_PATH`) so we can
+# reuse the system / venv-installed runtime (e.g.
+# `training/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.22.0`)
+# without bundling the binary. `api-22` is pinned to the system ORT major;
+# bump in lockstep with the runtime upgrade. `ndarray` is required by the
+# IR-3 typed tensor path; default `download-binaries` / `copy-dylibs` are
+# disabled to keep release-build determinism (no network step at build).
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-21"] }
+# Match ORT's transitive ndarray major (0.17 in 2.0.0-rc.12) so the
+# trait-impl bridge to `TensorRef::from_array_view` resolves; mismatched
+# majors compile to two crate instances and the From impl never fires.
+ndarray = "0.17"
 
 [profile.release]
 opt-level = 3

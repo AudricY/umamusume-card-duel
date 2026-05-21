@@ -1,5 +1,7 @@
 //! `MctsConfig` + defaults — bit-identical to `mcts.ts:143` `defaultMctsConfig`.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,13 +35,22 @@ pub struct MctsConfig {
     pub collapse_max_steps: u32,
     pub adaptive_ratio: f64,
     pub adaptive_min_sims: u32,
-    /// Optional `/predict` server URL. Defaults to empty; `run_mcts` takes
-    /// the URL as a separate argument matching the TS `runMcts(state,
-    /// modelSide, config, modelUrl, seed)` signature, but having a field
-    /// here lets callers carry the URL alongside the config when building
-    /// CLI argument structures.
+    /// LEGACY: was the `/predict` HTTP server URL when the engine called
+    /// out to `serve_onnx.py`. R16-P3 spike Option A landed in-process
+    /// ORT (see `crate::inference`); this field is retained for one
+    /// release so orchestrator argument plumbing doesn't break in
+    /// lockstep, but it is now IGNORED at predict time. Deprecate-and-
+    /// remove in the follow-up r12_orchestrator-wiring slice.
     #[serde(default)]
     pub model_url: String,
+    /// R16-P3 spike Option A: path to the ONNX policy file. When set,
+    /// `crate::inference::set_global` should have been invoked with a
+    /// session loaded from this path before MCTS launches (typically by
+    /// the sim-cli binary's `main()`). Carried here so callers can pin
+    /// the source-of-truth on the config object alongside the URL field
+    /// during the transition window.
+    #[serde(default)]
+    pub onnx_path: Option<PathBuf>,
 }
 
 impl Default for MctsConfig {
@@ -60,6 +71,7 @@ impl Default for MctsConfig {
             adaptive_ratio: 0.0,
             adaptive_min_sims: 20,
             model_url: String::new(),
+            onnx_path: None,
         }
     }
 }

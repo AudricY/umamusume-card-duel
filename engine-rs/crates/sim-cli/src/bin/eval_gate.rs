@@ -25,6 +25,7 @@ use engine::dispatcher::{
     get_forced_attack_coin_results, state_hash,
 };
 use engine::headless_setup::setup_ai_vs_ai_game;
+use engine::inference::{self, InferenceSession};
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
 use engine::mcts::driver::run_mcts;
 use engine::policy::actions::enumerate_legal_ai_actions;
@@ -118,6 +119,13 @@ struct Args {
     /// parallelise by spawning multiple Rust binaries).
     #[arg(long, default_value_t = 1)]
     workers: u32,
+    /// R16-P3 spike Option A: path to the ONNX policy file (v3.0
+    /// graph). Required when `--leaf value-head` or `--prior policy` is
+    /// set. Replaces the HTTP `/predict` round-trip the prior
+    /// `--challenger` URL used to drive. Set `ORT_DYLIB_PATH` to the
+    /// libonnxruntime.so location.
+    #[arg(long)]
+    onnx_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -329,12 +337,38 @@ fn main() -> Result<()> {
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
         model_url: model_url.clone(),
+        onnx_path: args.onnx_path.clone().map(PathBuf::from),
     };
     // Accept for orchestrator-flag parity (no-op stubs for now).
     let _ = args.selection;
     let _ = args.min_ci_lower;
     let _ = args.min_games;
     let _ = args.workers;
+    // R16-P3 spike Option A: load the ONNX policy if either leaf or
+    // prior path needs the model. Same bootstrap pattern as
+    // sim-mcts-selfplay — one-time graph compile, shared session.
+    let needs_inference =
+        matches!(prior, MctsPrior::Policy) || matches!(leaf, MctsLeaf::ValueHead);
+    if needs_inference {
+        let onnx = args
+            .onnx_path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "sim-eval-gate: --onnx-path is required when --prior policy or --leaf value-head is set"
+                )
+            })?;
+        let session = InferenceSession::load(std::path::Path::new(onnx))
+            .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
+        inference::set_global(session);
+        eprintln!("sim-eval-gate: loaded inference session from {}", onnx);
+    } else if !model_url.is_empty() {
+        eprintln!(
+            "sim-eval-gate: WARNING --challenger/--model-url is DEPRECATED (R16-P3); \
+             pass --onnx-path instead. The HTTP /predict path has been removed."
+        );
+    }
     // Mirror TS `evalGate.ts:43-49`: build the (seed, side) task list so
     // `--games N --model-side both` schedules 2N tasks (one per side per
     // seed), and `--games N --model-side player|opponent` schedules N

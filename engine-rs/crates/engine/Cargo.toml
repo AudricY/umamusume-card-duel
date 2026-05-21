@@ -2,12 +2,26 @@
 name = "engine"
 version = "0.1.0"
 edition.workspace = true
-rust-version.workspace = true
+# R16-P3 spike Option A: the `ort` 2.x crate requires rustc >= 1.88. Engine
+# bumps its rust-version above the workspace floor to admit `ort` as a
+# default-on dependency; downstream crates inherit transitively. CI image
+# already runs 1.92.
+rust-version = "1.88"
 license.workspace = true
 
 [lib]
 name = "engine"
 path = "src/lib.rs"
+
+[features]
+# R16-P3 spike Option A. `inference` gates the in-process ONNX path
+# (`crate::inference` + the `predict_*` driver functions) so callers that
+# do NOT need policy/value (golden-replay, codegen, headless test setup)
+# can drop the ORT binding cost. Default-on so the sim-cli + MCTS path
+# Just Works; flip off via `--no-default-features` in consumers that need
+# a leaner build.
+default = ["inference"]
+inference = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 serde.workspace = true
@@ -15,7 +29,8 @@ serde_json.workspace = true
 xxhash-rust.workspace = true
 indexmap.workspace = true
 arrayvec.workspace = true
-ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow.workspace = true

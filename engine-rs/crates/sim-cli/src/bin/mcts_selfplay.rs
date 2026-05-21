@@ -20,6 +20,7 @@ use engine::dispatcher::{
     get_forced_attack_coin_results, state_hash,
 };
 use engine::headless_setup::setup_ai_vs_ai_game;
+use engine::inference::{self, InferenceSession};
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
 use engine::mcts::driver::run_mcts;
 use engine::mcts::sample::pick_from_visits;
@@ -99,10 +100,21 @@ struct Args {
     /// since rows can be large.
     #[arg(long, default_value_t = false)]
     record_rows: bool,
-    /// `/predict` server URL. When set with --leaf=value-head, MCTS
-    /// queries it for leaf values + policy priors.
+    /// LEGACY: `/predict` server URL. R16-P3 spike Option A landed
+    /// in-process ORT (see `engine::inference`); this flag is accepted
+    /// for one release so orchestrators can transition without a
+    /// hard break, but it is IGNORED at predict time. Pass
+    /// `--onnx-path` instead.
     #[arg(long, default_value = "")]
     model_url: String,
+    /// R16-P3 spike Option A: path to the ONNX policy file (v3.0
+    /// graph). When set with `--leaf value-head` or `--prior policy`,
+    /// the in-process ORT session is loaded once at startup and shared
+    /// across all MCTS calls — replaces the prior HTTP `/predict`
+    /// round-trip. Set `ORT_DYLIB_PATH` to the libonnxruntime.so
+    /// (e.g. `training/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.22.0`).
+    #[arg(long)]
+    onnx_path: Option<String>,
 }
 
 impl Args {
@@ -131,6 +143,7 @@ impl Args {
             "out": self.out,
             "recordRows": self.record_rows,
             "modelUrl": self.model_url,
+            "onnxPath": self.onnx_path,
         })
     }
 }
@@ -428,6 +441,33 @@ fn main() -> Result<()> {
         "policy" => MctsPrior::Policy,
         _ => MctsPrior::Uniform,
     };
+    // R16-P3 spike Option A: load the ONNX policy in-process if any
+    // model-consuming path is active (policy prior OR value-head leaf).
+    // Done once before the seed loop so the ORT session bootstrap cost
+    // (~100ms graph compile) is amortized across all games.
+    let needs_inference = matches!(prior, MctsPrior::Policy) || matches!(leaf, MctsLeaf::ValueHead);
+    if needs_inference {
+        let onnx = args
+            .onnx_path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "sim-mcts-selfplay: --onnx-path is required when --prior policy or --leaf value-head is set"
+                )
+            })?;
+        let session = InferenceSession::load(std::path::Path::new(onnx))
+            .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
+        inference::set_global(session);
+        eprintln!("sim-mcts-selfplay: loaded inference session from {}", onnx);
+    } else if args.model_url.is_empty() && args.onnx_path.is_none() {
+        // pure-uniform/rollout path doesn't need a session.
+    } else if !args.model_url.is_empty() {
+        eprintln!(
+            "sim-mcts-selfplay: WARNING --model-url is DEPRECATED (R16-P3); \
+             pass --onnx-path instead. The HTTP /predict path has been removed."
+        );
+    }
     // Mirror TS `mctsSelfPlay.ts:627` default (Dirichlet ON unless explicit
     // `--no-root-dirichlet`). Bug fix 2 of `rust-port-orchestrator-wiring`
     // Slice 2 follow-ups: prior code hard-coded false even though both
@@ -449,6 +489,7 @@ fn main() -> Result<()> {
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
         model_url: args.model_url.clone(),
+        onnx_path: args.onnx_path.clone().map(PathBuf::from),
     };
     let _ = args.workers;
     let temperature_moves = args.temperature_moves;

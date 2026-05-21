@@ -6,13 +6,14 @@
 //! - Step via `step_from_model_decision`, which applies an action and then
 //!   collapses heuristic-opponent turns until the next model decision.
 //! - Leaf evaluation either rolls out via the heuristic opponent or calls
-//!   the `/predict` HTTP endpoint (when configured for value-head leaves).
+//!   the in-process ONNX inference path (when configured for value-head
+//!   leaves). R16-P3 spike Option A: the prior HTTP `/predict` round-trip
+//!   was replaced with `crate::inference::global().predict_v3(...)` —
+//!   `model_url` is now an ignored backward-compat field on `MctsConfig`.
 //!
 //! RNG-tree: the driver creates `Rng::from_seed(seed, "mcts-root")` — this
 //! is a SEPARATE RNG tree from any outer recorder/selfplay tree, matching
 //! the TS source's `createSeededRng(seed, "mcts-root")` in `mcts.ts:177`.
-
-use std::sync::OnceLock;
 
 use crate::core::constants::SideId;
 use crate::core::random::{with_rng, Rng};
@@ -28,19 +29,6 @@ use crate::mcts::sample::sample_dirichlet;
 use crate::policy::actions::enumerate_legal_ai_actions;
 use crate::policy::observation::build_public_observation;
 use crate::policy::types::LegalAiAction;
-
-/// Shared keep-alive HTTP client. Mirrors the TS `keepAliveClient` singleton —
-/// one agent for the whole process so socket reuse keeps `/predict` latency
-/// dominated by inference rather than TCP handshake.
-fn http_client() -> &'static ureq::Agent {
-    static CLIENT: OnceLock<ureq::Agent> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-    })
-}
 
 /// Top-level entry. Caller passes the inner seed string verbatim — the
 /// driver constructs the `mcts-root` RNG tree internally.
@@ -418,42 +406,32 @@ fn build_model_decision_node(
     }
 }
 
+/// R16-P3 Option A: in-process predict via `crate::inference`. The
+/// previous HTTP `/predict` round-trip + JSON serde lived here; that
+/// path was ~0.5-1ms RTT-dominated, the new path is ~10-100µs.
 fn predict_policy_and_value(
-    model_url: &str,
+    _model_url: &str,
     state: &GameState,
     model_side: SideId,
     legal_actions: &[LegalAiAction],
     _rng: &mut Rng,
 ) -> (Vec<f64>, f64) {
-    let url = format!("{}/predict", model_url.trim_end_matches('/'));
     let observation = build_public_observation(state, model_side);
-    let body = serde_json::json!({
-        "observation": observation,
-        "legalActions": legal_actions,
-        "sampling": "greedy",
-    });
-    let body_string = serde_json::to_string(&body).expect("serialize /predict body");
-    let response = http_client()
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .send_string(&body_string);
-    let parsed: PredictResponse = match response {
-        Ok(r) => match r.into_json::<PredictResponse>() {
-            Ok(p) => p,
-            Err(e) => panic!("MCTS prior+value parse failed: {}", e),
-        },
-        Err(e) => panic!("MCTS prior+value request failed: {}", e),
+    let session = crate::inference::global().expect(
+        "MCTS predict_policy_and_value: no inference session loaded — \
+         call inference::set_global(...) before run_mcts (typically in \
+         the sim-cli main()).",
+    );
+    let prediction = match session.predict_v3(&observation, legal_actions) {
+        Ok(p) => p,
+        Err(e) => panic!("MCTS prior+value inference failed: {}", e),
     };
-    let probs_row: &[f64] = parsed
-        .action_probs
-        .as_ref()
-        .and_then(|m| m.first().map(|v| v.as_slice()))
-        .unwrap_or(&[]);
-    let mut probs: Vec<f64> = probs_row
+    let mut probs: Vec<f64> = prediction
+        .probs
         .iter()
         .take(legal_actions.len())
         .copied()
-        .map(|p| if p.is_finite() { p.max(0.0) } else { 0.0 })
+        .map(|p| if p.is_finite() { p.max(0.0) as f64 } else { 0.0 })
         .collect();
     let sum: f64 = probs.iter().sum();
     if sum > 0.0 {
@@ -463,20 +441,7 @@ fn predict_policy_and_value(
     } else {
         probs = vec![1.0 / legal_actions.len() as f64; legal_actions.len()];
     }
-    let value = parsed
-        .value
-        .as_ref()
-        .and_then(|v| v.first().copied())
-        .unwrap_or(0.0);
-    (probs, value)
-}
-
-#[derive(serde::Deserialize)]
-struct PredictResponse {
-    #[serde(default, rename = "actionProbs")]
-    action_probs: Option<Vec<Vec<f64>>>,
-    #[serde(default)]
-    value: Option<Vec<f64>>,
+    (probs, prediction.value as f64)
 }
 
 fn step_from_model_decision(
@@ -570,32 +535,24 @@ fn leaf_value(
     }
 }
 
-fn value_head_leaf_value(state: &GameState, model_side: SideId, model_url: &str) -> f64 {
+fn value_head_leaf_value(state: &GameState, model_side: SideId, _model_url: &str) -> f64 {
     let legal_actions = enumerate_legal_ai_actions(state, model_side);
-    let url = format!("{}/predict", model_url.trim_end_matches('/'));
+    if legal_actions.is_empty() {
+        // No actions means there's nothing to predict against; fall back
+        // to the terminal-value evaluation (Python serve_onnx errors on
+        // empty legalActions, so we short-circuit before the call).
+        return mcts_terminal_value(state, model_side);
+    }
     let observation = build_public_observation(state, model_side);
-    let body = serde_json::json!({
-        "observation": observation,
-        "legalActions": legal_actions,
-        "sampling": "greedy",
-    });
-    let body_string = serde_json::to_string(&body).expect("serialize /predict body");
-    let response = http_client()
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .send_string(&body_string);
-    let parsed: PredictResponse = match response {
-        Ok(r) => match r.into_json::<PredictResponse>() {
-            Ok(p) => p,
-            Err(e) => panic!("MCTS leaf value parse failed: {}", e),
-        },
-        Err(e) => panic!("MCTS leaf value request failed: {}", e),
-    };
-    parsed
-        .value
-        .as_ref()
-        .and_then(|v| v.first().copied())
-        .unwrap_or(0.0)
+    let session = crate::inference::global().expect(
+        "MCTS value_head_leaf_value: no inference session loaded — \
+         call inference::set_global(...) before run_mcts (typically in \
+         the sim-cli main()).",
+    );
+    match session.predict_v3(&observation, &legal_actions) {
+        Ok(p) => p.value as f64,
+        Err(e) => panic!("MCTS leaf value inference failed: {}", e),
+    }
 }
 
 fn rollout_leaf_value(
@@ -862,6 +819,7 @@ mod tests {
             adaptive_ratio: 0.0,
             adaptive_min_sims: 100,
             model_url: String::new(),
+            onnx_path: None,
         };
         let (_out, _) = with_rng(Rng::from_seed(33u32, "step-test"), || {
             let mut rng = Rng::from_seed(33u32, "inner");
@@ -891,6 +849,7 @@ mod tests {
             adaptive_ratio: 0.0,
             adaptive_min_sims: 100,
             model_url: String::new(),
+            onnx_path: None,
         };
         // The state we built is still in `setup` phase — MCTS root will see
         // `game_over=false` but enumerate_legal_ai_actions will return setup

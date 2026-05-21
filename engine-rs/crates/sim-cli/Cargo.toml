@@ -25,6 +25,14 @@ path = "src/bin/mcts_selfplay.rs"
 name = "sim-export-training"
 path = "src/bin/export_training.rs"
 
+# R16-P3 spike Option A parity-smoke binary. Drives both the new
+# in-process ORT path AND the legacy serve_onnx HTTP path on N random
+# game states and asserts numeric agreement to <=1e-5 abs. External
+# stopping gate for the inference slice.
+[[bin]]
+name = "sim-inference-parity"
+path = "src/bin/inference_parity.rs"
+
 [dependencies]
 engine = { path = "../engine" }
 serde.workspace = true
@@ -32,3 +40,7 @@ serde_json.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 arrayvec.workspace = true
+# Only the parity smoke needs HTTP — kept lean (default features off,
+# tls-only) so the production sim-cli binaries (which no longer talk
+# HTTP after R16-P3 Option A) don't pull in TLS at link time.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }

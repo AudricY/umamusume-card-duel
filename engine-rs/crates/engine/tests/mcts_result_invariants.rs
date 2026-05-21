@@ -30,6 +30,7 @@ fn default_config(sims: u32) -> MctsConfig {
         adaptive_ratio: 0.0,
         adaptive_min_sims: 50,
         model_url: String::new(),
+        onnx_path: None,
     }
 }
 

@@ -52,6 +52,7 @@ fn drive_mcts_game(seed: &str) -> (String, u32, Option<SideId>) {
         adaptive_ratio: 0.0,
         adaptive_min_sims: 30,
         model_url: String::new(),
+        onnx_path: None,
     };
     let model_side = SideId::Player;
 

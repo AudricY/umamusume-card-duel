@@ -7,6 +7,8 @@
 
 pub mod actions;
 pub mod card_vocab;
+/// R16-P3 throughput-spike Option A: in-process v3.0 featurizer.
+pub mod featurize;
 pub mod observation;
 pub mod phase;
 pub mod types;

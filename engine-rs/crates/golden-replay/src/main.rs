@@ -203,6 +203,7 @@ fn v4_replay_for_seed(
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
         model_url: String::new(),
+        onnx_path: None,
     };
 
     let limit = if max_steps_to_replay == 0 {

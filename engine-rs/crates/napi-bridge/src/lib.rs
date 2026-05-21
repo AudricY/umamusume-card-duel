@@ -342,6 +342,11 @@ fn build_config(args: &McTsArgs) -> MctsConfig {
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
         model_url: args.model_url.clone().unwrap_or_default(),
+        // NAPI consumer does not yet plumb ONNX path; the JS-side
+        // backend would need to call `inference::set_global` manually
+        // through a sibling FFI export. Left None here so the existing
+        // NAPI smokes (uniform/rollout-only) keep building.
+        onnx_path: None,
     }
 }
 

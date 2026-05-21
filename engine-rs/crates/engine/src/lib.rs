@@ -15,6 +15,8 @@ pub mod dispatcher;
 pub mod fingerprint;
 pub mod flow;
 pub mod headless_setup;
+#[cfg(feature = "inference")]
+pub mod inference;
 pub mod mcts;
 pub mod policy;
 
