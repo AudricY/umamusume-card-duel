@@ -41,6 +41,35 @@ console.log(`Benchmark: ${N} heuristic-vs-heuristic games each way.`);
   );
 }
 
+// 1b. NAPI loop, MCTS-vs-heuristic. Slower per game (MCTS sims) but
+// still in-process — measures the MCTS pipeline cost without
+// subprocess startup.
+{
+  const cfg = JSON.stringify({
+    simulations: 30,
+    cPuct: 1.5,
+    rolloutCrnSamples: 2,
+    rolloutSteps: 100,
+    prior: "uniform",
+    leaf: "rollout",
+    maxNodes: 1000,
+  });
+  const t0 = process.hrtime.bigint();
+  let totalSteps = 0, totalDecisions = 0;
+  for (let i = 0; i < N; i += 1) {
+    const r = JSON.parse(bridge.driveMctsGameJson(String(i), "player", 500, cfg));
+    totalSteps += r.steps;
+    totalDecisions += r.modelDecisions;
+  }
+  const t1 = process.hrtime.bigint();
+  const wallMs = Number(t1 - t0) / 1e6;
+  console.log(
+    `  NAPI MCTS in-process:${(N / (wallMs / 1000)).toFixed(1).padStart(7)} games/s   `
+      + `${(wallMs / N).toFixed(2).padStart(7)} ms/game   `
+      + `wall ${wallMs.toFixed(0)} ms   total ${totalSteps} steps, ${totalDecisions} MCTS decisions`,
+  );
+}
+
 // 2. Subprocess loop. Use sim-export-training which drives heuristic
 // games to terminal; the closest binary to driveHeuristicGameJson.
 const binDir = join(here, "..", "target", "release");

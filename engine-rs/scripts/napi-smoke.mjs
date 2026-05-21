@@ -145,4 +145,31 @@ if (seedHashes.size !== 5) {
 }
 console.log(`5 distinct seeds produce 5 distinct final hashes (cross-seed determinism OK)`);
 
-console.log("✅ napi-bridge smoke OK (engineVersion, createGameJson, advanceStepJson, legalActionsJson, stateHashForJson, runMctsJson, mctsStepJson, driveHeuristicGameJson)");
+// driveMctsGameJson: pure-Rust MCTS-vs-heuristic loop, bit-identical
+// to sim-mcts-selfplay. Pin known-good hashes for seeds 0 and 42 so
+// any future drift in the MCTS pipeline (search, rollout, leaf-value,
+// or backprop) trips this regression net.
+const mctsGameArgs = JSON.stringify({
+  simulations: 30,
+  cPuct: 1.5,
+  rolloutCrnSamples: 2,
+  rolloutSteps: 100,
+  prior: "uniform",
+  leaf: "rollout",
+  maxNodes: 1000,
+});
+const expectedMcts = {
+  "0":  { hash: "d81c37747400442e79ed50e2a4e14867", steps: 51, winner: "player" },
+  "42": { hash: "0d3f4d96d091896628b98c82456772f8", steps: 71, winner: "player" },
+};
+for (const [seed, want] of Object.entries(expectedMcts)) {
+  const got = JSON.parse(bridge.driveMctsGameJson(seed, "player", 500, mctsGameArgs));
+  if (got.finalStateHash !== want.hash || got.steps !== want.steps || got.winner !== want.winner) {
+    throw new Error(
+      `driveMctsGameJson("${seed}") drift: expected (${want.hash}, ${want.steps}, ${want.winner}), got (${got.finalStateHash}, ${got.steps}, ${got.winner})`,
+    );
+  }
+}
+console.log(`driveMctsGameJson("0"/"42") matches recorded golden hashes`);
+
+console.log("✅ napi-bridge smoke OK (engineVersion, createGameJson, advanceStepJson, legalActionsJson, stateHashForJson, runMctsJson, mctsStepJson, driveHeuristicGameJson, driveMctsGameJson)");
