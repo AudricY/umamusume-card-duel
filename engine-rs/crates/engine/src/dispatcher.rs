@@ -199,6 +199,7 @@ pub fn create_game(
         ai_deck_style_by_side: [AiDeckStyle::Balanced, AiDeckStyle::Balanced],
         game_over: false,
         winner: None,
+        log: std::collections::VecDeque::new(),
     }
 }
 
@@ -922,6 +923,12 @@ fn advance_ai_turn_step(
                         advance_to_next_turn(state);
                     }
                     return;
+                } else {
+                    // Mirror TS engine.ts:391 — emit the "did not attack"
+                    // log line that turn_plan::has_consecutive_no_attack_turns
+                    // matches.
+                    let title = state.side(acting_side_id).title.clone();
+                    crate::core::log::log(state, format!("{} did not attack.", title));
                 }
                 state.opponent_turn_step = None;
                 if !state.game_over {

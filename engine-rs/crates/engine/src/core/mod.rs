@@ -4,6 +4,7 @@ pub mod constants;
 pub mod decks;
 pub mod effects;
 pub mod labels;
+pub mod log;
 pub mod packed;
 pub mod play_types;
 pub mod random;

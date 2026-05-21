@@ -369,6 +369,20 @@ pub fn perform_attack(
         }
     }
 
+    // Mirror TS combat.ts:124 — emit the "attacked with" log line that
+    // turn_plan::has_consecutive_no_attack_turns matches. Only the
+    // damage > 0 branch produces this exact prefix.
+    if damage > 0 {
+        let attacker_card_name = format!(
+            "{}'s {}",
+            crate::core::labels::format_umamusume_card_name(&attacker_card),
+            attack.name
+        );
+        let actor = crate::core::labels::actor_name(state.side(attacker_id));
+        let msg = format!("{} attacked with {} for {} damage.", actor, attacker_card_name, damage);
+        crate::core::log::log(state, msg);
+    }
+
     // Counter damage from defender's active tool (only when the attacked
     // target was the defender's active).
     let counter_damage = if damage > 0 {
@@ -1225,6 +1239,7 @@ mod tests {
             ai_deck_style_by_side: [AiDeckStyle::Balanced, AiDeckStyle::Balanced],
             game_over: false,
             winner: None,
+            log: std::collections::VecDeque::new(),
         }
     }
 

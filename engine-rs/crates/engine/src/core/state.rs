@@ -161,7 +161,15 @@ impl CurrentSide {
 
 /// `shared/src/types.ts:218` `GameState`.
 ///
-/// `log` is excluded — see module doc.
+/// `log` mirrors TS `state.log` and is intentionally NOT included in the
+/// packed fingerprint — `backend/src/sim/stateFingerprint.ts` excludes it
+/// from the TS fingerprint too. It IS used by the heuristic opponent's
+/// `has_consecutive_no_attack_turns` (Phase 1f), which reads
+/// `state.log[0..64]` searching for "did not attack" / "attacked with"
+/// entries. We cap at 12 to match TS `core/log.ts:5` `slice(0, 12)`.
+///
+/// `#[serde(skip)]` so JSON serialization of GameState round-trips don't
+/// emit the log (consumers don't expect it).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub phase: Phase,
@@ -180,6 +188,10 @@ pub struct GameState {
     pub ai_deck_style_by_side: [AiDeckStyle; 2],
     pub game_over: bool,
     pub winner: Option<SideId>,
+    /// Most-recent-first log entries (TS `unshift` + `slice(0, 12)`).
+    /// Excluded from packed buffer + fingerprint.
+    #[serde(skip)]
+    pub log: std::collections::VecDeque<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -107,6 +107,7 @@ fn build_realistic_state() -> GameState {
         ai_deck_style_by_side: [AiDeckStyle::Balanced, AiDeckStyle::Balanced],
         game_over: false,
         winner: None,
+        log: std::collections::VecDeque::new(),
     }
 }
 

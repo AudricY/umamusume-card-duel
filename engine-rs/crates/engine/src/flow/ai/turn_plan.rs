@@ -352,13 +352,38 @@ fn had_recent_no_attack(state: &GameState, side_title: &str) -> bool {
 
 /// `turnPlan.ts:179` `hasConsecutiveNoAttackTurns`.
 ///
-/// Walks the first 64 log entries looking for "did not attack." / "attacked
-/// with " streaks. The Rust engine elects not to maintain the log buffer
-/// (per the fingerprint contract, see flow module docs), so this always
-/// reports false — TS callers that depended on this would receive the same
-/// answer as a freshly-cleared log. Logging support could land later as a
-/// trace-side concern without altering the heuristic surface.
-pub fn has_consecutive_no_attack_turns(_state: &GameState, _side_title: &str, _required_count: u32) -> bool {
+/// Walks the first 64 log entries (most-recent first, matching TS
+/// `unshift` semantics) looking for "${sideTitle} did not attack." and
+/// "${sideTitle} attacked with " streaks.
+///
+/// **TS quirk preserved**: the "attacked with" log line is emitted by
+/// `combat.ts:124` using `actorName(attacker)` ("You" or "Opponent")
+/// rather than `side.title`, so when the heuristic searches for
+/// "${title} attacked with " on the player side (title="Player AI",
+/// actorName="You"), the prefix NEVER matches and the streak does not
+/// reset. This is the intended TS behavior — `state.log` is bounded at
+/// 12 entries by `core/log.ts`, so the heuristic's window is small
+/// enough that the bug rarely produces stuck-on-streak states.
+pub fn has_consecutive_no_attack_turns(
+    state: &GameState,
+    side_title: &str,
+    required_count: u32,
+) -> bool {
+    let no_attack = format!("{} did not attack.", side_title);
+    let attack_prefix = format!("{} attacked with ", side_title);
+    let mut streak: u32 = 0;
+    for entry in state.log.iter().take(64) {
+        if entry == &no_attack {
+            streak += 1;
+            if streak >= required_count {
+                return true;
+            }
+            continue;
+        }
+        if entry.starts_with(&attack_prefix) {
+            streak = 0;
+        }
+    }
     false
 }
 
@@ -413,6 +438,7 @@ mod tests {
             ai_deck_style_by_side: [AiDeckStyle::Balanced, AiDeckStyle::Balanced],
             game_over: false,
             winner: None,
+            log: std::collections::VecDeque::new(),
         }
     }
 
