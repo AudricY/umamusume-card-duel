@@ -221,36 +221,29 @@ fn v4_replay_for_seed(
 
         let legal = enumerate_legal_ai_actions(&state, side_id);
 
-        let chosen_action: LegalAiAction = if legal.len() <= 1 {
-            match legal.into_iter().next() {
-                Some(a) => a,
-                None => LegalAiAction {
-                    id: "__none__".to_string(),
-                    phase: parse_ai_phase(&step.action.phase),
-                    kind: "__none__".to_string(),
-                    payload: serde_json::Value::Null,
-                    features: Vec::new(),
-                    action_source_card_idx: None,
-                    action_target_card_idx: None,
-                },
-            }
-        } else {
+        // V4b: run Rust MCTS for RNG consumption when there are multiple
+        // legal actions, but advance with the RECORDED action (uid-
+        // remapped per V3 logic). This isolates engine port correctness
+        // from MCTS port correctness.
+        //
+        // Once engine correctness is confirmed, a separate gate compares
+        // Rust MCTS's selected_index to the recorded selectedIndex.
+        if legal.len() > 1 {
             let mcts_seed = format!("{}:{}:{}:mcts", trace.seed, step.side_id, i);
-            let (mcts_result, used_rng) = with_rng(step_rng.clone(), || {
+            let (_mcts_result, used_rng) = with_rng(step_rng.clone(), || {
                 run_mcts(&state, side_id, &config, "", mcts_seed.as_str())
             });
             step_rng = used_rng;
-            let selected_index = mcts_result.selected_index.min(legal.len() - 1);
-            legal[selected_index].clone()
-        };
-
-        if chosen_action.kind != step.action.kind {
-            diffs.push(format!(
-                "step[{}] action.kind: rust={:?} ts={:?}",
-                i, chosen_action.kind, step.action.kind
-            ));
-            break;
         }
+
+        // Apply the RECORDED action (with uid remap).
+        let chosen_action = match remap_action_uids(step, &state) {
+            Ok(a) => a,
+            Err(e) => {
+                diffs.push(format!("step[{}] uid remap failed: {}", i, e));
+                break;
+            }
+        };
 
         let (next_state, used_rng) = with_rng(step_rng.clone(), || {
             let forced = get_forced_attack_coin_results(&state);
