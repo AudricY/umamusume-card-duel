@@ -1,5 +1,5 @@
 //! R16-P3 throughput-spike Option A: in-process ONNX inference for the
-//! v3.0 policy/value graph.
+//! v3.0 and v3.2 policy/value graphs.
 //!
 //! Replaces the HTTP `/predict` round-trip in
 //! `crate::mcts::driver::predict_policy_and_value` /
@@ -7,15 +7,18 @@
 //! is loaded once per process and shared via a global; downstream MCTS
 //! workers stamp it through `InferenceSession::set_global`.
 //!
-//! Schema scope: **v3.0 only** in this slice. The graph signature is
-//! validated at load time:
-//!   - REQUIRED inputs (set-equality): `state_features`,
+//! Schema scope: **v3.0 + v3.2** (Slice 3 lands v3.2). The graph signature
+//! is validated at load time:
+//!   - REQUIRED v3.0 inputs (set-equality): `state_features`,
 //!     `action_features`, `action_mask`, `card_ids_by_zone`,
 //!     `action_card_idx`. Five inputs total.
-//!   - REJECTED inputs: `uma_slot_card_ids`, `uma_slot_features` (the
-//!     v3.2 slot-token pair); raising `unimplemented!()` with a clear
-//!     "use --schema v3.0 only in this slice" message keeps the parity
-//!     smoke unambiguous when run against a v3.2 model.
+//!   - REQUIRED v3.2 inputs: the five v3.0 inputs PLUS `uma_slot_card_ids`
+//!     and `uma_slot_features` (set-equality of 7). Either both v3.2
+//!     inputs are present (v3.2) or neither (v3.0). A partial v3.2 graph
+//!     (one slot input missing) is rejected explicitly (mirrors
+//!     `serve_onnx._graph_has_partial_uma_slot_inputs` guard).
+//!   - REJECTED: v3.1 graphs (164-d state). `unimplemented!()`-style hard
+//!     error pointing at the v3.1 follow-up slice.
 //!
 //! ONNX runtime: dynamic-loaded via `load-dynamic` (set
 //! `ORT_DYLIB_PATH=/path/to/libonnxruntime.so` before invoking; the
@@ -35,7 +38,8 @@ use ort::value::TensorRef;
 
 use crate::policy::card_vocab::card_vocab;
 use crate::policy::featurize::{
-    self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3,
+    self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3, UMA_SLOT_COUNT,
+    UMA_SLOT_FEATURE_DIM,
 };
 use crate::policy::types::{LegalAiAction, PublicObservation};
 
@@ -48,6 +52,22 @@ const REQUIRED_V3_INPUTS: [&str; 5] = [
     "card_ids_by_zone",
     "action_card_idx",
 ];
+
+/// Additional input names that a v3.2 graph declares on top of v3.0.
+/// Both must be present (the slot-token pair is contractual; partial
+/// presence is rejected explicitly, matching serve_onnx).
+const REQUIRED_V3_2_EXTRA_INPUTS: [&str; 2] = [
+    "uma_slot_card_ids",
+    "uma_slot_features",
+];
+
+/// Detected graph schema. Set at session load and read by
+/// `predict_v3` to dispatch the correct tensor packing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphSchema {
+    V3_0,
+    V3_2,
+}
 
 /// Errors surfaced by the inference layer. We hide ORT's `Error` behind
 /// our own enum (as a stringified message) so callers don't have to
@@ -117,6 +137,7 @@ impl From<featurize::FeaturizeError> for InferenceError {
 pub struct InferenceSession {
     session: Mutex<Session>,
     onnx_path: PathBuf,
+    schema: GraphSchema,
 }
 
 impl InferenceSession {
@@ -159,15 +180,16 @@ impl InferenceSession {
             .commit_from_file(onnx_path)
             .map_err(InferenceError::from)?;
 
-        // Graph-signature validation. The required-set must match
-        // exactly the v3.0 contract; surplus inputs (e.g. v3.2's
-        // `uma_slot_*` pair) trigger the explicit "use v3.0 only in
-        // this slice" guard.
-        validate_v3_graph_signature(&session)?;
+        // Graph-signature validation. Detects v3.0 vs v3.2 by input set
+        // (matches `serve_onnx._lookup_schema`). Partial v3.2 (one slot
+        // input missing) is rejected explicitly; v3.1 (164-d) is still
+        // a hard error pointing at the follow-up slice.
+        let schema = validate_graph_signature(&session)?;
 
         Ok(InferenceSession {
             session: Mutex::new(session),
             onnx_path: onnx_path.to_path_buf(),
+            schema,
         })
     }
 
@@ -221,17 +243,66 @@ impl InferenceSession {
             Array::from_shape_vec((1, n_actions, 2), action_card_idx_flat)
                 .map_err(|e| InferenceError::OutputShape(format!("action_card_idx reshape: {e}")))?;
 
+        // v3.2-only auxiliary tensors. We build them unconditionally so the
+        // `TensorRef::from_array_view` borrow lives long enough on both
+        // branches; v3.0 dispatch simply ignores them (ORT hard-rejects
+        // unknown feed keys, so v3.0 graphs MUST omit these from `inputs!`).
+        let (slot_card_ids_flat, slot_features_flat) = match self.schema {
+            GraphSchema::V3_2 => featurize::observation_uma_slots(observation),
+            GraphSchema::V3_0 => (Vec::new(), Vec::new()),
+        };
+        let slot_card_ids_arr = if matches!(self.schema, GraphSchema::V3_2) {
+            Some(
+                Array::from_shape_vec((1, UMA_SLOT_COUNT), slot_card_ids_flat).map_err(|e| {
+                    InferenceError::OutputShape(format!("uma_slot_card_ids reshape: {e}"))
+                })?,
+            )
+        } else {
+            None
+        };
+        let slot_features_arr = if matches!(self.schema, GraphSchema::V3_2) {
+            Some(
+                Array::from_shape_vec(
+                    (1, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM),
+                    slot_features_flat,
+                )
+                .map_err(|e| {
+                    InferenceError::OutputShape(format!("uma_slot_features reshape: {e}"))
+                })?,
+            )
+        } else {
+            None
+        };
+
         // `TensorRef::from_array_view` requires `&ArrayBase<OwnedRepr,_>`
         // (not a `View` produced by `.view()`); pass the owned arrays by
         // reference. This is zero-copy at the FFI boundary — ORT borrows
-        // the buffer for the duration of `run()`.
-        let inputs = ort::inputs![
-            "state_features" => TensorRef::from_array_view(&state_arr)?,
-            "action_features" => TensorRef::from_array_view(&action_features_arr)?,
-            "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
-            "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
-            "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
-        ];
+        // the buffer for the duration of `run()`. The two paths build a
+        // different ort::inputs! map (5 keys for v3.0, 7 keys for v3.2) —
+        // ORT hard-rejects unknown feed keys so we MUST omit the v3.2
+        // tensors from the v3.0 feed.
+        let inputs = match self.schema {
+            GraphSchema::V3_0 => ort::inputs![
+                "state_features" => TensorRef::from_array_view(&state_arr)?,
+                "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+            ],
+            GraphSchema::V3_2 => {
+                let slot_ids = slot_card_ids_arr.as_ref().expect("v3.2 built above");
+                let slot_feats = slot_features_arr.as_ref().expect("v3.2 built above");
+                ort::inputs![
+                    "state_features" => TensorRef::from_array_view(&state_arr)?,
+                    "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                    "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                    "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                    "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+                    "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
+                    "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
+                ]
+            }
+        };
 
         // Hold the lock across both `run()` and the tensor extraction
         // — `outputs[i].try_extract_tensor` borrows from the session,
@@ -345,33 +416,68 @@ fn card_vocab_metadata_hash() -> String {
         .to_string()
 }
 
-fn validate_v3_graph_signature(session: &Session) -> Result<(), InferenceError> {
+fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceError> {
     let session_inputs = session.inputs();
     let inputs: Vec<&str> = session_inputs.iter().map(|i| i.name()).collect();
     let input_set: std::collections::BTreeSet<&str> = inputs.iter().copied().collect();
-    let required: std::collections::BTreeSet<&str> =
+    let required_v3: std::collections::BTreeSet<&str> =
         REQUIRED_V3_INPUTS.iter().copied().collect();
+    let required_v3_2: std::collections::BTreeSet<&str> = REQUIRED_V3_INPUTS
+        .iter()
+        .chain(REQUIRED_V3_2_EXTRA_INPUTS.iter())
+        .copied()
+        .collect();
 
-    // v3.2 reject: explicit unimplemented panic if either slot tensor
-    // is present (per the brief). We use a hard error instead of a
-    // panic at the load site so callers can surface a clean diagnostic.
-    if input_set.contains("uma_slot_card_ids") || input_set.contains("uma_slot_features") {
+    // Partial-pair guard (mirrors serve_onnx._graph_has_partial_uma_slot_inputs):
+    // the v3.2 slot tensors are a CONTRACTUAL pair; refusing to serve a
+    // partial v3.2 graph keeps the diagnostic crisp vs the generic
+    // schema-mismatch path.
+    let has_slot_ids = input_set.contains("uma_slot_card_ids");
+    let has_slot_feats = input_set.contains("uma_slot_features");
+    if has_slot_ids ^ has_slot_feats {
         return Err(InferenceError::SchemaMismatch(format!(
-            "graph declares v3.2 uma_slot_* tensors (inputs: {:?}); \
-             this slice supports v3.0 only — re-export with --schema v3.0 or \
-             wait for the v3.2 follow-up slice",
+            "graph declares exactly one of `uma_slot_card_ids` / \
+             `uma_slot_features` (inputs: {:?}). The v3.2 slot tensors are \
+             a contractual pair; refusing to serve a partial v3.2 graph.",
             inputs
         )));
     }
 
-    if input_set != required {
-        return Err(InferenceError::SchemaMismatch(format!(
-            "graph input set {:?} does not match v3.0 contract {:?}",
-            inputs, REQUIRED_V3_INPUTS
-        )));
+    // v3.2 dispatch: both slot inputs present + required v3.0 inputs all
+    // present (set-equality on the 7-input contract).
+    if has_slot_ids && has_slot_feats {
+        if input_set != required_v3_2 {
+            return Err(InferenceError::SchemaMismatch(format!(
+                "graph input set {:?} does not match v3.2 contract {:?}",
+                inputs,
+                required_v3_2.iter().copied().collect::<Vec<_>>()
+            )));
+        }
+        return Ok(GraphSchema::V3_2);
     }
 
-    Ok(())
+    // v3.0 dispatch: set-equality on the 5-input v3.0 contract.
+    if input_set != required_v3 {
+        // Likely cause for an unexpected set with no slot inputs is a
+        // v3.1 (164-d) graph — that's the only other documented schema
+        // and it's still unimplemented this slice.
+        if input_set.contains("temporal_features")
+            || inputs.iter().any(|n| n.contains("temporal"))
+        {
+            return Err(InferenceError::SchemaMismatch(format!(
+                "graph appears to be v3.1 (164-d temporal/turn-state; \
+                 inputs {:?}); not implemented in this slice — file a \
+                 follow-up issue.",
+                inputs
+            )));
+        }
+        return Err(InferenceError::SchemaMismatch(format!(
+            "graph input set {:?} does not match v3.0 contract {:?} or \
+             v3.2 contract {:?}",
+            inputs, REQUIRED_V3_INPUTS, required_v3_2.iter().copied().collect::<Vec<_>>()
+        )));
+    }
+    Ok(GraphSchema::V3_0)
 }
 
 // ---------------------------------------------------------------------------

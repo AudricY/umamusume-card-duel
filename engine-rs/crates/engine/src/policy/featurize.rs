@@ -1,23 +1,26 @@
 //! R16-P3 throughput-spike Option A: in-process Rust port of the v3.0
-//! observation/action featurizer.
+//! and v3.2 observation/action featurizers.
 //!
-//! Bit-exact port of the **v3.0** Python builders in
+//! Bit-exact port of the **v3.0 + v3.2** Python builders in
 //! `training/uma_ai/features.py`:
 //!   - `observation_to_features`         → `observation_state_features`
 //!   - `legal_actions_to_features`       → `legal_actions_features`
 //!   - `observation_to_card_ids`         → `observation_card_ids_by_zone`
 //!   - `action_card_idx_pair`            → `action_card_idx_pair`
+//!   - `observation_to_uma_slots` (v3.2) → `observation_uma_slots`
 //!   - `card_vocab_metadata` / `card_vocab_index` → reused from
 //!     `crate::policy::card_vocab`.
 //!
 //! Pinned schemas
 //! --------------
-//! v3.0 ONLY in this slice. v3.1 (164-d temporal/turn-state) and v3.2
-//! (110-d head + per-Uma slot tensors) are explicit-unimplemented panics
-//! at the `inference::InferenceSession::load` graph-signature gate so a
-//! parity smoke against a v3.2 model fails loud rather than silently
-//! mis-routing tensors. Follow-up slice covers v3.2 once parity is
-//! confirmed.
+//! v3.0 + v3.2 in this slice. v3.1 (164-d temporal/turn-state) is still
+//! an explicit-unimplemented hard error at the
+//! `inference::InferenceSession::load` graph-signature gate. Slice 3 (this
+//! commit) adds v3.2: same 110-d state head as v3.0 plus the new per-Uma
+//! slot tensor pair (`uma_slot_card_ids: int64[10]`,
+//! `uma_slot_features: float32[10, 23]`). The slot-token feature row is a
+//! verbatim port of Python `_uma_slot_feature_row` — the 23-d layout is
+//! FROZEN (see comment block below for column order).
 //!
 //! Layout fidelity is enforced by:
 //!   - `STATE_DIM_V3 = 110` / `ACTION_DIM = 48` / `NUM_ZONES = 8` /
@@ -753,6 +756,188 @@ pub fn observation_card_ids_by_zone(obs: &PublicObservation) -> Vec<i64> {
     buf
 }
 
+// ---------------------------------------------------------------------------
+// v3.2 per-Uma slot tokens (R16-P2 C1, ported from
+// `training/uma_ai/features.py:563-705`).
+//
+// Slot order is FROZEN as UMA_SLOT_ORDER below — index 0 is own active,
+// 1..4 own bench 0..3, index 5 opp active, 6..9 opp bench 0..3. The 4th
+// bench slot per side is reserved (always absent under engine MAX_BENCH=3);
+// kept so the byte layout stays stable if MAX_BENCH ever grows. Absent
+// slots emit `card_id=0` and an all-zero feature row (same convention as
+// v3.0 `card_ids_by_zone` padding).
+// ---------------------------------------------------------------------------
+
+/// Number of per-Uma slot tokens (2 actives + 8 bench placeholders).
+pub const UMA_SLOT_COUNT: usize = 10;
+/// FROZEN width of the per-slot feature vector. See `_uma_slot_feature_row`
+/// in `training/uma_ai/features.py:577` for the column-by-column layout.
+pub const UMA_SLOT_FEATURE_DIM: usize = 23;
+/// Bench placeholder count per side (= 4; engine `MAX_BENCH=3` so the 4th
+/// is reserved). Mirrors `_UMA_SLOT_BENCH_PER_SIDE`.
+const UMA_SLOT_BENCH_PER_SIDE: usize = 4;
+
+// Per-slot feature-index constants (mirror `_UMA_SLOT_F_*` in Python).
+const _UMA_SLOT_F_POLARITY: usize = 0;
+const _UMA_SLOT_F_ROLE_ACTIVE: usize = 1;
+const _UMA_SLOT_F_SLOT_IDX: usize = 2;
+const _UMA_SLOT_F_PRESENT: usize = 3;
+const _UMA_SLOT_F_HP: usize = 4;
+const _UMA_SLOT_F_DAMAGE: usize = 5;
+const _UMA_SLOT_F_STAGE: usize = 6;
+const _UMA_SLOT_F_ENERGY_TOTAL: usize = 7;
+const _UMA_SLOT_F_ENERGY_TYPED_START: usize = 8; // exclusive end = 18
+const _UMA_SLOT_F_TOOL: usize = 18;
+const _UMA_SLOT_F_COND_PARALYSIS: usize = 19;
+const _UMA_SLOT_F_COND_COUNT: usize = 20;
+const _UMA_SLOT_F_ABILITY_USED: usize = 21;
+const _UMA_SLOT_F_EVOLVED: usize = 22;
+
+/// Per-slot typed-energy order — MUST match `_UMA_SLOT_ENERGY_TYPES` in
+/// Python and the existing `ENERGY_TYPES_ORDER` 10-wide slice (slots 48-58
+/// of v3.0). Compile-time guarded via the length assertion below.
+const _UMA_SLOT_ENERGY_TYPES: [&str; 10] = ENERGY_TYPES_ORDER;
+const _: () = {
+    // Width sanity (mirror Python's assert on _UMA_SLOT_ENERGY_TYPES len).
+    assert!(_UMA_SLOT_ENERGY_TYPES.len() == 10);
+};
+
+/// Build the v3.2 per-Uma slot tensors from a `PublicObservation`.
+///
+/// Returns `(card_ids, features)`:
+///   - `card_ids`: flat `Vec<i64>` of length `UMA_SLOT_COUNT` (= 10). Caller
+///     reshapes to `[1, 10]` for the ONNX feed (matches Python serve_onnx
+///     which prepends the batch dim via `slot_ids[None, :]`).
+///   - `features`: flat row-major `Vec<f32>` of length
+///     `UMA_SLOT_COUNT * UMA_SLOT_FEATURE_DIM` (= 230). Caller reshapes to
+///     `[1, 10, 23]`.
+///
+/// Absent slots (`active` is None, bench slot empty, or `card_id` is the
+/// empty string) yield `card_id=0` and an all-zero feature row. This mirrors
+/// the Python `observation_to_uma_slots` "absence is zero" contract.
+pub fn observation_uma_slots(obs: &PublicObservation) -> (Vec<i64>, Vec<f32>) {
+    let mut card_ids = vec![0i64; UMA_SLOT_COUNT];
+    let mut features = vec![0.0f32; UMA_SLOT_COUNT * UMA_SLOT_FEATURE_DIM];
+
+    // Active slots: own at slot 0 (polarity +1), opp at slot 5 (polarity
+    // -1). `slot_idx_norm = -1.0` marks the active role (per chunk plan).
+    for &(side, polarity, slot_idx) in &[
+        (Side::Own, 1.0f32, 0usize),
+        (Side::Opp, -1.0f32, 5usize),
+    ] {
+        let side_obs = match side {
+            Side::Own => &obs.own,
+            Side::Opp => &obs.opponent,
+        };
+        if let Some(active) = side_obs.active.as_ref() {
+            if !active.card_id.is_empty() {
+                card_ids[slot_idx] = card_vocab_index(Some(active.card_id.as_str())) as i64;
+                let row_start = slot_idx * UMA_SLOT_FEATURE_DIM;
+                fill_uma_slot_row(
+                    &mut features[row_start..row_start + UMA_SLOT_FEATURE_DIM],
+                    Some(active),
+                    polarity,
+                    true,
+                    -1.0,
+                );
+            }
+        }
+    }
+
+    // Bench slots: own bench i at slot 1+i, opp bench i at slot 6+i. Bench
+    // index norm = i / max(1, bench_per_side - 1) (= i/3 for the 4-slot
+    // placeholder; the 4th slot is always absent under MAX_BENCH=3).
+    let bench_denom = (UMA_SLOT_BENCH_PER_SIDE - 1).max(1) as f32;
+    for &(side, polarity, slot_base) in &[
+        (Side::Own, 1.0f32, 1usize),
+        (Side::Opp, -1.0f32, 6usize),
+    ] {
+        let side_obs = match side {
+            Side::Own => &obs.own,
+            Side::Opp => &obs.opponent,
+        };
+        for bench_pos in 0..UMA_SLOT_BENCH_PER_SIDE {
+            let entry = side_obs
+                .bench
+                .get(bench_pos)
+                .and_then(|o| o.as_ref());
+            let Some(entry) = entry else { continue; };
+            if entry.card_id.is_empty() {
+                continue;
+            }
+            let slot_idx = slot_base + bench_pos;
+            card_ids[slot_idx] = card_vocab_index(Some(entry.card_id.as_str())) as i64;
+            let row_start = slot_idx * UMA_SLOT_FEATURE_DIM;
+            fill_uma_slot_row(
+                &mut features[row_start..row_start + UMA_SLOT_FEATURE_DIM],
+                Some(entry),
+                polarity,
+                false,
+                bench_pos as f32 / bench_denom,
+            );
+        }
+    }
+
+    (card_ids, features)
+}
+
+#[derive(Copy, Clone)]
+enum Side {
+    Own,
+    Opp,
+}
+
+/// Mirror of Python `_uma_slot_feature_row` — emit one
+/// `UMA_SLOT_FEATURE_DIM`-wide feature row for a single slot. The slice
+/// must already be zeroed; we only set non-zero columns.
+fn fill_uma_slot_row(
+    row: &mut [f32],
+    uma: Option<&PublicUmaObservation>,
+    polarity: f32,
+    role_active: bool,
+    slot_idx_norm: f32,
+) {
+    debug_assert_eq!(row.len(), UMA_SLOT_FEATURE_DIM);
+    let Some(uma) = uma else { return; };
+    if uma.card_id.is_empty() {
+        return;
+    }
+
+    row[_UMA_SLOT_F_POLARITY] = polarity;
+    row[_UMA_SLOT_F_ROLE_ACTIVE] = if role_active { 1.0 } else { 0.0 };
+    row[_UMA_SLOT_F_SLOT_IDX] = slot_idx_norm;
+    row[_UMA_SLOT_F_PRESENT] = 1.0;
+
+    let max_hp = (uma.max_hp as f32).max(1.0);
+    let hp = uma.hp as f32;
+    row[_UMA_SLOT_F_HP] = (hp / max_hp).max(0.0).min(1.0);
+    row[_UMA_SLOT_F_DAMAGE] = ((max_hp - hp) / max_hp).max(0.0).min(1.0);
+    row[_UMA_SLOT_F_STAGE] = uma.stage as f32 / 2.0;
+    row[_UMA_SLOT_F_ENERGY_TOTAL] = uma.energy_total as f32 / 6.0;
+
+    for (offset, &energy_type) in _UMA_SLOT_ENERGY_TYPES.iter().enumerate() {
+        let amount = uma.energies.get(energy_type).copied().unwrap_or(0) as f32;
+        row[_UMA_SLOT_F_ENERGY_TYPED_START + offset] = amount / 4.0;
+    }
+
+    row[_UMA_SLOT_F_TOOL] = if uma.tool_card_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+        1.0
+    } else {
+        0.0
+    };
+
+    let cond_paralysis = uma
+        .special_conditions
+        .iter()
+        .any(|c| c == "paralysed");
+    row[_UMA_SLOT_F_COND_PARALYSIS] = if cond_paralysis { 1.0 } else { 0.0 };
+    // Full SpecialCondition union has 5 members (asleep/burned/frozen/
+    // paralysed/poisoned per shared/src/types.ts:10), so divide by 5.0.
+    row[_UMA_SLOT_F_COND_COUNT] = uma.special_conditions.len() as f32 / 5.0;
+    row[_UMA_SLOT_F_ABILITY_USED] = if uma.used_ability_this_turn { 1.0 } else { 0.0 };
+    row[_UMA_SLOT_F_EVOLVED] = if (uma.stage as f32) > 0.0 { 1.0 } else { 0.0 };
+}
+
 /// Errors surfaced by the featurizer.
 #[derive(Debug)]
 pub enum FeaturizeError {
@@ -844,5 +1029,141 @@ mod tests {
         assert!(a > 0.0);
         // Empty → 0.
         assert_eq!(hash_to_unit(""), 0.0);
+    }
+
+    // ----------------------------------------------------------------
+    // v3.2 per-Uma slot tokens
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn uma_slots_have_correct_shape() {
+        let obs = fixture();
+        let (card_ids, features) = observation_uma_slots(&obs);
+        assert_eq!(card_ids.len(), UMA_SLOT_COUNT);
+        assert_eq!(features.len(), UMA_SLOT_COUNT * UMA_SLOT_FEATURE_DIM);
+        // UMA_SLOT_COUNT and UMA_SLOT_FEATURE_DIM frozen to the C1
+        // contract — guard against accidental width drift.
+        assert_eq!(UMA_SLOT_COUNT, 10);
+        assert_eq!(UMA_SLOT_FEATURE_DIM, 23);
+    }
+
+    #[test]
+    fn uma_slots_active_row_present_polarity_roleactive() {
+        let obs = fixture();
+        let (card_ids, features) = observation_uma_slots(&obs);
+
+        // Own active is slot 0; setup_ai_vs_ai_game always assigns one.
+        assert!(card_ids[0] > 0, "own active card_id must be a real vocab idx");
+        let row0 = &features[0..UMA_SLOT_FEATURE_DIM];
+        assert_eq!(row0[_UMA_SLOT_F_POLARITY], 1.0, "own polarity = +1");
+        assert_eq!(row0[_UMA_SLOT_F_ROLE_ACTIVE], 1.0, "active flag = 1");
+        assert_eq!(row0[_UMA_SLOT_F_SLOT_IDX], -1.0, "active slot idx = -1");
+        assert_eq!(row0[_UMA_SLOT_F_PRESENT], 1.0, "present mask = 1");
+        // hp ratio is in [0, 1]; evolved is 0 or 1.
+        assert!(row0[_UMA_SLOT_F_HP] >= 0.0 && row0[_UMA_SLOT_F_HP] <= 1.0);
+        assert!(
+            row0[_UMA_SLOT_F_EVOLVED] == 0.0 || row0[_UMA_SLOT_F_EVOLVED] == 1.0
+        );
+
+        // Opp active is slot 5; opponent polarity = -1.
+        assert!(card_ids[5] > 0, "opp active card_id must be set");
+        let row5 = &features[5 * UMA_SLOT_FEATURE_DIM..6 * UMA_SLOT_FEATURE_DIM];
+        assert_eq!(row5[_UMA_SLOT_F_POLARITY], -1.0, "opp polarity = -1");
+        assert_eq!(row5[_UMA_SLOT_F_ROLE_ACTIVE], 1.0, "opp active flag");
+        assert_eq!(row5[_UMA_SLOT_F_PRESENT], 1.0);
+    }
+
+    #[test]
+    fn uma_slots_absent_4th_bench_is_zero() {
+        // Engine MAX_BENCH=3 so slot 4 (own bench[3]) and slot 9 (opp
+        // bench[3]) are ALWAYS absent. The whole row must be zero AND
+        // the card_id must be 0 (the padding idx).
+        let obs = fixture();
+        let (card_ids, features) = observation_uma_slots(&obs);
+        for &slot in &[4usize, 9usize] {
+            assert_eq!(
+                card_ids[slot], 0,
+                "reserved 4th-bench slot {} card_id must be 0 padding",
+                slot
+            );
+            let row = &features[slot * UMA_SLOT_FEATURE_DIM..(slot + 1) * UMA_SLOT_FEATURE_DIM];
+            for (i, &v) in row.iter().enumerate() {
+                assert_eq!(
+                    v, 0.0,
+                    "reserved 4th-bench slot {} col {} must be 0 (got {})",
+                    slot, i, v
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn uma_slots_hp_ratio_matches_observation() {
+        // Numeric parity gate: hp_norm = hp/max_hp clamped to [0,1].
+        // damage_norm = (max_hp-hp)/max_hp. The two MUST sum to 1.0 for
+        // a present slot (no clipping under nominal HP bounds).
+        let obs = fixture();
+        let (_card_ids, features) = observation_uma_slots(&obs);
+        let row0 = &features[0..UMA_SLOT_FEATURE_DIM];
+        let sum = row0[_UMA_SLOT_F_HP] + row0[_UMA_SLOT_F_DAMAGE];
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "hp+damage must sum to 1.0 for present slot (got {})",
+            sum
+        );
+
+        // Cross-check against the raw observation.
+        let active = obs.own.active.as_ref().expect("own active set in fixture");
+        let expected_hp = (active.hp as f32 / (active.max_hp as f32).max(1.0))
+            .max(0.0)
+            .min(1.0);
+        assert!((row0[_UMA_SLOT_F_HP] - expected_hp).abs() < 1e-6);
+    }
+
+    #[test]
+    fn uma_slots_typed_energy_matches_per_slot_sum() {
+        // Per-slot typed-energy slice ∈ [0, 1.5+] (each / 4.0); their
+        // SUM should equal energyTotal / 4.0 modulo per-type rounding —
+        // strictly typed_total / 4.0 = sum of typed entries when all
+        // attached energies enumerate the same 10 types as the order
+        // table (which they do, see ENERGY_TYPES_ORDER guard).
+        let obs = fixture();
+        let (_card_ids, features) = observation_uma_slots(&obs);
+        let row0 = &features[0..UMA_SLOT_FEATURE_DIM];
+        let typed_sum: f32 = row0
+            [_UMA_SLOT_F_ENERGY_TYPED_START.._UMA_SLOT_F_ENERGY_TYPED_START + 10]
+            .iter()
+            .sum();
+        let active = obs.own.active.as_ref().unwrap();
+        let raw_sum: u32 = active.energies.values().map(|&v| v as u32).sum();
+        let expected = raw_sum as f32 / 4.0;
+        assert!(
+            (typed_sum - expected).abs() < 1e-5,
+            "typed-energy sum {} != raw {}/4.0 = {}",
+            typed_sum, raw_sum, expected
+        );
+    }
+
+    #[test]
+    fn uma_slots_absent_active_yields_zero_row() {
+        // Take the seeded fixture, wipe own.active, re-build slots, and
+        // confirm slot 0 (own active) is now zero card_id + zero row.
+        let mut obs = fixture();
+        obs.own.active = None;
+        // Also blank the own bench so the no-active surface is sharp.
+        for slot in obs.own.bench.iter_mut() {
+            *slot = None;
+        }
+        let (card_ids, features) = observation_uma_slots(&obs);
+        for i in 0..5 {
+            assert_eq!(card_ids[i], 0, "own slot {} card_id must be 0", i);
+            let row = &features[i * UMA_SLOT_FEATURE_DIM..(i + 1) * UMA_SLOT_FEATURE_DIM];
+            for (j, &v) in row.iter().enumerate() {
+                assert_eq!(v, 0.0, "own slot {} col {} must be 0 (got {})", i, j, v);
+            }
+        }
+        // Opp side still has its actives — slot 5 (opp active) should
+        // remain populated to confirm we did NOT zero everything.
+        assert!(card_ids[5] > 0);
     }
 }

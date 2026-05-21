@@ -1,6 +1,6 @@
 # Throughput Optimization Spike
 
-> STATUS: **Slice 2 ACCEPTANCE PASSED 4.18× 2026-05-21** — 7.99 min wall vs 33.4 min baseline on 10-iter R110-faithful recipe. Slice 4 scale-up relook landed at `docs/ai-research/scoping/post-throughput-scale-up-directions.md`. Slice 3 (v3.2 featurizer port) now optional — required only for fast-path vhleaf loop.
+> STATUS: **Slice 3 LANDED 2026-05-21** — v3.2 per-Uma slot featurizer ported to Rust; parity smoke 50/50 PASS (max_prob_diff 1.79e-7, max_value_diff 4.47e-7) + 5-game bit-identical cross-run on v3.2 ONNX. Slice 2 acceptance PASSED 4.18× (7.99 min vs 33.4 min baseline). vhleaf loop now unblocked for fast path.
 
 Routing: `docs/ai-research/README.md`. Source-of-truth analysis:
 `docs/ai-research/analysis/r12-loop-throughput.md` (commit `f19cb4c`).
@@ -125,6 +125,49 @@ Re-prioritization summary:
 - DEPRIORITIZED: larger-model arch sweep, 50+ iter long-horizon (gate on positive signal).
 - BACKGROUND: side-conditioned eval as default `sim-eval-gate` report shape.
 
-## Slice 3 (deferred, optional)
+## Slice 3 — v3.2 featurizer port LANDED (2026-05-21)
 
-Port v3.2 per-Uma slot featurizer (`uma_slot_card_ids` + `uma_slot_features`) + ONNX inputs to the Rust path so the v3.2 lineage best (`runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-3/`, wl=0.5538) can ride the in-process path. Required ONLY for the user-queued vhleaf loop on the fast path. Alternative: run vhleaf on the slower HTTP path now (~33 min/10 iters) and ride Slice 3 for any follow-up.
+Added the v3.2 per-Uma slot featurizer to the Rust in-process path so v3.2 ONNX graphs (`runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-3/policy.onnx`, sidecar `state_feature_schema_version=3.2`, `uses_uma_slot_tokens=true`) ride the fast path. Implementation:
+
+- `engine-rs/crates/engine/src/policy/featurize.rs` gains `observation_uma_slots(obs) -> (Vec<i64>[10], Vec<f32>[10*23])`, a verbatim port of Python `observation_to_uma_slots` + `_uma_slot_feature_row` (slot order, 23-d column layout, "absence is zero" contract).
+- `engine-rs/crates/engine/src/inference/mod.rs` detects v3.0 vs v3.2 at session-load time by ONNX input-set (5 vs 7); v3.0 dispatches the original 5-input feed, v3.2 dispatches a 7-input feed with the two new slot tensors at `[1, 10]` (int64) and `[1, 10, 23]` (float32). Partial-pair guard mirrors `serve_onnx._graph_has_partial_uma_slot_inputs`. v3.1 (164-d) still hard-rejected.
+- 6 new unit tests in `policy::featurize` (shape, polarity/role/present flags, absent 4th-bench reserved slot, hp+damage sum-to-1, typed-energy sum, absent-active row). Total engine unit-test count 91/91 green.
+
+### Slice 3 parity smoke
+
+Binary unchanged (`sim-inference-parity` is schema-agnostic — it POSTs `{observation, legalActions, sampling}` and lets serve_onnx build its own tensors; the Rust side builds its own from the same observation). Source ONNX: `runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-3/policy.onnx` (`state_dim=110`, `state_feature_schema_version=3.2`, `uses_uma_slot_tokens=true`, `card_vocab.hash=e3a35716156494d6`).
+
+Run command:
+```
+ORT_DYLIB_PATH=training/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.22.0 \
+  engine-rs/target/release/sim-inference-parity \
+  --onnx-path runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-3/policy.onnx \
+  --serve-onnx-url http://127.0.0.1:8776 \
+  --n-states 50 --tol 1e-5
+```
+
+Serve_onnx side: `cd training && .venv/bin/python serve_onnx.py --model ../runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-3/policy.onnx --provider cpu --ort-threads 1 --port 8776 --host 127.0.0.1`.
+
+Result on 50 random `(state, legal_actions)` snapshots:
+```
+{"status":"PASS","n_states":50,"tol":1e-5,
+ "max_prob_diff":1.788e-7,"max_value_diff":4.470e-7,
+ "rust_mean_us":150,"http_mean_us":1632,"speedup":10.88,
+ "elapsed_secs":0.092}
+```
+
+Per-action prob agreement ≤ 1.79e-7 abs (well under 1e-5 tol); scalar value agreement ≤ 4.47e-7 abs. Mean inference latency Rust 150µs / HTTP 1632µs → 10.88× speedup at the call site on the v3.2 graph (similar to Slice 1's 15× on v3.0; small gap is the extra ndarray reshape + 2 ORT input bindings).
+
+### Slice 3 5-game cross-run determinism (rollout leaf, v3.2)
+
+```
+ORT_DYLIB_PATH=... engine-rs/target/release/sim-mcts-selfplay \
+  --onnx-path runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-3/policy.onnx \
+  --seeds 5 --seed-base 2500 --sims 20 \
+  --leaf rollout --prior policy --no-root-dirichlet \
+  --record-rows --out /tmp/run-{a,b}-v32.jsonl
+```
+
+Both runs: `diff /tmp/run-a-v32.jsonl /tmp/run-b-v32.jsonl` empty (37 lines each, byte-identical). 5 games: 2 player wins / 3 opponent wins, terminalReason=gameOver on all. Used `--leaf rollout` (not `--leaf value-head`) per the brief — vhleaf will be exercised by the user-queued loop downstream once the value head is calibrated.
+
+vhleaf loop unblock: with v3.2 on the Rust fast path, the user-queued `runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-3/checkpoint.pt`-seeded vhleaf loop can run at ~12 min/10-iter wall (the Slice 2 4.18× pace), down from ~33 min/10-iter on the HTTP path.
