@@ -161,6 +161,100 @@ fn parse_side_id(s: &str) -> Option<SideId> {
     }
 }
 
+/// V3: remap a recorded action's TS uids → Rust uids via position.
+///
+/// The recorded `fingerprintBefore` snapshots every umamusume
+/// instance's uid + position (active vs bench index) on both sides. We
+/// look up the position of each TS uid in the recorded fingerprint,
+/// then write the Rust uid at the same position into the action's
+/// payload. Same logical target, different uid space.
+fn remap_action_uids(step: &TraceStep, rust_state: &GameState) -> Result<LegalAiAction, String> {
+    let ts_fp: TsFingerprint = serde_json::from_str(&step.fingerprint_before)
+        .map_err(|e| format!("parse fingerprintBefore: {}", e))?;
+
+    // Build TS uid → (sideId, position) lookup. Position is `None` for
+    // active, `Some(idx)` for bench slot.
+    let mut ts_uid_to_pos: std::collections::HashMap<u32, (SideId, Option<usize>)> =
+        std::collections::HashMap::new();
+    for (side_id, side) in [
+        (SideId::Player, &ts_fp.sides.player),
+        (SideId::Opponent, &ts_fp.sides.opponent),
+    ] {
+        if let Some(active) = &side.active {
+            ts_uid_to_pos.insert(active.uid, (side_id, None));
+        }
+        for (idx, b) in side.bench.iter().enumerate() {
+            ts_uid_to_pos.insert(b.uid, (side_id, Some(idx)));
+        }
+    }
+
+    // For each uid-bearing payload key, remap TS uid → Rust uid at
+    // the same position. Keys observed across action kinds:
+    // - "targetUid" (evolve, ability, attachEnergy, retreat, attack)
+    // - "switchTargetUid" (attack with switch-self)
+    // - "healTargetUid" (attack with heal)
+    // - "pendingTargetUid" (resolvePendingChoice) — may also appear
+    // - nested "decision" dict for combat
+    let mut payload = step.action.payload.clone();
+    let known_uid_keys = [
+        "targetUid",
+        "switchTargetUid",
+        "healTargetUid",
+        "pendingTargetUid",
+    ];
+    if let serde_json::Value::Object(map) = &mut payload {
+        for key in &known_uid_keys {
+            if let Some(serde_json::Value::Number(n)) = map.get(*key) {
+                if let Some(ts_uid) = n.as_u64().map(|x| x as u32) {
+                    if let Some(&(side, position)) = ts_uid_to_pos.get(&ts_uid) {
+                        let rust_side = rust_state.side(side);
+                        let rust_uid = match position {
+                            None => rust_side.active.as_ref().map(|u| u.uid),
+                            Some(idx) => rust_side.bench.get(idx).map(|u| u.uid),
+                        };
+                        if let Some(rust_uid) = rust_uid {
+                            map.insert((*key).into(), serde_json::Value::Number(rust_uid.into()));
+                        }
+                    }
+                }
+            }
+        }
+        // Combat actions nest a `decision` object that itself contains
+        // targetUid + switchTargetUid + healTargetUid.
+        if let Some(serde_json::Value::Object(decision)) = map.get_mut("decision") {
+            for key in &known_uid_keys {
+                if let Some(serde_json::Value::Number(n)) = decision.get(*key) {
+                    if let Some(ts_uid) = n.as_u64().map(|x| x as u32) {
+                        if let Some(&(side, position)) = ts_uid_to_pos.get(&ts_uid) {
+                            let rust_side = rust_state.side(side);
+                            let rust_uid = match position {
+                                None => rust_side.active.as_ref().map(|u| u.uid),
+                                Some(idx) => rust_side.bench.get(idx).map(|u| u.uid),
+                            };
+                            if let Some(rust_uid) = rust_uid {
+                                decision.insert(
+                                    (*key).into(),
+                                    serde_json::Value::Number(rust_uid.into()),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(LegalAiAction {
+        id: step.action.id.clone(),
+        phase: parse_ai_phase(&step.action.phase),
+        kind: step.action.kind.clone(),
+        payload,
+        features: Vec::new(),
+        action_source_card_idx: None,
+        action_target_card_idx: None,
+    })
+}
+
 /// V2: drive the Rust sim step-by-step from the recorded action sequence.
 /// Verifies that after each `advance_modeled_turn_step`, the resulting
 /// state's identity-bearing fields match the next recorded step's
@@ -181,7 +275,20 @@ fn replay_steps_for_seed(
             diffs.push(format!("step[{}]: unrecognized sideId {:?}", i, step.side_id));
             break;
         };
-        let action = reconstruct_legal_action(&step.action);
+
+        // V3: normalize recorded uids → Rust uids by mapping POSITION
+        // (active vs bench[N]) using the recorded fingerprintBefore.
+        // TS's uid counter is bumped by MCTS internal rollouts, so the
+        // raw recorded uid won't exist in Rust's V2 replay (which
+        // doesn't run MCTS). Position-based remap preserves the role
+        // intent.
+        let action = match remap_action_uids(&step, &state) {
+            Ok(a) => a,
+            Err(e) => {
+                diffs.push(format!("step[{}] uid remap failed: {}", i, e));
+                break;
+            }
+        };
 
         // Wrap the entire forced-coin + advance step in a single with_rng
         // scope so any randomFloat() inside advance_modeled_turn_step
