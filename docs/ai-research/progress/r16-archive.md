@@ -200,3 +200,107 @@ checkpoint** (confirmed against the orchestrator data-flow and the
 v3.0 run, which also gated plain distilled checkpoints). Optional
 future one-knob fix: thread `--state-dim` through the probe —
 backlog-level only, not a blocker.
+
+## R16-TD 3a — Loader Verification full detail
+
+Compact summary lives in `r16.md` § "Production Corpus — Audit-v2
+ALL PASS". Rolled detail:
+
+Audit-v2 PASS is hollow if the Python BC loader silently drops the
+new schema. Verified by smoke-loading the sealed phase 1+2 traces
+through `training/uma_ai/dataset.py`
+`JsonlPolicyDataset.load_policy_samples`:
+
+- `rule-bot-mirror/traces.jsonl`: **4196 / 4196 retained**;
+  4196/4196 carry `policy_target` + `card_ids_by_zone` +
+  `action_card_idx`.
+- `policy-vs-rule/traces.jsonl`: **3664 / 3664 retained**; same
+  soft coverage.
+
+Loader retention equals corpus row count exactly. The
+`policyTargets`/`policy_target` camelCase-vs-snake-case mismatch
+concern is unfounded: `dataset.py:406-440` reads `policyTargets`
+verbatim and validates len/finite/non-negative/sum==1±1e-5.
+
+Soft path actively exercised in training: `train_bc.py:490-498`
+and `:576-579` branch on `policy_targets is not None` and take the
+soft cross-entropy path (`-(policy_targets * log_probs).sum(dim=1)`),
+not argmax hard-CE. The 3a upgrade's value is realized end-to-end.
+
+`oracle`, `stateSource`, `selectedOriginalRank` are silently
+ignored by the loader (not rejected). Default `state_dim=110`
+(v3.0); v3.1 is opt-in via `state_dim=STATE_DIM_V3_1`. **3b
+training can proceed directly off this corpus — no loader adapter
+needed.**
+
+Latent risk (forward-looking, not a current blocker):
+`dataset.py:34-43` notes `ROW_SCHEMA_VERSION` was deliberately held
+at 1 across Phase 2 to keep TS-produced corpora loadable. If a
+future phase bumps the row schema without coordinating the TS
+writer at `backend/src/sim/evaluateModelVsHeuristic.ts:367`, this
+corpus will retroactively fail to load.
+
+## R16-TD 3a — Served-Recipe Smokes full detail
+
+Compact summary lives in `r16.md` § "Production Corpus — Audit-v2
+ALL PASS". Rolled detail:
+
+Before the prod corpus launch (2026-05-21), each served recipe was
+smoked end-to-end against a live `serve_onnx` instance at tiny N
+(`--workers 2 --games 1`) to validate the missing wiring (server
+startup, `/health`, `--model-url`, `--mcts-prior`):
+
+| Recipe | `--selection` / `--mcts-prior` | Rows | Audit |
+| --- | --- | ---: | --- |
+| `policy-vs-rule` | `policy` / `uniform` | 16 | PASS (oracle + simplex + stateSource) |
+| `search-vs-rule` | `mcts` / `policy` | 28 | PASS (oracle + simplex + stateSource) |
+
+Both ran against a shared `serve_onnx` instance pinned to
+`runs/R13-W6-phase-d/iter-2/policy.onnx` (96-d v2 schema,
+`--ort-threads auto`, `[CUDAExecutionProvider,
+CPUExecutionProvider]`). `/health` returned 200 within ~1s on this
+host. Clean SIGTERM shutdown. The launch script
+`runs/R16-TD-3a-prod-corpus/launch.sh` runs all three recipes in
+sequence (rule-bot-mirror first, server-free; then serve_onnx start
++ policy-vs-rule + search-vs-rule; trap-handled server shutdown).
+
+## R16-TD 3a — Production Corpus per-slice coverage
+
+Compact summary lives in `r16.md` § "Production Corpus — Audit-v2
+ALL PASS". Rolled detail:
+
+Audit invocation:
+
+```
+python training/audit_relabel_corpus.py \
+  --recipe-trace rule-bot-mirror=runs/R16-TD-3a-prod-corpus/rule-bot-mirror/traces.jsonl \
+  --recipe-trace policy-vs-rule=runs/R16-TD-3a-prod-corpus/policy-vs-rule/traces.jsonl \
+  --recipe-trace search-vs-rule=runs/R16-TD-3a-prod-corpus/search-vs-rule/traces.jsonl \
+  --out runs/R16-TD-3a-prod-corpus/audit-v2.json
+```
+
+All three `stateSource` tags match the recipe directory; every row
+carries the full 11-key `oracle` block; simplex `policyTargets`; no
+forced-state row emitted. Per-recipe top skew is benign side-balance
+(~52-53% to the weaker side). Coverage is healthy across all slice
+axes:
+
+- **Phases (7/7 present per recipe)**: `ability` / `attach` /
+  `bench` / `combat` / `evolve` / `trainerAfter` / `trainerBefore`
+  — `trainerBefore` dominates (~37-41% of rows per recipe),
+  consistent with deck-loading early-game pressure.
+- **Action kinds (8/8 present per recipe)**: `attachEnergy` /
+  `attack` / `evolve` / `pass` / `playBasic` / `playTrainer` /
+  `retreatAttack` / `useAbility`. Rule-bot-mirror skews higher on
+  `pass` (1362 vs 831 in policy-vs-rule) and `useAbility` (176 vs
+  78) — consistent with rule-bot behavioral biases relative to the
+  model.
+- **Legal-action buckets** (≥3 legal = contested): rule-bot-mirror
+  49.9%, policy-vs-rule 49.7%, search-vs-rule 52.6%. ~50% of rows
+  carry the contested signal that 3b preference-pair extraction
+  consumes.
+
+Promote criteria (per scoping § P1 acceptance): retained
+contested-row rate ≥80% — MET trivially at 100% across all
+recipes. Loader retention verified separately (above): the
+`JsonlPolicyDataset` accepts 100% of these rows.
