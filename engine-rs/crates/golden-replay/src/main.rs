@@ -171,27 +171,10 @@ fn replay_steps_for_seed(
     resolve: &impl Fn(engine::core::card_id::CardId) -> String,
 ) -> Vec<String> {
     let mut diffs = Vec::new();
-    let mut state = {
-        let (s, _used) = with_rng(rng.clone(), || setup_ai_vs_ai_game());
-        s
-    };
-    // Re-install the seeded RNG so per-step coin/sample draws continue
-    // from where setup left off. Caller already advanced it via `_used`.
-    // We approximate by re-seeding from the same string; the cleanest
-    // path would thread the post-setup `_used` Rng forward, but that
-    // requires a tiny refactor. For V2 today we re-seed identically and
-    // accept: per-step RNG draw counts may drift, but identity-bearing
-    // state fields are checked exhaustively.
-    let mut step_rng = Rng::from_seed(format!("{}:selfplay", trace.seed).as_str(), "selfplay");
-    let _ = with_rng(step_rng.clone(), || setup_ai_vs_ai_game());
-    // Consume the same draws the recorder did during setup so step_rng
-    // is positioned at the post-setup point. We simulate that by walking
-    // the same outer-rng-consuming setup again — but with_rng moves the
-    // Rng. So we need a different approach.
-    //
-    // Pragmatic: V2 today validates STATE convergence only, not RNG
-    // draw counts. We use a fresh per-step RNG seeded the same way.
-    step_rng = Rng::from_seed(format!("{}:selfplay", trace.seed).as_str(), "selfplay-steps");
+    // Thread the post-setup Rng forward into the step loop so the outer
+    // PRNG stream matches the recorder's exactly. with_rng returns the
+    // consumed Rng so we can pick up where setup left off.
+    let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
 
     for (i, step) in trace.actions.iter().enumerate() {
         let Some(side_id) = parse_side_id(&step.side_id) else {

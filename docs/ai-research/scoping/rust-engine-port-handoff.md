@@ -307,6 +307,35 @@ npm --workspace backend run sim:replay-golden-traces -- \
   --in runs/rust-port-golden-traces/traces-500.jsonl
 ```
 
+### Phase 1h V2 — diagnostic insight (mid-session)
+
+V2 step-replay reaches step 54 of seed 0 before first divergence. The
+divergence is **uid mismatch**, not an engine bug:
+
+- Step 54 records `{ kind: "evolve", payload: { targetUid: 5745, ... } }`.
+- TS uid counter is **module-global and is incremented by MCTS internal
+  rollouts** (each rollout's `playSelectedBasic` calls `createUmamusume`).
+  At 100 sims × 200 rollout-steps per MCTS decision, the counter grows
+  by thousands per real player turn.
+- Rust V2 replay drives the sim via `advance_modeled_turn_step` only —
+  no MCTS — so the Rust uid counter only advances for real game-state
+  creates. At step 54 the player's bench basic has Rust uid ≈ 5–10, not
+  5745. Validation fails → evolve no-ops → state diverges.
+
+**Fixes for V3:**
+1. **Run full MCTS during V2 replay** (re-creates the same counter
+   advances by seed). This is the "real" Phase 1h gate.
+2. **Map recorded uids by position** (active vs bench[N]) at each step
+   using the recorded `fingerprintBefore` JSON. Cheaper, validates the
+   same engine surface.
+3. Make `advance_modeled_turn_step`'s evolve branch tolerant: when the
+   recorded targetUid doesn't match a Rust umamusume, fall back to the
+   first eligible target (matches the role intent without requiring uid
+   alignment).
+
+Recommendation: **(2) for V3** — preserves the trace's role intent
+without forcing MCTS-driven uid sync.
+
 ### P1 — Phase 1h: bit-identity gate at N=500 (now runnable)
 
 Engine is feature-complete. Steps for next session:
