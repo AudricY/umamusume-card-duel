@@ -2,19 +2,11 @@
 
 ## Open
 
-- **2026-05-21: chunk 5j n=1000 confirmation gate FALSIFIED
-  contested-coverage cheap slope.** Both autonomous P1 data-side
-  forward lines now exhausted: training-data-coverage-pilot →
-  `done-falsified` (chunk 5j); training-data-deep-program →
-  `done-negative` (chunks 5a-i). Sanity-check + coverage smoke
-  passed; n=1000 broke monotonicity and sign-flipped margin
-  (−1.8pp vs pilot +2.2pp). Only remaining autonomous-actionable
-  work is the diagnostic-only reframed step 1 (rollout-leaf return
-  audit, ~200 LOC, research-only). All other paths user-gated (W6
-  HP-sweep, r16-p2, value-head-leaf-recipe-axis,
-  value-head-data-program Stage 1 one-line heads-up). Canonical:
-  r16.md sub-§ "Chunk 5j — n=1000 confirmation gate FALSIFIES
-  cheap-slope".
+- **2026-05-21: chunk 5j n=1000 FALSIFIED contested-coverage.**
+  Both autonomous P1 data-side lines exhausted: coverage-pilot →
+  done-falsified; deep-program → done-negative. n=1000 sign-flipped
+  margin (−1.8pp vs pilot +2.2pp). Only autonomous-actionable work
+  is diagnostic-only reframed step 1. Canonical: r16.md § "Chunk 5j".
 
 ## Resolved Pointers
 
@@ -31,25 +23,12 @@
   Sim count not the lever. Canonical:
   `docs/ai-research/progress/r16.md` sub-§§ "Candidate-1 kill-test
   (chunk 5g)" / "Step 2 verdict (chunk 5i)".
-- 2026-05-18: R16 contested-coverage pilot (Fork A cheap tier, W6
-  predecessor #1) DONE = POSITIVE slope. Option1 resample sweep at fixed
-  retained-count/capacity: legal_action_count 0.20/0.30/0.45 →
-  side-balanced gate Wilson-lower 0.2416/0.2572/0.2635 (monotone).
-  Pre-registered acceptance MET; contested-coverage hypothesis NOT
-  falsified. Margin small (within single-gate noise) → next bounded step
-  is a larger-n confirmation gate; expensive n≥1000 closed-loop still
-  gated. Mechanisms shipped in `training/uma_ai/dataset.py` (default OFF).
-  Canonical: `docs/ai-research/progress/r16.md`.
-- 2026-05-19: User reprioritization — HP tuning (W6 regularization-dose
-  sweep) DEPRIORITIZED P1→P3. Gate-depth = option B (user-confirmed): W6
-  runs only after all three core predecessors land —
-  training-data-coverage-pilot → r16-p2-per-uma-slot-tokens →
-  training-data-deep-program (corpus recipe → preference/value-data).
-  R16-P2 user-gate now OPEN; it is the LAST model-feature item (series =
-  P0/P1/P2, no P3+). NOT W6 predecessors by explicit decision: conditional
-  side-balancing (TD item 4) and P3 manual mistake catalog (TD item 5) —
-  gating W6 behind the conditional item could block it indefinitely.
-  Canonical: `docs/ai-agent-state/queue.json`, `docs/ai-research-backlog.md`.
+- 2026-05-18: R16 contested-coverage pilot (Fork A cheap tier) DONE
+  positive-slope at n=300 — later FALSIFIED at chunk 5j n=1000 gate (see
+  open bullet above). Canonical: r16.md.
+- 2026-05-19: User reprioritization — HP tuning (W6 dose sweep)
+  DEPRIORITIZED P1→P3 (option B gate-depth); R16-P2 user-gate OPEN as
+  last model-feature item. Canonical: queue.json, ai-research-backlog.md.
 - 2026-05-19: R16-P1 v3.1 strength ablation COMPLETE = NO-GO
   (best-promoted 0.5955 < v3.0 0.6042; v3.1 not promoted, 96-d pin
   unchanged). serve_onnx 24-worker gate-fan-in crash blocker resolved
