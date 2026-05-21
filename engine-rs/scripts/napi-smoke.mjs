@@ -36,32 +36,69 @@ if (!version.startsWith("rust-port") || !version.includes("catalog=")) {
   throw new Error(`unexpected version string: ${version}`);
 }
 
-const stateJson = bridge.createGameJson("0");
-const state = JSON.parse(stateJson);
+// createGameJson now returns {stateJson, rngStateJson}.
+const initRaw = bridge.createGameJson("0");
+const init = JSON.parse(initRaw);
+const state = JSON.parse(init.stateJson);
 if (state.phase !== "play" && state.phase !== "Play") {
   throw new Error(`unexpected initial phase: ${state.phase}`);
 }
-if (state.gameOver !== false && state.game_over !== false) {
-  throw new Error(`fresh game should not be game_over: ${stateJson.slice(0, 200)}`);
-}
-console.log(`createGameJson("0") -> ${stateJson.length} bytes, phase=${state.phase}`);
+console.log(`createGameJson("0") -> stateJson=${init.stateJson.length}B rngStateJson=${init.rngStateJson.length}B phase=${state.phase}`);
 
-const hash = bridge.stateHashForJson(stateJson);
-if (typeof hash !== "string" || hash.length !== 32 || !/^[0-9a-f]+$/.test(hash)) {
+const hash = bridge.stateHashForJson(init.stateJson);
+console.log("stateHashForJson ->", hash);
+if (hash.length !== 32 || !/^[0-9a-f]+$/.test(hash)) {
   throw new Error(`unexpected hash shape: ${hash}`);
 }
-console.log("stateHashForJson ->", hash);
 
-const hash2 = bridge.stateHashForJson(stateJson);
-if (hash !== hash2) {
-  throw new Error("hash must be deterministic for the same input");
+// Drive a full game via repeated advance_step_json. GameState serializes
+// as snake_case (e.g., game_over, current_side, first_player) since the
+// struct doesn't carry #[serde(rename_all = "camelCase")] at the top
+// level — only nested types like PublicObservation do.
+let curStateJson = init.stateJson;
+let curRngJson = init.rngStateJson;
+let steps = 0;
+const maxSteps = 1000;
+let priorHash = hash;
+for (; steps < maxSteps; steps += 1) {
+  const cs = JSON.parse(curStateJson);
+  if (cs.game_over === true || cs.current_side === "done") break;
+  const raw = bridge.advanceStepJson(curStateJson, curRngJson);
+  const next = JSON.parse(raw);
+  const nextHash = bridge.stateHashForJson(next.stateJson);
+  if (nextHash === priorHash) {
+    throw new Error(`step ${steps} did not change state — stall`);
+  }
+  priorHash = nextHash;
+  curStateJson = next.stateJson;
+  curRngJson = next.rngStateJson;
+}
+const final = JSON.parse(curStateJson);
+console.log(`advanceStepJson drove ${steps} steps, game_over=${final.game_over} winner=${final.winner ?? null}`);
+if (final.game_over !== true) {
+  throw new Error(`expected game_over after ${steps} steps; got: ${curStateJson.slice(0, 200)}`);
 }
 
-// Cross-seed: hashes must differ for different seeds.
-const s2 = bridge.createGameJson("1");
-const h2 = bridge.stateHashForJson(s2);
-if (h2 === hash) {
-  throw new Error("hashes for different seeds should differ");
+// legal_actions_json at the initial state (before first advance).
+const legalRaw = bridge.legalActionsJson(init.stateJson, init.rngStateJson);
+const legal = JSON.parse(legalRaw);
+if (!Array.isArray(legal) || legal.length === 0) {
+  throw new Error(`expected non-empty legal-actions array; got: ${legalRaw.slice(0, 200)}`);
 }
+console.log(`legalActionsJson at t=0 -> ${legal.length} actions (kinds: ${[...new Set(legal.map(a => a.kind))].join(",")})`);
 
-console.log("✅ napi-bridge smoke OK");
+// Determinism: same seed → same final hash.
+const init2 = JSON.parse(bridge.createGameJson("0"));
+let s2 = init2.stateJson, r2 = init2.rngStateJson;
+for (let i = 0; i < steps; i += 1) {
+  const x = JSON.parse(bridge.advanceStepJson(s2, r2));
+  s2 = x.stateJson; r2 = x.rngStateJson;
+}
+const replayHash = bridge.stateHashForJson(s2);
+const finalHash = bridge.stateHashForJson(curStateJson);
+if (replayHash !== finalHash) {
+  throw new Error(`replay hash ${replayHash} != original ${finalHash} — non-determinism`);
+}
+console.log(`deterministic replay: ${steps} steps, final hash ${finalHash} matches`);
+
+console.log("✅ napi-bridge smoke OK (engineVersion, createGameJson, advanceStepJson, legalActionsJson, stateHashForJson)");

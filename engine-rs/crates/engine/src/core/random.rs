@@ -19,7 +19,7 @@
 
 use std::cell::RefCell;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Rng {
     state: u32,
     initial: u32,

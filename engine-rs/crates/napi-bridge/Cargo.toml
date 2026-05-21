@@ -16,6 +16,7 @@ crate-type = ["cdylib", "rlib"]
 engine = { path = "../engine" }
 napi = { version = "2.16", default-features = false, features = ["napi8", "serde-json"] }
 napi-derive = "2.16"
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [build-dependencies]
