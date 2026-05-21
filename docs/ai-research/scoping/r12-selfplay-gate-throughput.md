@@ -86,6 +86,16 @@ per-stage numbers + trajectory-neutrality proof live in
    Held OUT of scope so the R111 W6 recipe-fix A/B stays comparable to
    R110. Owned by the research backlog, not this scoping doc.
 
+6. **NEXT-TIER — Rust port of the TS engine + heuristic opponent.**
+   Successor lever once #1-#3+#5 are exhausted (the JS-side ceiling is
+   ~2.6-2.85× over the 4-worker baseline; further sim wall-clock must
+   leave the TS allocator/JSON hot path). Phase 0 golden-trace harness
+   is the go/no-go gate and the actionable next step. Full plan, scope
+   delineation (engine surface in / out, why `flow/ai/*` is in scope),
+   conformance strategy (RNG pinning, map-iteration order, float
+   audit), risk register, and payoff numbers (15-40× per-core
+   projection): `docs/ai-research/scoping/rust-engine-port-plan.md`.
+
 ## Determinism gate result
 
 `training/r12_throughput_determinism_gate.py --games 6` (R110 prod
