@@ -152,12 +152,17 @@ disjoint-mutable split returning `(acting, opposing)` regardless of
 underlying slot. Used by combat where TS aliases `attacker.active` and
 `defender.active`.
 
-### Phase 0 — 500-seed corpus — COMPLETE
+### Phase 0 — 500-seed corpus — COMPLETE + REPLAY OK
 
 500/500 seeds recorded in 16-way parallel chunks. Merged at
-`runs/rust-port-golden-traces/traces-500.jsonl`. 16-way parallel TS
-replay running in background (~18 min wall ETA) — when it lands clean,
-the Phase 0 kill signal is verified at the production seed count.
+`runs/rust-port-golden-traces/traces-500.jsonl`.
+
+**16/16 chunks bit-identical on TS-side replay**:
+- chunk 0–14: OK 32/32 seeds bit-identical each
+- chunk 15: OK 20/20 seeds bit-identical
+- Total: 500/500. **Phase 0 kill signal does NOT fire.** TS-side
+  determinism holds at the production seed count, so the Rust port has
+  a clean target to bit-match.
 
 ### Phase 1e — policy/ — scaffold landed
 
