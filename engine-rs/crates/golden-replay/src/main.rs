@@ -75,9 +75,13 @@ struct Trace {
     #[serde(rename = "traceVersion")]
     trace_version: u32,
     actions: Vec<TraceStep>,
+    // turn_number + winner are recorded in the trace; we don't read them
+    // today, but keep parsing-tolerant for forward compatibility.
     #[serde(rename = "turnNumber", default)]
+    #[allow(dead_code)]
     turn_number: Option<u32>,
     #[serde(default)]
+    #[allow(dead_code)]
     winner: Option<String>,
 }
 
@@ -103,6 +107,10 @@ struct TraceAction {
 
 #[derive(Deserialize, Debug)]
 struct TsFingerprint {
+    // `phase` is parsed for completeness but not asserted today; the
+    // current_side + turn_number + per-side identity checks already
+    // catch every observable divergence.
+    #[allow(dead_code)]
     phase: String,
     #[serde(rename = "currentSide")]
     current_side: String,
@@ -135,20 +143,9 @@ struct TsInst {
     max_hp: i32,
 }
 
-/// Reconstruct a `LegalAiAction` from a recorded trace step. Sufficient
-/// for `advance_modeled_turn_step` which dispatches on `kind` + reads
-/// `payload`.
-fn reconstruct_legal_action(t: &TraceAction) -> LegalAiAction {
-    LegalAiAction {
-        id: t.id.clone(),
-        phase: parse_ai_phase(&t.phase),
-        kind: t.kind.clone(),
-        payload: t.payload.clone(),
-        features: Vec::new(),
-        action_source_card_idx: None,
-        action_target_card_idx: None,
-    }
-}
+// `reconstruct_legal_action` was the V2/V3 helper before V3's
+// `remap_action_uids` superseded it (which also handles UID remap).
+// Removed in favor of the unified path.
 
 fn parse_ai_phase(s: &str) -> AiPhase {
     match s {
