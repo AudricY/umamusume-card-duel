@@ -635,6 +635,12 @@ pub struct RolloutStats {
     pub rollouts_ended_state_unchanged: u64,
     pub rollouts_ended_max_steps: u64,
     pub total_advance_calls: u64,
+    /// Sum of "outer rng draws made during all rollouts in the current
+    /// measurement window". Updated by `rollout_heuristic` via a Cell
+    /// passed through `with_active_outer_draws_counter`.
+    pub total_outer_rng_draws_during_rollouts: u64,
+    /// Max outer-rng draws by any single rollout in this window.
+    pub max_outer_rng_draws_in_single_rollout: u64,
 }
 
 pub fn reset_rollout_stats() {
@@ -647,6 +653,7 @@ pub fn rollout_stats() -> RolloutStats {
 
 fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameState {
     ROLLOUT_STATS.with(|s| s.borrow_mut().rollouts_started += 1);
+    let outer_draws_before = peek_active_outer_draws().unwrap_or(0);
     let mut next = state.clone();
     let mut before: Option<String> = None;
     let mut step_idx: u32 = 0;
@@ -686,6 +693,8 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
         before = Some(after);
         step_idx += 1;
     };
+    let outer_draws_after = peek_active_outer_draws().unwrap_or(outer_draws_before);
+    let rollout_draws = outer_draws_after.saturating_sub(outer_draws_before);
     ROLLOUT_STATS.with(|s| {
         let mut st = s.borrow_mut();
         match end_reason {
@@ -695,8 +704,17 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
             3 => st.rollouts_ended_max_steps += 1,
             _ => {}
         }
+        st.total_outer_rng_draws_during_rollouts += rollout_draws;
+        if rollout_draws > st.max_outer_rng_draws_in_single_rollout {
+            st.max_outer_rng_draws_in_single_rollout = rollout_draws;
+        }
     });
     next
+}
+
+/// Peek the active thread-local Rng's draw counter without mutating it.
+fn peek_active_outer_draws() -> Option<u64> {
+    crate::core::random::peek_active_draws()
 }
 
 /// Helper: `with_rng` borrows-by-move, so this swap-in-swap-out shim lets

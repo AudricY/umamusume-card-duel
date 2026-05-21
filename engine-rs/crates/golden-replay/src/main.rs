@@ -240,8 +240,18 @@ fn v4_replay_for_seed(
             step_rng = used_rng;
             let s = rollout_stats();
             if i < 5 {
+                let avg_draws = if s.rollouts_started > 0 {
+                    s.total_outer_rng_draws_during_rollouts as f64 / s.rollouts_started as f64
+                } else {
+                    0.0
+                };
+                let avg_advances = if s.rollouts_started > 0 {
+                    s.total_advance_calls as f64 / s.rollouts_started as f64
+                } else {
+                    0.0
+                };
                 eprintln!(
-                    "  step[{}] rollouts={} game_over={} side_done={} state_unchanged={} max_steps={} advances={}",
+                    "  step[{}] rollouts={} game_over={} side_done={} state_unchanged={} max_steps={} advances={} (avg {:.1} adv, {:.1} draws/rollout; max {})",
                     i,
                     s.rollouts_started,
                     s.rollouts_ended_game_over,
@@ -249,6 +259,9 @@ fn v4_replay_for_seed(
                     s.rollouts_ended_state_unchanged,
                     s.rollouts_ended_max_steps,
                     s.total_advance_calls,
+                    avg_advances,
+                    avg_draws,
+                    s.max_outer_rng_draws_in_single_rollout,
                 );
             }
         }

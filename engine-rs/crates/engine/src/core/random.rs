@@ -167,6 +167,12 @@ thread_local! {
     static ACTIVE_RNG: RefCell<Option<Rng>> = const { RefCell::new(None) };
 }
 
+/// Instrumentation-only: peek the active thread-local Rng's draw counter
+/// without taking ownership. Returns `None` if no Rng is installed.
+pub fn peek_active_draws() -> Option<u64> {
+    ACTIVE_RNG.with(|cell| cell.borrow().as_ref().map(|r| r.draws()))
+}
+
 pub fn with_rng<T>(rng: Rng, f: impl FnOnce() -> T) -> (T, Rng) {
     ACTIVE_RNG.with(|cell| {
         let previous = cell.replace(Some(rng));
