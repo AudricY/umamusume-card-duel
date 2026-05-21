@@ -22,9 +22,19 @@
     - `--temperature-moves` / `--temperature-value` (real AlphaZero visits^(1/T) sampling)
   - **Phase 1h V1 ✅ (500/500 setup-bit-identical); V4 RNG-gap reframed as benign behavioral variance** — Rust heuristic-only AI plays statistically equivalent to TS MCTS (39% vs 37% player WR over n=100 / n=500).
   - **Engine is PRODUCTION-VIABLE TODAY** for both headless and MCTS self-play.
-  - Phase 2 not started.
+  - **Phase 2 NAPI bridge ✅ — Node-callable Rust engine** (commits 71–76).
+    - 8 functions: engineVersion, createGameJson, advanceStepJson,
+      legalActionsJson, runMctsJson, mctsStepJson, stateHashForJson,
+      driveHeuristicGameJson
+    - Backend can `require("engine-rs/crates/napi-bridge")` with full
+      TypeScript declarations (index.d.ts)
+    - **NAPI vs subprocess: 11.2× speedup** at small-game scale
+      (3369 vs 300 games/s, N=100 heuristic games). Subprocess startup
+      is ~3 ms/game; NAPI per-step is ~7 μs.
+    - Two-driver parity locked: JS-driven loop and pure-Rust loop
+      produce bit-identical final state hashes
   - **100 unit + cross-lang + integration tests passing** (lib 73, headless 2, catalog cross-lang 2, RNG cross-lang 3, state_hash 5, legal_actions 5, mcts_result 6, ignored 3)
-  - **69 commits on the branch** end-to-end through the port
+  - **76 commits on the branch** end-to-end through the port
 
 ### Orchestrator-compat surface (commits 60–63)
 
@@ -54,6 +64,8 @@
 | MCTS vs heuristic eval-gate | 50 seeds | 4.43 g/s | 64% WR, Wilson 50-76% (p<0.05) |
 | **MCTS vs heuristic eval-gate** | **100 seeds** | **4.62 g/s** | **62% WR, Wilson 52-71% (p<0.01)** |
 | **MCTS selfplay + row recording** | **50 seeds** | **3.53 g/s** | **14.2 sec, 337 rows, 1.8 MB JSONL, Python parse ✅** |
+| **NAPI in-process heuristic (Phase 2)** | **100 games** | **3,369 g/s** | **30 ms wall, 0.30 ms/game, 11.2× over subprocess** |
+| Subprocess-per-game heuristic (baseline) | 100 games | 300 g/s | 333 ms wall — 3.33 ms/game startup-dominated |
 
 The 50-seed eval-gate result confirms MCTS provides a measurable
 edge over the heuristic-only baseline. Side-balanced: 60% as Player,
