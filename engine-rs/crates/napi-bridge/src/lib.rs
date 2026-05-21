@@ -120,6 +120,64 @@ pub fn state_hash_for_json(state_json: String) -> Result<String> {
     Ok(state_hash(&state))
 }
 
+/// Drive a full heuristic-vs-heuristic game in pure Rust and return
+/// just the summary. Avoids JS↔Rust roundtrip overhead per step.
+/// Returns `{finalStateHash, steps, winner, gameOver, terminalReason}`
+/// where terminalReason is one of "gameOver" | "stalled" | "maxSteps".
+#[napi]
+pub fn drive_heuristic_game_json(seed: String, max_steps: u32) -> Result<String> {
+    let rng = Rng::from_seed(format!("{}:selfplay", seed).as_str(), "selfplay");
+    let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
+    let mut prior_hash = state_hash(&state);
+    let mut terminal = "maxSteps";
+    let mut steps = 0u32;
+    for s in 0..max_steps {
+        steps = s;
+        if state.game_over {
+            terminal = "gameOver";
+            break;
+        }
+        let side = match state.current_side {
+            CurrentSide::Player => SideId::Player,
+            CurrentSide::Opponent => SideId::Opponent,
+            CurrentSide::Done => {
+                terminal = "gameOver";
+                break;
+            }
+        };
+        let (next, used_rng) = with_rng(step_rng.clone(), || {
+            let forced = get_forced_attack_coin_results(&state);
+            let mut s2 = state.clone();
+            match side {
+                SideId::Player => advance_player_ai_turn_step(&mut s2, forced),
+                SideId::Opponent => advance_opponent_turn_step(&mut s2, forced),
+            }
+            s2
+        });
+        step_rng = used_rng;
+        let next_hash = state_hash(&next);
+        if next_hash == prior_hash {
+            terminal = "stalled";
+            break;
+        }
+        prior_hash = next_hash;
+        state = next;
+    }
+    let winner = state.winner.map(|s| match s {
+        SideId::Player => "player",
+        SideId::Opponent => "opponent",
+    });
+    let summary = serde_json::json!({
+        "finalStateHash": state_hash(&state),
+        "steps": steps,
+        "winner": winner,
+        "gameOver": state.game_over,
+        "terminalReason": terminal,
+    });
+    serde_json::to_string(&summary)
+        .map_err(|e| napi::Error::from_reason(format!("serialize summary: {e}")))
+}
+
 /// Sentinel function — Node can call this to confirm the bridge is
 /// loaded and that engine::core::catalog initializes correctly.
 #[napi]

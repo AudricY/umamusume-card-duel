@@ -129,4 +129,35 @@ if (stepHash === hash) {
 }
 console.log(`mctsStepJson -> chosenActionIndex=${stepBundle.chosenActionIndex} new state_hash=${stepHash}`);
 
-console.log("✅ napi-bridge smoke OK (engineVersion, createGameJson, advanceStepJson, legalActionsJson, stateHashForJson, runMctsJson, mctsStepJson)");
+// driveHeuristicGameJson: pure-Rust full game, no per-step roundtrip.
+// Must produce the same finalStateHash as the JS-driven loop above.
+const ruRaw = bridge.driveHeuristicGameJson("0", 1000);
+const ru = JSON.parse(ruRaw);
+console.log(`driveHeuristicGameJson("0") -> ${ru.steps} steps, winner=${ru.winner}, hash=${ru.finalStateHash}, terminal=${ru.terminalReason}`);
+const jsDrivenFinalHash = bridge.stateHashForJson(curStateJson);
+if (ru.finalStateHash !== jsDrivenFinalHash) {
+  throw new Error(
+    `Rust-driven hash ${ru.finalStateHash} != JS-driven hash ${jsDrivenFinalHash} ` +
+    `— bridge step semantics diverge from in-Rust driver`
+  );
+}
+if (ru.steps !== steps) {
+  throw new Error(`step count mismatch: Rust=${ru.steps} JS=${steps}`);
+}
+
+// Across 5 seeds, finalStateHash is unique per seed (deterministic
+// but distinct outcomes).
+const seedHashes = new Set();
+for (const sd of ["0", "1", "7", "42", "123"]) {
+  const r = JSON.parse(bridge.driveHeuristicGameJson(sd, 1000));
+  if (r.terminalReason !== "gameOver") {
+    throw new Error(`seed ${sd} did not terminate via gameOver (${r.terminalReason})`);
+  }
+  seedHashes.add(r.finalStateHash);
+}
+if (seedHashes.size !== 5) {
+  throw new Error(`expected 5 distinct seed hashes, got ${seedHashes.size}`);
+}
+console.log(`5 distinct seeds produce 5 distinct final hashes (cross-seed determinism OK)`);
+
+console.log("✅ napi-bridge smoke OK (engineVersion, createGameJson, advanceStepJson, legalActionsJson, stateHashForJson, runMctsJson, mctsStepJson, driveHeuristicGameJson)");
