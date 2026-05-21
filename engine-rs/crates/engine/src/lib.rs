@@ -14,6 +14,7 @@ pub mod core;
 pub mod dispatcher;
 pub mod fingerprint;
 pub mod flow;
+pub mod headless_setup;
 pub mod mcts;
 pub mod policy;
 

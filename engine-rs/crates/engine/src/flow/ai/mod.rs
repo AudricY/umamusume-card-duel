@@ -26,6 +26,7 @@ pub mod energy_awareness;
 pub mod mid_level;
 pub mod opponent_heuristics;
 pub mod public_info;
+pub mod setup_selection;
 pub mod telemetry;
 pub mod trainer_utils;
 pub mod turn_plan;
