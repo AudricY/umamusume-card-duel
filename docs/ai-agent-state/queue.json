@@ -1,6 +1,6 @@
 {
-  "updated": "2026-05-21T08:30Z",
-  "loop_note": "Engine-rust-port branch merged into feat/ai 2026-05-21 as commit 4e86ea7. Phases 0/1a-h/2 (NAPI bridge) all complete: 100+ tests, 3,484 g/s headless, 3.07-4.62 g/s MCTS, NAPI 11.2x over subprocess. Live decisions pending user: (a) R16-P2 C8 ablation launch — Wilson-lower > 0.6042 AND CPU p95 within 10% via runs/R16-P2-c8-ablation/launch.sh; (b) value-head-data-program Stage 1 GPU one-line heads-up. New post-merge follow-ups queued: v3.2 schema verification for Rust /predict client; orchestrator wiring switch (TS -> Rust opt-in); backend NAPI consumer candidate. 96-d production pin unchanged.",
+  "updated": "2026-05-21T09:00Z",
+  "loop_note": "Engine-rust-port merged into feat/ai 2026-05-21 (commit 4e86ea7). Phases 0/1/2 complete: 100+ tests, 3,484 g/s headless, ~140-220x MCTS, NAPI 11.2x over subprocess. Live P1 decisions pending user: (a) R16-P2 C8 ablation (Wilson-lower > 0.6042 AND CPU p95 within 10%); (b) value-head-data-program Stage 1 GPU one-line heads-up. Strategic reframe: Rust 140x re-prices the frontier — several MARGINAL/DONE-NEGATIVE verdicts (R110-W6-repro, R16-P1 v3.1, deep-program 5g-i) were throughput-constrained, not signal-constrained, and become tight-gate re-verdict candidates at n=10,000 once rust-port-orchestrator-wiring lands. 96-d production pin unchanged.",
   "items": [
     {
       "id": "r16-p2-per-uma-slot-tokens",
@@ -35,7 +35,7 @@
       "priority": "P2",
       "status": "scoped-user-gated",
       "summary": "training/r12_orchestrator.py:318, :496 still invoke TS sim CLIs (npm --workspace backend run sim:mcts-selfplay / sim:eval-gate). Rust sim CLIs (sim-mcts-selfplay, sim-eval-gate, sim-export-training, sim-throughput-probe under engine-rs/crates/sim-cli/) are flag-compatible via 17 clap aliases per handoff doc — 140-220x speedup waiting. No orchestrator switched over yet. Same gap in ppo_orchestrator.py and dagger_orchestrator.py.",
-      "next_action": "Add opt-in --engine rust|ts flag to r12_orchestrator.py (default ts). A/B parity-gate: 1 iter both engines, compare trajectory rows + eval-gate verdict — Rust path promoted to default only after match. Estimated 2-3 days. User-gated because changing the default engine touches every downstream run."
+      "next_action": "Add opt-in --engine rust|ts flag to r12_orchestrator.py (default ts). A/B parity-gate: 1 iter both engines, compare trajectory rows + eval-gate verdict — Rust path promoted to default only after match. Estimated 2-3 days. User-gated because changing the default engine touches every downstream run. Downstream: tight-gate-reverdict-program, high-sim-mcts-regime-probe, and the side-conditioned-sim-budget backlog item (currently 'gated on evidence') all become actionable once this lands. Priority bump candidate if C8 sends us into multi-iter follow-up territory."
     },
     {
       "id": "rust-port-backend-napi-consumer",
@@ -43,6 +43,20 @@
       "status": "scoped-blocked-on-orchestrator-wiring",
       "summary": "engine-rs/crates/napi-bridge/ exposes 8 functions (driveHeuristicGameJson, driveMctsGameJson, runMctsJson, mctsStepJson, advanceStepJson, legalActionsJson, createGameJson, stateHashForJson) — Node-importable package with 11.2x speedup over subprocess. Zero usage in backend/src/ today; built and tested via engine-rs/scripts/napi-smoke.mjs only.",
       "next_action": "After rust-port-orchestrator-wiring lands. Pick a backend consumer (candidates: sim:export-training internals, or backend MCTS serve path) and replace TS engine call with NAPI bridge. Validate via existing regression tests. Exploratory — abandon if perf gain doesn't justify packaging burden."
+    },
+    {
+      "id": "tight-gate-reverdict-program",
+      "priority": "P2",
+      "status": "scoped-blocked-on-rust-orchestrator-wiring",
+      "summary": "Several recently-closed verdicts were throughput-constrained, not signal-constrained: R110-W6-repro MARGINAL (Wilson-lower 0.6042, couldn't separate from baseline at n=120); R16-P1 v3.1 NO-GO at Δ=-0.0087 within noise; training-data-deep-program 5g/5h/5i argmax-flip kills around the 30% threshold. At n=120 those reads are noisy; at n=10,000 (~same wall time on Rust path) they collapse to definitive. Could promote currently-pinned 96-d to something better, or finally close the door.",
+      "next_action": "Blocked on rust-port-orchestrator-wiring landing (so n=10,000 evals are tractable). Once wired: produce a candidate list with rationale (R110-W6-repro iter-2 first, R16-P1 v3.1 second, 5g-i probes third), spec the tight-gate protocol (n target, side-balanced split, Wilson-lower threshold), run each as an isolated re-verdict pass, write verdicts back to the canonical progress doc with cross-link from this queue item."
+    },
+    {
+      "id": "high-sim-mcts-regime-probe",
+      "priority": "P2",
+      "status": "scoped-blocked-on-rust-orchestrator-wiring",
+      "summary": "Production MCTS runs at 400-800 sims/decision. The deep-program kill thresholds (e.g. chunk 5i 17.3% argmax flip at 4x sims) were measured at this regime. At 140x compute via Rust path, 50,000+ sims/decision becomes economic — different MCTS regime entirely. Does the rule-bot-vs-MCTS gap close at high sims? Does the corpus relabel cost (the kill criterion for chunks 5g-i) become moot at 100x more sims? Not measurable today; not reviving the closed lines — a different question that wasn't askable.",
+      "next_action": "Blocked on rust-port-orchestrator-wiring. Scope: pick one rule-bot-loses head from the 5g per-kind table; run MCTS at 800 / 4,000 / 20,000 / 50,000 sims via Rust sim-eval-gate; report verdict-vs-sim-count curve. If the gap closes monotonically at high sims, deep-program's kill criterion is throughput-bound rather than fundamental — reopens the data-side line. ~1 day with Rust wired."
     },
     {
       "id": "w6-loop-anti-degradation",
@@ -75,9 +89,9 @@
     {
       "id": "per-game-pfsp-league-retry",
       "priority": "P3",
-      "status": "deferred-revisit",
+      "status": "deferred-revisit-throughput-unlocked",
       "summary": "League/PFSP retry on existing training/opponent_pool.py infra (PFSP weights, retention cap, cycling alarm, JSON persistence; already wired into ppo_orchestrator.py + dagger_orchestrator.py). Two prior negative datapoints: R5 weak-pool missed gate; PPO Phase J strong-pool regressed at iter-2 and missed the 0.40 gate by 18pp (docs/ai-performance-research-progress.md:2114-2127). Diagnosis at docs/ai-performance-research-progress.md:808-811 attributed the Phase J failure to the v1 sampler (per-RUN choice with self-promoted-at-mode); open hypothesis is that per-GAME re-sampling + strict PFSP weight enforcement would rescue it. NOT load-bearing for the current active failure mode: W6 iter-2-peak-then-rot is monotone representation drift (training/r12_orchestrator.py:53-69), not non-transitivity; cycling_alarm at training/opponent_pool.py:164-180 has not fired in any committed run log. Production claim is search-wrapped MCTS, which blunts marginal value of policy diversity. Canonical: docs/ai-research-backlog.md § Active Search-Wrapped Frontier item 7.",
-      "next_action": "DEFERRED + USER-GATED. Do not auto-launch. Revisit ONLY after the state-coverage line resolves (training-data-coverage-pilot larger-n confirmation + training-data-deep-program 3a+3b) AND explicit user go-ahead. Predecessor evidence preferred: a measured league-shaped symptom (e.g. cycling_alarm fires in a real run, or fixed-opponent eval regresses while self-vs-self winrate climbs). When picked: implement per-GAME opponent re-sampling in ppo_orchestrator.py:985-1020 (currently per-RUN via _select_pool_opponent) + enforce PFSP weights on draws (currently uniform fallback at random.Random(seed).choice(list(pool.entries))), then A/B vs the latest promoted checkpoint at the side-balanced gate. Use the existing W6/iter-{0,1,2} pool layout from Phase J as the comparator baseline."
+      "next_action": "DEFERRED + USER-GATED. Do not auto-launch. Revisit ONLY after the state-coverage line resolves (training-data-coverage-pilot larger-n confirmation + training-data-deep-program 3a+3b) AND explicit user go-ahead. Predecessor evidence preferred: a measured league-shaped symptom (e.g. cycling_alarm fires in a real run, or fixed-opponent eval regresses while self-vs-self winrate climbs). When picked: implement per-GAME opponent re-sampling in ppo_orchestrator.py:985-1020 (currently per-RUN via _select_pool_opponent) + enforce PFSP weights on draws (currently uniform fallback at random.Random(seed).choice(list(pool.entries))), then A/B vs the latest promoted checkpoint at the side-balanced gate. Use the existing W6/iter-{0,1,2} pool layout from Phase J as the comparator baseline. Rust 140x makes thousand-game tournaments cheap; the 'no league-shaped symptom in-tree' justification for deferral weakens — cycling/non-transitivity may simply not have been detectable at TS throughput. Re-scoping pass is now affordable, but still user-gated."
     }
   ]
 }

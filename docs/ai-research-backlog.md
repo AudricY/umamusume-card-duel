@@ -53,7 +53,9 @@ As of 2026-05-18:
 
 0. **Contested-state coverage pilot (R16-TD)** — DONE-FALSIFIED 2026-05-21
    (chunk 5j n=1000 confirmation, monotonicity broken + margin sign-flipped
-   −1.8pp). See `docs/ai-research/progress/r16.md`.
+   −1.8pp). See `docs/ai-research/progress/r16.md`. **Tight-gate re-verdict
+   candidate**: kill verdict held at the throughput-constrained n; not on the
+   immediate re-verdict shortlist but worth flagging.
 
 0a. **R16-P2 per-Uma slot tokens — model-feature upgrade, user-gate now
    OPEN.** The 2026-05-19 "land all model feature upgrade items first"
@@ -194,29 +196,35 @@ Forward items:
 - **Backend NAPI consumer** (P3, exploratory): no `backend/src/` consumer yet; pick a target after orchestrator wiring lands.
 - **Engine residual TODO** (P4): `has_consecutive_no_attack_streak: u8` field on `SideState` (V4 RNG-gap reframed as benign behavioral variance, but field still missing if anyone wants exact parity).
 
-5. **Side-conditioned sim budget — P2.**
-   Run only after a larger-n rollout-leaf side split separates CIs or a
-   search variant shows side-specific regression.
+5. **Side-conditioned sim budget — P2, throughput-unlocked.**
+   Side-split CI separation was the throughput-driven gate. Rust 140x makes
+   side-conditioned eval routine; flips from 'blocked on evidence' to
+   'actionable post `rust-port-orchestrator-wiring`'.
 
 6. **RL/PPO from a strong search-wrapped checkpoint — P3.**
    Later strategic bet. Do not use it to bypass search-wrapped gates above.
+   Throughput-unlock note: Rust 140x partially lifts the self-play barrier
+   that made PPO Phase J prohibitive. Worth a fresh scoping pass after
+   `rust-port-orchestrator-wiring` lands.
 
 7. **Per-game PFSP league retry — P3, deferred-revisit.**
    Infra already built (`training/opponent_pool.py`: snapshots, PFSP weights,
    retention cap, cycling alarm, JSON persistence; wired into
-   `ppo_orchestrator.py` + `dagger_orchestrator.py`). Two prior negative
-   datapoints: R5 weak-pool missed the gate; PPO Phase J strong-pool
-   regressed at iter-2 and missed the 0.40 gate by 18pp
-   (`docs/ai-performance-research-progress.md:2114-2127`). Diagnosis
-   attributed the recent failure to a **per-RUN sampler with self-promoted-
-   at-mode** (`progress.md:808-811`); open hypothesis is that per-GAME
-   re-sampling + strict PFSP weight enforcement would rescue it. Do NOT
-   auto-launch. The current dominant failure mode (W6 iter-2-peak-then-rot)
-   is representation drift, not non-transitivity (`r12_orchestrator.py:53-69`),
-   and the `cycling_alarm` has not fired in any committed run log — i.e.
-   there is no measured league-shaped symptom in-tree to treat. Revisit
-   only after the state-coverage line (items 0/0a + TD 2-3) resolves AND
-   explicit user go-ahead.
+   `ppo_orchestrator.py` + `dagger_orchestrator.py`). Two prior negatives:
+   R5 weak-pool missed gate; PPO Phase J strong-pool regressed iter-2 and
+   missed the 0.40 gate by 18pp (`docs/ai-performance-research-progress.md:2114-2127`).
+   Diagnosis attributed the Phase J failure to a **per-RUN sampler with
+   self-promoted-at-mode** (`progress.md:808-811`); open hypothesis is that
+   per-GAME re-sampling + strict PFSP weight enforcement would rescue it. Do
+   NOT auto-launch. Current dominant failure mode (W6 iter-2-peak-then-rot) is
+   representation drift, not non-transitivity (`r12_orchestrator.py:53-69`);
+   `cycling_alarm` has not fired in any committed run log — no measured
+   league-shaped symptom in-tree. Revisit only after state-coverage line
+   (items 0/0a + TD 2-3) resolves AND explicit user go-ahead. Throughput
+   note (2026-05-21): the 'no league-shaped symptom in-tree' justification
+   was partly throughput-driven. At Rust 140x, thousand-game tournaments
+   become cheap; revisit only as part of a deliberate strategic call, still
+   user-gated.
 
 ## Training-Data / State-Coverage Backlog
 
@@ -236,11 +244,14 @@ section).
 
 2. **Rule-bot-covered state corpus recipe** — SUPERSEDED 2026-05-21 by
    `training-data-deep-program` done-negative (chunks 5a-i). See
-   `docs/ai-research/progress/r16.md`.
+   `docs/ai-research/progress/r16.md`. **High-sim-regime caveat**: the
+   deep-program kill criterion (argmax-flip at 4x sims) was measured at
+   400-800 sims; at 50,000 sims the answer may differ — see queue
+   `high-sim-mcts-regime-probe`.
 
 3. **Preference pairs on rule-bot-covered states (DPO/BT)** — SUPERSEDED
    2026-05-21 by `training-data-deep-program` done-negative (chunks 5a-i).
-   See `docs/ai-research/progress/r16.md`.
+   See `docs/ai-research/progress/r16.md`. **Same caveat as item 2 above.**
 
 4. **Side-conditioned retained-data balancing — P2.**
    If side weakness is data-linked, balance retained player/opponent decision
