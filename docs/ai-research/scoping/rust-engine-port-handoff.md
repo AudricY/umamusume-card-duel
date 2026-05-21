@@ -1,14 +1,15 @@
 # Rust Engine Port — Session Hand-off
 
-- **Date:** 2026-05-21 (last updated end of long port session)
+- **Date:** 2026-05-21 (updated mid-session, post-Phase-1d landing)
 - **Branch:** `engine-rust-port`
 - **Status:**
-  - Phase 0 ✅ (harness + smoke validated; 500-seed corpus running)
+  - Phase 0 ✅ (harness + 500-seed corpus complete)
   - Phase 1a ✅ (RNG bit-identical)
   - Phase 1b ✅ (catalog + types + Attack/Ability/TrainerEffect)
-  - Phase 1c ✅ (packed buffer + xxh3 fingerprint)
-  - Phase 1d 🔄 (10 of 13 flow files done; trainers.rs + combat.rs pending)
-  - Phase 1e–1h not started, Phase 2 not started.
+  - Phase 1c ✅ (packed buffer + xxh3 fingerprint; benches confirm 24×/51× speedup)
+  - **Phase 1d ✅ (all 12 flow files ported, combat.rs + trainers.rs landed)**
+  - Phase 1e 🔄 (types + phase ported; 666-LOC actions enumerator blocked on Phase 1f)
+  - Phase 1f–1h not started, Phase 2 not started.
 - **Authoritative scoping doc:** `rust-engine-port-plan.md` (same dir).
 - **This doc:** the concrete delta between scoping and current state, and
   what the next session needs to do to keep the port moving.
@@ -124,24 +125,46 @@ cargo run -p xtask -- dump-rng-reference
   the per-step early-divergence signal without requiring byte-identity
   across hash algorithms.
 
-### Phase 1d — flow/* port — PARTIAL (10 of 13 files)
+### Phase 1d — flow/* port — DONE (all 12 files)
 
 | TS file | Rust file | Status |
 | ------- | --------- | ------ |
 | `flow/ability_rules.ts` | `flow/ability_rules.rs` | ✅ done |
-| `flow/board.ts` | `flow/board.rs` | ✅ done (refresh, normalize, switch_out, choose_preferred_active) |
-| `flow/eligibility.ts` | `flow/eligibility.rs` | ✅ done (predicate-only) |
-| `flow/energy.ts` | `flow/energy.rs` | ✅ done (attach, has_enough, ability_move_types) |
-| `flow/evolution.ts` | `flow/evolution.rs` | ✅ done; `evolve_umamusume` takes `turn_number: u32` instead of `&GameState` to avoid borrow conflicts |
-| `flow/play_rules.ts` | `flow/play_rules.rs` | 🔄 PARTIAL — trainer & rainbow-uncap branches stubbed (require trainers.rs) |
+| `flow/board.ts` | `flow/board.rs` | ✅ done |
+| `flow/combat.ts` | `flow/combat.rs` | ✅ done (1,391 LOC incl. tests; all 5 RNG sites preserved in TS order; CombatDeps as struct of dyn FnMut closures) |
+| `flow/eligibility.ts` | `flow/eligibility.rs` | ✅ done |
+| `flow/energy.ts` | `flow/energy.rs` | ✅ done |
+| `flow/evolution.ts` | `flow/evolution.rs` | ✅ done; `evolve_umamusume(turn_number: u32, …)` to avoid borrow conflicts |
+| `flow/play_rules.ts` | `flow/play_rules.rs` | ✅ done; trainer + rainbow-uncap branches wired |
 | `flow/retreat.ts` | `flow/retreat.rs` | ✅ done |
 | `flow/setup.ts` | `flow/setup.rs` | ✅ done; uid counter thread-local |
 | `flow/special_conditions.ts` | `flow/special_conditions.rs` | ✅ done |
-| `flow/turn.ts` | `flow/turn.rs` | ✅ done; RNG site at `rollEnergyFromPool` reproduced |
-| `flow/trainers.ts` | `flow/trainers.rs` | ❌ not started (231 LOC; many RNG sites) |
-| `flow/combat.ts` | `flow/combat.rs` | ❌ not started (532 LOC; hot path) |
-| `core/labels.ts` | `core/labels.rs` | ✅ done (display only — not in fingerprint) |
+| `flow/trainers.ts` | `flow/trainers.rs` | ✅ done (560 LOC; all 6 RNG sites preserved) |
+| `flow/turn.ts` | `flow/turn.rs` | ✅ done |
+| `core/labels.ts` | `core/labels.rs` | ✅ done (display only) |
 | `core/umamusume.ts` | `core/umamusume.rs` | ✅ done |
+
+Helper that landed mid-port: `GameState::sides_mut_for(actor)` —
+disjoint-mutable split returning `(acting, opposing)` regardless of
+underlying slot. Used by combat where TS aliases `attacker.active` and
+`defender.active`.
+
+### Phase 0 — 500-seed corpus — COMPLETE
+
+500/500 seeds recorded in 16-way parallel chunks. Merged at
+`runs/rust-port-golden-traces/traces-500.jsonl`. 16-way parallel TS
+replay running in background (~18 min wall ETA) — when it lands clean,
+the Phase 0 kill signal is verified at the production seed count.
+
+### Phase 1e — policy/ — scaffold landed
+
+- `policy/types.rs`: AiPhase (10 variants), ZoneKey (8 variants),
+  LegalAiAction (id / phase / kind / payload / features / source-target
+  vocab idx).
+- `policy/phase.rs`: `get_ai_phase` port — maps opponentTurnStep
+  → AiPhase exactly.
+- `policy/actions.rs`: **not started** (666 LOC). Imports from
+  `flow/ai/*` (heuristic opponent — Phase 1f). Port that first.
 
 Composition notes:
 - `flow::turn::start_turn` and `end_turn` take a `refresh_continuous_effects`
@@ -202,8 +225,8 @@ to-end depends on the legal-action enumerator + heuristic-opponent ports
 ## Test coverage today
 
 ```
-28 tests passing total
-├── 23 engine unit tests
+30 tests passing total
+├── 25 engine unit tests
 │   ├── catalog (4): variants, weakness_bonus, dense ids, base cards
 │   ├── card_id (1): interner idempotence
 │   ├── packed (4): stability, sensitivity to turn / card_id, fingerprint
@@ -211,7 +234,9 @@ to-end depends on the legal-action enumerator + heuristic-opponent ports
 │   ├── umamusume (3): energy count, iteration order, most damaged
 │   ├── energy (3): cost satisfied / unmet / attach moves zone
 │   ├── retreat (1): x-prefix parsing
-│   └── core::random::tests (5 above already counted)
+│   └── combat + trainers (7): flip_coin guaranteed-heads, knock-out
+│       game-over (×2), single-condition replacement, non-damaging
+│       attack predicate, discard-random-energy RNG draws, hand cap
 ├── 2 catalog cross-lang tests
 │   ├── catalog_card_set_matches_ts
 │   └── catalog_identity_fields_match_ts (106 cards × {stage,hp,type,trainerType})
