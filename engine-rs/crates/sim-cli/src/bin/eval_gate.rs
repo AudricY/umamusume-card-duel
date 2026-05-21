@@ -43,8 +43,20 @@ struct Args {
     challenger: Option<String>,
     #[arg(long)]
     baseline: Option<String>,
-    /// Number of seeds. Orchestrator alias: --games.
-    #[arg(long, alias = "games", default_value_t = 100)]
+    /// Number of games **per modelled side**. Matches TS
+    /// `evalGate.ts:43-49` semantics: under `--model-side both` the binary
+    /// schedules `2 * games` total tasks (one per side per seed); under
+    /// `--model-side player|opponent` it schedules `games` tasks for that
+    /// side only. Orchestrator passes `--games`; legacy callers that pass
+    /// `--seeds` get the same interpretation.
+    ///
+    /// Slice 2 follow-up (handoff doc § Phase 1h follow-up): prior to the
+    /// fix `--seeds N --model-side both` ran N games total (alternating
+    /// per seed), so `r12_orchestrator.run_gate` forwarding the same
+    /// `--games eval_games` to both engines silently ran HALF the games
+    /// under `--engine rust` vs `--engine ts`. Don't reintroduce the
+    /// asymmetry — TS is the canonical contract.
+    #[arg(long = "games", alias = "seeds", default_value_t = 100)]
     seeds: u32,
     /// First seed. Orchestrator alias: --seed-start.
     #[arg(long, alias = "seed-start", default_value_t = 0)]
@@ -320,10 +332,29 @@ fn main() -> Result<()> {
     };
     // Accept for orchestrator-flag parity (no-op stubs for now).
     let _ = args.selection;
-    let _ = args.model_side;
     let _ = args.min_ci_lower;
     let _ = args.min_games;
     let _ = args.workers;
+    // Mirror TS `evalGate.ts:43-49`: build the (seed, side) task list so
+    // `--games N --model-side both` schedules 2N tasks (one per side per
+    // seed), and `--games N --model-side player|opponent` schedules N
+    // tasks for that side. Prior code alternated side per seed and ran
+    // exactly `seeds` total — half of TS under `both`. See Slice 2
+    // follow-up in `docs/ai-research/scoping/rust-engine-port-handoff.md`
+    // § 'Phase 1h follow-up'.
+    let sides: Vec<SideId> = match args.model_side.as_str() {
+        "player" => vec![SideId::Player],
+        "opponent" => vec![SideId::Opponent],
+        "both" => vec![SideId::Player, SideId::Opponent],
+        other => anyhow::bail!(
+            "--model-side must be player, opponent, or both (got {})",
+            other
+        ),
+    };
+    let tasks: Vec<(u32, SideId)> = sides
+        .iter()
+        .flat_map(|&side| (0..args.seeds).map(move |i| (args.seed_base + i, side)))
+        .collect();
     // Truncate progress-out file at start (matches TS `writeFileSync(path, "")`).
     if let Some(path) = args.progress_out.as_ref() {
         let p = PathBuf::from(path);
@@ -334,12 +365,13 @@ fn main() -> Result<()> {
     }
 
     eprintln!(
-        "sim-eval-gate: sims={} K={} rollout_steps={} seeds={} (base={}) challenger={:?} baseline={:?}",
-        args.sims, args.k, args.rollout_steps, args.seeds, args.seed_base, args.challenger, args.baseline,
+        "sim-eval-gate: sims={} K={} rollout_steps={} games-per-side={} model-side={} (=> {} total tasks) base={} challenger={:?} baseline={:?}",
+        args.sims, args.k, args.rollout_steps, args.seeds, args.model_side, tasks.len(), args.seed_base, args.challenger, args.baseline,
     );
 
     let start = Instant::now();
-    // Rotate model side across seeds: even seed → Player, odd → Opponent.
+    // Side assignment is now driven by the (seed, side) task list above
+    // (TS-parity), not by even/odd seed rotation.
     let mut player_games = 0u32;
     let mut player_wins = 0u32;
     let mut opp_games = 0u32;
@@ -358,9 +390,8 @@ fn main() -> Result<()> {
         ),
         None => None,
     };
-    for i in 0..args.seeds {
-        let seed = args.seed_base + i;
-        let model_side = if i % 2 == 0 { SideId::Player } else { SideId::Opponent };
+    let total_tasks = tasks.len() as u32;
+    for (task_index, &(seed, model_side)) in tasks.iter().enumerate() {
         let game_start = Instant::now();
         let (winner, terminal) = drive_one_game(seed, model_side, args.max_steps, &config);
         let game_secs = game_start.elapsed().as_secs_f64();
@@ -382,11 +413,11 @@ fn main() -> Result<()> {
             }
         }
         if let Some(w) = progress_writer.as_mut() {
-            let games_completed = i + 1;
+            let games_completed = (task_index as u32) + 1;
             let elapsed_so_far = start.elapsed().as_secs_f64();
             let eta_sec = if games_completed > 0 {
                 (elapsed_so_far / games_completed as f64)
-                    * (args.seeds.saturating_sub(games_completed)) as f64
+                    * (total_tasks.saturating_sub(games_completed)) as f64
             } else {
                 0.0
             };
@@ -398,7 +429,7 @@ fn main() -> Result<()> {
             let row = serde_json::json!({
                 "event": "game_completed",
                 "gameIndex": games_completed,
-                "totalGames": args.seeds,
+                "totalGames": total_tasks,
                 "seed": seed,
                 "modelSide": if model_side == SideId::Player { "Player" } else { "Opponent" },
                 "winner": winner.map(|s| if s == SideId::Player { "Player" } else { "Opponent" }),
@@ -550,3 +581,85 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Games-vs-model-side semantics lock.
+    //!
+    //! TS `backend/src/sim/evalGate.ts:43-49` interprets `--games N` as
+    //! N games **per modelled side**: under `--model-side both` the
+    //! orchestrator schedules `2N` tasks (player×N + opponent×N); under
+    //! `--model-side player|opponent` it schedules N tasks. The Rust
+    //! binary was previously off-spec — `--seeds N --model-side both`
+    //! ran exactly N games, alternating side. That asymmetry meant
+    //! `r12_orchestrator.run_gate` forwarding the same
+    //! `--games eval_games` to both engines silently ran HALF the games
+    //! under `--engine rust` (see Slice 2 verdict in
+    //! `docs/ai-research/scoping/rust-engine-port-handoff.md`
+    //! § 'Phase 1h follow-up'). Pin the schedule math here so a future
+    //! drift fails at `cargo test`, not at gate-stage Wilson-noise time.
+    use super::*;
+    use engine::core::constants::SideId;
+
+    fn build_tasks(games: u32, model_side: &str, seed_base: u32) -> Vec<(u32, SideId)> {
+        let sides: Vec<SideId> = match model_side {
+            "player" => vec![SideId::Player],
+            "opponent" => vec![SideId::Opponent],
+            "both" => vec![SideId::Player, SideId::Opponent],
+            _ => panic!("bad model_side in test"),
+        };
+        sides
+            .iter()
+            .flat_map(|&side| (0..games).map(move |i| (seed_base + i, side)))
+            .collect()
+    }
+
+    #[test]
+    fn games_model_side_both_doubles_task_count() {
+        // TS evalGate.ts: --games 5 --model-side both → 10 tasks.
+        let tasks = build_tasks(5, "both", 70000);
+        assert_eq!(tasks.len(), 10, "both must schedule 2N tasks");
+        // Player block first, then opponent block — mirrors TS
+        // `for (const side of sides) for (let index = 0; ...)`.
+        let player_block: Vec<_> = tasks
+            .iter()
+            .filter(|(_, s)| *s == SideId::Player)
+            .collect();
+        let opponent_block: Vec<_> = tasks
+            .iter()
+            .filter(|(_, s)| *s == SideId::Opponent)
+            .collect();
+        assert_eq!(player_block.len(), 5);
+        assert_eq!(opponent_block.len(), 5);
+        // Each side iterates [seed_base, seed_base + games), so both
+        // sides share the same seed set (TS parity).
+        let player_seeds: Vec<u32> = player_block.iter().map(|(s, _)| *s).collect();
+        let opponent_seeds: Vec<u32> = opponent_block.iter().map(|(s, _)| *s).collect();
+        assert_eq!(player_seeds, vec![70000, 70001, 70002, 70003, 70004]);
+        assert_eq!(opponent_seeds, vec![70000, 70001, 70002, 70003, 70004]);
+    }
+
+    #[test]
+    fn games_model_side_single_is_n_total() {
+        // TS evalGate.ts: --games 5 --model-side player → 5 tasks all Player.
+        let tasks = build_tasks(5, "player", 70000);
+        assert_eq!(tasks.len(), 5);
+        assert!(tasks.iter().all(|(_, s)| *s == SideId::Player));
+
+        let tasks = build_tasks(5, "opponent", 70000);
+        assert_eq!(tasks.len(), 5);
+        assert!(tasks.iter().all(|(_, s)| *s == SideId::Opponent));
+    }
+
+    #[test]
+    fn clap_accepts_both_games_and_seeds_aliases() {
+        // Orchestrator passes `--games`; legacy callers / docs use `--seeds`.
+        // Clap `long = "games", alias = "seeds"` must accept both as the
+        // same field.
+        let a = Args::parse_from(["sim-eval-gate", "--games", "7"]);
+        assert_eq!(a.seeds, 7);
+        let b = Args::parse_from(["sim-eval-gate", "--seeds", "7"]);
+        assert_eq!(b.seeds, 7);
+    }
+}
+

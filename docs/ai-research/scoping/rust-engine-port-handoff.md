@@ -925,3 +925,10 @@ either translate `eval_games -> --seeds (eval_games * 2)` on the Rust
 path when `--model-side both`, or symmetrically constrain TS to
 `eval_games` total. Low priority; not blocking — track here.
 
+**RESOLVED 2026-05-21:** `sim-eval-gate` flag renamed `--seeds` → `--games`
+(legacy alias kept) and tasks list now built `sides × games` to mirror TS
+`evalGate.ts:43-49`; `--games 4 --model-side both` produces 8 games (4 per
+side) on both engines. Three cargo unit tests pin the schedule math.
+`mcts_selfplay.ts` does NOT double under `--model-side both` (no
+modelSide axis at all; always Player), so Rust selfplay needed no change.
+
