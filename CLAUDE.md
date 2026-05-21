@@ -36,9 +36,12 @@ evidence; they do not restate it.
 - Check `git status --short` before edits.
 - If unrelated dirty files exist, leave them alone.
 - Do not mutate historical `runs/` artifacts unless the user explicitly asks or the task is creating a new run output.
-- Warn before launching long GPU, training, or large evaluation jobs.
 - Missing checkpoints under `runs/` are environment gaps, not product passes.
 - Hooks are intentionally not part of this harness unless repeated concrete failures prove they are needed.
+
+## Long Compute Tasks
+
+During long jobs (training, large evals, multi-minute scripts), give frequent observable status updates — stream via `Monitor`, tail the log, or surface step/epoch ticks. Silence is a bug; "still running, step N at T+Xm" beats nothing.
 
 ## Documentation Discipline
 

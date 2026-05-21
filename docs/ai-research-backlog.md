@@ -103,10 +103,16 @@ As of 2026-05-18:
    item 0b HP sweep ran and did NOT clear the 0.6042 ceiling. COST: changes
    the learning targets, breaks the R110 A/B chain (96-d 0.6479 production
    claim is rollout-leaf-based); any run on this axis establishes a new
-   baseline. Predecessor on a separate track: item 4 below (value/
-   action-value data program) trains the head this item consumes —
-   partially in flight as `training-data-deep-program` 3b. DEFERRED +
-   USER-GATED. Scope pointer: `docs/ai-research/scoping/r12-selfplay-gate-throughput.md`
+   baseline. **Predecessor data program (item 4 below) is the binding
+   constraint, not in flight.** All prior value-head-leaf attempts (R13.W3
+   PARTIAL, R13.W8 loop regressed, R14 crossover never crossed) used the
+   shared-trunk single-scalar head trained on R4-era data; throwing epochs
+   at that recipe is closed. Item 4 enumerates the 3-stage ladder
+   (post-W6 corpus retrain → action-value head → architectural change) that
+   produces a value head this item can consume. The `training-data-deep-
+   program` 3b arm tested only the *policy* side (DPO + soft-CE BC) and is
+   now done-negative; the value side never ran. DEFERRED + USER-GATED.
+   Scope pointer: `docs/ai-research/scoping/r12-selfplay-gate-throughput.md`
    item 4; queue `value-head-leaf-recipe-axis`.
 
 0c. **Fork B — label-quality test matrix (umbrella over the W6 dose
@@ -144,10 +150,51 @@ As of 2026-05-18:
    production, not raw-policy WR. Seed:
    `docs/ai-research/scoping/gpu-fed-stronger-mcts.md`.
 
-4. **Value/action-value data program — P1/P2.**
-   Train value or action-value heads on rule-bot-covered contested states
-   relabeled by rollout-leaf MCTS, not self-play-only states. This is the data
-   prerequisite for any learned-leaf strength candidate.
+4. **Value/action-value data program — P2 (3-stage ladder).**
+   Data/training prerequisite for item 0d (value-head leaf at MCTS). Three
+   sub-stages, cheapest first; each falsifies one hypothesis about why the
+   value head is currently too noisy for MCTS leaves. Historical evidence
+   that constrains the ladder: R13.W3 retrain on R4-era rollout means moved
+   Brier 0.243→0.084 but value-head-leaf MCTS strength stayed below the
+   production bar (PARTIAL); R14 crossover probe across W6 iter-1→iter-4
+   never satisfied `val_mse ≤ 1.10 × W3-floor AND pearson ≥ 0.7` (pearson
+   stuck ~0.5, ratio 1.18–1.29); the +18pp rollout-leaf iter-1→iter-2 gain
+   (0.452→0.6479) did **not** transfer to value-head-leaf inference (held
+   flat 0.404–0.452). Throwing epochs at the existing head/objective/corpus
+   recipe is closed (`docs/ai-performance-research-progress.md:1803, 1818,
+   1870, 1946`).
+   - **Stage 1 — post-W6 corpus retrain (cheapest, ~4h compute).** Same head
+     architecture, same objective (regress to rollout-CRN means), same
+     freeze-trunk-and-policy protocol as R13.W3, but on the W6 corpus
+     (sharper rollout targets than R4). Gate = R14 crossover probe
+     (`training/r14_value_crossover_probe.py`) crossed = true on a
+     held-out slice. Outcome falsifies "the W3 PARTIAL result was data-
+     limited." If crossed, attempt the value-head-leaf gate; if not,
+     escalate to Stage 2.
+   - **Stage 2 — action-value (Q) head + per-action rollout targets.**
+     Changes the *target*: corpus emits per-legal-action rollout-CRN means
+     instead of one state-value scalar, and the model gains a Q(s,a) head
+     consumed at MCTS leaves directly (one rollout per legal action at
+     corpus-generation time; head is fed per-action embeddings or
+     action-conditioned). This is the AlphaZero→MuZero-style move and is
+     the closest match to what MCTS leaves actually want. Outcome
+     falsifies "the state-value objective was the bottleneck." Bigger
+     scope: corpus regeneration + head architecture + serve_onnx schema
+     bump.
+   - **Stage 3 — architectural change (separate value tower / deeper head
+     / inference-time variance reduction).** All prior heads were
+     shared-trunk single-scalar with the same depth. Possible moves:
+     dedicated value tower, deeper value head, dropout-at-inference as
+     ensemble proxy, or auxiliary calibration loss. Outcome falsifies
+     "shared-trunk capacity was the bottleneck." Largest scope and most
+     speculative — only fires if Stages 1 and 2 both fail to lift
+     value-head-leaf MCTS strength to the 0.40 production bar.
+
+   **Stage 1 PROMOTED TO AUTONOMOUS P1 (2026-05-21)** per user lift —
+   cleanest properties of any line in the queue (cheap, falsifiable via the
+   R14 crossover probe, A/B-comparable, no R110 chain break, no new code
+   beyond a corpus-pointer flag); ~4h GPU. Stages 2 and 3 remain
+   user-gated for scope. Queue: `value-head-data-program`.
 
 5. **Side-conditioned sim budget — P2.**
    Run only after a larger-n rollout-leaf side split separates CIs or a
