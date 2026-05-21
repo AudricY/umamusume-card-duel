@@ -26,8 +26,15 @@
 | --- | ---: | ---: | --- |
 | Headless self-play (no MCTS) | 100 seeds | **3,484 g/s** | 28.7 ms, 153K advances/sec |
 | MCTS self-play, no rows | 5 seeds | 3.07 g/s | 1.63 sec |
-| **MCTS self-play, +row recording** | **100 seeds** | **3.89 g/s** | **25.7 sec, 639 rows, 0 stalls, 60/40 split favoring MCTS player** |
-| MCTS vs heuristic eval gate | 10 seeds | 3.05 g/s | Wilson 95% CI |
+| MCTS self-play, +row recording | 100 seeds | 3.89 g/s | 25.7 sec, 639 rows, 0 stalls |
+| MCTS vs heuristic eval-gate | 10 seeds | 3.05 g/s | 90% WR, Wilson 60-98% |
+| **MCTS vs heuristic eval-gate** | **50 seeds** | **4.43 g/s** | **64% WR, Wilson 50-76% (p<0.05 vs 50%)** |
+
+The 50-seed eval-gate result confirms MCTS provides a measurable
+edge over the heuristic-only baseline. Side-balanced: 60% as Player,
+68% as Opponent. The opponent-side bump (~8pp) is consistent with
+opponent's structural turn-order advantage that MCTS exploits more
+fully than the heuristic does.
 
 The 100-seed run produces 639 MCTS decisions worth of training data
 (observation + legal_actions + visit_distribution + diagnostics per
