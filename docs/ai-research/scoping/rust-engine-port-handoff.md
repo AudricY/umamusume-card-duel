@@ -307,6 +307,40 @@ npm --workspace backend run sim:replay-golden-traces -- \
   --in runs/rust-port-golden-traces/traces-500.jsonl
 ```
 
+### Phase 1h V4 RNG-gap diagnostic — narrows to scoreCandidate path
+
+Stack-traced TS rolloutHeuristic with `UMA_TRACE_RNG=1` env (instrument
+in `frontend/src/game/engine/core/random.ts`). Per-rollout 5-draw gap
+localized:
+
+```
+[randomFloat] at flipCoin (combat.ts:507:40)
+            | at performAttack (combat.ts:113:19)
+            | at scoreCandidate (combatPlanner.ts:203:5)
+```
+
+TS `combatPlanner.ts:203` calls `performAttack` on a CLONED state to
+score each candidate. For multi-coin attacks (knockOutActiveIfAllCoinHeads
+> 1), `forcedCoinResults` has only 1 entry but the attack needs N — so
+N-1 fallback `randomFloat()` calls fire per scoring.
+
+Rust's `flow/ai/combat_planner.rs:447` ALSO calls `perform_attack` for
+scoring, with `Some(vec![CoinFlipResult::Heads/Tails])` — also a
+1-entry forced. Same path SHOULD trigger same fallback.
+
+The hypothesis that needs verification: Rust may not generate the same
+number of candidate variants as TS, so fewer scoreCandidate calls →
+fewer random_float fallbacks. Per-rollout gap ≈ 5 missing
+random_float calls per rollout matches roughly 5 missing candidate
+variants per rollout.
+
+Next steps:
+1. Add per-candidate-count instrumentation to compare Rust vs TS
+   buildCombatCandidates output size at a known state.
+2. If counts match, the gap is in the SCORE path (which RNG sites
+   fire per call). If counts differ, port the missing candidate
+   variants in Rust.
+
 ### Phase 1h V3 → V4 — same root cause, deeper diagnostic
 
 V3 with uid remap advances 54 → 60 steps before first divergence. HP
