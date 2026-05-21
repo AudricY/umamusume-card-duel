@@ -45,6 +45,13 @@ export interface HeuristicGameSummary {
   terminalReason: "gameOver" | "stalled" | "maxSteps";
 }
 
+/** Result of driveMctsGameJson. Same as HeuristicGameSummary plus
+ *  modelDecisions (count of times MCTS actually fired — legal.len > 1
+ *  on the model side). */
+export interface McTsGameSummary extends HeuristicGameSummary {
+  modelDecisions: number;
+}
+
 /** MCTS config — all fields optional, defaults match sim-mcts-selfplay. */
 export interface McTsArgs {
   simulations?: number;
@@ -115,4 +122,20 @@ export interface NapiBridge {
    * @returns JSON of `HeuristicGameSummary`.
    */
   driveHeuristicGameJson(seed: string, maxSteps: number): string;
+
+  /**
+   * Drive a full MCTS-vs-heuristic game in pure Rust. Bit-identical
+   * trace to sim-mcts-selfplay for the same seed + config; avoids the
+   * per-step JSON roundtrip drift the composable mctsStepJson +
+   * advanceStepJson path is subject to.
+   * @param modelSide "player" or "opponent"
+   * @param mctsArgsJson JSON of `McTsArgs`
+   * @returns JSON of `McTsGameSummary`
+   */
+  driveMctsGameJson(
+    seed: string,
+    modelSide: "player" | "opponent",
+    maxSteps: number,
+    mctsArgsJson: string,
+  ): string;
 }
