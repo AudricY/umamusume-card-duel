@@ -5,7 +5,13 @@ from dataclasses import dataclass, asdict
 import torch
 from torch import nn
 
-from .features import ACTION_DIM, STATE_DIM, ZONE_ORDER
+from .features import (
+    ACTION_DIM,
+    STATE_DIM,
+    UMA_SLOT_COUNT,
+    UMA_SLOT_FEATURE_DIM,
+    ZONE_ORDER,
+)
 
 # R7.b.2 Phase 2: card-embedding vocab. `vocabSize` (107) + 1 for the
 # pad/unknown slot at index 0 — `shared/src/cardVocab.json:3-4` reserves
@@ -16,6 +22,25 @@ CARD_VOCAB_TABLE_SIZE = 108  # 107 cards + reserved 0 for unknown/pad
 NUM_ZONES = len(ZONE_ORDER)
 ACTION_PAIR_FANOUT = 2  # source + target idx per action
 
+# R16-P2 C2: board-zone lane indices into `card_ids_by_zone` (axis=1). When the
+# per-Uma slot-token branch is active (`uses_uma_slot_tokens=True`), the
+# `uma_slot_encoder` already encodes board identities at per-slot granularity,
+# so we MUST zero these 4 lanes before `zone_projection` consumes them to
+# avoid double-counting board identities (chunk plan § "Avoid double-counting
+# board identities"). The 4 non-board zones (ownHand, ownDiscard, oppDiscard,
+# stadium) pass through unchanged. The order MUST match the leading 4 entries
+# of `ZONE_ORDER` in `features.py` (assertion below). The slot-token branch is
+# a no-op when its kwargs are absent, so v3.0/v3.1 forwards stay byte-stable.
+BOARD_ZONE_NAMES: tuple[str, ...] = ("ownActive", "oppActive", "ownBench", "oppBench")
+BOARD_ZONE_LANE_INDICES: tuple[int, ...] = tuple(
+    ZONE_ORDER.index(name) for name in BOARD_ZONE_NAMES
+)
+assert BOARD_ZONE_LANE_INDICES == (0, 1, 2, 3), (
+    f"BOARD_ZONE_LANE_INDICES {BOARD_ZONE_LANE_INDICES} does not match the "
+    f"frozen ZONE_ORDER head (0..3 = ownActive/oppActive/ownBench/oppBench); "
+    f"slot-token board-zone masking depends on this layout."
+)
+
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -24,6 +49,16 @@ class ModelConfig:
     hidden_dim: int = 128
     depth: int = 3
     dropout: float = 0.05
+    # R16-P2 C2: when True, build the `uma_slot_encoder` branch in
+    # `CandidatePolicyNet` AND zero the 4 board-zone lanes of
+    # `card_ids_by_zone` before `zone_projection` to avoid double-counting
+    # board identities. Defaults to False so v3.0/v3.1 forwards (and any
+    # caller that does not opt in) are byte-identical to pre-C2 behavior.
+    # The encoder's final Linear is zero-initialized at construction time so
+    # the slot-residual contribution to `state_encoded` is structurally null
+    # at init (the v3.1 `delta=0.0` parity trick analog — load-bearing for
+    # C7's `make_v32_slot_token_init.py` warm-start from a v3.0 checkpoint).
+    uses_uma_slot_tokens: bool = False
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -113,6 +148,35 @@ class CandidatePolicyNet(nn.Module):
             nn.Tanh(),
         )
 
+        # R16-P2 C2: optional per-Uma slot-token encoder. Construction is
+        # gated on `uses_uma_slot_tokens` so default v3.0/v3.1 callers (which
+        # leave the flag False) get IDENTICAL parameter layouts to pre-C2 —
+        # no extra params, no init-order shifts, no state_dict key drift. The
+        # encoder shape mirrors the existing `zone_projection` pattern but
+        # operates per-slot instead of per-zone-sum: GELU+Linear-Linear with
+        # a ZERO-initialized FINAL Linear so `uma_slot_encoder(any) → 0` at
+        # init — the slot residual added to `state_encoded` is structurally
+        # null regardless of the slot tensors fed in. This is the load-
+        # bearing parity claim C7's `make_v32_slot_token_init.py` relies on
+        # (copy v3.0 weights verbatim + leave the slot encoder at its
+        # zero-init → identical logits/value to the source v3.0 checkpoint).
+        #
+        # The FIRST Linear stays at default (Kaiming/Xavier) — its output
+        # flows through GELU and then the zero Linear, so the structural
+        # null at the encoder's output does not depend on the first layer's
+        # init. The training dynamics get a useful starting Jacobian from
+        # the non-zero first layer once the zero output Linear begins to
+        # accumulate signal.
+        if self.config.uses_uma_slot_tokens:
+            self.uma_slot_encoder = nn.Sequential(
+                nn.Linear(CARD_EMBED_DIM + UMA_SLOT_FEATURE_DIM, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden, bias=False),
+            )
+            nn.init.zeros_(self.uma_slot_encoder[-1].weight)
+        else:
+            self.uma_slot_encoder = None
+
     def forward(
         self,
         state_features: torch.Tensor,
@@ -120,6 +184,8 @@ class CandidatePolicyNet(nn.Module):
         action_mask: torch.Tensor,
         card_ids_by_zone: torch.Tensor | None = None,
         action_card_idx: torch.Tensor | None = None,
+        uma_slot_card_ids: torch.Tensor | None = None,
+        uma_slot_features: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Candidate-conditioned forward.
 
@@ -162,6 +228,23 @@ class CandidatePolicyNet(nn.Module):
         # mask anyway because it documents the intent and survives any
         # future padding_idx change.
         if card_ids_by_zone is not None:
+            # R16-P2 C2 board-zone double-counting fix: when the per-Uma
+            # slot-token branch is active, the 4 board-zone lanes
+            # (ownActive=0, oppActive=1, ownBench=2, oppBench=3) are already
+            # encoded at per-slot granularity by `uma_slot_encoder`. Zero
+            # those lanes' card ids here (replace with the pad index 0) so
+            # `zone_projection` only sees the 4 non-board zones (ownHand,
+            # ownDiscard, oppDiscard, stadium). The 4 board lanes still feed
+            # the projection but contribute embed(0)=0 per `padding_idx=0` —
+            # the existing zero-pad contract carries the structural-zero
+            # for us, no shape change to `zone_features`. Gated on the flag
+            # so v3.0/v3.1 forwards stay byte-identical when False.
+            if self.config.uses_uma_slot_tokens:
+                card_ids_by_zone = card_ids_by_zone.clone()
+                # Index axis 1 (NUM_ZONES axis) at the 4 board-zone lanes;
+                # we keep a contiguous 0..3 slice rather than scatter so
+                # the operation is a single-stride view-and-fill on CUDA.
+                card_ids_by_zone[:, : len(BOARD_ZONE_LANE_INDICES), :] = 0
             # `embedded`: [B, NUM_ZONES, max_cards, embed]
             embedded = self.card_embed(card_ids_by_zone)
             mask = (card_ids_by_zone != 0).unsqueeze(-1).to(embedded.dtype)
@@ -171,6 +254,53 @@ class CandidatePolicyNet(nn.Module):
             pooled = (embedded * mask).sum(dim=-2)
             zone_features = pooled.reshape(batch_size, NUM_ZONES * CARD_EMBED_DIM)
             state_encoded = state_encoded + self.zone_projection(zone_features)
+
+        # R16-P2 C2: per-Uma slot-token branch. Active only when the model
+        # was constructed with `uses_uma_slot_tokens=True` AND both slot
+        # tensors are provided. When inactive (flag False, encoder None, or
+        # kwargs absent) this is a strict no-op — state_encoded passes
+        # through untouched, byte-identical to v3.0/v3.1.
+        #
+        # Mask source: we use `(uma_slot_card_ids != 0)` rather than
+        # `uma_slot_features[..., _UMA_SLOT_F_PRESENT]` (slot col 3). Both
+        # are equivalent under the C1 builder contract (absent slot → both
+        # card_id=0 AND present_mask=0; present slot → card_id != 0 AND
+        # present_mask=1.0). The card-id mask is preferred because:
+        #   (a) it mirrors the existing `card_ids_by_zone` mask convention
+        #       in `zone_projection` (single contract across both
+        #       embedding branches);
+        #   (b) it is a bit-exact predicate (int64 != 0) instead of a
+        #       float-equality compare, so it never picks up FP noise from
+        #       an upstream ablation that zeroes the features but leaves
+        #       card_ids intact (no such ablation exists today, but the
+        #       contract is cleaner);
+        #   (c) C7's init builder mirrors this convention — when the slot
+        #       tensors are all zero (the init-parity test), card_ids are
+        #       all zero so the mask is all zero, sum-pool is zero, and
+        #       the residual is structurally null regardless of the
+        #       zero-Linear init. Double-guard.
+        if (
+            self.config.uses_uma_slot_tokens
+            and self.uma_slot_encoder is not None
+            and uma_slot_card_ids is not None
+            and uma_slot_features is not None
+        ):
+            # Embed slot card ids using the SHARED `card_embed` table — no
+            # new vocab, no new embedding parameters. `slot_embed`:
+            # [B, UMA_SLOT_COUNT, CARD_EMBED_DIM].
+            slot_embed = self.card_embed(uma_slot_card_ids)
+            # Concat embedding + per-slot scalar features along the feature
+            # axis: [B, UMA_SLOT_COUNT, CARD_EMBED_DIM + UMA_SLOT_FEATURE_DIM].
+            slot_concat = torch.cat([slot_embed, uma_slot_features], dim=-1)
+            # Per-slot encode: [B, UMA_SLOT_COUNT, hidden]. At init the
+            # final Linear's weight is all zeros, so this output is
+            # structurally zero regardless of input.
+            per_slot_encoded = self.uma_slot_encoder(slot_concat)
+            # Sum-pool over the UMA_SLOT_COUNT (=10) slots with the absent-
+            # slot mask. Absent slot → card_id 0 → mask 0 → contributes 0.
+            slot_mask = (uma_slot_card_ids != 0).to(per_slot_encoded.dtype).unsqueeze(-1)
+            slot_pooled = (per_slot_encoded * slot_mask).sum(dim=1)
+            state_encoded = state_encoded + slot_pooled
 
         action_encoded = self.action_encoder(action_features)
         # R7.b.2 Phase 2: source + target embedding for each candidate.
