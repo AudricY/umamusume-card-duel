@@ -38,6 +38,16 @@ As of 2026-05-18:
   **ablated NO-GO** (v3.1 ≈ v3.0, no Wilson-lower win;
   `docs/ai-research/progress/r16.md`). Live operational state and forward
   order are in `docs/ai-agent-state/queue.json`.
+- **Post-data-work ceiling path (2026-05-21 sequencing refinement).** The
+  iter-2-peak-then-rot ceiling has two layered fixes, cheapest first:
+  **(A)** W6 recipe-fix HP sweep — already-landed flags (cross-iter replay
+  + fixed KL anchor, commit `d44de3f`) at tuned-down strengths; cheap,
+  in-methodology, R110 A/B chain intact. **(B)** Value-head leaf at MCTS
+  (item 0d below) — R111 recipe-axis change; heavy, breaks the R110 A/B
+  chain. Run (B) only if (A) cannot clear the 0.6042 iter-2 ceiling — pay
+  the methodology-break cost at most once. This sequence sits behind the
+  active data block; nothing changes about the current forward order, only
+  what comes after it.
 
 ## Active Search-Wrapped Frontier
 
@@ -58,22 +68,46 @@ As of 2026-05-18:
    (leverage-per-cost). Scope: `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`
    § "P2 - Per-Uma Slot Tokens"; queue `r16-p2-per-uma-slot-tokens`.
 
-0b. **W6 loop anti-degradation recipe — DEPRIORITIZED (regularization-dose
-   sweep = the deprioritized HP tuning).** Demoted from TOP PRIORITY to P3 by
-   the 2026-05-19 user reprioritization: runs only AFTER all three core
+0b. **W6 loop anti-degradation recipe — DEPRIORITIZED ordering, REFRAMED
+   role (ceiling-path step A).** Demoted from TOP PRIORITY to P3 by the
+   2026-05-19 user reprioritization: runs only AFTER all three core
    predecessors land (coverage pilot → R16-P2 → deep data program: corpus
-   recipe → preference/value-data), and stays user-gated. Gate-depth =
-   option B: it is **NOT** gated on the conditional side-balancing item or
-   the P3 manual mistake catalog (those fire on their own triggers; gating
-   W6 behind the conditional item could block it indefinitely). Operational
-   predecessor set is canonical in `docs/ai-agent-state/queue.json`. Mechanism still
-   CONFIRMED via R111 (iter-3 rot eliminated; recipe-fix landed commit
-   `d44de3f`, cross-iter replay buffer + fixed iter-0/SL KL anchor in
-   `r12_orchestrator.py`) but over-damps at default HP — policy froze then
-   decayed (0.5527→0.5358), below the 0.6042 baseline iter-2 peak. Reopen
-   knobs: lower/anneal the fixed-KL-anchor weight from 0.05 and/or reduce
-   replay old-fraction (0.40) / window (3). Canonical:
+   recipe → preference/value-data), and stays user-gated. **Strategic role
+   refined 2026-05-21**: this is not just deprioritized HP tuning — it is
+   the *cheap, in-methodology, R110-A/B-preserving* first attempt at the
+   iter-2-peak-then-rot ceiling. One or two HP runs decides whether
+   containment alone clears 0.6042; if it does NOT, escalate to item 0d
+   (value-head leaf at MCTS, the heavy recipe-axis fix). Gate-depth = option
+   B: it is **NOT** gated on the conditional side-balancing item or the P3
+   manual mistake catalog (those fire on their own triggers; gating W6
+   behind the conditional item could block it indefinitely). Operational
+   predecessor set is canonical in `docs/ai-agent-state/queue.json`.
+   Mechanism still CONFIRMED via R111 (iter-3 rot eliminated; recipe-fix
+   landed commit `d44de3f`, cross-iter replay buffer + fixed iter-0/SL KL
+   anchor in `r12_orchestrator.py`) but over-damps at default HP — policy
+   froze then decayed (0.5527→0.5358), below the 0.6042 baseline iter-2
+   peak. Reopen knobs: lower/anneal the fixed-KL-anchor weight from 0.05
+   and/or reduce replay old-fraction (0.40) / window (3). Canonical:
    `docs/ai-research/progress/r110.md` §4c; queue `w6-loop-anti-degradation`.
+
+0d. **Value-head leaf at MCTS — ceiling-path step B (R111 recipe-axis).**
+   Surfaced 2026-05-21 as its own forward-line entry (previously buried as a
+   one-line pointer inside the DONE `r12-throughput` queue entry). Root
+   mechanism behind the iter-2-peak-then-rot ceiling: in rollout-leaf mode
+   the trained value head is never used at gate/self-play
+   (`backend/src/sim/mcts.ts:552-555`), so the loop has no improving signal
+   feeding back into MCTS across iters (rule-bot rollouts at leaves are
+   fixed quality). Re-enabling the value head at leaves gives the loop a
+   positive gradient toward ground-truth `z`, which is what lets visits
+   ratchet *sharper* across iters instead of softer. Trigger condition:
+   item 0b HP sweep ran and did NOT clear the 0.6042 ceiling. COST: changes
+   the learning targets, breaks the R110 A/B chain (96-d 0.6479 production
+   claim is rollout-leaf-based); any run on this axis establishes a new
+   baseline. Predecessor on a separate track: item 4 below (value/
+   action-value data program) trains the head this item consumes —
+   partially in flight as `training-data-deep-program` 3b. DEFERRED +
+   USER-GATED. Scope pointer: `docs/ai-research/scoping/r12-selfplay-gate-throughput.md`
+   item 4; queue `value-head-leaf-recipe-axis`.
 
 0c. **Fork B — label-quality test matrix (umbrella over the W6 dose
    sweep).** Raises target/teacher quality at *fixed* capacity and volume
