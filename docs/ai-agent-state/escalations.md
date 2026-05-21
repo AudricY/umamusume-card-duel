@@ -2,16 +2,27 @@
 
 ## Open
 
-- **2026-05-21: 3b corpus arm DONE-NEGATIVE; direction open.**
-  Chunks 5a-i falsify candidate-1 (5i flip 17.3% n=365 < 30%) and
-  candidate-3 (5f BC −0.0179). Queue 2026-05-21T05:24Z:
-  `training-data-deep-program` → `done-negative`; r16-p2 deferral
-  spent (unblocked, user-gated). Open: autonomous reframed-step-1
-  (rollout-leaf return audit, diagnostic) vs user-gated W6 HP-sweep
-  (CEILING PATH A). Secondary: P3 `mcts-relabel-rng-bleed`.
-  Canonical: r16.md "chunk 5i".
+- **2026-05-21: chunk 5j n=1000 confirmation gate FALSIFIED
+  contested-coverage cheap slope.** Both autonomous P1 data-side
+  forward lines now exhausted: training-data-coverage-pilot →
+  `done-falsified` (chunk 5j); training-data-deep-program →
+  `done-negative` (chunks 5a-i). Sanity-check + coverage smoke
+  passed; n=1000 broke monotonicity and sign-flipped margin
+  (−1.8pp vs pilot +2.2pp). Only remaining autonomous-actionable
+  work is the diagnostic-only reframed step 1 (rollout-leaf return
+  audit, ~200 LOC, research-only). All other paths user-gated (W6
+  HP-sweep, r16-p2, value-head-leaf-recipe-axis,
+  value-head-data-program Stage 1 one-line heads-up). Canonical:
+  r16.md sub-§ "Chunk 5j — n=1000 confirmation gate FALSIFIES
+  cheap-slope".
 
 ## Resolved Pointers
+
+- 2026-05-21: 3b corpus arm DONE-NEGATIVE direction call RESOLVED;
+  both autonomous P1 data-side forward lines now closed end-to-end
+  (training-data-deep-program done-negative chunks 5a-i; sibling
+  training-data-coverage-pilot done-falsified at chunk 5j n=1000
+  confirmation gate). Canonical: r16.md chunks 5a-j.
 
 - 2026-05-21: 3b candidate-1 forward-line direction call RESOLVED
   (DIES at step 2). Chunk 5g labels-confidently-wrong + chunk 5h

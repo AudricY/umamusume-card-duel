@@ -83,10 +83,49 @@ v3.1 best-promoted **0.5955** (iter-3) vs v3.0 best-promoted **0.6042**
   intrinsic W6-recipe property, not a representation effect.
   Canonical: `docs/ai-research/progress/r110.md` §3.
 
-## R16 Contested-Coverage Pilot — Methodology + cross-references (full prose)
+## R16 Contested-Coverage Pilot — Mechanisms + Methodology (full prose)
 
-Compact summary lives in `r16.md` § "R16 Training-Data — Contested-Coverage
-Pilot"; full prose retained here.
+Compact summary + chunk-5j falsification verdict live in `r16.md` § "R16
+Training-Data — Contested-Coverage Pilot"; full prose retained here.
+
+### Mechanisms as built (full detail; write scope: `training/uma_ai/dataset.py`)
+
+Two independently-selectable knobs, both holding total retained-row count
+fixed, both defaulting OFF (bit-identical no-op when unset — verified):
+
+- **Option 3 — legal-action-count loss weighting.** `contested_loss_weight`
+  (×1.0 = no-op) multiplies `_sample_weight` for rows with
+  `≥ contested_min_legal` (default 4) legal actions. Reuses the existing
+  `sample_weight` / `collate_policy_batch` / `normalized_weights` seam; no
+  corpus change, no row-count change.
+- **Option 1 — contested resampling.** `contested_resample_fraction`
+  (`None` = no-op) buffers the retained stream, splits on the ≥4-legal
+  threshold, and draws with replacement from each group to hit the target
+  contested fraction while keeping total retained count exactly fixed
+  (deterministic, RNG seeded by `--seed`). Empty-group guard yields the
+  unmodified stream rather than fabricating distribution.
+
+Threaded into `train_bc.py` (bc mode only) as `--contested-loss-weight`,
+`--contested-min-legal`, `--contested-resample-fraction` — same
+`--state-dim`-style option threading; no new config framework.
+
+### Pilot sweep detail (n=300/side, supersedes pilot-positive framing)
+
+Pilot full table (Option 1 swept) — superseded by chunk 5j n=1000
+falsification but retained here for evidence trace:
+
+| Coverage point | `legal_action_count` | player WR | opp WR | side-bal Wilson-lower | overall WR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline (no knob) | 0.2022 | 0.290 | 0.393 | 0.2416 | 0.342 |
+| resample ~30% | 0.3001 | 0.307 | 0.393 | 0.2572 | 0.350 |
+| resample ~45% | 0.4500 | 0.313 | 0.397 | 0.2635 | 0.355 |
+
+Improvement at n=300/side driven by the weaker (player) side; opponent
+side flat. Baseline 0.2022 reproduces the audit headline (below ≥30%
+floor; R7 retained is exactly-2-legal-dominated). Confirmation gate at
+n=1000/side (chunk 5j) found all three pilot point estimates fall BELOW
+the n=1000 95% CIs and the slope sign flips — the pilot was on the low
+tail of sampling noise.
 
 ### Methodology / discipline (full)
 
@@ -97,10 +136,9 @@ default-arg equality); (2) coverage-moves — both knobs move
 corpus at fixed retained count (Option 1 hits 0.2022/0.3001/0.4500
 exactly; Option 3 holds count fixed and scales contested weight mass);
 (3) one cheap point measured first (train ~10s + export ~1s + gate ~90s ≈
-~2 min/point ≪ 30-min threshold) → full 3-point sweep run. The n≥1000
-expensive closed-loop gate was NOT launched (stop rule: forbidden until
-the cheap slope is positive — which it now is, unlocking but not
-performing the next tier).
+~2 min/point ≪ 30-min threshold) → full 3-point sweep run; (4) n=1000/side
+confirmation gate pre-registered to fire only on positive cheap slope —
+fired, falsified the pilot direction (chunk 5j).
 
 ### Cross-references (full)
 
