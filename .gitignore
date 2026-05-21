@@ -1,6 +1,10 @@
 node_modules
 dist
 *.tsbuildinfo
+engine-rs/target/
+engine-rs/Cargo.lock
+# rust-analyzer / IDE caches sometimes drop a top-level target/
+/target/
 __pycache__/
 *.pyc
 *:Zone.Identifier
