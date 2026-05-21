@@ -88,6 +88,8 @@ struct TraceStep {
     #[serde(rename = "sideId")]
     side_id: String,
     action: TraceAction,
+    #[serde(default, rename = "rngDrawsThisStep")]
+    rng_draws_this_step: u64,
 }
 
 #[derive(Deserialize, Clone)]
@@ -220,6 +222,7 @@ fn v4_replay_for_seed(
         };
 
         let legal = enumerate_legal_ai_actions(&state, side_id);
+        let pre_step_draws = step_rng.draws();
 
         // V4b: run Rust MCTS for RNG consumption when there are multiple
         // legal actions, but advance with the RECORDED action (uid-
@@ -251,6 +254,20 @@ fn v4_replay_for_seed(
         });
         step_rng = used_rng;
         state = next_state;
+
+        // RNG-draw-count diagnostic: TS recorded `rngDrawsThisStep`.
+        let rust_draws = step_rng.draws() - pre_step_draws;
+        if rust_draws != step.rng_draws_this_step {
+            diffs.push(format!(
+                "step[{}] rngDrawsThisStep: rust={} ts={} (delta {:+})",
+                i,
+                rust_draws,
+                step.rng_draws_this_step,
+                rust_draws as i64 - step.rng_draws_this_step as i64
+            ));
+            // Don't break — continue to state check + subsequent steps so
+            // we see the full divergence pattern.
+        }
 
         let target_fp = if i + 1 < trace.actions.len() {
             trace.actions[i + 1].fingerprint_before.as_str()

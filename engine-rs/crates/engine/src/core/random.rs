@@ -24,6 +24,10 @@ pub struct Rng {
     state: u32,
     initial: u32,
     label: String,
+    /// Monotonically increasing draw count. Bit-identity-only test
+    /// instrumentation; not load-bearing for engine semantics. Wraps
+    /// at u64::MAX (unreachable in practice).
+    draws: u64,
 }
 
 impl Rng {
@@ -37,6 +41,7 @@ impl Rng {
             state,
             initial,
             label: label.to_string(),
+            draws: 0,
         }
     }
 
@@ -51,7 +56,13 @@ impl Rng {
         value ^= value.wrapping_add(mix);
         // ((value ^ (value >>> 14)) >>> 0) / 4294967296
         let final_u32 = value ^ (value >> 14);
+        self.draws = self.draws.saturating_add(1);
         (final_u32 as f64) / 4_294_967_296.0
+    }
+
+    /// Total `next_f64` calls since construction.
+    pub fn draws(&self) -> u64 {
+        self.draws
     }
 
     /// Mirror of `rng.fork(forkLabel)`.
@@ -65,6 +76,7 @@ impl Rng {
     pub fn label(&self) -> &str {
         &self.label
     }
+
 }
 
 /// Mirror of TS `normalizeSeed`.
