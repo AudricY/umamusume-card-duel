@@ -17,8 +17,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use engine::core::random::{with_rng, Rng};
 use engine::core::state::CurrentSide;
-use engine::dispatcher::{advance_opponent_turn_step, advance_player_ai_turn_step, get_forced_attack_coin_results};
+use engine::dispatcher::{advance_opponent_turn_step, advance_player_ai_turn_step, get_forced_attack_coin_results, state_hash};
 use engine::headless_setup::setup_ai_vs_ai_game;
+use engine::policy::actions::{choose_highest_scored_action, enumerate_legal_ai_actions};
+use engine::policy::observation::build_public_observation;
+use engine::policy::types::{LegalAiAction, PublicObservation};
 use serde::Serialize;
 
 #[derive(Parser, Debug)]
@@ -59,43 +62,109 @@ struct TerminalReasons {
     stalled: u32,
 }
 
-#[derive(Serialize)]
+/// Mirror of TS `TrainingExample` (`backend/src/sim/headlessAiVsAi.ts:151`).
+/// Per-AI-decision row produced by the heuristic-candidate-v1 policy
+/// (`chooseHighestScoredAction` over enumerated legal actions).
+#[derive(Serialize, Clone)]
 struct TrainingExample {
-    seed: String,
+    schema_version: u32,
+    episode_id: String,
     step: u32,
-    turn_number: u32,
+    seed: String,
     side_id: String,
     phase: String,
-    // Placeholder for downstream consumers. Populated in a follow-up when
-    // the observation builder's JSON shape is finalized to match TS.
-    // legal_actions: Vec<LegalAiActionJson>,
-    // selected_action_index: usize,
-    // observation: PublicObservation,
+    observation: PublicObservation,
+    legal_actions: Vec<LegalAiAction>,
+    selected_action_id: String,
+    selected_action_index: usize,
+    policy: &'static str,
+    result: ExampleResult,
+}
+
+#[derive(Serialize, Clone)]
+struct ExampleResult {
+    winner: Option<String>,
+    points: PointsByside,
+}
+
+#[derive(Serialize, Clone)]
+struct PointsByside {
+    player: u8,
+    opponent: u8,
 }
 
 fn drive_one_game(seed: &str, max_steps: u32) -> (Vec<TrainingExample>, &'static str) {
     let rng = Rng::from_seed(format!("{}:selfplay", seed).as_str(), "selfplay");
     let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
-    let examples: Vec<TrainingExample> = Vec::new();
+    let mut examples: Vec<TrainingExample> = Vec::new();
+    let episode_id = format!("ep-{}", seed);
 
     let mut terminal = "max_steps";
-    for _step in 0..max_steps {
+    for step in 0..max_steps {
         if state.game_over {
             terminal = "game_over";
             break;
         }
         let side = match state.current_side {
-            CurrentSide::Player => Some(engine::core::constants::SideId::Player),
-            CurrentSide::Opponent => Some(engine::core::constants::SideId::Opponent),
+            CurrentSide::Player => engine::core::constants::SideId::Player,
+            CurrentSide::Opponent => engine::core::constants::SideId::Opponent,
             CurrentSide::Done => {
                 terminal = "game_over";
                 break;
             }
         };
-        let Some(side) = side else {
-            terminal = "game_over";
-            break;
-        };
+
+        // Heuristic-candidate-v1 policy: enumerate legal actions, pick
+        // highest-scored. Record the example BEFORE advancing.
+        let (legal, used_rng) = with_rng(step_rng.clone(), || {
+            enumerate_legal_ai_actions(&state, side)
+        });
+        step_rng = used_rng;
+        if legal.is_empty() {
+            // Some phases (e.g. setup) may have zero AI actions; just
+            // advance without recording.
+        } else {
+            let selected = choose_highest_scored_action(&legal);
+            let selected_idx = legal
+                .iter()
+                .position(|a| a.id == selected.id)
+                .unwrap_or(0);
+            let phase_str = match selected.phase {
+                engine::policy::types::AiPhase::Setup => "setup",
+                engine::policy::types::AiPhase::PendingChoice => "pendingChoice",
+                engine::policy::types::AiPhase::Bench => "bench",
+                engine::policy::types::AiPhase::TrainerBefore => "trainerBefore",
+                engine::policy::types::AiPhase::Evolve => "evolve",
+                engine::policy::types::AiPhase::Attach => "attach",
+                engine::policy::types::AiPhase::TrainerAfter => "trainerAfter",
+                engine::policy::types::AiPhase::Ability => "ability",
+                engine::policy::types::AiPhase::Combat => "combat",
+                engine::policy::types::AiPhase::StadiumOrEnd => "stadiumOrEnd",
+            };
+            examples.push(TrainingExample {
+                schema_version: 1,
+                episode_id: episode_id.clone(),
+                step,
+                seed: seed.to_string(),
+                side_id: match side {
+                    engine::core::constants::SideId::Player => "player".to_string(),
+                    engine::core::constants::SideId::Opponent => "opponent".to_string(),
+                },
+                phase: phase_str.to_string(),
+                observation: build_public_observation(&state, side),
+                legal_actions: legal,
+                selected_action_id: selected.id.clone(),
+                selected_action_index: selected_idx,
+                policy: "heuristic-candidate-v1",
+                result: ExampleResult {
+                    winner: None,
+                    points: PointsByside {
+                        player: state.sides[0].points,
+                        opponent: state.sides[1].points,
+                    },
+                },
+            });
+        }
 
         let (next_state, used_rng) = with_rng(step_rng.clone(), || {
             let forced = get_forced_attack_coin_results(&state);
@@ -112,14 +181,27 @@ fn drive_one_game(seed: &str, max_steps: u32) -> (Vec<TrainingExample>, &'static
         });
         step_rng = used_rng;
 
-        // Detect stall via identical state (mirrors TS recorder's
-        // stalled-fingerprint check).
-        if engine::dispatcher::state_hash(&next_state) == engine::dispatcher::state_hash(&state) {
+        if state_hash(&next_state) == state_hash(&state) {
             terminal = "stalled";
             break;
         }
         state = next_state;
     }
+
+    // Backfill winner + final points across all examples (matches TS pattern).
+    let final_winner = state.winner.map(|s| match s {
+        engine::core::constants::SideId::Player => "player".to_string(),
+        engine::core::constants::SideId::Opponent => "opponent".to_string(),
+    });
+    let final_points = PointsByside {
+        player: state.sides[0].points,
+        opponent: state.sides[1].points,
+    };
+    for ex in &mut examples {
+        ex.result.winner = final_winner.clone();
+        ex.result.points = final_points.clone();
+    }
+
     (examples, terminal)
 }
 
