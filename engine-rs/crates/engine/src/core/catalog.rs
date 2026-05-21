@@ -295,4 +295,106 @@ mod tests {
             assert!(c.get(cid).is_some());
         }
     }
+
+    #[test]
+    fn every_umamusume_has_positive_hp_and_at_least_one_attack() {
+        // Codegen-regression guard. An umamusume with hp <= 0 is
+        // unplayable (instantly knocked out); zero attacks means it
+        // can never deal damage. Both conditions silently break
+        // gameplay and were not caught by cross-language identity
+        // comparisons, since hp == 0 would propagate from TS too.
+        let c = catalog();
+        let mut umas = 0u32;
+        for card in c.cards.iter() {
+            if let Card::Umamusume(u) = card {
+                umas += 1;
+                assert!(
+                    u.hp > 0,
+                    "umamusume {} has non-positive hp {}",
+                    u.id,
+                    u.hp
+                );
+                assert!(
+                    !u.attacks.is_empty(),
+                    "umamusume {} has zero attacks — unplayable",
+                    u.id
+                );
+                assert!(
+                    !u.name.is_empty(),
+                    "umamusume {} has empty name",
+                    u.id
+                );
+                assert!(
+                    !u.species.is_empty(),
+                    "umamusume {} has empty species",
+                    u.id
+                );
+            }
+        }
+        assert!(umas > 0, "catalog has zero umamusume — codegen broken");
+    }
+
+    #[test]
+    fn every_trainer_card_has_nonempty_name() {
+        let c = catalog();
+        let mut trainers = 0u32;
+        for card in c.cards.iter() {
+            if let Card::Trainer(t) = card {
+                trainers += 1;
+                assert!(
+                    !t.name.is_empty(),
+                    "trainer {} has empty name",
+                    t.id
+                );
+            }
+        }
+        assert!(trainers > 0, "catalog has zero trainer cards");
+    }
+
+    #[test]
+    fn no_duplicate_card_ids() {
+        let c = catalog();
+        let mut seen: std::collections::HashSet<&str> =
+            std::collections::HashSet::with_capacity(c.len());
+        for card in c.cards.iter() {
+            let id = match card {
+                Card::Umamusume(u) => u.id.as_str(),
+                Card::Trainer(t) => t.id.as_str(),
+            };
+            assert!(
+                seen.insert(id),
+                "duplicate catalog id: {} (interner would also collapse this — silent bug)",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn evolution_chains_resolve_to_a_basic_umamusume() {
+        // `evolves_from` is matched by SPECIES, not card id (see
+        // flow/evolution.rs:47). So for every umamusume that claims
+        // an evolves_from, some basic umamusume in the catalog must
+        // have that species — otherwise the evolve action is unreachable.
+        let c = catalog();
+        let mut species_in_catalog: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        for card in c.cards.iter() {
+            if let Card::Umamusume(u) = card {
+                species_in_catalog.insert(u.species.as_str());
+            }
+        }
+        for card in c.cards.iter() {
+            if let Card::Umamusume(u) = card {
+                if let Some(parent_species) = u.evolves_from.as_ref() {
+                    assert!(
+                        species_in_catalog.contains(parent_species.as_str()),
+                        "{} (stage {}) evolves from species {:?}, but no catalog card has that species — chain is broken",
+                        u.id,
+                        u.stage,
+                        parent_species,
+                    );
+                }
+            }
+        }
+    }
 }
