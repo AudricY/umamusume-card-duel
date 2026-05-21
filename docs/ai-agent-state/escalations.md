@@ -16,7 +16,10 @@
   contested-confident rows → 400-sim argmax-flip test → only then
   escalate sims). Canonical: `docs/ai-research/progress/r16.md` §
   "3b — BC-on-relabel probe (chunk 5f)" / sub-§ "Candidate-1
-  kill-test (chunk 5g)".
+  kill-test (chunk 5g)". Ladder step-2 brief now concrete
+  (rule-bot-mirror @ 400 sims, ~20-40 min); step-1 deferred pending
+  CRN-paired clarification — see sub-§ "Step ordering refined
+  (chunk 5h scoping)".
 
 ## Resolved Pointers
 
