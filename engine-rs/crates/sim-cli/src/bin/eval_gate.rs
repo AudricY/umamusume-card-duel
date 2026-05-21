@@ -61,6 +61,7 @@ struct Args {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SideStat {
     games: u32,
     wins: u32,
@@ -70,6 +71,7 @@ struct SideStat {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GateSummary {
     challenger: Option<String>,
     baseline: Option<String>,
@@ -85,6 +87,7 @@ struct GateSummary {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConfigEcho {
     sims: u32,
     k: u32,

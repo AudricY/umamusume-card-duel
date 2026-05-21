@@ -66,6 +66,7 @@ struct TerminalReasons {
 /// Per-AI-decision row produced by the heuristic-candidate-v1 policy
 /// (`chooseHighestScoredAction` over enumerated legal actions).
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct TrainingExample {
     schema_version: u32,
     episode_id: String,
@@ -82,12 +83,14 @@ struct TrainingExample {
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ExampleResult {
     winner: Option<String>,
     points: PointsByside,
 }
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct PointsByside {
     player: u8,
     opponent: u8,

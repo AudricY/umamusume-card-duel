@@ -69,6 +69,7 @@ struct Args {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GameRecord {
     seed: u32,
     terminal_reason: String,
@@ -84,6 +85,7 @@ struct GameRecord {
 /// Mirror of TS `SelfPlayRow` in `backend/src/sim/mctsSelfPlay.ts:485`.
 /// Subset of fields populated today; full parity in a follow-up.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SelfPlayRow {
     schema_version: u32,
     kind: &'static str,
