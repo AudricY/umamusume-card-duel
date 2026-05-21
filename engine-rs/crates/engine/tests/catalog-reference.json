@@ -1,0 +1,683 @@
+{
+  "count": 106,
+  "cards": [
+    {
+      "id": "3starMakeDebutScout",
+      "kind": "trainer",
+      "trainerType": "item"
+    },
+    {
+      "id": "3starMakeDebutScoutFullArtGold",
+      "kind": "trainer",
+      "trainerType": "item"
+    },
+    {
+      "id": "agnesDigitalBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 60,
+      "type": "Fire"
+    },
+    {
+      "id": "agnesDigitalStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 100,
+      "type": "Fire"
+    },
+    {
+      "id": "agnesDigitalStage1FullArt",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 100,
+      "type": "Fire"
+    },
+    {
+      "id": "agnesDigitalStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 100,
+      "type": "Fire"
+    },
+    {
+      "id": "agnesTachyonBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 50,
+      "type": "Fire"
+    },
+    {
+      "id": "agnesTachyonStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 80,
+      "type": "Fire"
+    },
+    {
+      "id": "agnesTachyonStage1Ex",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 140,
+      "type": "Fire"
+    },
+    {
+      "id": "agnesTachyonStage1FullArt",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 80,
+      "type": "Fire"
+    },
+    {
+      "id": "agnesTachyonStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 80,
+      "type": "Fire"
+    },
+    {
+      "id": "aoiKiryuin",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "aoiKiryuinFullArt",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "boxingGloves",
+      "kind": "trainer",
+      "trainerType": "tool"
+    },
+    {
+      "id": "boxingGlovesUncommonPlus",
+      "kind": "trainer",
+      "trainerType": "tool"
+    },
+    {
+      "id": "carrotHamburgerSteak",
+      "kind": "trainer",
+      "trainerType": "item"
+    },
+    {
+      "id": "carrotJelly",
+      "kind": "trainer",
+      "trainerType": "item"
+    },
+    {
+      "id": "daiwaScarletBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 60,
+      "type": "Water"
+    },
+    {
+      "id": "daiwaScarletStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 90,
+      "type": "Water"
+    },
+    {
+      "id": "daiwaScarletStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 90,
+      "type": "Water"
+    },
+    {
+      "id": "daiwaScarletStage2",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 120,
+      "type": "Water"
+    },
+    {
+      "id": "daiwaScarletStage2FullArt",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 120,
+      "type": "Water"
+    },
+    {
+      "id": "etsukoOtonashi",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "etsukoOtonashiFullArt",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "hanshinRacetrack",
+      "kind": "trainer",
+      "trainerType": "stadium"
+    },
+    {
+      "id": "haruUraraBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 90,
+      "type": "Psychic"
+    },
+    {
+      "id": "haruUraraBasicFullArt",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 90,
+      "type": "Psychic"
+    },
+    {
+      "id": "leftoverCarrot",
+      "kind": "trainer",
+      "trainerType": "tool"
+    },
+    {
+      "id": "leftoverCarrotUncommonPlus",
+      "kind": "trainer",
+      "trainerType": "tool"
+    },
+    {
+      "id": "manhattanCafeBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 60,
+      "type": "Darkness"
+    },
+    {
+      "id": "manhattanCafeStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 90,
+      "type": "Darkness"
+    },
+    {
+      "id": "manhattanCafeStage1FullArt",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 90,
+      "type": "Darkness"
+    },
+    {
+      "id": "manhattanCafeStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 90,
+      "type": "Darkness"
+    },
+    {
+      "id": "matikanefukukitaruBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 70,
+      "type": "Psychic"
+    },
+    {
+      "id": "matikanefukukitaruStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 100,
+      "type": "Psychic"
+    },
+    {
+      "id": "matikanefukukitaruStage1FullArt",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 100,
+      "type": "Psychic"
+    },
+    {
+      "id": "matikanefukukitaruStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 100,
+      "type": "Psychic"
+    },
+    {
+      "id": "matikanetannhauserBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 60,
+      "type": "Psychic"
+    },
+    {
+      "id": "matikanetannhauserStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 90,
+      "type": "Psychic"
+    },
+    {
+      "id": "matikanetannhauserStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 90,
+      "type": "Psychic"
+    },
+    {
+      "id": "matikanetannhauserStage2",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 120,
+      "type": "Psychic"
+    },
+    {
+      "id": "matikanetannhauserStage2FullArt",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 120,
+      "type": "Psychic"
+    },
+    {
+      "id": "mihonoBourbonBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 50,
+      "type": "Steel"
+    },
+    {
+      "id": "mihonoBourbonStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 90,
+      "type": "Steel"
+    },
+    {
+      "id": "mihonoBourbonStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 90,
+      "type": "Steel"
+    },
+    {
+      "id": "mihonoBourbonStage2",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 130,
+      "type": "Steel"
+    },
+    {
+      "id": "mihonoBourbonStage2Ex",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 150,
+      "type": "Steel"
+    },
+    {
+      "id": "mihonoBourbonStage2FullArt",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 130,
+      "type": "Steel"
+    },
+    {
+      "id": "nakayamaTurf",
+      "kind": "trainer",
+      "trainerType": "stadium"
+    },
+    {
+      "id": "niceNatureBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 70,
+      "type": "Grass"
+    },
+    {
+      "id": "niceNatureBasicEx",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 110,
+      "type": "Grass"
+    },
+    {
+      "id": "niceNatureBasicFullArt",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 70,
+      "type": "Grass"
+    },
+    {
+      "id": "nishinoFlowerBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 70,
+      "type": "Grass"
+    },
+    {
+      "id": "nishinoFlowerBasicFullArt",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 70,
+      "type": "Grass"
+    },
+    {
+      "id": "oguriCapBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 70,
+      "type": "Colorless"
+    },
+    {
+      "id": "oguriCapStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 110,
+      "type": "Colorless"
+    },
+    {
+      "id": "oguriCapStage1Ex",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 170,
+      "type": "Colorless"
+    },
+    {
+      "id": "oguriCapStage1FullArt",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 110,
+      "type": "Colorless"
+    },
+    {
+      "id": "oguriCapStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 110,
+      "type": "Colorless"
+    },
+    {
+      "id": "rainbowUncapCrystal",
+      "kind": "trainer",
+      "trainerType": "item"
+    },
+    {
+      "id": "rainbowUncapCrystalFullArtGold",
+      "kind": "trainer",
+      "trainerType": "item"
+    },
+    {
+      "id": "riceShowerBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 50,
+      "type": "Darkness"
+    },
+    {
+      "id": "riceShowerStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 80,
+      "type": "Darkness"
+    },
+    {
+      "id": "riceShowerStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 80,
+      "type": "Darkness"
+    },
+    {
+      "id": "riceShowerStage2",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 140,
+      "type": "Darkness"
+    },
+    {
+      "id": "riceShowerStage2Ex",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 170,
+      "type": "Darkness"
+    },
+    {
+      "id": "riceShowerStage2FullArt",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 140,
+      "type": "Darkness"
+    },
+    {
+      "id": "superCreekBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 70,
+      "type": "Water"
+    },
+    {
+      "id": "superCreekStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 120,
+      "type": "Water"
+    },
+    {
+      "id": "superCreekStage1FullArt",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 120,
+      "type": "Water"
+    },
+    {
+      "id": "superCreekStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 120,
+      "type": "Water"
+    },
+    {
+      "id": "symboliRudolfBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 50,
+      "type": "Dragon"
+    },
+    {
+      "id": "symboliRudolfStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 80,
+      "type": "Dragon"
+    },
+    {
+      "id": "symboliRudolfStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 80,
+      "type": "Dragon"
+    },
+    {
+      "id": "symboliRudolfStage2",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 120,
+      "type": "Dragon"
+    },
+    {
+      "id": "symboliRudolfStage2Ex",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 160,
+      "type": "Dragon"
+    },
+    {
+      "id": "symboliRudolfStage2FullArt",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 120,
+      "type": "Dragon"
+    },
+    {
+      "id": "takoyakiBox",
+      "kind": "trainer",
+      "trainerType": "item"
+    },
+    {
+      "id": "tamamoCrossBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 50,
+      "type": "Lightning"
+    },
+    {
+      "id": "tamamoCrossStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 70,
+      "type": "Lightning"
+    },
+    {
+      "id": "tamamoCrossStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 70,
+      "type": "Lightning"
+    },
+    {
+      "id": "tamamoCrossStage2",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 100,
+      "type": "Lightning"
+    },
+    {
+      "id": "tamamoCrossStage2FullArt",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 100,
+      "type": "Lightning"
+    },
+    {
+      "id": "tazunaHayakawa",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "tazunaHayakawaFullArt",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "teamCanopus",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "teamCanopusFullArt",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "teamRigil",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "teamRigilFullArt",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "teamSpica",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "teamSpicaFullArt",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "tracenAcademy",
+      "kind": "trainer",
+      "trainerType": "stadium"
+    },
+    {
+      "id": "tracenGym",
+      "kind": "trainer",
+      "trainerType": "stadium"
+    },
+    {
+      "id": "traineeScoutTicket",
+      "kind": "trainer",
+      "trainerType": "item"
+    },
+    {
+      "id": "trainingHelmet",
+      "kind": "trainer",
+      "trainerType": "tool"
+    },
+    {
+      "id": "trainingHelmetUncommonPlus",
+      "kind": "trainer",
+      "trainerType": "tool"
+    },
+    {
+      "id": "twinTurboBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 80,
+      "type": "Lightning"
+    },
+    {
+      "id": "twinTurboBasicEx",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 110,
+      "type": "Lightning"
+    },
+    {
+      "id": "twinTurboBasicFullArt",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 80,
+      "type": "Lightning"
+    },
+    {
+      "id": "vodkaBasic",
+      "kind": "umamusume",
+      "stage": 0,
+      "hp": 60,
+      "type": "Fighting"
+    },
+    {
+      "id": "vodkaStage1",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 80,
+      "type": "Fighting"
+    },
+    {
+      "id": "vodkaStage1UncommonPlus",
+      "kind": "umamusume",
+      "stage": 1,
+      "hp": 80,
+      "type": "Fighting"
+    },
+    {
+      "id": "vodkaStage2",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 110,
+      "type": "Fighting"
+    },
+    {
+      "id": "vodkaStage2FullArt",
+      "kind": "umamusume",
+      "stage": 2,
+      "hp": 110,
+      "type": "Fighting"
+    },
+    {
+      "id": "yayoiAkikawa",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    },
+    {
+      "id": "yayoiAkikawaFullArt",
+      "kind": "trainer",
+      "trainerType": "supporter"
+    }
+  ]
+}
