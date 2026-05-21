@@ -57,6 +57,13 @@
       "status": "deferred-revisit",
       "summary": "Guardrail only: raw-policy SL follow-up is not a forward line absent new evidence. Canonical rationale: docs/ai-research/progress/r15.md and docs/ai-research-backlog.md.",
       "next_action": "Do not action unless explicit new evidence or user request reopens the raw-policy line."
+    },
+    {
+      "id": "per-game-pfsp-league-retry",
+      "priority": "P3",
+      "status": "deferred-revisit",
+      "summary": "League/PFSP retry on existing training/opponent_pool.py infra (PFSP weights, retention cap, cycling alarm, JSON persistence; already wired into ppo_orchestrator.py + dagger_orchestrator.py). Two prior negative datapoints: R5 weak-pool missed gate; PPO Phase J strong-pool regressed at iter-2 and missed the 0.40 gate by 18pp (docs/ai-performance-research-progress.md:2114-2127). Diagnosis at docs/ai-performance-research-progress.md:808-811 attributed the Phase J failure to the v1 sampler (per-RUN choice with self-promoted-at-mode); open hypothesis is that per-GAME re-sampling + strict PFSP weight enforcement would rescue it. NOT load-bearing for the current active failure mode: W6 iter-2-peak-then-rot is monotone representation drift (training/r12_orchestrator.py:53-69), not non-transitivity; cycling_alarm at training/opponent_pool.py:164-180 has not fired in any committed run log. Production claim is search-wrapped MCTS, which blunts marginal value of policy diversity. Canonical: docs/ai-research-backlog.md § Active Search-Wrapped Frontier item 7.",
+      "next_action": "DEFERRED + USER-GATED. Do not auto-launch. Revisit ONLY after the state-coverage line resolves (training-data-coverage-pilot larger-n confirmation + training-data-deep-program 3a+3b) AND explicit user go-ahead. Predecessor evidence preferred: a measured league-shaped symptom (e.g. cycling_alarm fires in a real run, or fixed-opponent eval regresses while self-vs-self winrate climbs). When picked: implement per-GAME opponent re-sampling in ppo_orchestrator.py:985-1020 (currently per-RUN via _select_pool_opponent) + enforce PFSP weights on draws (currently uniform fallback at random.Random(seed).choice(list(pool.entries))), then A/B vs the latest promoted checkpoint at the side-balanced gate. Use the existing W6/iter-{0,1,2} pool layout from Phase J as the comparator baseline."
     }
   ]
 }

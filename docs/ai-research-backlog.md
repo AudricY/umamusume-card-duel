@@ -122,6 +122,23 @@ As of 2026-05-18:
 6. **RL/PPO from a strong search-wrapped checkpoint — P3.**
    Later strategic bet. Do not use it to bypass search-wrapped gates above.
 
+7. **Per-game PFSP league retry — P3, deferred-revisit.**
+   Infra already built (`training/opponent_pool.py`: snapshots, PFSP weights,
+   retention cap, cycling alarm, JSON persistence; wired into
+   `ppo_orchestrator.py` + `dagger_orchestrator.py`). Two prior negative
+   datapoints: R5 weak-pool missed the gate; PPO Phase J strong-pool
+   regressed at iter-2 and missed the 0.40 gate by 18pp
+   (`docs/ai-performance-research-progress.md:2114-2127`). Diagnosis
+   attributed the recent failure to a **per-RUN sampler with self-promoted-
+   at-mode** (`progress.md:808-811`); open hypothesis is that per-GAME
+   re-sampling + strict PFSP weight enforcement would rescue it. Do NOT
+   auto-launch. The current dominant failure mode (W6 iter-2-peak-then-rot)
+   is representation drift, not non-transitivity (`r12_orchestrator.py:53-69`),
+   and the `cycling_alarm` has not fired in any committed run log — i.e.
+   there is no measured league-shaped symptom in-tree to treat. Revisit
+   only after the state-coverage line (items 0/0a + TD 2-3) resolves AND
+   explicit user go-ahead.
+
 ## Training-Data / State-Coverage Backlog
 
 **Fork A — contested-state coverage** frames items 1–2 below as its
