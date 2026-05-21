@@ -161,15 +161,20 @@ impl CurrentSide {
 
 /// `shared/src/types.ts:218` `GameState`.
 ///
-/// `log` mirrors TS `state.log` and is intentionally NOT included in the
-/// packed fingerprint — `backend/src/sim/stateFingerprint.ts` excludes it
-/// from the TS fingerprint too. It IS used by the heuristic opponent's
+/// `log` mirrors TS `state.log: string[]` (shared/src/types.ts:235) and is
+/// intentionally NOT included in the packed fingerprint —
+/// `backend/src/sim/stateFingerprint.ts` excludes it from the TS
+/// fingerprint too. It IS used by the heuristic opponent's
 /// `has_consecutive_no_attack_turns` (Phase 1f), which reads
 /// `state.log[0..64]` searching for "did not attack" / "attacked with"
 /// entries. We cap at 12 to match TS `core/log.ts:5` `slice(0, 12)`.
 ///
-/// `#[serde(skip)]` so JSON serialization of GameState round-trips don't
-/// emit the log (consumers don't expect it).
+/// `#[serde(default)]` so legacy/missing-field JSON still parses (gives
+/// an empty deque). Serializes as a normal JSON string array — matches
+/// TS shape, so the field survives NAPI per-step roundtrips. Before
+/// this, mctsStepJson + advanceStepJson would clear the log every
+/// step, diverging from sim-cli on seeds where the heuristic AI's
+/// no-attack-streak check fires.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub phase: Phase,
@@ -190,7 +195,7 @@ pub struct GameState {
     pub winner: Option<SideId>,
     /// Most-recent-first log entries (TS `unshift` + `slice(0, 12)`).
     /// Excluded from packed buffer + fingerprint.
-    #[serde(skip)]
+    #[serde(default)]
     pub log: std::collections::VecDeque<String>,
 }
 
