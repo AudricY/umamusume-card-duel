@@ -890,3 +890,38 @@ sequential after (~90-100min).
 single-process; orchestrator forwards `--workers 24` but only TS path
 fans out. Not load-bearing yet — track for after the parity verdict.
 
+### Slice 2 verdict — re-scoped eval-gate-only A/B (2026-05-21)
+
+Re-scoped Slice 2 acceptance check (paired `sim-eval-gate` only, no
+distill loop) ran against `runs/R110-rust-parity-rust/iter-0/policy.onnx`
+on a single `serve_onnx --provider cpu` instance at port 46211, R110
+recipe (`sims=100 K=3 rollout=200 leaf=rollout prior=policy c_puct=1.5`
+`modelSide=both`). Rust (single-process, `--seeds 120` to match TS-both):
+wilson_lower **0.5189** / wr 0.6083 / 120 games / 118.9s / PASS.
+TS (`--workers 24`): wilson_lower **0.5869** / wr 0.6750 / 120 games /
+346.4s / PASS. |delta_wilson|=**0.0680**, |delta_winRate|=0.0667 — within
+the ±0.07 60-game-side-balanced Wilson noise band (edge). No crashes;
+both gates emitted full `summary.wilson95` shape parseable by
+`load_summary`. **Verdict: PARITY PASS at edge of band.** Wall-time
+ratio Rust:TS=0.343x (~2.9x speedup at 100 sims rollout-leaf).
+Per the original queue plan ('retire after a clean second iter') the
+`--engine ts` escape hatch is retained until a second clean datapoint
+(the first promoted-checkpoint gate under `--engine rust`). Artefacts:
+`runs/R110-rust-parity-eval-only-{rust,ts}/gate.manifest.json` +
+`gate-progress.jsonl`.
+
+**Open follow-up — orchestrator `--games` semantics across engines.**
+The Slice 2 A/B exposed an asymmetry: TS `evalGate.ts` interprets
+`--games N --model-side both` as N **per side** (=2N total tasks; see
+`backend/src/sim/evalGate.ts:43-49`), while Rust `sim-eval-gate`
+interprets `--seeds N --model-side both` as N **total** (alternating
+per-seed; see `engine-rs/crates/sim-cli/src/bin/eval_gate.rs:361-383`).
+`r12_orchestrator.run_gate` currently passes the same `--games
+<eval_games>` value to both engines via `resolve_engine_command`, so a
+gate under `--engine rust` runs HALF as many games as the same gate
+under `--engine ts`. Side-rotation is still 50/50 in both (Wilson-lower
+comparison stays meaningful), but per-iter game-count differs. Fix:
+either translate `eval_games -> --seeds (eval_games * 2)` on the Rust
+path when `--model-side both`, or symmetrically constrain TS to
+`eval_games` total. Low priority; not blocking — track here.
+
