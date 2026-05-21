@@ -16,8 +16,12 @@ As of 2026-05-18:
 - **The iter-2-peak-then-regress is now a characterized schema-independent
   recipe property.** Reproduced across BOTH 96-d and 110-d v3; 0.6479 is
   itself W6's *transient iter-2 peak*, not a stable optimum. The R110 v3
-  reproduction was MARGINAL (best-promoted iter-2 0.6042) and not promoted.
-  Canonical: `docs/ai-research/progress/r110.md`.
+  reproduction was MARGINAL (best-promoted iter-2 0.6042 at n=120). Tight-gate
+  re-verdict 2026-05-21 at n=10,000 resolved the v3 ceiling to **Wilson-lower
+  0.5811 / point 0.5908 / upper 0.6004** — 0.6042 was n=120 high-tail noise.
+  Pin position unchanged; strength claim downgrades to MARGINAL-WEAK. Where
+  this backlog reads "0.6042 iter-2 ceiling" below, the honest comparator is
+  now 0.5811. Canonical: `docs/ai-research/progress/r110.md` §1 + §4d.
 - **The search-free/raw-policy SL line is closed.** Labels, objective,
   representation, and label-shape all failed to approach the 0.40 gate
   (R7/R8/R7.b.2/mcts-distill v1). Do not spend compute on another isolated
