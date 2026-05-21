@@ -255,8 +255,15 @@ fn main() -> Result<()> {
     let _ = args.model_side;
     let _ = args.min_ci_lower;
     let _ = args.min_games;
-    let _ = args.progress_out;
     let _ = args.workers;
+    // Truncate progress-out file at start (matches TS `writeFileSync(path, "")`).
+    if let Some(path) = args.progress_out.as_ref() {
+        let p = PathBuf::from(path);
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        fs::write(&p, "").with_context(|| format!("truncate {}", path))?;
+    }
 
     eprintln!(
         "sim-eval-gate: sims={} K={} rollout_steps={} seeds={} (base={}) challenger={:?} baseline={:?}",
@@ -273,10 +280,22 @@ fn main() -> Result<()> {
     let mut terminal_stalled = 0u32;
     let mut terminal_max_steps = 0u32;
 
+    let mut progress_writer = match args.progress_out.as_ref() {
+        Some(path) => Some(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("open progress-out {}", path))?,
+        ),
+        None => None,
+    };
     for i in 0..args.seeds {
         let seed = args.seed_base + i;
         let model_side = if i % 2 == 0 { SideId::Player } else { SideId::Opponent };
+        let game_start = Instant::now();
         let (winner, terminal) = drive_one_game(seed, model_side, args.max_steps, &config);
+        let game_secs = game_start.elapsed().as_secs_f64();
         match terminal {
             "game_over" => terminal_game_over += 1,
             "stalled" => terminal_stalled += 1,
@@ -293,6 +312,41 @@ fn main() -> Result<()> {
             if model_won {
                 opp_wins += 1;
             }
+        }
+        if let Some(w) = progress_writer.as_mut() {
+            let games_completed = i + 1;
+            let elapsed_so_far = start.elapsed().as_secs_f64();
+            let eta_sec = if games_completed > 0 {
+                (elapsed_so_far / games_completed as f64)
+                    * (args.seeds.saturating_sub(games_completed)) as f64
+            } else {
+                0.0
+            };
+            let running_wr = if games_completed > 0 {
+                (player_wins + opp_wins) as f64 / games_completed as f64
+            } else {
+                0.0
+            };
+            let row = serde_json::json!({
+                "event": "game_completed",
+                "gameIndex": games_completed,
+                "totalGames": args.seeds,
+                "seed": seed,
+                "modelSide": if model_side == SideId::Player { "Player" } else { "Opponent" },
+                "winner": winner.map(|s| if s == SideId::Player { "Player" } else { "Opponent" }),
+                "modelWon": model_won,
+                "terminalReason": terminal,
+                "gameElapsedSec": game_secs,
+                "totalElapsedSec": elapsed_so_far,
+                "etaSec": eta_sec,
+                "runningWinRate": running_wr,
+                "workerId": 0,
+                "ts": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0),
+            });
+            writeln!(w, "{}", row)?;
         }
     }
     let elapsed = start.elapsed();

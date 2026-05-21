@@ -96,6 +96,35 @@ struct Args {
     model_url: String,
 }
 
+impl Args {
+    /// Serialize the args set into the JSON shape the TS sim:mcts-selfplay
+    /// writes to --manifest-out: camelCase keys, all flags present.
+    fn manifest_args_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sims": self.sims,
+            "k": self.k,
+            "rolloutSteps": self.rollout_steps,
+            "collapseMax": self.collapse_max,
+            "seeds": self.seeds,
+            "seedBase": self.seed_base,
+            "prior": self.prior,
+            "leaf": self.leaf,
+            "workers": self.workers,
+            "cPuct": self.c_puct,
+            "maxNodes": self.max_nodes,
+            "dirichletAlpha": self.dirichlet_alpha,
+            "dirichletEpsilon": self.dirichlet_epsilon,
+            "temperatureMoves": self.temperature_moves,
+            "temperatureValue": self.temperature_value,
+            "manifestOut": self.manifest_out,
+            "maxSteps": self.max_steps,
+            "out": self.out,
+            "recordRows": self.record_rows,
+            "modelUrl": self.model_url,
+        })
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GameRecord {
@@ -299,7 +328,6 @@ fn main() -> Result<()> {
     let _ = args.temperature_moves;
     let _ = args.temperature_value;
     let _ = args.workers;
-    let _ = args.manifest_out;
 
     let model_side = SideId::Player;
     eprintln!(
@@ -354,6 +382,20 @@ fn main() -> Result<()> {
         draws,
         terminal_reasons,
     };
+    let output = serde_json::json!({
+        "args": args.manifest_args_json(),
+        "summary": summary,
+    });
+    if let Some(path) = args.manifest_out.as_ref() {
+        let p = PathBuf::from(path);
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        let body = serde_json::to_string_pretty(&output)? + "\n";
+        fs::write(&p, body).with_context(|| format!("write {}", p.display()))?;
+        eprintln!("manifest-out: wrote {}", p.display());
+    }
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
 }
