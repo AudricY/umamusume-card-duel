@@ -307,6 +307,42 @@ npm --workspace backend run sim:replay-golden-traces -- \
   --in runs/rust-port-golden-traces/traces-500.jsonl
 ```
 
+### Phase 1h V3 → V4 — same root cause, deeper diagnostic
+
+V3 with uid remap advances 54 → 60 steps before first divergence. HP
+tracking added to the diff exposes the actual issue: opponent active's
+HP at step 60 diverges (Rust over-damages, KO's Stage 2 that should
+have survived).
+
+Root cause: **per-step outer-RNG draw counts go up to 5,000+** because
+the recorder's MCTS rollouts consume the OUTER RNG inside
+`getForcedAttackCoinResults` calls and rule-bot rollout transitions.
+Per-step counts on the first few steps: `[59, 5414, 4943, 0, 0, 4821, ...]`.
+
+Total outer-RNG draws through step 60 of seed 0: **100,581**. Rust V3
+(no MCTS) consumes maybe 100-200 draws total. By step 60 the PRNG
+streams have diverged by ~100K draws → coin flips at step 60+ land
+differently → 30 vs 60 damage → KO divergence.
+
+**V4 plan** (deferred to next session): the "real" Phase 1h gate runs
+**full Rust MCTS during replay** with the same config (sims=100, K=3,
+rollout_steps=200, prior=uniform, leaf=rollout, collapseMaxSteps=64).
+Rust MCTS uses identical engine + heuristic + RNG, so it should pick
+identical actions and consume identical outer-RNG draws as TS.
+
+If the Rust MCTS port is also bit-identical, V4 reaches 500/500 game
+parity. If V4 still diverges, the divergence will be in one of:
+- Rust MCTS's PUCT selection (math::puct_select)
+- Rust rollout_heuristic (advances rule-bot via flow::ai::core)
+- Rust's inner RNG tree ("mcts-root" seeded RNG) not matching
+  TS's `createSeededRng(seed, "mcts-root")` byte-for-byte
+
+The known divergence flagged by the Phase 1f agent —
+`has_consecutive_no_attack_turns` returning false instead of reading
+state.log — is a likely V4 divergence source. Fix: add
+`SideState.consecutive_no_attack_streak: u8` counter mutated by
+`flow::combat::perform_attack` and `flow::turn::end_turn`.
+
 ### Phase 1h V2 — diagnostic insight (mid-session)
 
 V2 step-replay reaches step 54 of seed 0 before first divergence. The

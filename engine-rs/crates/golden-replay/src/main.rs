@@ -118,8 +118,11 @@ struct TsSide {
 struct TsInst {
     #[serde(rename = "cardId")]
     card_id: String,
-    #[allow(dead_code)]
     uid: u32,
+    #[serde(default)]
+    hp: i32,
+    #[serde(default, rename = "maxHp")]
+    max_hp: i32,
 }
 
 /// Reconstruct a `LegalAiAction` from a recorded trace step. Sufficient
@@ -353,36 +356,37 @@ fn compare_card_id_fields<F: Fn(engine::core::card_id::CardId) -> String>(
     resolve: &F,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    let rust_player_active = state.sides[0].active.as_ref().map(|u| resolve(u.card_id));
-    let ts_player_active = ts.sides.player.active.as_ref().map(|u| u.card_id.clone());
+    let fmt_inst = |u: &engine::core::state::UmamusumeInstance| {
+        format!("{}@{}/{}", resolve(u.card_id), u.hp, u.max_hp)
+    };
+    let fmt_ts_inst = |u: &TsInst| format!("{}@{}/{}", u.card_id, u.hp, u.max_hp);
+
+    let rust_player_active = state.sides[0].active.as_ref().map(fmt_inst);
+    let ts_player_active = ts.sides.player.active.as_ref().map(fmt_ts_inst);
     if rust_player_active != ts_player_active {
         out.push(format!(
             "player.active: rust={:?} ts={:?}",
             rust_player_active, ts_player_active
         ));
     }
-    let rust_opp_active = state.sides[1].active.as_ref().map(|u| resolve(u.card_id));
-    let ts_opp_active = ts.sides.opponent.active.as_ref().map(|u| u.card_id.clone());
+    let rust_opp_active = state.sides[1].active.as_ref().map(fmt_inst);
+    let ts_opp_active = ts.sides.opponent.active.as_ref().map(fmt_ts_inst);
     if rust_opp_active != ts_opp_active {
         out.push(format!(
             "opponent.active: rust={:?} ts={:?}",
             rust_opp_active, ts_opp_active
         ));
     }
-    let rust_player_bench: Vec<String> =
-        state.sides[0].bench.iter().map(|u| resolve(u.card_id)).collect();
-    let ts_player_bench: Vec<String> =
-        ts.sides.player.bench.iter().map(|u| u.card_id.clone()).collect();
+    let rust_player_bench: Vec<String> = state.sides[0].bench.iter().map(fmt_inst).collect();
+    let ts_player_bench: Vec<String> = ts.sides.player.bench.iter().map(fmt_ts_inst).collect();
     if rust_player_bench != ts_player_bench {
         out.push(format!(
             "player.bench: rust={:?} ts={:?}",
             rust_player_bench, ts_player_bench
         ));
     }
-    let rust_opp_bench: Vec<String> =
-        state.sides[1].bench.iter().map(|u| resolve(u.card_id)).collect();
-    let ts_opp_bench: Vec<String> =
-        ts.sides.opponent.bench.iter().map(|u| u.card_id.clone()).collect();
+    let rust_opp_bench: Vec<String> = state.sides[1].bench.iter().map(fmt_inst).collect();
+    let ts_opp_bench: Vec<String> = ts.sides.opponent.bench.iter().map(fmt_ts_inst).collect();
     if rust_opp_bench != ts_opp_bench {
         out.push(format!(
             "opponent.bench: rust={:?} ts={:?}",
