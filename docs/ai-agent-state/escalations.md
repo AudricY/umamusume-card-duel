@@ -2,21 +2,21 @@
 
 ## Open
 
-- **2026-05-21: 3b BC-on-relabel probe FALSIFIES candidate-3 —
-  corpus binding constraint, direction call needed.** Soft-CE BC on
-  the 11798 relabel rows (3ep, lr 3e-4, h64 d2 dropout 0.05) lands
-  `pair_accuracy` 0.6802 vs 0.6981 baseline = **−0.0179, OUTSIDE
-  the ±0.022 noise band**; all 5 ranking metrics regress vs ref.
-  Candidate-3 (objective mismatch fixes the DPO ceiling) is
-  FALSIFIED — BC is meaningfully worse than the untrained ref, not
-  flat. By elimination, candidate-1 (relabel-MCTS too weak vs ref)
-  is now the binding hypothesis: the rollout-leaf 100-sim labels
-  actively mislead training. Forward line is a user direction call
-  between (a) re-relabel with stronger MCTS (400+ sims / value-head
-  leaf) — direct candidate-1 test, or (b) W6 HP-sweep (CEILING PATH
-  step A, cheap-first). Canonical:
-  `docs/ai-research/progress/r16.md` § "3b — BC-on-relabel probe
-  (chunk 5f)".
+- **2026-05-21: 3b candidate-1 kill-test (chunk 5g) — labels
+  confidently wrong on contested heads; stronger-MCTS demoted from
+  cheap-first.** Chunk 5f FALSIFIED candidate-3 (BC-on-relabel
+  regressed −0.0179 outside ±0.022 noise). Chunk 5g read-only
+  label-divergence audit on the 11798 relabel rows then identified
+  the binding sub-case: Case B — relabel `policyTargets` decisively
+  diverge from the untrained 96-d ref on the same states, with wide
+  margins on the three heads (`pass`/`playTrainer`/`retreatAttack`)
+  where BC val acc cratered. Direction call: stronger-MCTS
+  re-relabel is no longer the cheap-first candidate-1 test;
+  superseded by a 3-step diagnostic ladder (value-eval audit on
+  contested-confident rows → 400-sim argmax-flip test → only then
+  escalate sims). Canonical: `docs/ai-research/progress/r16.md` §
+  "3b — BC-on-relabel probe (chunk 5f)" / sub-§ "Candidate-1
+  kill-test (chunk 5g)".
 
 ## Resolved Pointers
 

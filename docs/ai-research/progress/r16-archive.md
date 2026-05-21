@@ -304,3 +304,85 @@ Promote criteria (per scoping § P1 acceptance): retained
 contested-row rate ≥80% — MET trivially at 100% across all
 recipes. Loader retention verified separately (above): the
 `JsonlPolicyDataset` accepts 100% of these rows.
+
+## R16-TD 3b chunks 5a-5e — per-chunk landings (full)
+
+Compact summary lives in `r16.md` § "3b Chunks 5a-5e" + the
+Cumulative Verdict table.
+
+- **5a** (3ep β=0.1 lr=1e-5, commit dc68ac8): HP-overfit FAIL
+  (Δpair_acc −0.0167 / Δtop1 −0.0321). Offline gate (scoping § P2
+  step 5) caught the regression before any n=1000 spend.
+  `training/pad_checkpoint_to_v3.py` (numerically null pad) makes
+  the pre-v3 96-d checkpoint usable as both ref and init.
+- **5b** (1ep β=0.5 lr=3e-6, 21s wall-clock): HP probe POSITIVE
+  (+0.0043 pair_acc / +0.0006 top1, best of the series). HP, not
+  corpus, was the 5a issue — `margin_bucket 0.05-0.10` recovered
+  +6.6pp. Both deltas inside the ±0.022 noise band at n=1620.
+- **5c-long** (5ep at 5b HPs, commit c243fd8): REGRESSED below
+  baseline (−0.0012 / −0.0117). 5-epoch overshoot proves the
+  runner-up-only corpus signal is exhausted by ~1 epoch at this
+  HP regime; train/val gap 0.696/0.640.
+- **5d (pair-builder)** (commit 7448b14): expanded
+  `pair_builder.py` with `top_k` (ranks 2..K) and `rule_bot`
+  (winner vs `heuristicSelectedActionIndex` when different) modes.
+  Diversified corpus = **13419 pairs (+65.8% vs 8093)** — 60.3%
+  runner_up + 33.9% top_k_rank_3 + 5.8% rule_bot. 52% of states
+  had rule-bot == MCTS winner (structural). Margin histogram
+  stays winner-dominant (80.7% ≥0.20). Deferred `high_prior` +
+  `policy_argmax` (data-availability).
+- **5e** (1ep β=0.5 lr=3e-6 on the 13419-pair diversified corpus,
+  commit 059f2a7): COMPARABLE to 5b (+0.0031 / −0.0043), inside
+  noise — diversification did NOT lift the headline. Falsifies
+  "runner-up-only is the bottleneck" at this HP budget.
+
+## R16-TD 3b Cumulative Verdict — root-cause candidates (superseded by chunk 5g)
+
+Pre-chunk-5g framing kept for history. Compact summary + the
+sharpened diagnostic ladder live in `r16.md` § "Candidate-1
+kill-test (chunk 5g)". Original 4-candidate list and forward-line
+proposal preserved below for historical context only.
+
+Root-cause candidates (deferred to user-scoped decision at the
+time of cumulative-verdict writeup):
+
+1. **Relabel-MCTS quality**: the rollout-leaf 100-sims relabel
+   may not be meaningfully sharper than the 96-d reference's
+   own policy on the contested states. The gap to learn is
+   small, so DPO can't lift the policy above the ref ceiling.
+   Test: re-relabel with a stronger MCTS (e.g. 400+ sims or a
+   value-head leaf) and see if the relabel-vs-ref disagreement
+   distribution shifts toward bigger margins.
+2. **Reference too strong**: the 96-d production pin is already
+   near a local optimum for the rule-bot opponent; DPO can't
+   improve much without a stronger comparison target. Test:
+   train BC from scratch + use that as ref/init (lift may
+   appear vs a weaker baseline).
+3. **DPO objective mismatch**: the pair-margin loss may not
+   transfer to the candidate-ranking metric on this domain.
+   Test: switch to direct soft-CE on the relabeled
+   `policyTargets` (i.e. BC on the 11798-row 3a corpus) and
+   compare against the same held-out floor.
+4. **Held-out split correlation**: blake2b on (episode, step)
+   may not separate train/held-out enough for lift to
+   generalize. Test: re-split by episode only (held-out
+   episodes never appear in train) and re-eval.
+
+Forward line proposal (orchestrator recommendation, pre-5g):
+candidates (1) and (3) are the cheapest to test (no new
+generation, just a re-train or re-relabel). Candidate (3) —
+direct soft-CE on the 11798 relabel rows — is closest to the
+"BC-on-the-new-corpus" baseline that DPO should beat; if BC
+itself doesn't lift the offline metrics, the relabel corpus
+itself is the binding constraint (candidate 1) and chunk-5d
+diversification was always going to be a marginal lever. Per
+the user's 2026-05-21 sequencing refinement (loop_note), the
+post-data-work CEILING PATH is W6 HP-sweep (A) cheap-first;
+the 3b workstream may have hit its productive limit absent a
+direction call from the user.
+
+Chunk 5f then falsified candidate-3 directly; chunk 5g then
+re-tested candidate-1 with a read-only label-divergence check
+(rather than the proposed expensive stronger-MCTS re-relabel)
+and found labels confidently wrong on contested heads — see
+the chunk-5g ladder in `r16.md`.
