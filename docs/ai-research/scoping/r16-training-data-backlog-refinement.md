@@ -1,6 +1,14 @@
 # R16 Training Data Backlog Refinement
 
 - **Date:** 2026-05-18
+- **Status (2026-05-21):** SUPERSEDED — Fork A contested-coverage pilot
+  DONE-FALSIFIED at chunk 5j n=1000 confirmation gate (monotonicity
+  broken, margin sign-flipped −1.8pp); P1 rule-bot-covered MCTS relabel
+  3a/3b emit-path landed and chunks 5a–5i exhausted the corpus signal
+  (DONE-NEGATIVE). Canonical outcome: `docs/ai-research/progress/r16.md`
+  §§ "Contested-Coverage Pilot" + "Online MCTS Relabel Infra (3a)".
+  The P0/P1/P2 prose below remains the canonical recipe and design
+  reference for any future revisit but is not on the active queue.
 - **Scope:** deeper backlog refinement for the top three training-data research
   ideas after mechanics, data-loader, simulator, and subagent review.
 - **Top three items:**

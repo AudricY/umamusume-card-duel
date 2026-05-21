@@ -391,7 +391,16 @@ opt-in whereas TS `mctsSelfPlay.ts` always emits rows. `ppo_orchestrator.py`
 and `dagger_orchestrator.py` invoke no sim CLIs directly — they were left
 alone. Slice 2 is the parity run, tracked in the queue.
 
-## What is left (priority order)
+## What was left (priority order) — HISTORICAL
+
+The P0–P7 plan below is the original session hand-off forward plan. All
+items P0 through P7 LANDED across the engine-rust-port branch and merged
+to `feat/ai` as commit `4e86ea7` (see top-of-file status block). The
+prose is retained for historical context (RNG-gap diagnostic notes,
+phase rationale, conformance discipline) but is not an active work list.
+Current forward consumer-wiring work lives in queue items
+`rust-port-orchestrator-wiring`, `rust-port-v32-schema-verification`,
+and `rust-port-backend-napi-consumer` in `docs/ai-agent-state/queue.json`.
 
 ### P0 — Finish 500-seed corpus + replay
 

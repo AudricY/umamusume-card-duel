@@ -1,12 +1,15 @@
 # Scoping: r12 selfplay + gate throughput
 
-Status: Deliverable 1 landed (worker default 1→24). Items #2
-(rollout hash-carry) and #3 (HTTP keep-alive) landed ON, both
-proven bit-identical by the determinism gate (see below). Item #5
-(work-stealing dispatch) landed ON, proven bit-identical (selfplay
-bytes + gate fingerprints) at workers>1 — see below. Item #4
-(CRN/value-head leaf) stays deferred to R111 — it is a research-recipe
-decision and changing it would break the trusted R110 A/B comparison.
+Status: DONE — Deliverables 1, 2, 3, 5 all landed ON, all proven
+bit-identical by the determinism gates (below). Item #4 (CRN /
+value-head leaf) graduated into its own queue item
+`value-head-leaf-recipe-axis` (P4, deferred + user-gated, R111 axis)
+and its data-side predecessor `value-head-data-program` (P1
+autonomous, R14-crossover gate). Item #6 (Rust engine port) LANDED
+end-to-end (Phase 0/1/2 merged as commit `4e86ea7`); follow-ups
+tracked at queue items `rust-port-orchestrator-wiring` /
+`rust-port-v32-schema-verification` / `rust-port-backend-napi-consumer`.
+Canonical: `docs/ai-agent-state/queue.json`.
 
 ## Context
 

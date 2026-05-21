@@ -1,8 +1,14 @@
 # Rust Engine Port — Scoping
 
 - **Date:** 2026-05-21
-- **Status:** scoping (Phase 0 go/no-go gate is the actionable next step;
-  Phase 1 not started)
+- **Status:** SUPERSEDED — Phase 0/1/2 all complete and merged into
+  `feat/ai` as commit `4e86ea7` (2026-05-21). This doc is the original
+  scoping rationale and payoff projection; current state, measured
+  throughput, and forward consumer-wiring work live in
+  `docs/ai-research/scoping/rust-engine-port-handoff.md` and queue items
+  `rust-engine-port` / `rust-port-orchestrator-wiring` /
+  `rust-port-v32-schema-verification` / `rust-port-backend-napi-consumer`.
+  Phases below remain as historical scoping context only.
 - **One-liner:** Port the TS game engine + heuristic opponent to Rust to
   unblock further selfplay/gate throughput once the JS-side ceiling
   (worker fan-out + hash-carry + work-stealing, ~2.85× over the

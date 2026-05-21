@@ -1,7 +1,12 @@
 # r110-w6-reproduction — Scoping
 
 - **Date:** 2026-05-15
-- **Status:** scoping
+- **Status:** DONE — verdict MARGINAL (best-promoted iter-2 Wilson lower
+  0.6042, in the 0.60–0.6479 band); reproduced-but-not-superior, not
+  promoted, 96-d pin retained. Canonical result + per-iter trajectory:
+  `docs/ai-research/progress/r110.md`. This doc remains the
+  pre-registered hypothesis, recipe, and exit-gate reference; do not
+  edit §1–§7 prose retroactively.
 - **One-liner:** Re-run the *exact W6 Phase D rollout-leaf MCTS self-play + mcts-distill loop* that produced the pinned 96-d production model (search-wrapped Wilson 0.6479), but at the current 110-d / state-schema-v3.0 feature representation, to produce a 110-d model non-inferior (ideally superior) to the pinned 96-d model under the same rollout-leaf search wrap — thereby unlocking the `serve_onnx --feature-schema v3` "promote later" path.
 - **Forward brief:** queue entry `r110-w6-reproduction`.
 - **Pick rationale:** User-commissioned next-arc. The 96-d production strength is a *search* property, not an SL-net property; the loop that produced it is schema-portable and the pipeline is already 110-d end-to-end. Strictly-richer features through the identical pipeline has no principled reason for inferiority.

@@ -1,15 +1,19 @@
 # R16 Model Feature Backlog Refinement
 
 - **Date:** 2026-05-18
-- **Status (2026-05-19):** P0 **DONE** (commit `b38de0e`). P1
+- **Status (2026-05-21):** P0 **DONE** (commit `b38de0e`). P1
   **IMPLEMENTED + ABLATED NO-GO** — v3.1 strength ablation complete;
   best-promoted v3.1 **0.5955 < v3.0 0.6042** (no Wilson-lower win,
   null strength signal); v3.1 NOT promoted, production stays pinned
-  96-d. Full trajectory + verdict reasoning + the serve_onnx
-  backlog-fix (`e846881`) durable harness fact:
-  `docs/ai-research/progress/r16.md` (canonical — not restated here).
-  P2 scope below is intact but P1 produced a **null** strength signal,
-  so P2 no longer has a cheap-P1-baseline rationale (user-gated only).
+  96-d. P2 **DONE-MIXED-SIGNAL** — C1–C7 implementation chain landed
+  bit-exact; C8 acceptance gate NO-GO (best v3.2 0.5955 < 0.6042) but
+  C8 iter-0 produced a +6.8pp lift over R110 iter-0 (real learning,
+  not variance). 96-d production pin unchanged. Forward line transitioned
+  to `w6-loop-anti-degradation` (queue, P2). Full trajectory + verdict
+  reasoning + the serve_onnx backlog-fix (`e846881`) durable harness
+  fact: `docs/ai-research/progress/r16.md` (canonical — not restated
+  here). The P2 scope and chunk plan below remain as the canonical
+  recipe reference for any future v3.2 experiment.
 - **Status (2026-05-18 — implementation):** P1
   **IMPLEMENTED** (2026-05-18) — TS observation schemaVersion 2→3 with
   `temporal` + per-side/per-Uma `turnState`; NEW 164-d
@@ -587,12 +591,20 @@ P0 is not just a research idea; it is data-path parity work. P1 is the lowest
 risk new signal. P2 is the largest representation lift and should not be
 evaluated until the MCTS/self-play path can actually exercise embedding inputs.
 
-## P2 - Chunk Plan (kickoff 2026-05-21)
+## P2 - Chunk Plan (kickoff 2026-05-21, LANDED done-mixed-signal)
 
 User gate OPENED 2026-05-21 after both autonomous P1 data-side arms closed
 (`training-data-coverage-pilot` done-falsified at n=1000, `training-data-deep-
 program` done-negative chunks 5a-i). Initiative is 3-4 eng-days; chunked
 small to ride autonomously on the `/work` loop with C8 user-gated.
+
+**OUTCOME (2026-05-21):** C1–C7 all landed bit-exact (commits `c46b02f` /
+`0d7d6a6` / `43db81b` / `212ecde` / `dc3d23b` / `103e2ce`); C8/C8b/C8c ran
+2026-05-21 and DID NOT clear the 0.6042 acceptance bar (best v3.2 0.5955,
+C8 iter-0). Forward direction routed to `w6-loop-anti-degradation`. The
+recipe below is the canonical reference for any future v3.2 experiment but
+is not on the active queue. Canonical verdict + trajectories:
+`docs/ai-research/progress/r16.md` § "R16-P2 — Per-Uma Slot Tokens v3.2".
 
 ### Architectural shape (load-bearing)
 
