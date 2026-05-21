@@ -1,0 +1,15 @@
+{
+  "name": "engine-rs-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phase 2 NAPI bridge — Node-callable Rust port of the umamusume-card-duel engine.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

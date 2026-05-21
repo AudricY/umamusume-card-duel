@@ -1,0 +1,175 @@
+// Phase 2 NAPI smoke test. Loads the compiled libnapi_bridge.so and
+// confirms the three scaffolded functions work end-to-end. Run with:
+//
+//   node engine-rs/scripts/napi-smoke.mjs
+//
+// Build the .so first: `cargo build -p napi-bridge --release --lib`
+// (manifest at engine-rs/Cargo.toml).
+
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+// Load via the package's index.js — exercises the path consumers use.
+const require = createRequire(import.meta.url);
+const bridge = require(join(here, "..", "crates", "napi-bridge", "index.js"));
+
+const version = bridge.engineVersion();
+console.log("engineVersion ->", version);
+if (!version.startsWith("rust-port") || !version.includes("catalog=")) {
+  throw new Error(`unexpected version string: ${version}`);
+}
+
+// createGameJson now returns {stateJson, rngStateJson}.
+const initRaw = bridge.createGameJson("0");
+const init = JSON.parse(initRaw);
+const state = JSON.parse(init.stateJson);
+if (state.phase !== "play" && state.phase !== "Play") {
+  throw new Error(`unexpected initial phase: ${state.phase}`);
+}
+console.log(`createGameJson("0") -> stateJson=${init.stateJson.length}B rngStateJson=${init.rngStateJson.length}B phase=${state.phase}`);
+
+const hash = bridge.stateHashForJson(init.stateJson);
+console.log("stateHashForJson ->", hash);
+if (hash.length !== 32 || !/^[0-9a-f]+$/.test(hash)) {
+  throw new Error(`unexpected hash shape: ${hash}`);
+}
+
+// Drive a full game via repeated advance_step_json. GameState serializes
+// as snake_case (e.g., game_over, current_side, first_player) since the
+// struct doesn't carry #[serde(rename_all = "camelCase")] at the top
+// level — only nested types like PublicObservation do.
+let curStateJson = init.stateJson;
+let curRngJson = init.rngStateJson;
+let steps = 0;
+const maxSteps = 1000;
+let priorHash = hash;
+for (; steps < maxSteps; steps += 1) {
+  const cs = JSON.parse(curStateJson);
+  if (cs.game_over === true || cs.current_side === "done") break;
+  const raw = bridge.advanceStepJson(curStateJson, curRngJson);
+  const next = JSON.parse(raw);
+  const nextHash = bridge.stateHashForJson(next.stateJson);
+  if (nextHash === priorHash) {
+    throw new Error(`step ${steps} did not change state — stall`);
+  }
+  priorHash = nextHash;
+  curStateJson = next.stateJson;
+  curRngJson = next.rngStateJson;
+}
+const final = JSON.parse(curStateJson);
+console.log(`advanceStepJson drove ${steps} steps, game_over=${final.game_over} winner=${final.winner ?? null}`);
+if (final.game_over !== true) {
+  throw new Error(`expected game_over after ${steps} steps; got: ${curStateJson.slice(0, 200)}`);
+}
+
+// legal_actions_json at the initial state (before first advance).
+const legalRaw = bridge.legalActionsJson(init.stateJson, init.rngStateJson);
+const legal = JSON.parse(legalRaw);
+if (!Array.isArray(legal) || legal.length === 0) {
+  throw new Error(`expected non-empty legal-actions array; got: ${legalRaw.slice(0, 200)}`);
+}
+console.log(`legalActionsJson at t=0 -> ${legal.length} actions (kinds: ${[...new Set(legal.map(a => a.kind))].join(",")})`);
+
+// Determinism: same seed → same final hash.
+const init2 = JSON.parse(bridge.createGameJson("0"));
+let s2 = init2.stateJson, r2 = init2.rngStateJson;
+for (let i = 0; i < steps; i += 1) {
+  const x = JSON.parse(bridge.advanceStepJson(s2, r2));
+  s2 = x.stateJson; r2 = x.rngStateJson;
+}
+const replayHash = bridge.stateHashForJson(s2);
+const finalHash = bridge.stateHashForJson(curStateJson);
+if (replayHash !== finalHash) {
+  throw new Error(`replay hash ${replayHash} != original ${finalHash} — non-determinism`);
+}
+console.log(`deterministic replay: ${steps} steps, final hash ${finalHash} matches`);
+
+// MCTS surface: run_mcts at the initial state and verify shape.
+const mctsArgs = JSON.stringify({
+  simulations: 30,
+  cPuct: 1.5,
+  rolloutCrnSamples: 2,
+  rolloutSteps: 100,
+  prior: "uniform",
+  leaf: "rollout",
+  maxNodes: 1000,
+});
+const mctsRaw = bridge.runMctsJson(init.stateJson, init.rngStateJson, mctsArgs, "0:Player:0:mcts");
+const mctsBundle = JSON.parse(mctsRaw);
+const mctsResult = JSON.parse(mctsBundle.mctsResult);
+if (!Array.isArray(mctsResult.visits) || mctsResult.visits.length === 0) {
+  throw new Error(`MCTS produced no visits: ${mctsRaw.slice(0, 200)}`);
+}
+const totalVisits = mctsResult.visits.reduce((a, b) => a + b, 0);
+console.log(`runMctsJson -> selectedIndex=${mctsResult.selectedIndex} visits=${mctsResult.visits.join(",")} (total=${totalVisits}) rootValue=${mctsResult.diagnostics.rootValue.toFixed(3)}`);
+
+// mctsStepJson: full search-and-apply.
+const stepRaw = bridge.mctsStepJson(init.stateJson, init.rngStateJson, mctsArgs, "0:Player:0:mcts");
+const stepBundle = JSON.parse(stepRaw);
+const stepHash = bridge.stateHashForJson(stepBundle.stateJson);
+if (stepHash === hash) {
+  throw new Error("mctsStepJson did not change state");
+}
+console.log(`mctsStepJson -> chosenActionIndex=${stepBundle.chosenActionIndex} new state_hash=${stepHash}`);
+
+// driveHeuristicGameJson: pure-Rust full game, no per-step roundtrip.
+// Must produce the same finalStateHash as the JS-driven loop above.
+const ruRaw = bridge.driveHeuristicGameJson("0", 1000);
+const ru = JSON.parse(ruRaw);
+console.log(`driveHeuristicGameJson("0") -> ${ru.steps} steps, winner=${ru.winner}, hash=${ru.finalStateHash}, terminal=${ru.terminalReason}`);
+const jsDrivenFinalHash = bridge.stateHashForJson(curStateJson);
+if (ru.finalStateHash !== jsDrivenFinalHash) {
+  throw new Error(
+    `Rust-driven hash ${ru.finalStateHash} != JS-driven hash ${jsDrivenFinalHash} ` +
+    `— bridge step semantics diverge from in-Rust driver`
+  );
+}
+if (ru.steps !== steps) {
+  throw new Error(`step count mismatch: Rust=${ru.steps} JS=${steps}`);
+}
+
+// Across 5 seeds, finalStateHash is unique per seed (deterministic
+// but distinct outcomes).
+const seedHashes = new Set();
+for (const sd of ["0", "1", "7", "42", "123"]) {
+  const r = JSON.parse(bridge.driveHeuristicGameJson(sd, 1000));
+  if (r.terminalReason !== "gameOver") {
+    throw new Error(`seed ${sd} did not terminate via gameOver (${r.terminalReason})`);
+  }
+  seedHashes.add(r.finalStateHash);
+}
+if (seedHashes.size !== 5) {
+  throw new Error(`expected 5 distinct seed hashes, got ${seedHashes.size}`);
+}
+console.log(`5 distinct seeds produce 5 distinct final hashes (cross-seed determinism OK)`);
+
+// driveMctsGameJson: pure-Rust MCTS-vs-heuristic loop, bit-identical
+// to sim-mcts-selfplay. Pin known-good hashes for seeds 0 and 42 so
+// any future drift in the MCTS pipeline (search, rollout, leaf-value,
+// or backprop) trips this regression net.
+const mctsGameArgs = JSON.stringify({
+  simulations: 30,
+  cPuct: 1.5,
+  rolloutCrnSamples: 2,
+  rolloutSteps: 100,
+  prior: "uniform",
+  leaf: "rollout",
+  maxNodes: 1000,
+});
+const expectedMcts = {
+  "0":  { hash: "d81c37747400442e79ed50e2a4e14867", steps: 51, winner: "player" },
+  "42": { hash: "0d3f4d96d091896628b98c82456772f8", steps: 71, winner: "player" },
+};
+for (const [seed, want] of Object.entries(expectedMcts)) {
+  const got = JSON.parse(bridge.driveMctsGameJson(seed, "player", 500, mctsGameArgs));
+  if (got.finalStateHash !== want.hash || got.steps !== want.steps || got.winner !== want.winner) {
+    throw new Error(
+      `driveMctsGameJson("${seed}") drift: expected (${want.hash}, ${want.steps}, ${want.winner}), got (${got.finalStateHash}, ${got.steps}, ${got.winner})`,
+    );
+  }
+}
+console.log(`driveMctsGameJson("0"/"42") matches recorded golden hashes`);
+
+console.log("✅ napi-bridge smoke OK (engineVersion, createGameJson, advanceStepJson, legalActionsJson, stateHashForJson, runMctsJson, mctsStepJson, driveHeuristicGameJson, driveMctsGameJson)");

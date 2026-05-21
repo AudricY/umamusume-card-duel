@@ -1,0 +1,5 @@
+# Golden traces for the Rust engine port (docs/ai-research/scoping/rust-engine-port-plan.md
+# § 3 "Phase 0"). The parent `runs/` is already in the repo .gitignore, but
+# we keep this file as an explicit policy marker: trace JSONLs are large and
+# regenerable from the recorder + (seeds, configHash) — do not commit them.
+*.jsonl
