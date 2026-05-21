@@ -2,19 +2,14 @@
 
 ## Open
 
-- **2026-05-21: chunk 5i candidate-1 ladder step 2 = DIES; next
-  direction call needed.** Step 2 (rule-bot-mirror @ 400 sims) ran
-  end-to-end; argmax flip 17.3% (n=365) on contested-head + max-prob
-  ≥0.8 subset — below the 30% LIVES threshold AND the 20% sticky
-  cutoff. Sim count is not the binding lever. Candidate-1
-  (stronger-MCTS-fixes-corpus) eliminated. Forward direction is
-  either (a) reframed step 1 (rollout-leaf return audit on contested
-  states, no CRN-paired ambiguity) OR (b) pivot to user-gated W6
-  HP-sweep (CEILING PATH A) since the 3a corpus arm is exhausted by
-  evidence. Secondary finding: relabel-MCTS RNG bleed via global
-  `random()` proxy invalidates sim-count A/B determinism (tracked as
-  P3 queue item `mcts-relabel-rng-bleed`). Canonical:
-  `docs/ai-research/progress/r16.md` sub-§ "Step 2 verdict (chunk 5i)".
+- **2026-05-21: 3b corpus arm DONE-NEGATIVE; direction open.**
+  Chunks 5a-i falsify candidate-1 (5i flip 17.3% n=365 < 30%) and
+  candidate-3 (5f BC −0.0179). Queue 2026-05-21T05:24Z:
+  `training-data-deep-program` → `done-negative`; r16-p2 deferral
+  spent (unblocked, user-gated). Open: autonomous reframed-step-1
+  (rollout-leaf return audit, diagnostic) vs user-gated W6 HP-sweep
+  (CEILING PATH A). Secondary: P3 `mcts-relabel-rng-bleed`.
+  Canonical: r16.md "chunk 5i".
 
 ## Resolved Pointers
 
