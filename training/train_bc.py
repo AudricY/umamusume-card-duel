@@ -104,6 +104,7 @@ def main() -> None:
         uses_uma_slot_tokens=uses_uma_slot_tokens,
         model_variant=args.model_variant,
         uses_q_value_head=bool(args.q_value_head),
+        q_value_scalar=args.q_value_scalar,
     )
     model = CandidatePolicyNet(config).to(device)
     if args.freeze_non_q_value_head:
@@ -253,6 +254,7 @@ def main() -> None:
             "value_weight": args.value_weight,
             "q_value_weight": args.q_value_weight,
             "q_value_head": bool(args.q_value_head),
+            "q_value_scalar": args.q_value_scalar,
             "freeze_non_q_value_head": bool(args.freeze_non_q_value_head),
             "amp": use_amp,
             "grad_accum": grad_accum,
@@ -1103,6 +1105,8 @@ def parse_args() -> argparse.Namespace:
                         help="Weight on per-action Q-value MSE. Requires --q-value-head and rootMeanQ rows to have effect.")
     parser.add_argument("--freeze-non-q-value-head", action="store_true",
                         help="When --q-value-head is enabled, train only q_value_head.* parameters.")
+    parser.add_argument("--q-value-scalar", choices=["max", "mean", "policy_mean"], default="max",
+                        help="Scalar value exported from a Q-head graph; default max preserves Stage-2 behavior.")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--split-by", choices=["row", "episode", "seed"], default="episode")
     parser.add_argument("--ablate", action="append", choices=[

@@ -100,11 +100,16 @@ class ModelConfig:
     model_variant: str = "mlp"
     # Stage-2 value-head program: optional action-value head trained against
     # per-action rootMeanQ targets from rollout-leaf MCTS. When enabled the
-    # exported scalar `value` is the masked max over legal action Q values,
-    # so existing value-head-leaf MCTS can consume it without an ONNX
-    # signature change. Default False keeps all legacy checkpoints and graphs
-    # byte-compatible.
+    # exported scalar `value` is derived from legal action Q values according
+    # to `q_value_scalar`, so existing value-head-leaf MCTS can consume it
+    # without an ONNX signature change. Default False keeps all legacy
+    # checkpoints and graphs byte-compatible.
     uses_q_value_head: bool = False
+    # Q-head scalarization used only when `uses_q_value_head=True`:
+    # "max" preserves the first Stage-2 behavior, "mean" reduces max-Q
+    # overestimation by averaging legal Qs, and "policy_mean" uses the
+    # model's masked policy distribution as action weights.
+    q_value_scalar: str = "max"
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -657,7 +662,18 @@ class CandidatePolicyNet(nn.Module):
         if self.q_value_head is not None:
             q_values = self.q_value_head(joint).squeeze(-1)
             masked_q = q_values.masked_fill(~action_mask.bool(), torch.finfo(q_values.dtype).min)
-            value = masked_q.max(dim=1).values
+            scalar_mode = self.config.q_value_scalar
+            if scalar_mode == "max":
+                value = masked_q.max(dim=1).values
+            elif scalar_mode == "mean":
+                legal = action_mask.bool()
+                legal_count = legal.sum(dim=1).clamp_min(1).to(q_values.dtype)
+                value = q_values.masked_fill(~legal, 0.0).sum(dim=1) / legal_count
+            elif scalar_mode == "policy_mean":
+                weights = torch.softmax(logits, dim=1).to(q_values.dtype)
+                value = (weights * q_values).sum(dim=1)
+            else:
+                raise ValueError(f"unknown q_value_scalar={scalar_mode!r}")
         else:
             value = self.value_head(state_encoded).squeeze(-1)
         if return_q_values:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -32,6 +33,10 @@ def main() -> None:
     args = parse_args()
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     config = ModelConfig.from_dict(checkpoint.get("model_config"))
+    if args.q_value_scalar is not None:
+        if not config.uses_q_value_head:
+            raise ValueError("--q-value-scalar override requires a checkpoint with uses_q_value_head=True")
+        config = replace(config, q_value_scalar=args.q_value_scalar)
     # R16-P1: the graph state dim is driven by the CHECKPOINT's
     # config.state_dim (96 / 110 / 164), not the module default STATE_DIM
     # (which stays 110 = v3.0). Validate it is a known builder dim so a
@@ -206,6 +211,9 @@ def main() -> None:
     # sidecars stay byte-identical (no spurious key churn under re-export).
     if config.model_variant != "mlp":
         sidecar_payload["model_variant"] = config.model_variant
+    if config.uses_q_value_head:
+        sidecar_payload["uses_q_value_head"] = True
+        sidecar_payload["q_value_scalar"] = config.q_value_scalar
     sidecar = out.with_suffix(out.suffix + ".meta.json")
     sidecar.write_text(
         json.dumps(sidecar_payload, indent=2) + "\n",
@@ -220,6 +228,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", required=True)
     parser.add_argument("--max-actions", type=int, default=16)
     parser.add_argument("--opset", type=int, default=17)
+    parser.add_argument("--q-value-scalar", choices=["max", "mean", "policy_mean"], default=None,
+                        help="Override scalarization for Q-head checkpoints at export time.")
     return parser.parse_args()
 
 
