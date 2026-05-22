@@ -11,8 +11,10 @@
 //! --challenger / --baseline URLs.
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -115,8 +117,14 @@ struct Args {
     /// Per-game progress JSONL output.
     #[arg(long)]
     progress_out: Option<String>,
-    /// Worker fan-out (no-op — Rust runs single-process; orchestrators
-    /// parallelise by spawning multiple Rust binaries).
+    /// Worker fan-out — number of OS threads dispatching independent
+    /// games in parallel. `0` resolves to `available_parallelism()`.
+    /// Each task `(seed, model_side)` is fully independent; determinism
+    /// is preserved because the per-task Rng is seeded from
+    /// `seed`+`side` and `with_rng` uses thread-local state. The shared
+    /// `InferenceSession` is `Arc<Mutex<Session>>` and serializes
+    /// `predict_v3` calls; at sims=100 with `--leaf rollout` the MCTS
+    /// dominates so the Mutex is not the bottleneck.
     #[arg(long, default_value_t = 1)]
     workers: u32,
     /// R16-P3 spike Option A: path to the ONNX policy file (v3.0
@@ -343,7 +351,14 @@ fn main() -> Result<()> {
     let _ = args.selection;
     let _ = args.min_ci_lower;
     let _ = args.min_games;
-    let _ = args.workers;
+    // `--workers` is consumed below; resolve `0` to available_parallelism.
+    let workers: usize = if args.workers == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        args.workers as usize
+    };
     // R16-P3 spike Option A: load the ONNX policy if either leaf or
     // prior path needs the model. Same bootstrap pattern as
     // sim-mcts-selfplay — one-time graph compile, shared session.
@@ -404,8 +419,160 @@ fn main() -> Result<()> {
     );
 
     let start = Instant::now();
-    // Side assignment is now driven by the (seed, side) task list above
+    // Side assignment is driven by the (seed, side) task list above
     // (TS-parity), not by even/odd seed rotation.
+    let total_tasks = tasks.len();
+    // Per-task outcome — populated by worker threads, then sorted by
+    // `task_index` for deterministic aggregation. Order in the progress
+    // JSONL can be out-of-completion-order (parallel writes), but the
+    // final manifest stays bit-stable because we re-sort here.
+    #[derive(Clone, Copy)]
+    struct Outcome {
+        model_side: SideId,
+        winner: Option<SideId>,
+        terminal: &'static str,
+    }
+    let outcomes: Arc<Mutex<Vec<Option<Outcome>>>> =
+        Arc::new(Mutex::new(vec![None; total_tasks]));
+    // BufWriter wrapped in Mutex: each completed game appends one JSONL
+    // line and flushes. Lines arrive out-of-order under parallelism;
+    // consumers should not assume monotone gameIndex.
+    let progress_writer: Option<Arc<Mutex<BufWriter<fs::File>>>> = match args.progress_out.as_ref()
+    {
+        Some(path) => {
+            let f = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("open progress-out {}", path))?;
+            Some(Arc::new(Mutex::new(BufWriter::new(f))))
+        }
+        None => None,
+    };
+    // Shared running completion counter — drives `gameIndex`,
+    // `etaSec`, and `runningWinRate` in the progress JSONL. Under
+    // parallelism `gameIndex` is the *Nth game to complete*, not the
+    // Nth-in-schedule. ETA is wall-clock based:
+    // `remaining * (elapsed / completed)`.
+    let completed_counter = Arc::new(AtomicUsize::new(0));
+    let running_wins_counter = Arc::new(AtomicUsize::new(0));
+
+    let task_cursor = Arc::new(AtomicUsize::new(0));
+    let tasks_arc: Arc<Vec<(u32, SideId)>> = Arc::new(tasks);
+    let config_arc = Arc::new(config);
+
+    // Effective worker count: never more than tasks (no-op extras
+    // would just contend on the cursor).
+    let effective_workers = workers.max(1).min(total_tasks.max(1));
+    eprintln!(
+        "sim-eval-gate: workers={} (requested {}, total_tasks {})",
+        effective_workers, args.workers, total_tasks
+    );
+
+    std::thread::scope(|s| -> Result<()> {
+        let mut handles = Vec::with_capacity(effective_workers);
+        for worker_id in 0..effective_workers {
+            let task_cursor = Arc::clone(&task_cursor);
+            let tasks_arc = Arc::clone(&tasks_arc);
+            let outcomes = Arc::clone(&outcomes);
+            let config_arc = Arc::clone(&config_arc);
+            let completed_counter = Arc::clone(&completed_counter);
+            let running_wins_counter = Arc::clone(&running_wins_counter);
+            let progress_writer = progress_writer.as_ref().map(Arc::clone);
+            let max_steps = args.max_steps;
+            let start_for_worker = start;
+            let total_tasks_u32 = total_tasks as u32;
+            handles.push(s.spawn(move || -> Result<()> {
+                loop {
+                    let task_index = task_cursor.fetch_add(1, Ordering::Relaxed);
+                    if task_index >= tasks_arc.len() {
+                        break;
+                    }
+                    let (seed, model_side) = tasks_arc[task_index];
+                    let game_start = Instant::now();
+                    let (winner, terminal) =
+                        drive_one_game(seed, model_side, max_steps, &config_arc);
+                    let game_secs = game_start.elapsed().as_secs_f64();
+                    let model_won = winner == Some(model_side);
+                    // Store outcome for final aggregation (sorted by index).
+                    {
+                        let mut guard = outcomes.lock().expect("outcomes mutex poisoned");
+                        guard[task_index] = Some(Outcome {
+                            model_side,
+                            winner,
+                            terminal,
+                        });
+                    }
+                    // Update running counters BEFORE writing the JSONL
+                    // line so `gameIndex` and `runningWinRate` reflect
+                    // this completion.
+                    if model_won {
+                        running_wins_counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let games_completed =
+                        (completed_counter.fetch_add(1, Ordering::Relaxed) + 1) as u32;
+                    if let Some(w) = progress_writer.as_ref() {
+                        let elapsed_so_far = start_for_worker.elapsed().as_secs_f64();
+                        let eta_sec = if games_completed > 0 {
+                            (elapsed_so_far / games_completed as f64)
+                                * (total_tasks_u32.saturating_sub(games_completed)) as f64
+                        } else {
+                            0.0
+                        };
+                        let running_wins =
+                            running_wins_counter.load(Ordering::Relaxed) as f64;
+                        let running_wr = if games_completed > 0 {
+                            running_wins / games_completed as f64
+                        } else {
+                            0.0
+                        };
+                        let row = serde_json::json!({
+                            "event": "game_completed",
+                            "gameIndex": games_completed,
+                            "taskIndex": task_index,
+                            "totalGames": total_tasks_u32,
+                            "seed": seed,
+                            "modelSide": if model_side == SideId::Player { "Player" } else { "Opponent" },
+                            "winner": winner.map(|s| if s == SideId::Player { "Player" } else { "Opponent" }),
+                            "modelWon": model_won,
+                            "terminalReason": terminal,
+                            "gameElapsedSec": game_secs,
+                            "totalElapsedSec": elapsed_so_far,
+                            "etaSec": eta_sec,
+                            "runningWinRate": running_wr,
+                            "workerId": worker_id,
+                            "ts": std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs_f64())
+                                .unwrap_or(0.0),
+                        });
+                        let mut guard = w.lock().expect("progress mutex poisoned");
+                        writeln!(&mut *guard, "{}", row)?;
+                        guard.flush()?;
+                    }
+                }
+                Ok(())
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked")?;
+        }
+        Ok(())
+    })?;
+
+    // Flush progress writer one final time (the per-line flush is best
+    // effort but a final flush ensures the BufWriter is empty before
+    // the manifest write).
+    if let Some(w) = progress_writer.as_ref() {
+        let mut guard = w.lock().expect("progress mutex poisoned");
+        guard.flush()?;
+    }
+
+    let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+
+    // Aggregate outcomes in task-index order so the manifest is
+    // bit-stable regardless of worker completion order.
     let mut player_games = 0u32;
     let mut player_wins = 0u32;
     let mut opp_games = 0u32;
@@ -413,77 +580,30 @@ fn main() -> Result<()> {
     let mut terminal_game_over = 0u32;
     let mut terminal_stalled = 0u32;
     let mut terminal_max_steps = 0u32;
-
-    let mut progress_writer = match args.progress_out.as_ref() {
-        Some(path) => Some(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .with_context(|| format!("open progress-out {}", path))?,
-        ),
-        None => None,
-    };
-    let total_tasks = tasks.len() as u32;
-    for (task_index, &(seed, model_side)) in tasks.iter().enumerate() {
-        let game_start = Instant::now();
-        let (winner, terminal) = drive_one_game(seed, model_side, args.max_steps, &config);
-        let game_secs = game_start.elapsed().as_secs_f64();
-        match terminal {
-            "game_over" => terminal_game_over += 1,
-            "stalled" => terminal_stalled += 1,
-            _ => terminal_max_steps += 1,
-        }
-        let model_won = winner == Some(model_side);
-        if model_side == SideId::Player {
-            player_games += 1;
-            if model_won {
-                player_wins += 1;
+    {
+        let guard = outcomes.lock().expect("outcomes mutex poisoned");
+        for (idx, slot) in guard.iter().enumerate() {
+            let o = slot.expect("worker did not fill outcome slot");
+            let _ = idx;
+            match o.terminal {
+                "game_over" => terminal_game_over += 1,
+                "stalled" => terminal_stalled += 1,
+                _ => terminal_max_steps += 1,
             }
-        } else {
-            opp_games += 1;
-            if model_won {
-                opp_wins += 1;
+            let model_won = o.winner == Some(o.model_side);
+            if o.model_side == SideId::Player {
+                player_games += 1;
+                if model_won {
+                    player_wins += 1;
+                }
+            } else {
+                opp_games += 1;
+                if model_won {
+                    opp_wins += 1;
+                }
             }
-        }
-        if let Some(w) = progress_writer.as_mut() {
-            let games_completed = (task_index as u32) + 1;
-            let elapsed_so_far = start.elapsed().as_secs_f64();
-            let eta_sec = if games_completed > 0 {
-                (elapsed_so_far / games_completed as f64)
-                    * (total_tasks.saturating_sub(games_completed)) as f64
-            } else {
-                0.0
-            };
-            let running_wr = if games_completed > 0 {
-                (player_wins + opp_wins) as f64 / games_completed as f64
-            } else {
-                0.0
-            };
-            let row = serde_json::json!({
-                "event": "game_completed",
-                "gameIndex": games_completed,
-                "totalGames": total_tasks,
-                "seed": seed,
-                "modelSide": if model_side == SideId::Player { "Player" } else { "Opponent" },
-                "winner": winner.map(|s| if s == SideId::Player { "Player" } else { "Opponent" }),
-                "modelWon": model_won,
-                "terminalReason": terminal,
-                "gameElapsedSec": game_secs,
-                "totalElapsedSec": elapsed_so_far,
-                "etaSec": eta_sec,
-                "runningWinRate": running_wr,
-                "workerId": 0,
-                "ts": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0),
-            });
-            writeln!(w, "{}", row)?;
         }
     }
-    let elapsed = start.elapsed();
-    let elapsed_secs = elapsed.as_secs_f64();
 
     let total_games = player_games + opp_games;
     let total_wins = player_wins + opp_wins;
