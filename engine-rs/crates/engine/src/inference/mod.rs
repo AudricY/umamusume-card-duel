@@ -38,7 +38,7 @@
 
 use std::cell::UnsafeCell;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use ndarray::Array;
 use ort::ep::CUDA as CUDAExecutionProvider;
@@ -141,22 +141,25 @@ impl From<featurize::FeaturizeError> for InferenceError {
 
 /// Selects the ORT execution provider used to load the session.
 ///
-/// `Cpu` keeps the legacy single-threaded CPU path (R14.G FP-determinism
-/// contract: `intra/inter_threads = 1`, matches the
-/// `serve_onnx --ort-threads 1` server the `sim-inference-parity` smoke
-/// runs against). `Cuda` wires the ORT CUDA EP at session-build time and
-/// drops the per-call `Mutex<Session>` — the ORT CUDA EP is documented
-/// thread-safe for concurrent `Session::run` calls (see
-/// `docs/ai-research/scoping/gpu-inference-execution-provider.md` for
-/// background). The CUDA path requires `libonnxruntime.so` to be
-/// CUDA-enabled and `libonnxruntime_providers_cuda.so` to be loadable
-/// at `Session::run` time; failures surface as `InferenceError::Ort`.
+/// `Cpu` keeps the R14.G FP-determinism contract on the SessionBuilder
+/// (`intra/inter_threads = 1`, matching the `serve_onnx --ort-threads 1`
+/// server the `sim-inference-parity` smoke runs against). G5 (2026-05-22)
+/// dropped the per-call `Mutex<Session>` on the CPU path as well: ORT's
+/// `Session::Run` is documented thread-safe for concurrent calls on a
+/// single session, and the `&mut self` was a Rust-API artifact of the
+/// `ort` crate's signature, not a real exclusivity requirement. With
+/// intra/inter pinned to 1, no ORT internal thread pool re-orders
+/// reductions — the FP-determinism contract is unaffected.
+///
+/// `Cuda` wires the ORT CUDA EP at session-build time. The CUDA path
+/// requires `libonnxruntime.so` to be CUDA-enabled and
+/// `libonnxruntime_providers_cuda.so` to be loadable at `Session::run`
+/// time; failures surface as `InferenceError::Ort`.
 #[derive(Debug, Clone, Copy)]
 pub enum Device {
     /// CPU EP (default). Keeps FP-determinism with `serve_onnx`.
     Cpu,
-    /// CUDA EP, pinned to a specific device. Drops the per-call Mutex
-    /// because the underlying ORT CUDA path is reentrant.
+    /// CUDA EP, pinned to a specific device.
     Cuda { device_id: i32 },
 }
 
@@ -166,35 +169,46 @@ impl Default for Device {
     }
 }
 
-/// Internal session guard. The CPU path keeps the historical
-/// `Mutex<Session>` wrap (the existing parity contract treats the CPU
-/// session as single-threaded per binary; removing the Mutex is the
-/// out-of-scope G5 slice). The CUDA path drops the Mutex outright since
-/// the ORT CUDA EP supports concurrent `Session::run` — the underlying
-/// `Session` is `Send + Sync` per ort's declared safety contract; the
-/// `&mut self` on `Session::run` is a Rust-API artifact only. We use
-/// `UnsafeCell<Session>` to allow shared access from worker threads.
+/// Internal session guard. Both CPU and CUDA variants now wrap
+/// `Session` in an `UnsafeCell` and rely on ORT's documented
+/// thread-safety for concurrent `Session::run` calls. The `&mut self`
+/// signature on `ort::Session::run` is a Rust-API artifact only — the
+/// underlying ORT C API (`OrtApi::Run`) is reentrant on a single
+/// session for both the CPU EP and the CUDA EP.
+///
+/// G5 (2026-05-22) collapsed the CPU variant from `Mutex<Session>` to
+/// `UnsafeCell<Session>` to remove the Slice 3c game-level worker
+/// serialization bottleneck. The two variants are kept distinct (rather
+/// than a single `UnsafeCell<Session>`) to preserve the
+/// `inference/mod.rs` dispatch shape and keep the `Device` enum's two
+/// configuration paths (intra/inter thread pinning vs CUDA EP wiring)
+/// visible at the type level.
 enum SessionGuard {
-    Cpu(Mutex<Session>),
+    Cpu(UnsafeCell<Session>),
     Cuda(UnsafeCell<Session>),
 }
 
 // Safety: `Session` is `Send + Sync` per ort's `unsafe impl`. The
-// `UnsafeCell` here is just a punch-through to call `Session::run`
-// (which has a Rust-side `&mut self`) from multiple threads — the
-// underlying ORT C API on the CUDA EP is reentrant. We never alias a
-// `&mut Session` on the CPU path (it stays behind the Mutex).
+// `UnsafeCell` here is a punch-through to call `Session::run` (which
+// has a Rust-side `&mut self`) from multiple threads. ORT's
+// `Session::Run` is documented thread-safe for concurrent calls on a
+// single session for both the CPU EP and the CUDA EP, so granting
+// `&mut Session` to multiple threads simultaneously is sound. On the
+// CPU branch, `intra_threads=1` + `inter_threads=1` are pinned at
+// session-build time so no internal ORT thread pool re-orders FP
+// reductions (R14.G determinism contract preserved).
 unsafe impl Sync for SessionGuard {}
 
 /// Loaded in-process ONNX session — thread-safe per ORT's contract
 /// (`unsafe impl Send + Sync for Session`); callers wrap in an `Arc`
-/// to share across MCTS workers. On the CPU path the internal
-/// `Mutex<Session>` is required because `ort::Session::run` takes
-/// `&mut self` at the Rust API surface even though the underlying ORT
-/// C API is reentrant; today the CPU path is uncontended in practice.
-/// On the CUDA path the Mutex is removed — the ORT CUDA EP supports
-/// concurrent `Session::run` and the Mutex was the Slice 3c parallelism
-/// bottleneck this slice opens up.
+/// to share across MCTS workers. Both CPU and CUDA paths share the
+/// `UnsafeCell<Session>` punch-through (see `SessionGuard`): ORT's
+/// `Session::Run` is reentrant on a single session, the `&mut self`
+/// on the Rust API surface is an artifact only. The CPU path's
+/// `intra/inter_threads = 1` pins (R14.G FP-determinism contract)
+/// remain set on the builder — those control ORT's internal thread
+/// pool, not how many Rust threads may concurrently call `Session::run`
+/// on the same session.
 pub struct InferenceSession {
     session: SessionGuard,
     onnx_path: PathBuf,
@@ -221,8 +235,8 @@ impl InferenceSession {
     /// `serve_onnx --ort-threads 1`). CUDA branch wires the CUDA EP via
     /// `with_execution_providers` and drops the intra/inter-thread pins
     /// (thread counts on the CPU pool are irrelevant once compute is on
-    /// the GPU). CUDA also bypasses the per-call `Mutex<Session>`; see
-    /// `SessionGuard`.
+    /// the GPU). Both branches share the lock-free `UnsafeCell<Session>`
+    /// punch-through; see `SessionGuard`.
     pub fn load_on(onnx_path: &Path, device: Device) -> Result<Self, InferenceError> {
         // Sidecar vocab hash parity. We load the sidecar BEFORE building
         // the ORT session so a vocab mismatch is the first error the
@@ -277,7 +291,7 @@ impl InferenceSession {
         let schema = validate_graph_signature(&session)?;
 
         let guard = match device {
-            Device::Cpu => SessionGuard::Cpu(Mutex::new(session)),
+            Device::Cpu => SessionGuard::Cpu(UnsafeCell::new(session)),
             Device::Cuda { .. } => SessionGuard::Cuda(UnsafeCell::new(session)),
         };
 
@@ -418,24 +432,17 @@ impl InferenceSession {
             }
         };
 
-        // Hold the lock across both `run()` and the tensor extraction
-        // — `outputs[i].try_extract_tensor` borrows from the session,
-        // so we must finish copying out the f32 buffers before the
-        // lock guard drops. On the CUDA path we punch through the
-        // `UnsafeCell` instead of locking; the ORT CUDA EP is reentrant
-        // on `Session::run` and the `&mut self` is purely a Rust-API
-        // artifact.
+        // Both CPU and CUDA paths punch through `UnsafeCell` —
+        // `outputs[i].try_extract_tensor` borrows from the session, so
+        // we keep the `&mut Session` alive for the full extract. Safety
+        // for the multi-threaded access lives on `unsafe impl Sync for
+        // SessionGuard`: ORT's `Session::Run` is documented thread-safe
+        // for concurrent calls on a single session for both the CPU EP
+        // (with `intra/inter_threads = 1` pinned at build time) and the
+        // CUDA EP.
         let (logits_vec, value_scalar) = match &self.session {
-            SessionGuard::Cpu(mutex) => {
-                let mut sess = mutex.lock().expect("inference session mutex poisoned");
-                let outputs = sess.run(inputs)?;
-                extract_logits_and_value(&outputs, n_actions)?
-            }
-            SessionGuard::Cuda(cell) => {
-                // Safety: see `unsafe impl Sync for SessionGuard` —
-                // the ORT CUDA EP supports concurrent `Session::run`,
-                // so granting `&mut Session` to multiple threads
-                // simultaneously is sound for this EP.
+            SessionGuard::Cpu(cell) | SessionGuard::Cuda(cell) => {
+                // Safety: see `unsafe impl Sync for SessionGuard`.
                 let sess: &mut Session = unsafe { &mut *cell.get() };
                 let outputs = sess.run(inputs)?;
                 extract_logits_and_value(&outputs, n_actions)?

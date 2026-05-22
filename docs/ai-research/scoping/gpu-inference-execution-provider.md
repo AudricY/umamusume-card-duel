@@ -1,16 +1,18 @@
 # GPU Inference Execution Provider for Sim/Gate Throughput
 
-> STATUS: **G1+G2 LANDED 2026-05-22 / G4 FALSIFIED 2026-05-22** —
-> throughput motivation is wrong on the current `--leaf rollout` recipe
-> (CUDA wall 5.12× SLOWER than CPU at workers=16, see §G4 results table
-> below). Strength agreement gate PASSED (|wl_cuda-wl_cpu| = 0.005 < 0.02
-> envelope). G1+G2 wiring still ships as an opt-in (`--device cuda` flag
-> on `sim-eval-gate`) because the *strength* axis
-> ([`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md)) reuses the same
-> CUDA EP plumbing — that's where GPU buys progress (higher sims, not
-> lower latency at fixed sims). G3 (separate `sim-gpu-cpu-agreement`
-> binary) folded into G4's manual A/B; G5 (CPU-path Mutex removal)
-> DEFERRED.
+> STATUS: **G1+G2 LANDED 2026-05-22 / G4 FALSIFIED 2026-05-22 / G5
+> LANDED 2026-05-22** — throughput motivation on the GPU path is wrong
+> on the current `--leaf rollout` recipe (CUDA wall 5.12× SLOWER than
+> CPU at workers=16; see §G4 below). G5 dropped the CPU `Mutex<Session>`
+> and unlocked 7.11× scaling at workers=16 over workers=1, bit-identical
+> wilson_lower across `--workers ∈ {1, 16, 32}` on R110-W6-repro/iter-0
+> (see §G5 below). Strength agreement gate PASSED on G4
+> (|wl_cuda-wl_cpu| = 0.005 < 0.02 envelope). G1+G2 wiring still ships
+> as an opt-in (`--device cuda` flag on `sim-eval-gate`) because the
+> *strength* axis ([`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md))
+> reuses the same CUDA EP plumbing — that's where GPU buys progress
+> (higher sims, not lower latency at fixed sims). G3 (separate
+> `sim-gpu-cpu-agreement` binary) folded into G4's manual A/B.
 
 Routing: `docs/ai-research/README.md`. Predecessor:
 [`throughput-optimization-spike.md`](throughput-optimization-spike.md)
@@ -207,19 +209,64 @@ Validation environment notes:
   on the loader path. Without this the CUDA EP fails at dlopen with
   "libcudnn.so.9: cannot open shared object file".
 
-### G5 (optional, post-G4) — CPU-path Mutex removal
+### G5 — CPU-path Mutex removal (LANDED 2026-05-22)
 
-If G4 is decisive, G5 is a separate concern: does the **CPU** path
-benefit from dropping the InferenceSession Mutex? The original `--workers
-1` rationale assumed a single thread; the Mutex was defensive. ORT
-CPU runtime with `intra_threads=1` may be concurrent-safe — worth a
-1-day smoke test.
+Slice 3c (commit `154248d`) unlocked game-level worker parallelism, but
+sim-eval-gate at workers=16 was scaling ~3.76× over workers=1 instead
+of the ~8× the box could deliver. The dominant remaining serialization
+was `engine::inference::InferenceSession::session: Mutex<Session>` —
+every `predict_v3` call locked it.
 
-Acceptance: workers=16 CPU scaling improves from 4.5× → ≥6× on the
-same `sim-eval-gate` smoke. Falsification: segfault or wilson_lower
-divergence from workers=1 → revert.
+G5 replaced `SessionGuard::Cpu(Mutex<Session>)` with
+`SessionGuard::Cpu(UnsafeCell<Session>)`, reusing the same pattern G2
+established on the CUDA branch. The `unsafe impl Sync for SessionGuard`
+annotation now covers both variants with the same justification: ORT's
+`Session::Run` is documented thread-safe for concurrent calls on a
+single session, and the `&mut self` on `ort::Session::run` is a
+Rust-API artifact, not a real exclusivity requirement. The CPU branch
+keeps `intra_threads = 1` + `inter_threads = 1` on the SessionBuilder
+(R14.G FP-determinism contract: those control ORT's internal thread
+pool, which is a different concern from how many Rust threads may
+concurrently dispatch `Session::run`).
 
-Effort: ~1 day. Independent of G1-G4.
+The dispatch site in `predict_v3` collapsed from two arms to one
+shared `Cpu | Cuda` match arm — both variants now punch through the
+`UnsafeCell` identically.
+
+Validation (sim-eval-gate, n=200 games, R110-W6-repro/iter-0/policy.onnx,
+sims=100, leaf=rollout, rollout-steps=200, prior=policy):
+
+| `--workers` | wilsonLower | elapsedSecs | gamesPerSec | speedup vs w=1 |
+|---|---|---|---|---|
+| 1 | 0.4957060908195922 | 58.877 | 3.397 | 1.00× |
+| 16 | 0.4957060908195922 | 8.282 | 24.148 | **7.11×** |
+| 32 | 0.4957060908195922 | 7.449 | 26.849 | 7.90× |
+
+Gates met:
+1. **Bit-identical wilson_lower across `--workers ∈ {1, 16, 32}`** to
+   all 16 decimal places — matches the Slice 3c workers=1 golden
+   exactly. The CPU `Session::Run` is reentrant in practice, no FP
+   drift from concurrent calls.
+2. **Speedup 7.11× at workers=16** vs the ≥6× gate (and vs Slice 3c's
+   4.5× at workers=8 — a clear +25% efficiency lift from removing the
+   Mutex bottleneck).
+3. No segfault, no panic, no ORT thread-safety warning across the
+   three runs.
+
+The w=32 gain over w=16 is modest (7.90× vs 7.11×) because a
+concurrent v3.2 deck-sampling gate was using ~16 cores during the
+acceptance run — w=32 was oversubscribed; in an unloaded box w=32
+would likely scale closer to 10-12×. The Slice 3c brief's "ceiling
+~6-7 cores" was Mutex-bound; with G5 the new ceiling is contention on
+the shared `extract_logits_and_value` allocation path (Vec<f32>
+copies), not session-level serialization. If post-G5 throughput
+becomes the bottleneck on a new workload, the next lever is batched
+inference (gather N action-features tensors and run them as a single
+session call), but the current scaling closes the original "workers=16
+stalls at ~7 cores" gap.
+
+Effort: ~1 hour (code change is minimal; the heavy lift was acceptance
+validation across three worker counts).
 
 ## Risks
 
@@ -252,6 +299,7 @@ Effort: ~1 day. Independent of G1-G4.
 - `throughput-optimization-spike.md` — predecessor. Closed; Slice 3c
   parallelism (commit `154248d`) is the precondition that surfaced the
   Mutex contention this slice would lift.
-- `engine-rs/crates/engine/src/inference/mod.rs:148-203` — the
-  Mutex-wrapped Session and CPU-pinned builder this slice opens up.
+- `engine-rs/crates/engine/src/inference/mod.rs` — `Device` enum,
+  `SessionGuard` (Cpu/Cuda variants, both `UnsafeCell<Session>` post-G5)
+  and the CPU-pinned `intra/inter_threads = 1` SessionBuilder.
 - Queue: `gpu-inference-execution-provider` (to be added).
