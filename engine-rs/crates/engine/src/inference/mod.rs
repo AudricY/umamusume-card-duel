@@ -1,5 +1,5 @@
 //! R16-P3 throughput-spike Option A: in-process ONNX inference for the
-//! v3.0 and v3.2 policy/value graphs.
+//! v3.0, v3.1, and v3.2 policy/value graphs.
 //!
 //! Replaces the HTTP `/predict` round-trip in
 //! `crate::mcts::driver::predict_policy_and_value` /
@@ -7,18 +7,25 @@
 //! is loaded once per process and shared via a global; downstream MCTS
 //! workers stamp it through `InferenceSession::set_global`.
 //!
-//! Schema scope: **v3.0 + v3.2** (Slice 3 lands v3.2). The graph signature
-//! is validated at load time:
+//! Schema scope: **v3.0 + v3.1 + v3.2** (Slice 3b lands v3.1). The graph
+//! signature is validated at load time:
 //!   - REQUIRED v3.0 inputs (set-equality): `state_features`,
 //!     `action_features`, `action_mask`, `card_ids_by_zone`,
-//!     `action_card_idx`. Five inputs total.
+//!     `action_card_idx`. Five inputs total. `state_features` last
+//!     dim = 110.
+//!   - REQUIRED v3.1 inputs (set-equality): same 5 names as v3.0 BUT
+//!     `state_features` last dim = 164 (the 54-d temporal/turn-state
+//!     tail). Distinguished from v3.0 by the input-shape probe, not the
+//!     input-name set (graph signature matches `serve_onnx._graph_signature`
+//!     state-dim discriminator).
 //!   - REQUIRED v3.2 inputs: the five v3.0 inputs PLUS `uma_slot_card_ids`
 //!     and `uma_slot_features` (set-equality of 7). Either both v3.2
-//!     inputs are present (v3.2) or neither (v3.0). A partial v3.2 graph
-//!     (one slot input missing) is rejected explicitly (mirrors
+//!     inputs are present (v3.2) or neither (v3.0/v3.1). A partial v3.2
+//!     graph (one slot input missing) is rejected explicitly (mirrors
 //!     `serve_onnx._graph_has_partial_uma_slot_inputs` guard).
-//!   - REJECTED: v3.1 graphs (164-d state). `unimplemented!()`-style hard
-//!     error pointing at the v3.1 follow-up slice.
+//!   - REJECTED: unknown schemas (e.g. 96-d v2 graphs, 7-input graphs at
+//!     a non-110 state dim, partial v3.2 pairs). Surface a clean error
+//!     pointing at the actual input shape.
 //!
 //! ONNX runtime: dynamic-loaded via `load-dynamic` (set
 //! `ORT_DYLIB_PATH=/path/to/libonnxruntime.so` before invoking; the
@@ -38,8 +45,8 @@ use ort::value::TensorRef;
 
 use crate::policy::card_vocab::card_vocab;
 use crate::policy::featurize::{
-    self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3, UMA_SLOT_COUNT,
-    UMA_SLOT_FEATURE_DIM,
+    self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3, STATE_DIM_V3_1,
+    UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM,
 };
 use crate::policy::types::{LegalAiAction, PublicObservation};
 
@@ -62,10 +69,13 @@ const REQUIRED_V3_2_EXTRA_INPUTS: [&str; 2] = [
 ];
 
 /// Detected graph schema. Set at session load and read by
-/// `predict_v3` to dispatch the correct tensor packing.
+/// `predict_v3` to dispatch the correct tensor packing. v3.0 and v3.1
+/// share the 5-input contract; the discriminator is the `state_features`
+/// last-dim shape (110 vs 164).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GraphSchema {
     V3_0,
+    V3_1,
     V3_2,
 }
 
@@ -180,10 +190,11 @@ impl InferenceSession {
             .commit_from_file(onnx_path)
             .map_err(InferenceError::from)?;
 
-        // Graph-signature validation. Detects v3.0 vs v3.2 by input set
-        // (matches `serve_onnx._lookup_schema`). Partial v3.2 (one slot
-        // input missing) is rejected explicitly; v3.1 (164-d) is still
-        // a hard error pointing at the follow-up slice.
+        // Graph-signature validation. Detects v3.0/v3.1 (5-input
+        // contract; discriminated by `state_features` last-dim 110 vs
+        // 164) vs v3.2 (7-input contract) — matches
+        // `serve_onnx._lookup_schema`. Partial v3.2 (one slot input
+        // missing) is rejected explicitly.
         let schema = validate_graph_signature(&session)?;
 
         Ok(InferenceSession {
@@ -211,11 +222,22 @@ impl InferenceSession {
                 "legalActions must not be empty".into(),
             ));
         }
-        // Pack the five v3.0 input tensors. Layout matches
-        // `serve_onnx.request_to_arrays` exactly (batch=1 leading dim
-        // everywhere).
-        let state = featurize::observation_state_features(observation);
-        let state_arr = Array::from_shape_vec((1, STATE_DIM_V3), state)
+        // Pack the five v3.0 (or v3.1 — 164-d head) input tensors.
+        // Layout matches `serve_onnx.request_to_arrays` exactly (batch=1
+        // leading dim everywhere). v3.2 reuses the v3.0 state head and
+        // ADDS the slot tensors below; the state-features tensor is
+        // unchanged.
+        let (state, state_dim) = match self.schema {
+            GraphSchema::V3_1 => (
+                featurize::observation_state_features_v3_1(observation),
+                STATE_DIM_V3_1,
+            ),
+            GraphSchema::V3_0 | GraphSchema::V3_2 => (
+                featurize::observation_state_features(observation),
+                STATE_DIM_V3,
+            ),
+        };
+        let state_arr = Array::from_shape_vec((1, state_dim), state)
             .map_err(|e| InferenceError::OutputShape(format!("state reshape: {e}")))?;
 
         let n_actions = legal_actions.len();
@@ -245,11 +267,11 @@ impl InferenceSession {
 
         // v3.2-only auxiliary tensors. We build them unconditionally so the
         // `TensorRef::from_array_view` borrow lives long enough on both
-        // branches; v3.0 dispatch simply ignores them (ORT hard-rejects
-        // unknown feed keys, so v3.0 graphs MUST omit these from `inputs!`).
+        // branches; v3.0 + v3.1 dispatch simply ignores them (ORT hard-rejects
+        // unknown feed keys, so v3.0/v3.1 graphs MUST omit these from `inputs!`).
         let (slot_card_ids_flat, slot_features_flat) = match self.schema {
             GraphSchema::V3_2 => featurize::observation_uma_slots(observation),
-            GraphSchema::V3_0 => (Vec::new(), Vec::new()),
+            GraphSchema::V3_0 | GraphSchema::V3_1 => (Vec::new(), Vec::new()),
         };
         let slot_card_ids_arr = if matches!(self.schema, GraphSchema::V3_2) {
             Some(
@@ -278,11 +300,13 @@ impl InferenceSession {
         // (not a `View` produced by `.view()`); pass the owned arrays by
         // reference. This is zero-copy at the FFI boundary — ORT borrows
         // the buffer for the duration of `run()`. The two paths build a
-        // different ort::inputs! map (5 keys for v3.0, 7 keys for v3.2) —
-        // ORT hard-rejects unknown feed keys so we MUST omit the v3.2
-        // tensors from the v3.0 feed.
+        // different ort::inputs! map (5 keys for v3.0/v3.1, 7 keys for
+        // v3.2) — ORT hard-rejects unknown feed keys so we MUST omit the
+        // v3.2 tensors from the v3.0/v3.1 feed. v3.0 and v3.1 share the
+        // same 5-input shape (only the `state_features` tensor's last
+        // dim differs: 110 vs 164).
         let inputs = match self.schema {
-            GraphSchema::V3_0 => ort::inputs![
+            GraphSchema::V3_0 | GraphSchema::V3_1 => ort::inputs![
                 "state_features" => TensorRef::from_array_view(&state_arr)?,
                 "action_features" => TensorRef::from_array_view(&action_features_arr)?,
                 "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
@@ -416,6 +440,32 @@ fn card_vocab_metadata_hash() -> String {
         .to_string()
 }
 
+/// Probe the `state_features` input's last-dim from the ORT graph
+/// signature. Returns `None` if the graph declares no `state_features`
+/// input (caught downstream by the set-equality check) or if the shape
+/// has no concrete last dim. Mirrors the Python `_graph_signature`
+/// state-dim discriminator in `serve_onnx.py`.
+fn read_state_features_last_dim(session: &Session) -> Option<i64> {
+    for inp in session.inputs().iter() {
+        if inp.name() == "state_features" {
+            // `Outlet::dtype()` returns the `ValueType`; for a Tensor
+            // input the shape is exposed via `tensor_shape()` and Derefs
+            // to `[i64]`. Read the last entry if concrete (>0); a
+            // symbolic dim is represented as a negative sentinel and we
+            // treat that as "unknown" (fall back to v3.0).
+            if let Some(shape) = inp.dtype().tensor_shape() {
+                if let Some(&last) = shape.last() {
+                    if last > 0 {
+                        return Some(last);
+                    }
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
 fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceError> {
     let session_inputs = session.inputs();
     let inputs: Vec<&str> = session_inputs.iter().map(|i| i.name()).collect();
@@ -444,7 +494,8 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
     }
 
     // v3.2 dispatch: both slot inputs present + required v3.0 inputs all
-    // present (set-equality on the 7-input contract).
+    // present (set-equality on the 7-input contract). v3.2 reuses the
+    // 110-d state head — the shape probe is informational only here.
     if has_slot_ids && has_slot_feats {
         if input_set != required_v3_2 {
             return Err(InferenceError::SchemaMismatch(format!(
@@ -456,28 +507,38 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
         return Ok(GraphSchema::V3_2);
     }
 
-    // v3.0 dispatch: set-equality on the 5-input v3.0 contract.
+    // v3.0/v3.1 dispatch: same 5-input name set; differ ONLY by
+    // `state_features` last-dim (110 vs 164).
     if input_set != required_v3 {
-        // Likely cause for an unexpected set with no slot inputs is a
-        // v3.1 (164-d) graph — that's the only other documented schema
-        // and it's still unimplemented this slice.
-        if input_set.contains("temporal_features")
-            || inputs.iter().any(|n| n.contains("temporal"))
-        {
-            return Err(InferenceError::SchemaMismatch(format!(
-                "graph appears to be v3.1 (164-d temporal/turn-state; \
-                 inputs {:?}); not implemented in this slice — file a \
-                 follow-up issue.",
-                inputs
-            )));
-        }
         return Err(InferenceError::SchemaMismatch(format!(
-            "graph input set {:?} does not match v3.0 contract {:?} or \
+            "graph input set {:?} does not match v3.0/v3.1 contract {:?} or \
              v3.2 contract {:?}",
             inputs, REQUIRED_V3_INPUTS, required_v3_2.iter().copied().collect::<Vec<_>>()
         )));
     }
-    Ok(GraphSchema::V3_0)
+
+    // Discriminate v3.0 (110) from v3.1 (164) by state_features last
+    // dim. The shape is a concrete int on every exported policy graph
+    // (export pins `state_features: float[1, STATE_DIM]`); a missing or
+    // symbolic last dim is treated as v3.0 for backwards compatibility
+    // (matches the Python `_lookup_schema` fallback behaviour where
+    // state_dim=None is rejected upstream).
+    match read_state_features_last_dim(session) {
+        Some(d) if d as usize == STATE_DIM_V3 => Ok(GraphSchema::V3_0),
+        Some(d) if d as usize == STATE_DIM_V3_1 => Ok(GraphSchema::V3_1),
+        Some(d) => Err(InferenceError::SchemaMismatch(format!(
+            "graph state_features last dim {} does not match v3.0 ({}) \
+             or v3.1 ({}); inputs {:?}",
+            d, STATE_DIM_V3, STATE_DIM_V3_1, inputs
+        ))),
+        None => {
+            // No concrete state_features shape — fall back to v3.0 for
+            // backwards compatibility (older v3.0 graphs may have had
+            // a dynamic batch + dynamic state dim under some exporters;
+            // every modern exporter emits a concrete 110/164).
+            Ok(GraphSchema::V3_0)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

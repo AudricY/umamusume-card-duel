@@ -1,26 +1,29 @@
-//! R16-P3 throughput-spike Option A: in-process Rust port of the v3.0
-//! and v3.2 observation/action featurizers.
+//! R16-P3 throughput-spike Option A: in-process Rust port of the v3.0,
+//! v3.1, and v3.2 observation/action featurizers.
 //!
-//! Bit-exact port of the **v3.0 + v3.2** Python builders in
+//! Bit-exact port of the **v3.0 + v3.1 + v3.2** Python builders in
 //! `training/uma_ai/features.py`:
-//!   - `observation_to_features`         → `observation_state_features`
-//!   - `legal_actions_to_features`       → `legal_actions_features`
-//!   - `observation_to_card_ids`         → `observation_card_ids_by_zone`
-//!   - `action_card_idx_pair`            → `action_card_idx_pair`
-//!   - `observation_to_uma_slots` (v3.2) → `observation_uma_slots`
+//!   - `observation_to_features`             → `observation_state_features`
+//!   - `observation_to_features_v3_1`        → `observation_state_features_v3_1`
+//!   - `legal_actions_to_features`           → `legal_actions_features`
+//!   - `observation_to_card_ids`             → `observation_card_ids_by_zone`
+//!   - `action_card_idx_pair`                → `action_card_idx_pair`
+//!   - `observation_to_uma_slots` (v3.2)     → `observation_uma_slots`
 //!   - `card_vocab_metadata` / `card_vocab_index` → reused from
 //!     `crate::policy::card_vocab`.
 //!
 //! Pinned schemas
 //! --------------
-//! v3.0 + v3.2 in this slice. v3.1 (164-d temporal/turn-state) is still
-//! an explicit-unimplemented hard error at the
-//! `inference::InferenceSession::load` graph-signature gate. Slice 3 (this
-//! commit) adds v3.2: same 110-d state head as v3.0 plus the new per-Uma
-//! slot tensor pair (`uma_slot_card_ids: int64[10]`,
-//! `uma_slot_features: float32[10, 23]`). The slot-token feature row is a
-//! verbatim port of Python `_uma_slot_feature_row` — the 23-d layout is
-//! FROZEN (see comment block below for column order).
+//! v3.0 + v3.1 + v3.2 all supported. Slice 3 added v3.2 (per-Uma slot
+//! tokens). Slice 3b (this commit) adds v3.1: 164-d = frozen v3.0 110-d
+//! head + 54-d temporal/turn-state tail. Slot 0–109 are byte-identical
+//! to the v3.0 builder (the v3.1 builder calls into the v3.0 builder
+//! and concatenates the temporal block; no re-derivation). Slots
+//! 110–163 are the FROZEN P1 enumeration (4 global + 14 side + 36
+//! per-Uma; see `observation_state_features_v3_1` for the slot map).
+//! v3.2 inputs add `uma_slot_card_ids: int64[10]` +
+//! `uma_slot_features: float32[10, 23]` on top of the v3.0 5-input
+//! contract; the 23-d slot layout is FROZEN (see comment block below).
 //!
 //! Layout fidelity is enforced by:
 //!   - `STATE_DIM_V3 = 110` / `ACTION_DIM = 48` / `NUM_ZONES = 8` /
@@ -38,6 +41,9 @@ use crate::policy::types::{AiPhase, LegalAiAction, PublicObservation, PublicSide
 
 /// Mirrors `STATE_DIM_V3` / `STATE_DIM` in Python (frozen 110-d v3.0).
 pub const STATE_DIM_V3: usize = 110;
+/// Mirrors `STATE_DIM_V3_1` in Python — 164-d v3.1 temporal/turn-state
+/// builder. Layout is the frozen v3.0 110-d head + 54-d temporal block.
+pub const STATE_DIM_V3_1: usize = 164;
 /// Mirrors `ACTION_DIM` (48-d action feature vector — pre-computed
 /// TS-side and carried verbatim on `LegalAiAction.features`).
 pub const ACTION_DIM: usize = 48;
@@ -200,6 +206,133 @@ pub fn observation_state_features(obs: &PublicObservation) -> Vec<f32> {
     f[97..100].copy_from_slice(&one_hot);
     let tool = tool_card_features(own, opp);
     f[100..110].copy_from_slice(&tool);
+
+    f
+}
+
+// ---------------------------------------------------------------------------
+// v3.1 temporal / turn-state builder (R16-P1; ported from
+// `training/uma_ai/features.py:237-388`).
+//
+// Layout (frozen, mirrors P1 enumeration in scoping doc):
+//   0–109      v3.0 head (byte-identical via `observation_state_features`)
+//   110–113    global temporal: ownTurnsTaken(/CAP), oppTurnsTaken(/CAP),
+//              ownIsFirstTurn(bool), oppIsFirstTurn(bool)
+//   114–120    own side turnState ×7
+//   121–127    opp side turnState ×7
+//   128–136    own active per-Uma temporal ×9
+//   137–145    own bench aggregate (mean of the 9 over present bench Umas)
+//   146–154    opp active per-Uma temporal ×9
+//   155–163    opp bench aggregate (mean of the 9 over present bench Umas)
+//
+// Normalisation caps (match Python module constants):
+//   _TURN_CAP   = 20.0  (matches features[2] = turnNumber/20.0)
+//   _BUDGET_CAP = 3.0   (energy-attach budgets, coin-flip count, ability counts)
+//   _DAMAGE_CAP = 30.0  (activeAttackDamageBonus, nextTurnDamageReduction,
+//                        effectiveRetreatCostReduction)
+//
+// The temporal-block ablation (`state_temporal_turn_v31`) lives in the
+// Python training path only; the Rust runtime serves an already-trained
+// ONNX and never needs to apply ablations.
+// ---------------------------------------------------------------------------
+
+const _TURN_CAP_V3_1: f32 = 20.0;
+const _BUDGET_CAP_V3_1: f32 = 3.0;
+const _DAMAGE_CAP_V3_1: f32 = 30.0;
+
+fn norm_v3_1(value: f32, cap: f32) -> f32 {
+    value.min(cap) / cap
+}
+
+/// Mirror of Python `_side_turn_state_vec`. 7 side-level turnState
+/// scalars. The retreat slot encodes the DERIVED
+/// `effectiveRetreatCostReduction` (raw side reduction + stadium global
+/// term), available on every Rust observation (the field is non-Option).
+fn side_turn_state_vec(side: &PublicSideObservation) -> [f32; 7] {
+    let ts = &side.turn_state;
+    let mut out = [0.0f32; 7];
+    out[0] = norm_v3_1(ts.energy_attachments_this_turn as f32, _BUDGET_CAP_V3_1);
+    out[1] = norm_v3_1(ts.bonus_energy_attachments as f32, _BUDGET_CAP_V3_1);
+    out[2] = norm_v3_1(ts.effective_retreat_cost_reduction as f32, _DAMAGE_CAP_V3_1);
+    out[3] = norm_v3_1(ts.active_attack_damage_bonus as f32, _DAMAGE_CAP_V3_1);
+    out[4] = norm_v3_1(ts.used_ability_name_count_this_turn as f32, _BUDGET_CAP_V3_1);
+    out[5] = norm_v3_1(ts.used_ability_name_count_this_game as f32, _TURN_CAP_V3_1);
+    out[6] = norm_v3_1(ts.guaranteed_coin_flip_heads as f32, _BUDGET_CAP_V3_1);
+    out
+}
+
+/// Mirror of Python `_uma_turn_state_vec`. 9 per-Uma temporal scalars.
+/// `None` (absent slot) → all zeros (mirrors Python's `if not uma:
+/// return zeros`).
+fn uma_turn_state_vec(uma: Option<&PublicUmaObservation>) -> [f32; 9] {
+    let mut out = [0.0f32; 9];
+    let Some(u) = uma else { return out; };
+    let ts = &u.turn_state;
+    out[0] = norm_v3_1(ts.turns_in_play as f32, _TURN_CAP_V3_1);
+    out[1] = if ts.entered_this_turn { 1.0 } else { 0.0 };
+    out[2] = if ts.evolved_this_turn { 1.0 } else { 0.0 };
+    out[3] = if ts.evolved_last_turn { 1.0 } else { 0.0 };
+    out[4] = if ts.took_damage_last_turn { 1.0 } else { 0.0 };
+    out[5] = if ts.took_damage_this_turn { 1.0 } else { 0.0 };
+    out[6] = norm_v3_1(ts.next_turn_damage_reduction as f32, _DAMAGE_CAP_V3_1);
+    out[7] = if ts.attack_blocked_this_turn { 1.0 } else { 0.0 };
+    out[8] = if ts.paralysis_recovery_pending { 1.0 } else { 0.0 };
+    out
+}
+
+/// Mirror of Python `_bench_turn_state_aggregate`. Mean of the 9 per-Uma
+/// temporal scalars over PRESENT bench Umas. Empty bench → zeros.
+fn bench_turn_state_aggregate(side: &PublicSideObservation) -> [f32; 9] {
+    let present: Vec<&PublicUmaObservation> =
+        side.bench.iter().flatten().collect();
+    let mut out = [0.0f32; 9];
+    if present.is_empty() {
+        return out;
+    }
+    let denom = present.len() as f32;
+    for u in &present {
+        let row = uma_turn_state_vec(Some(*u));
+        for (i, v) in row.iter().enumerate() {
+            out[i] += *v;
+        }
+    }
+    for v in out.iter_mut() {
+        *v /= denom;
+    }
+    out
+}
+
+/// Public façade for `observation_to_features_v3_1` (R16-P1 schema-v3.1).
+/// Builds a 164-d `Vec<f32>` = byte-identical v3.0 head + 54-d temporal
+/// block. The head is produced by calling `observation_state_features`
+/// directly, NOT re-deriving — Python's contract is "slots 0–109 are
+/// byte-identical to the frozen v3.0 builder".
+pub fn observation_state_features_v3_1(obs: &PublicObservation) -> Vec<f32> {
+    let mut f = vec![0.0f32; STATE_DIM_V3_1];
+
+    // Head: byte-identical v3.0 builder output.
+    let head = observation_state_features(obs);
+    debug_assert_eq!(head.len(), STATE_DIM_V3);
+    f[..STATE_DIM_V3].copy_from_slice(&head);
+
+    // 110–113: global temporal.
+    let temporal = &obs.temporal;
+    f[110] = norm_v3_1(temporal.own_turns_taken as f32, _TURN_CAP_V3_1);
+    f[111] = norm_v3_1(temporal.opponent_turns_taken as f32, _TURN_CAP_V3_1);
+    f[112] = if temporal.own_is_first_turn { 1.0 } else { 0.0 };
+    f[113] = if temporal.opponent_is_first_turn { 1.0 } else { 0.0 };
+
+    // 114–120: own side turnState; 121–127: opp side turnState.
+    f[114..121].copy_from_slice(&side_turn_state_vec(&obs.own));
+    f[121..128].copy_from_slice(&side_turn_state_vec(&obs.opponent));
+
+    // 128–136: own active per-Uma; 137–145: own bench aggregate.
+    f[128..137].copy_from_slice(&uma_turn_state_vec(obs.own.active.as_ref()));
+    f[137..146].copy_from_slice(&bench_turn_state_aggregate(&obs.own));
+
+    // 146–154: opp active per-Uma; 155–163: opp bench aggregate.
+    f[146..155].copy_from_slice(&uma_turn_state_vec(obs.opponent.active.as_ref()));
+    f[155..164].copy_from_slice(&bench_turn_state_aggregate(&obs.opponent));
 
     f
 }
@@ -1142,6 +1275,113 @@ mod tests {
             "typed-energy sum {} != raw {}/4.0 = {}",
             typed_sum, raw_sum, expected
         );
+    }
+
+    // ----------------------------------------------------------------
+    // v3.1 temporal / turn-state builder (R16-P1)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn v3_1_state_vector_dimension_is_164() {
+        let obs = fixture();
+        let v = observation_state_features_v3_1(&obs);
+        assert_eq!(v.len(), STATE_DIM_V3_1);
+        assert_eq!(STATE_DIM_V3_1, 164);
+    }
+
+    #[test]
+    fn v3_1_head_is_byte_identical_to_v3_0() {
+        // The first 110 slots MUST be byte-equal to the standalone v3.0
+        // builder — this is the core layering contract.
+        let obs = fixture();
+        let head = observation_state_features(&obs);
+        let v31 = observation_state_features_v3_1(&obs);
+        assert_eq!(&v31[..STATE_DIM_V3], &head[..]);
+    }
+
+    #[test]
+    fn v3_1_temporal_block_layout_and_bounds() {
+        // Slot ranges from the FROZEN v3.1 layout (110-d v3.0 head +
+        // 54-d temporal block). All entries must be in [0, 1] after
+        // bounded-norm/bool encoding.
+        let obs = fixture();
+        let v = observation_state_features_v3_1(&obs);
+
+        // Global temporal: turn counters in [0,1] (capped), bools in {0,1}.
+        for &slot in &[110usize, 111] {
+            assert!(
+                v[slot] >= 0.0 && v[slot] <= 1.0,
+                "global temporal slot {} out of [0,1]: {}",
+                slot, v[slot]
+            );
+        }
+        for &slot in &[112usize, 113] {
+            assert!(
+                v[slot] == 0.0 || v[slot] == 1.0,
+                "isFirstTurn slot {} must be 0/1: {}", slot, v[slot]
+            );
+        }
+
+        // Side turnState scalars are all bounded-norm in [0,1]
+        // (effectiveRetreatCostReduction can be > 30 only in pathological
+        // states; the cap clamps).
+        for slot in 114..128 {
+            assert!(
+                v[slot] >= 0.0 && v[slot] <= 1.0,
+                "side turnState slot {} out of [0,1]: {}", slot, v[slot]
+            );
+        }
+
+        // Active + bench-aggregate per-Uma scalars in [0,1] too.
+        for slot in 128..164 {
+            assert!(
+                v[slot] >= 0.0 && v[slot] <= 1.0,
+                "per-Uma temporal slot {} out of [0,1]: {}", slot, v[slot]
+            );
+        }
+    }
+
+    #[test]
+    fn v3_1_global_temporal_matches_observation() {
+        // Slots 110, 111 = turn counters; 112, 113 = isFirstTurn bools.
+        let obs = fixture();
+        let v = observation_state_features_v3_1(&obs);
+        let t = &obs.temporal;
+        let exp_own = (t.own_turns_taken as f32).min(20.0) / 20.0;
+        let exp_opp = (t.opponent_turns_taken as f32).min(20.0) / 20.0;
+        assert!((v[110] - exp_own).abs() < 1e-6);
+        assert!((v[111] - exp_opp).abs() < 1e-6);
+        assert_eq!(v[112], if t.own_is_first_turn { 1.0 } else { 0.0 });
+        assert_eq!(v[113], if t.opponent_is_first_turn { 1.0 } else { 0.0 });
+    }
+
+    #[test]
+    fn v3_1_uma_turn_state_absent_uma_is_zero() {
+        // The per-Uma helper must return all zeros for None input
+        // (mirrors Python `if not uma: return np.zeros(9)`).
+        let row = uma_turn_state_vec(None);
+        for (i, &v) in row.iter().enumerate() {
+            assert_eq!(v, 0.0, "absent-uma col {} must be 0 (got {})", i, v);
+        }
+    }
+
+    #[test]
+    fn v3_1_bench_aggregate_empty_bench_is_zero() {
+        // Wipe both benches; the aggregate must collapse to zero rows.
+        let mut obs = fixture();
+        for slot in obs.own.bench.iter_mut() {
+            *slot = None;
+        }
+        for slot in obs.opponent.bench.iter_mut() {
+            *slot = None;
+        }
+        let v = observation_state_features_v3_1(&obs);
+        for slot in 137..146 {
+            assert_eq!(v[slot], 0.0, "own bench-agg slot {} must be 0", slot);
+        }
+        for slot in 155..164 {
+            assert_eq!(v[slot], 0.0, "opp bench-agg slot {} must be 0", slot);
+        }
     }
 
     #[test]
