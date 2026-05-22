@@ -37,6 +37,14 @@ def main() -> None:
         if not config.uses_q_value_head:
             raise ValueError("--q-value-scalar override requires a checkpoint with uses_q_value_head=True")
         config = replace(config, q_value_scalar=args.q_value_scalar)
+    if args.q_value_scalar_scale != 1.0 or args.q_value_scalar_bias != 0.0:
+        if not config.uses_q_value_head:
+            raise ValueError("Q scalar calibration overrides require a checkpoint with uses_q_value_head=True")
+        config = replace(
+            config,
+            q_value_scalar_scale=args.q_value_scalar_scale,
+            q_value_scalar_bias=args.q_value_scalar_bias,
+        )
     # R16-P1: the graph state dim is driven by the CHECKPOINT's
     # config.state_dim (96 / 110 / 164), not the module default STATE_DIM
     # (which stays 110 = v3.0). Validate it is a known builder dim so a
@@ -214,6 +222,8 @@ def main() -> None:
     if config.uses_q_value_head:
         sidecar_payload["uses_q_value_head"] = True
         sidecar_payload["q_value_scalar"] = config.q_value_scalar
+        sidecar_payload["q_value_scalar_scale"] = config.q_value_scalar_scale
+        sidecar_payload["q_value_scalar_bias"] = config.q_value_scalar_bias
     sidecar = out.with_suffix(out.suffix + ".meta.json")
     sidecar.write_text(
         json.dumps(sidecar_payload, indent=2) + "\n",
@@ -230,6 +240,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument("--q-value-scalar", choices=["max", "mean", "top2_mean", "top3_mean", "policy_mean"], default=None,
                         help="Override scalarization for Q-head checkpoints at export time.")
+    parser.add_argument("--q-value-scalar-scale", type=float, default=1.0,
+                        help="Affine scale for Q-head scalar value, clamped to [-1, 1].")
+    parser.add_argument("--q-value-scalar-bias", type=float, default=0.0,
+                        help="Affine bias for Q-head scalar value, clamped to [-1, 1].")
     return parser.parse_args()
 
 

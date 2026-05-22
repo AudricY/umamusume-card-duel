@@ -111,6 +111,11 @@ class ModelConfig:
     # the best legal Q values, and "policy_mean" uses the model's masked
     # policy distribution as action weights.
     q_value_scalar: str = "max"
+    # Optional affine calibration applied to the exported Q-derived scalar,
+    # then clamped back to the value range consumed by MCTS. Defaults preserve
+    # existing Q-head graph behavior.
+    q_value_scalar_scale: float = 1.0
+    q_value_scalar_bias: float = 0.0
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -685,6 +690,11 @@ class CandidatePolicyNet(nn.Module):
                 value = (weights * q_values).sum(dim=1)
             else:
                 raise ValueError(f"unknown q_value_scalar={scalar_mode!r}")
+            if self.config.q_value_scalar_scale != 1.0 or self.config.q_value_scalar_bias != 0.0:
+                value = (
+                    value * float(self.config.q_value_scalar_scale)
+                    + float(self.config.q_value_scalar_bias)
+                ).clamp(-1.0, 1.0)
         else:
             value = self.value_head(state_encoded).squeeze(-1)
         if return_q_values:
