@@ -122,7 +122,7 @@ def main() -> None:
     required = {
         "schemaVersion", "kind", "seed", "sideId", "step", "turnNumber",
         "observation", "legalActions", "selectedActionIndex", "visitDistribution",
-        "rootPriors", "rootValue", "valueTarget", "result",
+        "rootPriors", "rootMeanQ", "rootValue", "valueTarget", "result",
     }
     for i, row in enumerate(rows):
         missing = required - set(row.keys())
@@ -138,6 +138,13 @@ def main() -> None:
         dist = row["visitDistribution"]
         if not (0.999 <= sum(dist) <= 1.001):
             print(f"[selfplay-smoke] row {i} visitDistribution sum={sum(dist):.4f} not 1", file=sys.stderr)
+            sys.exit(1)
+        if len(row["rootMeanQ"]) != len(row["legalActions"]):
+            print(
+                f"[selfplay-smoke] row {i} rootMeanQ length={len(row['rootMeanQ'])} "
+                f"!= legalActions length={len(row['legalActions'])}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         if len(dist) != len(row["legalActions"]):
             print(f"[selfplay-smoke] row {i} dist length {len(dist)} != legal {len(row['legalActions'])}", file=sys.stderr)

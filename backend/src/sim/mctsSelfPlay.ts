@@ -87,6 +87,7 @@ type SelfPlayRow = {
   selectedActionIndex: number;
   visitDistribution: number[];
   rootPriors: number[];
+  rootMeanQ: number[];
   rootValue: number;
   rootPriorEntropy: number;
   rootPriorArgmax: number;
@@ -494,6 +495,7 @@ async function runSelfPlayGameWithRng(args: SelfPlayArgs, seed: string, rng: Rng
       selectedActionIndex: selectedIndex,
       visitDistribution,
       rootPriors: mctsResult.diagnostics.rootPriors,
+      rootMeanQ: mctsResult.diagnostics.rootMeanQ,
       rootValue: mctsResult.diagnostics.rootValue,
       rootPriorEntropy: mctsResult.diagnostics.rootPriorEntropy,
       rootPriorArgmax: mctsResult.diagnostics.rootPriorArgmax,

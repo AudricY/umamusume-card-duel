@@ -228,6 +228,7 @@ struct SelfPlayRow {
     selected_action_index: usize,
     visit_distribution: Vec<f64>,
     root_priors: Vec<f64>,
+    root_mean_q: Vec<f64>,
     root_value: f64,
     root_prior_entropy: f64,
     root_prior_argmax: usize,
@@ -374,7 +375,11 @@ fn drive_one_game(
             if record_rows {
                 let total_visits: u32 = mcts_result.visits.iter().sum();
                 let visit_distribution: Vec<f64> = if total_visits > 0 {
-                    mcts_result.visits.iter().map(|&n| n as f64 / total_visits as f64).collect()
+                    mcts_result
+                        .visits
+                        .iter()
+                        .map(|&n| n as f64 / total_visits as f64)
+                        .collect()
                 } else {
                     let n = legal.len();
                     vec![1.0 / n.max(1) as f64; n]
@@ -394,6 +399,7 @@ fn drive_one_game(
                     selected_action_index: idx,
                     visit_distribution,
                     root_priors: mcts_result.diagnostics.root_priors.clone(),
+                    root_mean_q: mcts_result.diagnostics.root_mean_q.clone(),
                     root_value: mcts_result.diagnostics.root_value,
                     root_prior_entropy: mcts_result.diagnostics.root_prior_entropy,
                     root_prior_argmax: mcts_result.diagnostics.root_prior_argmax,
@@ -539,7 +545,8 @@ fn main() -> Result<()> {
         Some(path) => {
             let p = PathBuf::from(path);
             if let Some(parent) = p.parent() {
-                fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("mkdir {}", parent.display()))?;
             }
             Some(fs::File::create(&p).with_context(|| format!("create {}", path))?)
         }
@@ -562,8 +569,7 @@ fn main() -> Result<()> {
             .as_ref()
             .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
             .unwrap_or((None, None));
-        let (player_deck_id, opponent_deck_id) =
-            manifest_pair_for(&sampling, args.seed_base, i);
+        let (player_deck_id, opponent_deck_id) = manifest_pair_for(&sampling, args.seed_base, i);
         let record = drive_one_game(
             seed,
             args.max_steps,
@@ -626,8 +632,7 @@ fn main() -> Result<()> {
     if let Some(path) = args.manifest_out.as_ref() {
         let p = PathBuf::from(path);
         if let Some(parent) = p.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
         }
         let body = serde_json::to_string_pretty(&output)? + "\n";
         fs::write(&p, body).with_context(|| format!("write {}", p.display()))?;
@@ -672,6 +677,7 @@ mod tests {
             selected_action_index: 0,
             visit_distribution: vec![1.0],
             root_priors: vec![1.0],
+            root_mean_q: vec![0.0],
             root_value: 0.0,
             root_prior_entropy: 0.0,
             root_prior_argmax: 0,
@@ -710,6 +716,7 @@ mod tests {
             "selectedActionIndex",
             "visitDistribution",
             "rootPriors",
+            "rootMeanQ",
             "rootValue",
             "rootPriorEntropy",
             "rootPriorArgmax",
@@ -726,8 +733,14 @@ mod tests {
             keys, expected,
             "TS-flat key set drift; sync with mctsSelfPlay.ts SelfPlayRow"
         );
-        assert_eq!(object.get("kind").and_then(|v| v.as_str()), Some("mcts-selfplay"));
-        assert_eq!(object.get("schemaVersion").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(
+            object.get("kind").and_then(|v| v.as_str()),
+            Some("mcts-selfplay")
+        );
+        assert_eq!(
+            object.get("schemaVersion").and_then(|v| v.as_u64()),
+            Some(1)
+        );
         assert!(object.get("seed").and_then(|v| v.as_str()).is_some());
     }
 
@@ -748,6 +761,7 @@ mod tests {
             selected_action_index: 0,
             visit_distribution: vec![],
             root_priors: vec![],
+            root_mean_q: vec![],
             root_value: 0.0,
             root_prior_entropy: 0.0,
             root_prior_argmax: 0,
@@ -819,7 +833,9 @@ mod tests {
         );
         let manifest_off = args_off.manifest_args_json();
         assert_eq!(
-            manifest_off.get("addRootDirichlet").and_then(|v| v.as_bool()),
+            manifest_off
+                .get("addRootDirichlet")
+                .and_then(|v| v.as_bool()),
             Some(false)
         );
     }
