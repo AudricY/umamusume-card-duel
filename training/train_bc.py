@@ -106,13 +106,22 @@ def main() -> None:
         uses_q_value_head=bool(args.q_value_head),
     )
     model = CandidatePolicyNet(config).to(device)
+    if args.freeze_non_q_value_head:
+        if not args.q_value_head:
+            raise SystemExit("--freeze-non-q-value-head requires --q-value-head")
+        for name, param in model.named_parameters():
+            param.requires_grad = name.startswith("q_value_head.")
     # Item 11/17 KL-anchor anti-forgetting: if --kl-anchor-checkpoint is set,
     # load that checkpoint as a frozen anchor distribution and regularize the
     # current policy toward it via a per-batch KL(anchor || target) penalty.
     # The anchor is the prior promoted iteration so the loop can't drift to
     # a state distribution the prior iteration never visited.
     anchor_model = load_kl_anchor(args.kl_anchor_checkpoint, device) if args.kl_anchor_checkpoint else None
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(
+        [param for param in model.parameters() if param.requires_grad],
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
     scheduler = build_scheduler(optimizer, args, total_steps=max(1, args.epochs * max(1, len(train_loader))))
     use_amp = args.amp and device.type == "cuda"
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
@@ -244,6 +253,7 @@ def main() -> None:
             "value_weight": args.value_weight,
             "q_value_weight": args.q_value_weight,
             "q_value_head": bool(args.q_value_head),
+            "freeze_non_q_value_head": bool(args.freeze_non_q_value_head),
             "amp": use_amp,
             "grad_accum": grad_accum,
             "lr_schedule": args.lr_schedule,
@@ -1091,6 +1101,8 @@ def parse_args() -> argparse.Namespace:
                         help="Enable an action-value head trained from mcts-selfplay rootMeanQ targets.")
     parser.add_argument("--q-value-weight", type=float, default=0.0,
                         help="Weight on per-action Q-value MSE. Requires --q-value-head and rootMeanQ rows to have effect.")
+    parser.add_argument("--freeze-non-q-value-head", action="store_true",
+                        help="When --q-value-head is enabled, train only q_value_head.* parameters.")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--split-by", choices=["row", "episode", "seed"], default="episode")
     parser.add_argument("--ablate", action="append", choices=[
