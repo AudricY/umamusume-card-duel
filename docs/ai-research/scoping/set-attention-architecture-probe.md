@@ -1,12 +1,16 @@
 # Set-Attention Architecture Probe (R7.b.3-Style)
 
 - **Date:** 2026-05-22
-- **Status:** USER-GATED scoping. Sits behind the v3.2-mandatory + deck-variety
-  gates AND behind the current recipe-axis forward lines
-  (`w6-loop-anti-degradation`, `per-game-pfsp-league-retry`,
-  `value-head-data-program` Stage 2/3). P3 in
-  `docs/ai-agent-state/queue.json`. Not auto-launchable; explicit user gate
-  required before any code lands beyond P0a.
+- **Status:** SLICE 2 MARGINAL / DO NOT ADVANCE as of 2026-05-22 heartbeat
+  loop. User directive promoted this line ahead of the W6 HP sweep. P0a
+  passed locally (`training/r7b3_mha_onnx_roundtrip_smoke.py`,
+  max_abs_diff 7.153e-07); Slice 1 model/export plumbing is implemented
+  locally but not yet committed. Slice 2 trained and gated at n=1000
+  side-balanced (TS gate reports 2000 total side games): aggregate
+  wr=0.341, wilson_lower=0.3205. This clears strict non-regression vs
+  R7.b.2's 0.3045 but misses the 0.40 acceptance bar, so it is the
+  pre-registered marginal band. Do NOT proceed to Slice 3 without a new
+  explicit user gate.
 - **Routing:** new backlog entry under "Active Search-Wrapped Frontier" (item
   3b, the architecture axis sibling to item 0d's recipe axis); this scoping
   is the canonical home until the line resolves.
@@ -195,6 +199,14 @@ sum-pool at the SL gate; close the line and document.
 
 **Marginal:** `0.30 ≤ wl < 0.40` ⇒ attention helps but does not clear F1;
 do NOT proceed to Slice 3 without explicit user gate.
+
+**Observed 2026-05-22:** Slice 2 landed in this marginal band:
+`wilson_lower=0.3205`, wr=0.341 over the n=1000 side-balanced raw-policy
+gate (`runs/r7b3-set-attention-slice2/gate.manifest.json`). Per-side lower:
+player 0.2753, opponent 0.3494. This is +1.6pp over R7.b.2's 0.3045
+reference but far below the 0.40 F1 gate. Treat as "attention gives a small
+raw-policy lift on the item17/R4-era corpus, but not enough to reopen the
+raw-policy line or justify search-wrapped Slice 3."
 
 ### Slice 3 — search-wrapped acceptance under v3.2 + deck-variety (~1 day wall)
 

@@ -133,6 +133,8 @@ def main() -> None:
         "selfplay_games": args.selfplay_games,
         "mcts_simulations": args.mcts_simulations,
         "eval_games": args.eval_games,
+        "uma_slot_tokens": bool(args.uma_slot_tokens),
+        "model_variant": str(args.model_variant),
         # deck-pair-sampling Slice 2: deck-sampling mode applied to self-play
         # this iter. Eval gate is always 'fixed' (see run_gate); recording the
         # self-play mode lets a later reader tell whether a checkpoint's
@@ -179,13 +181,16 @@ def main() -> None:
         "ts": time.time(),
     })
 
-    # R14: auto-infer hidden_dim/depth from the init checkpoint so an
+    # R14/R7.b.3: auto-infer model-shape fields from the init checkpoint so an
     # operator passing the orchestrator defaults (128/3) against a 64/2
-    # ckpt does not crash at the distill step with a state-dict shape
-    # mismatch — the silent-failure mode we hit on the first W6 extension
-    # attempt. CLI-supplied dims still win when they match the checkpoint;
-    # we only override when they would cause a load_state_dict failure.
+    # ckpt, or omitting the attention/slot-token flags against a set-attention
+    # ckpt, does not crash at the distill step with a state-dict mismatch.
     args = _maybe_override_dims_from_checkpoint(args, state.promoted_checkpoint, events_path)
+    if args.model_variant == "set_attention" and not args.uma_slot_tokens:
+        raise SystemExit(
+            "--model-variant set_attention requires --uma-slot-tokens "
+            "(or an init checkpoint whose model_config enables slot tokens)."
+        )
 
     last_iter = max((entry["iteration"] for entry in state.iterations), default=-1)
     for iteration in range(last_iter + 1, args.iterations):
@@ -209,9 +214,15 @@ def main() -> None:
             state.consecutive_failures = 0
         else:
             state.consecutive_failures += 1
-            if state.consecutive_failures >= 2:
+            if (
+                args.halt_after_consecutive_failures > 0
+                and state.consecutive_failures >= args.halt_after_consecutive_failures
+            ):
                 state.halted = True
-                state.halt_reason = "halt-after-2 consecutive promotion failures"
+                state.halt_reason = (
+                    f"halt-after-{args.halt_after_consecutive_failures} "
+                    "consecutive promotion failures"
+                )
                 emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "halted",
                                          "iteration": iteration, "halt_reason": state.halt_reason,
                                          "ts": time.time()})
@@ -1006,6 +1017,8 @@ def run_distill(
     # checkpoint-driven export auto-gates the 7-input ONNX graph.
     if args.uma_slot_tokens:
         cmd.append("--uma-slot-tokens")
+    if args.model_variant != "mlp":
+        cmd.extend(["--model-variant", str(args.model_variant)])
     with log_path.open("w") as logf:
         subprocess.run(cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True)
 
@@ -1306,9 +1319,10 @@ def _maybe_override_dims_from_checkpoint(
     init_checkpoint: Path,
     events_path: Path,
 ) -> argparse.Namespace:
-    """If the init checkpoint stores a model_config, override hidden_dim/
-    depth to match it. Prevents the W6-extension footgun where the
-    orchestrator defaults (128/3) were passed against a 64/2 checkpoint.
+    """If the init checkpoint stores a model_config, override model-shape
+    fields to match it. Prevents the W6-extension footgun where the
+    orchestrator defaults (128/3 or MLP) were passed against a narrower or
+    set-attention checkpoint.
     """
     try:
         import torch  # local import keeps the orchestrator usable without torch
@@ -1322,6 +1336,8 @@ def _maybe_override_dims_from_checkpoint(
     cfg = payload.get("model_config") or (payload.get("metadata", {}) or {}).get("model_config") or {}
     ckpt_hidden = cfg.get("hidden_dim")
     ckpt_depth = cfg.get("depth")
+    ckpt_uses_uma_slot_tokens = bool(cfg.get("uses_uma_slot_tokens", False))
+    ckpt_model_variant = cfg.get("model_variant")
     overrides: dict[str, Any] = {}
     if isinstance(ckpt_hidden, int) and ckpt_hidden > 0 and ckpt_hidden != args.hidden_dim:
         overrides["hidden_dim"] = (args.hidden_dim, ckpt_hidden)
@@ -1329,9 +1345,19 @@ def _maybe_override_dims_from_checkpoint(
     if isinstance(ckpt_depth, int) and ckpt_depth > 0 and ckpt_depth != args.depth:
         overrides["depth"] = (args.depth, ckpt_depth)
         args.depth = ckpt_depth
+    if ckpt_uses_uma_slot_tokens and not args.uma_slot_tokens:
+        overrides["uma_slot_tokens"] = (False, True)
+        args.uma_slot_tokens = True
+    if (
+        isinstance(ckpt_model_variant, str)
+        and ckpt_model_variant
+        and ckpt_model_variant != args.model_variant
+    ):
+        overrides["model_variant"] = (args.model_variant, ckpt_model_variant)
+        args.model_variant = ckpt_model_variant
     if overrides:
         emit_event(events_path, {
-            "stage": "r12-orchestrator", "event_type": "dim_inferred_from_checkpoint",
+            "stage": "r12-orchestrator", "event_type": "model_config_inferred_from_checkpoint",
             "checkpoint": str(init_checkpoint),
             "overrides": {k: {"cli": v[0], "checkpoint": v[1]} for k, v in overrides.items()},
             "ts": time.time(),
@@ -1414,6 +1440,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eval-seed-start", type=int, default=9000)
     p.add_argument("--eval-min-ci-lower", type=float, default=0.30,
                    help="Promotion floor. Distinct from the final-gate target — iterations promote on RELATIVE improvement above the current promoted floor.")
+    p.add_argument("--halt-after-consecutive-failures", type=int, default=2,
+                   help="Stop after this many consecutive non-promoted "
+                        "iterations. Set to 0 to run all requested iterations.")
     p.add_argument("--mcts-simulations", type=int, default=100)
     p.add_argument("--mcts-c-puct", type=float, default=1.5)
     p.add_argument("--mcts-leaf", default="value-head", choices=["value-head", "rollout"])
@@ -1455,6 +1484,15 @@ def parse_args() -> argparse.Namespace:
                         "make_v32_slot_token_init.py from a v3.0 source). "
                         "No exporter-side CLI flag — the pivot is the "
                         "checkpoint config, per C5.")
+    p.add_argument("--model-variant", choices=["mlp", "set_attention"], default="mlp",
+                   help="R7.b.3 set-attention probe: forwarded to "
+                        "train_bc.py --model-variant for distill. Default "
+                        "mlp preserves legacy v3.0/v3.1/v3.2 loops. "
+                        "set_attention requires --uma-slot-tokens and "
+                        "hidden_dim=64; when the init checkpoint records a "
+                        "non-default model_config.model_variant, the "
+                        "orchestrator auto-infers it to avoid state_dict "
+                        "mismatches on attention-loop resumes.")
     p.add_argument("--kl-anchor-weight", type=float, default=0.0,
                    help="Optional anti-forgetting anchor weight (init checkpoint as anchor).")
     # W6 recipe-fix (r110.md §4a). Default ON via the module constants above;

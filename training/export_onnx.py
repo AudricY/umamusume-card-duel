@@ -196,6 +196,16 @@ def main() -> None:
         sidecar_payload["uses_uma_slot_tokens"] = True
         sidecar_payload["uma_slot_feature_dim"] = UMA_SLOT_FEATURE_DIM
         sidecar_payload["uma_slot_count"] = UMA_SLOT_COUNT
+    # R7.b.3 set-attention probe: surface the model_variant in the sidecar
+    # so downstream consumers (e.g. analysis tooling) can distinguish a
+    # 7-input v3.2 graph trained with the MLP sum-pool trunk from one
+    # trained with the attention trunk. ONNX-graph-wise the two are
+    # identical (same 7-input set, same shapes), so the meta.json is the
+    # only place this distinction lives outside the .pt checkpoint.
+    # Only emit the key for non-default values so existing v3.0/v3.1/v3.2
+    # sidecars stay byte-identical (no spurious key churn under re-export).
+    if config.model_variant != "mlp":
+        sidecar_payload["model_variant"] = config.model_variant
     sidecar = out.with_suffix(out.suffix + ".meta.json")
     sidecar.write_text(
         json.dumps(sidecar_payload, indent=2) + "\n",

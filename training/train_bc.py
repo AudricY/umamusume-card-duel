@@ -39,6 +39,14 @@ def main() -> None:
     # and the batch dict omits both keys — `.get(...)` in the training loop
     # then returns None and the model's slot-encoder no-op branch fires.
     uses_uma_slot_tokens = bool(args.uma_slot_tokens)
+    # R7.b.3 set-attention probe: when --model-variant=set_attention, the
+    # dataset MUST emit v3.2 slot tensors. Surface the implicit requirement
+    # before touching the corpus so a bad invocation fails immediately.
+    if args.model_variant == "set_attention" and not uses_uma_slot_tokens:
+        raise SystemExit(
+            "--model-variant set_attention requires --uma-slot-tokens; the "
+            "attention encoder consumes the v3.2 slot tensors directly."
+        )
     if args.data_mode == "mcts-distill":
         # R12 phase C: soft policy target from MCTS visit distribution.
         dataset = MctsSelfPlayDataset(
@@ -92,6 +100,7 @@ def main() -> None:
         depth=args.depth,
         dropout=args.dropout,
         uses_uma_slot_tokens=uses_uma_slot_tokens,
+        model_variant=args.model_variant,
     )
     model = CandidatePolicyNet(config).to(device)
     # Item 11/17 KL-anchor anti-forgetting: if --kl-anchor-checkpoint is set,
@@ -1086,6 +1095,19 @@ def parse_args() -> argparse.Namespace:
                              "holding total retained-row count FIXED. Unset "
                              "(default) is a bit-identical no-op. bc mode "
                              "only. Resample RNG seeded by --seed.")
+    parser.add_argument("--model-variant",
+                        choices=["mlp", "set_attention"],
+                        default="mlp",
+                        help="R7.b.3 set-attention probe: 'mlp' (default) is "
+                             "byte-identical to the legacy v3.0/v3.1/v3.2 "
+                             "sum-pool trunk. 'set_attention' builds a 1-layer "
+                             "self-attention encoder over the per-card / "
+                             "per-slot tokens; requires --uma-slot-tokens "
+                             "(consumes v3.2 inputs) and hidden_dim=64 "
+                             "(SET_ATTN_D_MODEL). The new variant is recorded "
+                             "in the checkpoint's model_config and read by "
+                             "export_onnx for the 7-input ONNX graph (no new "
+                             "graph signature — rides the v3.2 dispatch).")
     parser.add_argument("--uma-slot-tokens", action="store_true",
                         help="R16-P2 C6: opt into the per-Uma slot-token "
                              "branch end-to-end. Drives the dataset packer "

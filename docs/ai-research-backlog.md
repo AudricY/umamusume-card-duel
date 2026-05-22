@@ -143,16 +143,21 @@ As of 2026-05-18:
    production, not raw-policy WR. Seed:
    `docs/ai-research/scoping/gpu-fed-stronger-mcts.md`.
 
-3b. **Set-attention architecture probe (R7.b.3) — P3 SCOPED 2026-05-22,
-    user-gated.** Architecture-axis sibling to the recipe-axis lines
+3b. **Set-attention architecture probe (R7.b.3) — MARGINAL, no Slice 3
+    2026-05-22.** Architecture-axis sibling to the recipe-axis lines
     (0b W6 HP sweep, 0d value-head-leaf closed). Tests a 1-2 layer MHA
     trunk over per-card+per-slot tokens vs the current sum-pool prior;
     raw-policy SL plateau at wl≤0.33 across R7/R8/R7.b.2/mcts-distill-v1
     and the schema-independent iter-2-peak-then-rot across v3.0/v3.1/v3.2
     sum-pool variants motivate it. NOT a capacity probe (R6 closes
-    capacity-from-above; param delta ≤ +80K). Gated behind
-    deck-pair-sampling Slice 2 + re-verdict #3 + W6 HP sweep + PFSP
-    league retry. Canonical scope:
+    capacity-from-above; param delta ≤ +80K). P0a passed locally
+    (MHA opset-17 ONNX max_abs_diff 7.153e-07); local Slice 1 plumbing adds
+    `model_variant=set_attention` as a zero-init attention residual over the
+    v3.2 trunk, preserving warm-start parity. Slice 2 trained/gated on the
+    re-extracted item17/R4-era corpus and landed wr=0.341,
+    wilson_lower=0.3205 at n=1000 side-balanced: small lift vs R7.b.2
+    0.3045, but below the 0.40 acceptance bar. Pre-registered marginal band:
+    do NOT proceed to Slice 3 without explicit user gate. Canonical scope:
     `docs/ai-research/scoping/set-attention-architecture-probe.md`;
     queue `set-attention-architecture-probe`.
 
