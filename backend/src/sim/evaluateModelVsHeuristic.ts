@@ -41,6 +41,7 @@ import { getAbilityMoveEnergyTypes } from "../../../frontend/src/game/engine/flo
 import { drawCards } from "../../../frontend/src/game/engine/flow/turn";
 import type { PlayChoices } from "../../../frontend/src/game/engine/core/playTypes";
 import type { CoinFlipResult, EnergyCost, EnergyType, GameState, SideId, SideState, UmamusumeInstance } from "../../../shared/src/types";
+import { aiPremadeDecks, premadeDecks } from "../../../shared/src/gameData";
 import { stateFingerprint } from "./stateFingerprint";
 import { rankLegalActions, type CandidateRankerMode } from "./candidateRanker";
 import { withGitMetadata } from "./manifest";
@@ -1350,8 +1351,27 @@ function finishTurn(state: GameState): void {
   }
 }
 
-export function setupAiVsAiGame(): GameState {
-  let state = createGame(undefined, undefined, "Opponent", "hard", false, "Player AI");
+/**
+ * Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`: the seam
+ * that lets callers (Rust sim-cli parity, future TS orchestrators) override
+ * the default deck pair. Calling `setupAiVsAiGame()` with no args is
+ * byte-identical to the pre-Slice-1 entry point.
+ */
+export type SetupAiVsAiGameOptions = {
+  playerDeckId?: string;
+  opponentDeckId?: string;
+};
+
+export function setupAiVsAiGame(options: SetupAiVsAiGameOptions = {}): GameState {
+  const explicit = options.playerDeckId !== undefined || options.opponentDeckId !== undefined;
+  let playerDeck: string[] | undefined;
+  let opponentDeck: string[] | undefined;
+  if (explicit) {
+    const resolved = resolveDeckPair(options);
+    playerDeck = resolved.playerDeck;
+    opponentDeck = resolved.opponentDeck;
+  }
+  let state = createGame(playerDeck, opponentDeck, "Opponent", "hard", false, "Player AI");
   state.humanBySide.player = false;
   state.humanBySide.opponent = false;
   state = chooseOpeningCoin(state, randomFloat() >= 0.5 ? "heads" : "tails");
@@ -1363,6 +1383,30 @@ export function setupAiVsAiGame(): GameState {
   for (let tick = 0; tick < 5 && state.phase === "setup"; tick += 1) state = tickSetupCountdown(state);
   if (state.phase !== "play") throw new Error("Headless setup did not enter play phase.");
   return state;
+}
+
+function resolveDeckPair(options: SetupAiVsAiGameOptions): {
+  playerDeck: string[];
+  opponentDeck: string[];
+} {
+  const playerId = options.playerDeckId;
+  const opponentId = options.opponentDeckId;
+  let playerDeck: string[] | undefined;
+  let opponentDeck: string[] | undefined;
+  if (playerId !== undefined) {
+    const match = premadeDecks.find((deck) => deck.id === playerId);
+    if (!match) throw new Error(`setupAiVsAiGame: unknown player deck id '${playerId}'`);
+    playerDeck = match.cardIds;
+  }
+  if (opponentId !== undefined) {
+    const match = aiPremadeDecks.find((deck) => deck.id === opponentId);
+    if (!match) throw new Error(`setupAiVsAiGame: unknown opponent deck id '${opponentId}'`);
+    opponentDeck = match.cardIds;
+  }
+  return {
+    playerDeck: playerDeck ?? premadeDecks[0]?.cardIds ?? [],
+    opponentDeck: opponentDeck ?? aiPremadeDecks[0]?.cardIds ?? [],
+  };
 }
 
 export function getForcedAttackCoinResults(state: GameState, rng: Rng): CoinFlipResult | CoinFlipResult[] | undefined {

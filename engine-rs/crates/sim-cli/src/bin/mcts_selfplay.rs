@@ -15,11 +15,12 @@ use clap::Parser;
 use engine::core::constants::SideId;
 use engine::core::random::{with_rng, Rng};
 use engine::core::state::CurrentSide;
+use engine::deck_sampling::{manifest_pair_for, DeckSampling};
 use engine::dispatcher::{
     advance_modeled_turn_step, advance_opponent_turn_step, advance_player_ai_turn_step,
     get_forced_attack_coin_results, state_hash,
 };
-use engine::headless_setup::setup_ai_vs_ai_game;
+use engine::headless_setup::setup_ai_vs_ai_game_with_decks;
 use engine::inference::{self, InferenceSession};
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
 use engine::mcts::driver::run_mcts;
@@ -115,6 +116,13 @@ struct Args {
     /// (e.g. `training/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.22.0`).
     #[arg(long)]
     onnx_path: Option<String>,
+    /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`.
+    /// Deck-pair sampling mode (`fixed`, `uniform`, or
+    /// `pair=<player>:<opponent>`). Default `fixed` keeps current
+    /// behavior. When != fixed, each per-decision row in `--out` is
+    /// stamped with `playerDeckId` + `opponentDeckId`.
+    #[arg(long, default_value = "fixed")]
+    deck_sampling: String,
 }
 
 impl Args {
@@ -144,6 +152,7 @@ impl Args {
             "recordRows": self.record_rows,
             "modelUrl": self.model_url,
             "onnxPath": self.onnx_path,
+            "deckSampling": self.deck_sampling,
         })
     }
 }
@@ -166,6 +175,12 @@ struct GameRecord {
     winner: Option<String>,
     total_steps: u32,
     model_decisions: u32,
+    /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`:
+    /// every per-game wrapper carries the resolved deck-pair regardless
+    /// of sampling mode, so consumers stratifying a `--record-rows=false`
+    /// run still have the matchup tag.
+    player_deck_id: String,
+    opponent_deck_id: String,
     /// Per-MCTS-decision trajectory rows. Empty when no MCTS decisions
     /// fired (e.g., game ended in single-action-only steps).
     rows: Vec<SelfPlayRow>,
@@ -227,6 +242,13 @@ struct SelfPlayRow {
     /// pointsO }` once the game terminates. Same per-row reference for
     /// every row in the same game.
     result: Option<GameResult>,
+    /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`:
+    /// per-row matchup tag so the distill consumer can stratify by
+    /// deck-pair without re-keying through the per-game wrapper.
+    /// Mirrors the per-record manifest emission the scoping doc calls
+    /// "mandatory, sampling-independent".
+    player_deck_id: String,
+    opponent_deck_id: String,
 }
 
 const ROW_SCHEMA_VERSION: u32 = 1;
@@ -285,10 +307,16 @@ fn drive_one_game(
     record_rows: bool,
     temperature_moves: u32,
     temperature_value: f64,
+    player_deck: Option<&[engine::core::card_id::CardId]>,
+    opponent_deck: Option<&[engine::core::card_id::CardId]>,
+    player_deck_id: &str,
+    opponent_deck_id: &str,
 ) -> GameRecord {
     let seed_str = seed.to_string();
     let rng = Rng::from_seed(format!("{}:selfplay", seed_str).as_str(), "selfplay");
-    let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
+    let (mut state, mut step_rng) = with_rng(rng, || {
+        setup_ai_vs_ai_game_with_decks(player_deck, opponent_deck)
+    });
     let mut step = 0u32;
     let mut terminal = "max_steps";
     let mut model_decisions = 0u32;
@@ -375,6 +403,8 @@ fn drive_one_game(
                     // Post-hoc backfill below once the game terminates.
                     value_target: None,
                     result: None,
+                    player_deck_id: player_deck_id.to_string(),
+                    opponent_deck_id: opponent_deck_id.to_string(),
                 });
             }
 
@@ -427,12 +457,16 @@ fn drive_one_game(
         winner,
         total_steps: step + 1,
         model_decisions,
+        player_deck_id: player_deck_id.to_string(),
+        opponent_deck_id: opponent_deck_id.to_string(),
         rows,
     }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let sampling = DeckSampling::parse(&args.deck_sampling)
+        .map_err(|e| anyhow::anyhow!("--deck-sampling: {}", e))?;
     let leaf = match args.leaf.as_str() {
         "value-head" => MctsLeaf::ValueHead,
         _ => MctsLeaf::Rollout,
@@ -520,6 +554,16 @@ fn main() -> Result<()> {
 
     for i in 0..args.seeds {
         let seed = args.seed_base + i;
+        // Slice 1: deck-pair resolution per game. `i` is the
+        // game-relative index used both by the sampler (uniform mod
+        // n_pairs) and by the manifest tag.
+        let resolved = sampling.resolve(args.seed_base, i);
+        let (player_deck_opt, opponent_deck_opt) = resolved
+            .as_ref()
+            .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
+            .unwrap_or((None, None));
+        let (player_deck_id, opponent_deck_id) =
+            manifest_pair_for(&sampling, args.seed_base, i);
         let record = drive_one_game(
             seed,
             args.max_steps,
@@ -528,6 +572,10 @@ fn main() -> Result<()> {
             args.record_rows,
             temperature_moves,
             temperature_value,
+            player_deck_opt,
+            opponent_deck_opt,
+            player_deck_id,
+            opponent_deck_id,
         );
         match record.terminal_reason.as_str() {
             "game_over" => terminal_reasons.game_over += 1,
@@ -636,6 +684,8 @@ mod tests {
                 points_p: 0,
                 points_o: 0,
             }),
+            player_deck_id: "matikanetannhauser".to_string(),
+            opponent_deck_id: "matikanetannhauser".to_string(),
         };
         let value = serde_json::to_value(&row).expect("serialize row");
         let object = value.as_object().expect("row is a JSON object");
@@ -644,6 +694,10 @@ mod tests {
         // Canonical TS-flat key set — keep IN SYNC with
         // `backend/src/sim/mctsSelfPlay.ts:78-101` (`SelfPlayRow`) and
         // `training/r12_selfplay_smoke.py:122-126` (`required`).
+        // Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`
+        // adds `playerDeckId` + `opponentDeckId`; these are
+        // additive (mandatory-on-emit but optional-on-read) so the
+        // Python loader's existing `required` set still matches.
         let mut expected = vec![
             "schemaVersion",
             "kind",
@@ -664,6 +718,8 @@ mod tests {
             "leafEvaluations",
             "valueTarget",
             "result",
+            "playerDeckId",
+            "opponentDeckId",
         ];
         expected.sort();
         assert_eq!(
@@ -700,6 +756,8 @@ mod tests {
             leaf_evaluations: 0,
             value_target: None,
             result: None,
+            player_deck_id: "matikanetannhauser".to_string(),
+            opponent_deck_id: "matikanetannhauser".to_string(),
         };
         let mut rows = vec![make("player"), make("opponent"), make("player")];
         fill_terminal_result(&mut rows, Some("opponent"), 1, 3);

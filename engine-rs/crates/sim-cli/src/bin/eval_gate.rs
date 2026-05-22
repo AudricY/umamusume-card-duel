@@ -22,11 +22,12 @@ use clap::Parser;
 use engine::core::constants::SideId;
 use engine::core::random::{with_rng, Rng};
 use engine::core::state::CurrentSide;
+use engine::deck_sampling::{manifest_pair_for, DeckSampling};
 use engine::dispatcher::{
     advance_modeled_turn_step, advance_opponent_turn_step, advance_player_ai_turn_step,
     get_forced_attack_coin_results, state_hash,
 };
-use engine::headless_setup::setup_ai_vs_ai_game;
+use engine::headless_setup::setup_ai_vs_ai_game_with_decks;
 use engine::inference::{self, Device, InferenceSession};
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
 use engine::mcts::driver::run_mcts;
@@ -145,6 +146,21 @@ struct Args {
     /// CUDA device id (only honored under `--device cuda`).
     #[arg(long, default_value_t = 0)]
     cuda_device_id: i32,
+    /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`.
+    /// Deck-pair sampling mode:
+    ///   - `fixed` (default) — every game uses the registry defaults
+    ///     (matikanetannhauser vs matikanetannhauser, the historical
+    ///     tight-gate matchup). Byte-identical to pre-Slice-1 behavior.
+    ///   - `uniform` — index by `(seed_base + task_index) %
+    ///     (n_player_decks * n_ai_decks)`; row-major pair pick.
+    ///     Deterministic across `--workers`.
+    ///   - `pair=<player>:<opponent>` — literal deck-id pair (validates
+    ///     both ids at parse time).
+    /// Every game record in `--progress-out` carries `playerDeckId` +
+    /// `opponentDeckId` regardless of mode; the aggregate manifest gains
+    /// a `perMatchup` section only when sampling != fixed.
+    #[arg(long, default_value = "fixed")]
+    deck_sampling: String,
 }
 
 #[derive(Serialize)]
@@ -261,10 +277,14 @@ fn drive_one_game(
     model_side: SideId,
     max_steps: u32,
     config: &MctsConfig,
+    player_deck: Option<&[engine::core::card_id::CardId]>,
+    opponent_deck: Option<&[engine::core::card_id::CardId]>,
 ) -> (Option<SideId>, &'static str) {
     let seed_str = seed.to_string();
     let rng = Rng::from_seed(format!("{}:selfplay", seed_str).as_str(), "selfplay");
-    let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
+    let (mut state, mut step_rng) = with_rng(rng, || {
+        setup_ai_vs_ai_game_with_decks(player_deck, opponent_deck)
+    });
     let mut terminal = "max_steps";
     for s in 0..max_steps {
         if state.game_over {
@@ -326,6 +346,8 @@ fn drive_one_game(
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let sampling = DeckSampling::parse(&args.deck_sampling)
+        .map_err(|e| anyhow::anyhow!("--deck-sampling: {}", e))?;
     let leaf = match args.leaf.as_str() {
         "value-head" => MctsLeaf::ValueHead,
         _ => MctsLeaf::Rollout,
@@ -438,8 +460,8 @@ fn main() -> Result<()> {
     }
 
     eprintln!(
-        "sim-eval-gate: sims={} K={} rollout_steps={} games-per-side={} model-side={} (=> {} total tasks) base={} challenger={:?} baseline={:?}",
-        args.sims, args.k, args.rollout_steps, args.seeds, args.model_side, tasks.len(), args.seed_base, args.challenger, args.baseline,
+        "sim-eval-gate: sims={} K={} rollout_steps={} games-per-side={} model-side={} (=> {} total tasks) base={} deck-sampling={} challenger={:?} baseline={:?}",
+        args.sims, args.k, args.rollout_steps, args.seeds, args.model_side, tasks.len(), args.seed_base, args.deck_sampling, args.challenger, args.baseline,
     );
 
     let start = Instant::now();
@@ -455,6 +477,13 @@ fn main() -> Result<()> {
         model_side: SideId,
         winner: Option<SideId>,
         terminal: &'static str,
+        // Slice 1 (deck-pair-sampling): per-game manifest emits these
+        // unconditionally so post-hoc consumers can stratify. For
+        // `--deck-sampling=fixed` both ids point at the registry
+        // defaults; for `uniform` / `pair=...` they vary per game.
+        // 'static lifetime is safe — the deck registry is OnceLock-init.
+        player_deck_id: &'static str,
+        opponent_deck_id: &'static str,
     }
     let outcomes: Arc<Mutex<Vec<Option<Outcome>>>> =
         Arc::new(Mutex::new(vec![None; total_tasks]));
@@ -484,6 +513,8 @@ fn main() -> Result<()> {
     let task_cursor = Arc::new(AtomicUsize::new(0));
     let tasks_arc: Arc<Vec<(u32, SideId)>> = Arc::new(tasks);
     let config_arc = Arc::new(config);
+    let sampling_arc = Arc::new(sampling);
+    let seed_base = args.seed_base;
 
     // Effective worker count: never more than tasks (no-op extras
     // would just contend on the cursor).
@@ -503,6 +534,7 @@ fn main() -> Result<()> {
             let completed_counter = Arc::clone(&completed_counter);
             let running_wins_counter = Arc::clone(&running_wins_counter);
             let progress_writer = progress_writer.as_ref().map(Arc::clone);
+            let sampling_arc = Arc::clone(&sampling_arc);
             let max_steps = args.max_steps;
             let start_for_worker = start;
             let total_tasks_u32 = total_tasks as u32;
@@ -513,9 +545,25 @@ fn main() -> Result<()> {
                         break;
                     }
                     let (seed, model_side) = tasks_arc[task_index];
+                    // Deck-pair resolution. For `Fixed` this returns None
+                    // and `drive_one_game` falls through to defaults
+                    // exactly as pre-Slice-1.
+                    let resolved = sampling_arc.resolve(seed_base, task_index as u32);
+                    let (player_deck_opt, opponent_deck_opt) = resolved
+                        .as_ref()
+                        .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
+                        .unwrap_or((None, None));
+                    let (player_deck_id, opponent_deck_id) =
+                        manifest_pair_for(&sampling_arc, seed_base, task_index as u32);
                     let game_start = Instant::now();
-                    let (winner, terminal) =
-                        drive_one_game(seed, model_side, max_steps, &config_arc);
+                    let (winner, terminal) = drive_one_game(
+                        seed,
+                        model_side,
+                        max_steps,
+                        &config_arc,
+                        player_deck_opt,
+                        opponent_deck_opt,
+                    );
                     let game_secs = game_start.elapsed().as_secs_f64();
                     let model_won = winner == Some(model_side);
                     // Store outcome for final aggregation (sorted by index).
@@ -525,6 +573,8 @@ fn main() -> Result<()> {
                             model_side,
                             winner,
                             terminal,
+                            player_deck_id,
+                            opponent_deck_id,
                         });
                     }
                     // Update running counters BEFORE writing the JSONL
@@ -565,6 +615,11 @@ fn main() -> Result<()> {
                             "etaSec": eta_sec,
                             "runningWinRate": running_wr,
                             "workerId": worker_id,
+                            // Slice 1 (deck-pair-sampling): emitted on
+                            // every game record regardless of mode so
+                            // consumers can stratify post-hoc.
+                            "playerDeckId": player_deck_id,
+                            "opponentDeckId": opponent_deck_id,
                             "ts": std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_secs_f64())
@@ -604,6 +659,11 @@ fn main() -> Result<()> {
     let mut terminal_game_over = 0u32;
     let mut terminal_stalled = 0u32;
     let mut terminal_max_steps = 0u32;
+    // Slice 1 (deck-pair-sampling): per-matchup tallies, keyed by
+    // (player_deck_id, opponent_deck_id). Populated unconditionally;
+    // serialized into the manifest only when sampling != fixed.
+    let mut per_matchup: std::collections::BTreeMap<(String, String), (u32, u32)> =
+        std::collections::BTreeMap::new();
     {
         let guard = outcomes.lock().expect("outcomes mutex poisoned");
         for (idx, slot) in guard.iter().enumerate() {
@@ -625,6 +685,15 @@ fn main() -> Result<()> {
                 if model_won {
                     opp_wins += 1;
                 }
+            }
+            let key = (
+                o.player_deck_id.to_string(),
+                o.opponent_deck_id.to_string(),
+            );
+            let entry = per_matchup.entry(key).or_insert((0u32, 0u32));
+            entry.0 += 1; // games
+            if model_won {
+                entry.1 += 1; // wins
             }
         }
     }
@@ -696,6 +765,7 @@ fn main() -> Result<()> {
         "manifestOut": args.manifest_out,
         "progressOut": args.progress_out,
         "workers": args.workers,
+        "deckSampling": args.deck_sampling,
     });
     let status = if passed { "PASS" } else { "FAIL" };
     let inner = GateInnerSummary {
@@ -736,7 +806,44 @@ fn main() -> Result<()> {
         passed,
     };
 
-    let json = serde_json::to_string_pretty(&summary)?;
+    // Serialize the typed summary, then optionally splice in a
+    // `perMatchup` block when sampling != fixed (Slice 1 of the
+    // deck-pair-sampling scoping doc). `perMatchup` is keyed
+    // `"<player_deck_id>:<opponent_deck_id>"` with point-estimate
+    // win-rate + Wilson 95% bounds. At n≈45/matchup the per-matchup CIs
+    // are wide (≈±15pp); the field is signal-spotting, not a verdict.
+    let mut value = serde_json::to_value(&summary)?;
+    if sampling_arc.is_active() {
+        let mut per_matchup_obj = serde_json::Map::new();
+        for ((player_id, opponent_id), (games, wins)) in per_matchup.iter() {
+            let (lo, hi) = wilson_interval(*wins, *games);
+            let win_rate = if *games > 0 {
+                *wins as f64 / *games as f64
+            } else {
+                0.0
+            };
+            let key = format!("{}:{}", player_id, opponent_id);
+            per_matchup_obj.insert(
+                key,
+                serde_json::json!({
+                    "playerDeckId": player_id,
+                    "opponentDeckId": opponent_id,
+                    "games": games,
+                    "wins": wins,
+                    "winRate": win_rate,
+                    "wilsonLower": lo,
+                    "wilsonUpper": hi,
+                }),
+            );
+        }
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "perMatchup".to_string(),
+                serde_json::Value::Object(per_matchup_obj),
+            );
+        }
+    }
+    let json = serde_json::to_string_pretty(&value)?;
     println!("{}", json);
 
     if let Some(path) = args.manifest_out.as_ref() {

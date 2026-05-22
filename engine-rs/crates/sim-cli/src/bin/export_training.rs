@@ -17,8 +17,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use engine::core::random::{with_rng, Rng};
 use engine::core::state::CurrentSide;
+use engine::deck_sampling::{manifest_pair_for, DeckSampling};
 use engine::dispatcher::{advance_opponent_turn_step, advance_player_ai_turn_step, get_forced_attack_coin_results, state_hash};
-use engine::headless_setup::setup_ai_vs_ai_game;
+use engine::headless_setup::setup_ai_vs_ai_game_with_decks;
 use engine::policy::actions::{choose_highest_scored_action, enumerate_legal_ai_actions};
 use engine::policy::observation::build_public_observation;
 use engine::policy::types::{LegalAiAction, PublicObservation};
@@ -45,6 +46,14 @@ struct Args {
     /// Hard cap on engine advance steps per game (stall guard).
     #[arg(long, default_value_t = 360)]
     max_steps: u32,
+
+    /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`.
+    /// Deck-pair sampling mode (`fixed`, `uniform`, or
+    /// `pair=<player>:<opponent>`). Default `fixed` keeps the historical
+    /// distribution. Per-decision rows are stamped with
+    /// `playerDeckId` + `opponentDeckId` regardless of mode.
+    #[arg(long, default_value = "fixed")]
+    deck_sampling: String,
 }
 
 #[derive(Serialize)]
@@ -80,6 +89,10 @@ struct TrainingExample {
     selected_action_index: usize,
     policy: &'static str,
     result: ExampleResult,
+    /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`:
+    /// per-row matchup tag for stratification downstream.
+    player_deck_id: String,
+    opponent_deck_id: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -96,9 +109,18 @@ struct PointsByside {
     opponent: u8,
 }
 
-fn drive_one_game(seed: &str, max_steps: u32) -> (Vec<TrainingExample>, &'static str) {
+fn drive_one_game(
+    seed: &str,
+    max_steps: u32,
+    player_deck: Option<&[engine::core::card_id::CardId]>,
+    opponent_deck: Option<&[engine::core::card_id::CardId]>,
+    player_deck_id: &str,
+    opponent_deck_id: &str,
+) -> (Vec<TrainingExample>, &'static str) {
     let rng = Rng::from_seed(format!("{}:selfplay", seed).as_str(), "selfplay");
-    let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
+    let (mut state, mut step_rng) = with_rng(rng, || {
+        setup_ai_vs_ai_game_with_decks(player_deck, opponent_deck)
+    });
     let mut examples: Vec<TrainingExample> = Vec::new();
     let episode_id = format!("ep-{}", seed);
 
@@ -166,6 +188,8 @@ fn drive_one_game(seed: &str, max_steps: u32) -> (Vec<TrainingExample>, &'static
                         opponent: state.sides[1].points,
                     },
                 },
+                player_deck_id: player_deck_id.to_string(),
+                opponent_deck_id: opponent_deck_id.to_string(),
             });
         }
 
@@ -210,9 +234,11 @@ fn drive_one_game(seed: &str, max_steps: u32) -> (Vec<TrainingExample>, &'static
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let sampling = DeckSampling::parse(&args.deck_sampling)
+        .map_err(|e| anyhow::anyhow!("--deck-sampling: {}", e))?;
     eprintln!(
-        "sim-export-training: games={} seed_start={} max_steps={} out={}",
-        args.games, args.seed_start, args.max_steps, args.out
+        "sim-export-training: games={} seed_start={} max_steps={} deck_sampling={} out={}",
+        args.games, args.seed_start, args.max_steps, args.deck_sampling, args.out
     );
 
     let mut all_examples: Vec<TrainingExample> = Vec::new();
@@ -220,7 +246,21 @@ fn main() -> Result<()> {
 
     for i in 0..args.games {
         let seed = (args.seed_start + i).to_string();
-        let (examples, terminal) = drive_one_game(&seed, args.max_steps);
+        let resolved = sampling.resolve(args.seed_start, i);
+        let (player_deck_opt, opponent_deck_opt) = resolved
+            .as_ref()
+            .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
+            .unwrap_or((None, None));
+        let (player_deck_id, opponent_deck_id) =
+            manifest_pair_for(&sampling, args.seed_start, i);
+        let (examples, terminal) = drive_one_game(
+            &seed,
+            args.max_steps,
+            player_deck_opt,
+            opponent_deck_opt,
+            player_deck_id,
+            opponent_deck_id,
+        );
         all_examples.extend(examples);
         match terminal {
             "game_over" => terminal_reasons.game_over += 1,

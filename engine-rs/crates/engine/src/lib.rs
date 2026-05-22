@@ -11,6 +11,7 @@
 //! - `fingerprint` ↔ `backend/src/sim/stateFingerprint.ts`
 
 pub mod core;
+pub mod deck_sampling;
 pub mod dispatcher;
 pub mod fingerprint;
 pub mod flow;

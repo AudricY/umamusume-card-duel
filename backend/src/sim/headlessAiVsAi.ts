@@ -10,6 +10,12 @@ import {
   getUmamusumeCard,
   tickSetupCountdown,
 } from "../../../frontend/src/game/engine";
+import {
+  aiPremadeDecks,
+  defaultAiOpponentDeckId,
+  defaultPlayerDeckId,
+  premadeDecks,
+} from "../../../shared/src/gameData";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import "./rngAsyncStore";
@@ -93,8 +99,50 @@ export function runHeadlessBatch(seeds: string[], maxSteps: number): HeadlessRun
   return seeds.map((seed) => runHeadlessAiVsAi({ seed, maxSteps, collectExamples: true }));
 }
 
-function setupAiVsAiGame(): GameState {
-  let state = createGame(undefined, undefined, "Opponent", "hard", false, "Player AI");
+export type SetupAiVsAiGameOptions = {
+  playerDeckId?: string;
+  opponentDeckId?: string;
+};
+
+/**
+ * Resolve a deck-id pair into (playerDeck cardIds, opponentDeck cardIds).
+ *
+ * Mirrors `engine::deck_sampling::resolved_from` on the Rust side: the
+ * caller-supplied id is looked up in `premadeDecks` for the player side and
+ * `aiPremadeDecks` for the opponent side; an unknown id throws so the bug
+ * surfaces at the call-site instead of silently falling back to the default
+ * (which is what the pre-P0a code did and is exactly the failure mode the
+ * deck-pair-sampling scoping doc was opened to fix).
+ */
+export function resolveDeckPair(options: SetupAiVsAiGameOptions): {
+  playerDeck: string[];
+  opponentDeck: string[];
+  playerDeckId: string;
+  opponentDeckId: string;
+} {
+  const playerId = options.playerDeckId ?? defaultPlayerDeckId;
+  const opponentId = options.opponentDeckId ?? defaultAiOpponentDeckId;
+  const playerDeckMatch = premadeDecks.find((deck) => deck.id === playerId);
+  if (!playerDeckMatch && options.playerDeckId !== undefined) {
+    throw new Error(`setupAiVsAiGame: unknown player deck id '${playerId}'`);
+  }
+  const opponentDeckMatch = aiPremadeDecks.find((deck) => deck.id === opponentId);
+  if (!opponentDeckMatch && options.opponentDeckId !== undefined) {
+    throw new Error(`setupAiVsAiGame: unknown opponent deck id '${opponentId}'`);
+  }
+  return {
+    playerDeck: playerDeckMatch?.cardIds ?? premadeDecks[0]?.cardIds ?? [],
+    opponentDeck: opponentDeckMatch?.cardIds ?? aiPremadeDecks[0]?.cardIds ?? [],
+    playerDeckId: playerDeckMatch?.id ?? premadeDecks[0]?.id ?? playerId,
+    opponentDeckId: opponentDeckMatch?.id ?? aiPremadeDecks[0]?.id ?? opponentId,
+  };
+}
+
+function setupAiVsAiGame(options: SetupAiVsAiGameOptions = {}): GameState {
+  const explicit = options.playerDeckId !== undefined || options.opponentDeckId !== undefined;
+  const playerDeck = explicit ? resolveDeckPair(options).playerDeck : undefined;
+  const opponentDeck = explicit ? resolveDeckPair(options).opponentDeck : undefined;
+  let state = createGame(playerDeck, opponentDeck, "Opponent", "hard", false, "Player AI");
   state.humanBySide.player = false;
   state.humanBySide.opponent = false;
 

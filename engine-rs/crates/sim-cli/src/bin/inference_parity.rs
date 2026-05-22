@@ -36,11 +36,12 @@ use clap::Parser;
 use engine::core::constants::SideId;
 use engine::core::random::{with_rng, Rng};
 use engine::core::state::CurrentSide;
+use engine::deck_sampling::DeckSampling;
 use engine::dispatcher::{
     advance_opponent_turn_step, advance_player_ai_turn_step, get_forced_attack_coin_results,
     state_hash,
 };
-use engine::headless_setup::setup_ai_vs_ai_game;
+use engine::headless_setup::setup_ai_vs_ai_game_with_decks;
 use engine::inference::InferenceSession;
 use engine::policy::actions::enumerate_legal_ai_actions;
 use engine::policy::observation::build_public_observation;
@@ -74,17 +75,28 @@ struct Args {
     /// within ~5 steps).
     #[arg(long, default_value_t = 300)]
     max_steps: u32,
+    /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`.
+    /// Deck-pair sampling mode (`fixed`, `uniform`, or
+    /// `pair=<player>:<opponent>`). Default `fixed` preserves the
+    /// historical parity-sample distribution. For parity assertions
+    /// the choice of deck only changes the state-space the smoke
+    /// covers; it does not affect the ORT-vs-HTTP equality tolerance.
+    #[arg(long, default_value = "fixed")]
+    deck_sampling: String,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let sampling = DeckSampling::parse(&args.deck_sampling)
+        .map_err(|e| anyhow::anyhow!("--deck-sampling: {}", e))?;
 
     eprintln!(
-        "sim-inference-parity: n_states={} tol={} onnx={} url={}",
+        "sim-inference-parity: n_states={} tol={} onnx={} url={} deck_sampling={}",
         args.n_states,
         args.tol,
         args.onnx_path.display(),
         args.serve_onnx_url,
+        args.deck_sampling,
     );
 
     let session = InferenceSession::load(&args.onnx_path)
@@ -102,7 +114,16 @@ fn main() -> Result<()> {
     let start = Instant::now();
 
     while samples_taken < args.n_states {
-        let snapshot = sample_decision_point(seed, args.max_steps);
+        // Slice 1: per-sample deck-pair resolution. Indexed by
+        // `samples_taken` (the resampled sample-count, not raw `seed`)
+        // so the uniform cycle covers all pairs in n_states even when
+        // `seed` is shifted by non-branching seeds skipping ahead.
+        let resolved = sampling.resolve(args.seed_base, samples_taken);
+        let (player_deck_opt, opponent_deck_opt) = resolved
+            .as_ref()
+            .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
+            .unwrap_or((None, None));
+        let snapshot = sample_decision_point(seed, args.max_steps, player_deck_opt, opponent_deck_opt);
         seed += 1;
         let Some((obs, legal)) = snapshot else { continue; };
 
@@ -195,9 +216,13 @@ fn main() -> Result<()> {
 fn sample_decision_point(
     seed: u32,
     max_steps: u32,
+    player_deck: Option<&[engine::core::card_id::CardId]>,
+    opponent_deck: Option<&[engine::core::card_id::CardId]>,
 ) -> Option<(PublicObservation, Vec<LegalAiAction>)> {
     let rng = Rng::from_seed(format!("{}:parity", seed).as_str(), "parity");
-    let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
+    let (mut state, mut step_rng) = with_rng(rng, || {
+        setup_ai_vs_ai_game_with_decks(player_deck, opponent_deck)
+    });
 
     for _ in 0..max_steps {
         if state.game_over {
