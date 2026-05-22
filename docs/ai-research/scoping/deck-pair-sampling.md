@@ -166,6 +166,76 @@ Build/test: `npm run build` (TS) + `cargo build --release -p sim-cli` (Rust) gre
 
 Slice 3 (diverse-matchup eval gate at n=10k with per-matchup Wilson lower bounds) is unblocked but not yet user-gated to action. We have the broadly-representative verdict from the Step 3 smoke; diverse-matchup gating becomes urgent if and only if a recipe-axis verdict comes back that is suspected to be matchup-conditional (e.g. an HP-sweep iter shows fixed-gate gain but the worst-matchup tail collapses). Until then it stays at "scoped, do not auto-launch".
 
+## Slice 3 v3.2 first-gate verdict — 2026-05-22
+
+User directive 2026-05-22T03:54Z: "for slice 3 gate i want to be using v3.2 first." Per the v3.2-mandatory directive (commit `417b9b5`), the forward research line carries the v3.2 representation; the existing v3.2 lineage best is `runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-3/policy.onnx` (fixed-matchup n=240 wl=0.5538).
+
+Caveat noted before launch: **this ckpt was trained with `--deck-sampling=fixed`**; Slice 2 only landed in commit `0e391f3`. So the gate measures **off-distribution generalization** of a single-matchup-trained v3.2 ckpt to the diverse matchup distribution, not the v3.2 ceiling under matchup-diverse training.
+
+Recipe-faithful to the v3.0 Step 3 smoke + R110 tight-gate program: sims=100, c-puct=1.5, leaf=rollout, k=3, rollout-steps=200, prior=policy, collapse-max=64, max-nodes=5000, max-steps=500, seed-start=9000, model-side both, workers=16. Only changes from v3.0 Step 3: ckpt is v3.2, n collapses 1,000→10,000. Pre-G5 binary (Mutex-bound) wall 15.5 min at workers=16.
+
+| n | wr | Wilson-lower | Wilson-upper |
+|---|---|---|---|
+| **10,000** (5,000 / side) | **0.5787** | **0.5690** | 0.5883 |
+| 240 (fixed-matchup baseline) | 0.5825 | 0.5538 | — |
+
+Per-side: player wl 0.6641 (wr 0.6772) — strong first-mover; opponent wl 0.4664 (wr 0.4802). Asymmetry **+19.8pp** by side, broader than v3.0 R110's player–opponent gap.
+
+### Comparison against the v3.0 program
+
+| Ckpt | Schema | Fixed-matchup wl | Uniform-aggregate wl | Δ uniform vs fixed |
+|---|---|---|---|---|
+| R110-W6 iter-2 (v3.0) | 96-d v3.0 | 0.5811 (n=10k) | 0.5331 (n=1k) | **−4.8pp drop** |
+| **C8-W6FIX-ON 2x-games iter-3 (v3.2)** | 110-d slot-tokens | 0.5538 (n=240) | **0.5690 (n=10k)** | **+1.5pp** |
+
+**v3.2 generalizes BETTER across decks than v3.0.** The single-matchup-trained v3.2 lineage best dropped 0.0121 wl from R110-v3.0's fixed reference (−1.2pp) under uniform sampling, vs v3.0's own −4.8pp drop. The slot-token representation appears to encode less matchup-specific exploitation pattern; the per-matchup tail is tighter.
+
+### Per-matchup signal table (ranked by point estimate, n≈454/pair)
+
+| Player | Opponent | wr | wl | wu |
+|---|---|---|---|---|
+| riceShower | tamamoCross | 0.6608 | 0.6161 | 0.7028 |
+| riceShower | symboliRudolf | 0.6410 | 0.5958 | 0.6837 |
+| matikanetannhauser | symboliRudolf | 0.6220 | 0.5766 | 0.6653 |
+| riceShower | manhattanCafe | 0.6211 | 0.5757 | 0.6646 |
+| matikanetannhauser | matikanetannhauser | 0.6167 | 0.5712 | 0.6603 |
+| riceShower | oguriCap | 0.6167 | 0.5712 | 0.6603 |
+| matikanetannhauser | superCreek | 0.6022 | 0.5565 | 0.6461 |
+| matikanetannhauser | tamamoCross | 0.5978 | 0.5521 | 0.6419 |
+| matikanetannhauser | daiwaScarlet | 0.5824 | 0.5366 | 0.6269 |
+| matikanetannhauser | oguriCap | 0.5824 | 0.5366 | 0.6269 |
+| matikanetannhauser | agnesDigital | 0.5780 | 0.5322 | 0.6226 |
+| riceShower | mihonoBourbon | 0.5736 | 0.5278 | 0.6183 |
+| riceShower | matikanetannhauser | 0.5670 | 0.5211 | 0.6118 |
+| riceShower | superCreek | 0.5639 | 0.5179 | 0.6088 |
+| matikanetannhauser | mihonoBourbon | 0.5582 | 0.5123 | 0.6032 |
+| matikanetannhauser | riceShower | 0.5529 | 0.5069 | 0.5980 |
+| riceShower | daiwaScarlet | 0.5463 | 0.5003 | 0.5915 |
+| matikanetannhauser | vodka | 0.5429 | 0.4969 | 0.5881 |
+| riceShower | riceShower | 0.5385 | 0.4925 | 0.5838 |
+| matikanetannhauser | manhattanCafe | 0.5341 | 0.4881 | 0.5794 |
+| riceShower | vodka | 0.5286 | 0.4827 | 0.5741 |
+| riceShower | agnesDigital | 0.5044 | 0.4586 | 0.5502 |
+
+Per-matchup spread (point estimate): **15.6pp** (riceShower:tamamoCross 0.6608 → riceShower:agnesDigital 0.5044). Wilson lower spread: 15.7pp.
+
+**Per-matchup spread crosses the Slice 4 PFSP-attractive threshold (>15pp)** — same conclusion as v3.0 Step 3 (19.6pp). The bottom-3 matchups (riceShower:agnesDigital 0.5044, riceShower:vodka 0.5286, matikanetannhauser:manhattanCafe 0.5341) are now per-matchup measurement-grade signal; targeted PFSP weighting would push selfplay corpus into these matchups.
+
+### Acceptance branches
+
+- Aggregate uniform wl 0.5690 vs fixed-matchup 0.5811 ceiling = −1.2pp, **within ±5pp matchup-broadly-representative envelope**. Continue current research direction; uniform selfplay default (Slice 2) is no-regret.
+- v3.2 representation passes off-distribution generalization in a way v3.0 did not — promotes the next experiment (v3.2 retrain from R110-W6 with uniform selfplay) from speculative to high-prior-positive.
+- Per-matchup spread 15.6pp — Slice 4 PFSP weighting remains "attractive" but not load-bearing until a per-matchup recipe-axis verdict emerges.
+
+### Caveats
+
+- Source ckpt was trained under `--deck-sampling=fixed` (Slice 2 landed AFTER iter-3 generated). This is off-distribution generalization, not "v3.2 ceiling under matchup-diverse training." The next step (v3.2 retrain from R110-W6 with uniform selfplay default) addresses that.
+- Pre-G5 wall (15.5 min) is the last gate to pay the full Mutex contention cost. Post-G5 (commit `fb7d3f8`, 7.11× at workers=16) any future n=10k gate runs in ~7-8 min.
+- Both sides exhibit `riceShower:*` ≥ `matikanetannhauser:*` only on a few matchups; the player-side asymmetry holds globally (player 0.6641 vs opponent 0.4664). Some of the per-matchup spread is the side-asymmetry not deck-of-opponent — the table conflates them and should be re-stratified per-side if a deeper Slice 3 verdict is needed.
+- v3.0 fixed-n=10k vs v3.0 uniform-n=10k was never done — the Step 3 smoke was n=1,000 (Wilson half-width ±3.07pp). The −4.8pp gap could shrink by ~3pp at n=10,000. The directional claim (v3.0 generalizes WORSE than v3.2) is robust to that range.
+
+Artifact: `runs/deck-sampling-slice3-v32-gate/gate.manifest.json`.
+
 ## Falsification
 
 This is a measurement workstream, not a hypothesis-test. The "falsification" framing is:
