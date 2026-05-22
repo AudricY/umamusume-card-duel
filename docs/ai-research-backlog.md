@@ -117,11 +117,9 @@ As of 2026-05-18:
    `docs/ai-research/progress/r110.md` §4c; queue `w6-loop-anti-degradation`.
 
 0d. **Value-head leaf at MCTS — CLOSED as strength lever 2026-05-21.**
-   vhleaf loop on the calibrated C8-W6FIX-ON seed produced wl=0.4250 /
-   0.4413 / 0.4209 / 0.4046 — descends after iter-1, best falls below R14.A
-   0.452 baseline, no iter clears the 0.5811 ceiling. Falsifies "calibration
-   was the missing piece." Closed as a strength lever on this seed/recipe.
-   Queue `value-head-leaf-recipe-axis`; canonical
+   vhleaf loop on the C8-W6FIX-ON seed descended after iter-1, best
+   below R14.A 0.452 baseline; "calibration was the missing piece"
+   falsified. Queue `value-head-leaf-recipe-axis`; canonical
    `docs/ai-research/progress/r16.md`.
 
 0c. **Fork B — label-quality test matrix.** Umbrella over W6 dose sweep;
@@ -144,6 +142,19 @@ As of 2026-05-18:
    root-search variants. Promotion requires a search-wrapped gain over
    production, not raw-policy WR. Seed:
    `docs/ai-research/scoping/gpu-fed-stronger-mcts.md`.
+
+3b. **Set-attention architecture probe (R7.b.3) — P3 SCOPED 2026-05-22,
+    user-gated.** Architecture-axis sibling to the recipe-axis lines
+    (0b W6 HP sweep, 0d value-head-leaf closed). Tests a 1-2 layer MHA
+    trunk over per-card+per-slot tokens vs the current sum-pool prior;
+    raw-policy SL plateau at wl≤0.33 across R7/R8/R7.b.2/mcts-distill-v1
+    and the schema-independent iter-2-peak-then-rot across v3.0/v3.1/v3.2
+    sum-pool variants motivate it. NOT a capacity probe (R6 closes
+    capacity-from-above; param delta ≤ +80K). Gated behind
+    deck-pair-sampling Slice 2 + re-verdict #3 + W6 HP sweep + PFSP
+    league retry. Canonical scope:
+    `docs/ai-research/scoping/set-attention-architecture-probe.md`;
+    queue `set-attention-architecture-probe`.
 
 4. **Value/action-value data program — P2 (3-stage ladder).**
    Data/training prerequisite for item 0d (value-head leaf at MCTS). Three
@@ -272,6 +283,11 @@ section).
   (leverage-per-cost); it remains a 3–4-day model/ONNX migration.
 - Do not re-open representation/capacity tuning off the R110 MARGINAL band;
   the forward line is the loop-recipe axis only (`docs/ai-research/progress/r110.md`).
+- Carve-out from "do not re-open representation/capacity tuning":
+  set-attention architecture probe (item 3b) is the *trunk-shape* axis
+  (inductive bias), not capacity tuning and not feature-schema; user-gated,
+  does not auto-launch. Canonical scope:
+  `docs/ai-research/scoping/set-attention-architecture-probe.md`.
 
 ## Historical Pointers
 
