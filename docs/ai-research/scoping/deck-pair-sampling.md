@@ -1,8 +1,9 @@
 # Deck-Pair Sampling For Self-Play And Eval
 
 - **Date:** 2026-05-22
-- **Status:** ACTIVE FORWARD LINE — gates all new training per user directive 2026-05-22 ("no more AI research or training without deck variety"). P0 + Slices 1, 2 are the unblock condition for the rest of the queue's training-bearing items. Tracked in queue under `deck-pair-sampling` (P1). Re-surfaces archived items §6 (deck-pair sampling) and §13 (per-matchup eval gating) from `docs/archive/ai-research/ai-performance-research-backlog.md`, parked behind throughput work and never implemented.
+- **Status:** ACTIVE FORWARD LINE — gates all new training per user directive 2026-05-22A ("no more AI research or training without deck variety"). Combines with directive 2026-05-22B ("all training and research uses per-Uma slot tokens (v3.2) from now on"): any new training must satisfy BOTH constraints. P0 + Slices 1, 2 are the unblock condition for the rest of the queue's training-bearing items. Tracked in queue under `deck-pair-sampling` (P1). Re-surfaces archived items §6 (deck-pair sampling) and §13 (per-matchup eval gating) from `docs/archive/ai-research/ai-performance-research-backlog.md`, parked behind throughput work and never implemented.
 - **Routing:** active backlog reference §6b; this scoping is the canonical home until landed.
+- **v3.2 interaction:** v3.2 introduces `uma_slot_card_ids` + `uma_slot_features` (positional per-Uma-slot tokens), which carry the model's primary signal about *which deck* it is facing (the active+bench Uma identities). Deck-variety sampling tests whether the v3.2 slot-token branch generalizes across opponent archetypes or has only learned the Matikane mirror. Featurizer remains deck-agnostic (global card vocab, verified zero OOV across all 13 decks); the slot-token branch reads the same vocab via the shared `card_embed` table.
 
 ## Hypothesis
 

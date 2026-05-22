@@ -6,22 +6,34 @@ in progress, scoping, or analysis docs. See `docs/ai-research/README.md`.
 
 ## Current Anchor
 
-**User directive 2026-05-22: no more AI research or training without deck
-variety.** Every post-R110 measurement (the 0.5811 tight-gate ceiling, the
-iter-2-peak-then-rot characterization, the v3.0/v3.1/v3.2 representation
-verdicts) was taken on a single near-mirror Matikane vs Matikane matchup; the
-opponent default silently falls back to AI-flavor Matikane because
+**Two user directives 2026-05-22 — both must hold for any new training.**
+
+**(A) No more AI research or training without deck variety.** Every post-R110
+measurement was taken on a single near-mirror Matikane vs Matikane matchup;
 `defaultAiOpponentDeckId='riceShowerHaruUrara'` does not match any id in
-`aiPremadeDecks`. 11 AI decks and 2 player decks otherwise unused in sim.
-Featurizer is deck-agnostic (verified zero OOV across all decks). All
-training-bearing forward lines (W6-fix HP sweep, per-game-PFSP league retry,
-value-head data-program Stages 2/3, any new self-play loop) are BLOCKED until
-`deck-pair-sampling` Slices P0+1+2 land (defaults-bug fix + deck-legality
-smoke + `--deck-sampling` plumbing + data-gen rollouts default-on uniform).
-Measurement-only work on existing checkpoints (tight-gate re-verdict #3,
-high-sim regime probe) remains unblocked. Canonical scope:
-`docs/ai-research/scoping/deck-pair-sampling.md`; queue
+`aiPremadeDecks`, silently falling back to AI-flavor Matikane. 11 AI decks and
+2 player decks otherwise unused in sim. Featurizer is deck-agnostic (verified
+zero OOV across all decks). Training-bearing forward lines (W6-fix HP sweep,
+per-game-PFSP league retry, value-head data-program Stages 2/3, any new
+self-play loop) are BLOCKED until `deck-pair-sampling` Slices P0+1+2 land.
+Canonical scope: `docs/ai-research/scoping/deck-pair-sampling.md`; queue
 `deck-pair-sampling` (P1).
+
+**(B) All training and research uses per-Uma slot tokens (v3.2) from now on.**
+`uses_uma_slot_tokens=True` is mandatory for any new training; v3.0 (96-d /
+110-d) and v3.1 (164-d) become historical baselines only. v3.2 infra is
+landed end-to-end (C1-C7 bit-exact, Rust featurizer Slice 3, `serve_onnx`
+schema 3.2 dispatch). The existing 0.5811 tight-gate ceiling is a v3.0
+reference; **the v3.2 ceiling is unknown**. Tight-gate re-verdict #3 (C8
+iter-0, v3.2, n=120 `wl=0.5955`) is now the highest-leverage next measurement
+— it establishes the v3.2 ceiling under the current production rollout-leaf
+recipe. Production pin **stays at 96-d v3.0 (0.6479)** until a v3.2 ckpt
+clears it on the diverse-matchup gate.
+
+**Combined gate for any new training:** v3.2 architecture **AND**
+deck-variety sampling active. Measurement-only work on existing checkpoints
+(re-verdict #3 on v3.2; high-sim regime probe on v3.2 ckpts) remains
+unblocked.
 
 As of 2026-05-18:
 
@@ -146,38 +158,13 @@ As of 2026-05-18:
    flat 0.404–0.452). Throwing epochs at the existing head/objective/corpus
    recipe is closed (`docs/ai-performance-research-progress.md:1803, 1818,
    1870, 1946`).
-   - **Stage 1 — post-W6 corpus retrain (cheapest, ~4h compute).** Same head
-     architecture, same objective (regress to rollout-CRN means), same
-     freeze-trunk-and-policy protocol as R13.W3, but on the W6 corpus
-     (sharper rollout targets than R4). Gate = R14 crossover probe
-     (`training/r14_value_crossover_probe.py`) crossed = true on a
-     held-out slice. Outcome falsifies "the W3 PARTIAL result was data-
-     limited." If crossed, attempt the value-head-leaf gate; if not,
-     escalate to Stage 2.
-   - **Stage 2 — action-value (Q) head + per-action rollout targets.**
-     Changes the *target*: corpus emits per-legal-action rollout-CRN means
-     instead of one state-value scalar, and the model gains a Q(s,a) head
-     consumed at MCTS leaves directly (one rollout per legal action at
-     corpus-generation time; head is fed per-action embeddings or
-     action-conditioned). This is the AlphaZero→MuZero-style move and is
-     the closest match to what MCTS leaves actually want. Outcome
-     falsifies "the state-value objective was the bottleneck." Bigger
-     scope: corpus regeneration + head architecture + serve_onnx schema
-     bump.
-   - **Stage 3 — architectural change (separate value tower / deeper head
-     / inference-time variance reduction).** All prior heads were
-     shared-trunk single-scalar with the same depth. Possible moves:
-     dedicated value tower, deeper value head, dropout-at-inference as
-     ensemble proxy, or auxiliary calibration loss. Outcome falsifies
-     "shared-trunk capacity was the bottleneck." Largest scope and most
-     speculative — only fires if Stages 1 and 2 both fail to lift
-     value-head-leaf MCTS strength to the 0.40 production bar.
-
-   **Stage 1 PROMOTED TO AUTONOMOUS P1 (2026-05-21)** per user lift —
-   cleanest properties of any line in the queue (cheap, falsifiable via the
-   R14 crossover probe, A/B-comparable, no R110 chain break, no new code
-   beyond a corpus-pointer flag); ~4h GPU. Stages 2 and 3 remain
-   user-gated for scope. Queue: `value-head-data-program`.
+   - **Stage 1 — post-W6 corpus retrain — DONE-POSITIVE 2026-05-21** via
+     C8-W6FIX-ON iter-1 (R14 crossover gate accidentally satisfied; ratio
+     0.722 ≤ 1.10 AND pearson 0.725 ≥ 0.70). Downstream vhleaf consumer
+     hit 0.40 production bar but fell short of R14.A 0.452 baseline.
+   - **Stages 2 (action-value Q-head) and 3 (architectural change)** —
+     user-gated for scope; both now also bound by directives A+B (deck
+     variety + v3.2). Queue: `value-head-data-program`.
 
 ### 4b. Rust engine port follow-ups (post Phase-2-merge, 2026-05-21)
 
@@ -201,7 +188,7 @@ Forward items, ordered by user prioritization 2026-05-21:
    that made PPO Phase J prohibitive. Worth a fresh scoping pass after
    `rust-port-orchestrator-wiring` lands.
 
-6b. **Deck-pair sampling for self-play and eval — P1, BLOCKING all new training (user directive 2026-05-22).**
+6b. **Deck-pair sampling for self-play and eval — P1, BLOCKING all new training (user directive 2026-05-22A).** Combines with directive 2026-05-22B (v3.2-only): any new training runs under v3.2 architecture AND uniform deck sampling.
    Surfaced 2026-05-22 via deck-selection investigation: every post-R110
    measurement (the 0.5811 tight-gate ceiling, the iter-2-peak-then-rot
    characterization, the v3.0/v3.1/v3.2 representation verdicts) was taken on
