@@ -64,6 +64,10 @@ struct Args {
     /// parallelises by spawning multiple Rust binaries).
     #[arg(long, default_value_t = 1)]
     workers: u32,
+    /// Modeled side: "player", "opponent", or "both". Default "player"
+    /// preserves the historical TS/Rust self-play row distribution.
+    #[arg(long, default_value = "player")]
+    model_side: String,
     /// PUCT exploration constant. Orchestrator alias: --mcts-c-puct.
     #[arg(long, alias = "mcts-c-puct", default_value_t = 1.5)]
     c_puct: f64,
@@ -139,6 +143,7 @@ impl Args {
             "prior": self.prior,
             "leaf": self.leaf,
             "workers": self.workers,
+            "modelSide": self.model_side,
             "cPuct": self.c_puct,
             "maxNodes": self.max_nodes,
             "dirichletAlpha": self.dirichlet_alpha,
@@ -535,10 +540,22 @@ fn main() -> Result<()> {
     let temperature_moves = args.temperature_moves;
     let temperature_value = args.temperature_value;
 
-    let model_side = SideId::Player;
+    let model_sides: Vec<SideId> = match args.model_side.as_str() {
+        "player" => vec![SideId::Player],
+        "opponent" => vec![SideId::Opponent],
+        "both" => vec![SideId::Player, SideId::Opponent],
+        other => anyhow::bail!(
+            "--model-side must be player, opponent, or both (got {})",
+            other
+        ),
+    };
+    let tasks: Vec<(u32, SideId)> = model_sides
+        .iter()
+        .flat_map(|&side| (0..args.seeds).map(move |i| (args.seed_base + i, side)))
+        .collect();
     eprintln!(
-        "sim-mcts-selfplay: sims={} K={} rollout_steps={} prior={} leaf={} seeds={} (base={}) model_side={:?}",
-        args.sims, args.k, args.rollout_steps, args.prior, args.leaf, args.seeds, args.seed_base, model_side,
+        "sim-mcts-selfplay: sims={} K={} rollout_steps={} prior={} leaf={} seeds-per-side={} model-side={} (=> {} total games) base={}",
+        args.sims, args.k, args.rollout_steps, args.prior, args.leaf, args.seeds, args.model_side, tasks.len(), args.seed_base,
     );
 
     let mut writer: Option<fs::File> = match args.out.as_ref() {
@@ -559,17 +576,18 @@ fn main() -> Result<()> {
     let mut draws = 0u32;
     let mut terminal_reasons = TerminalReasons::default();
 
-    for i in 0..args.seeds {
-        let seed = args.seed_base + i;
-        // Slice 1: deck-pair resolution per game. `i` is the
+    for (task_index, (seed, model_side)) in tasks.iter().copied().enumerate() {
+        let task_index = task_index as u32;
+        // Slice 1: deck-pair resolution per game. `task_index` is the
         // game-relative index used both by the sampler (uniform mod
         // n_pairs) and by the manifest tag.
-        let resolved = sampling.resolve(args.seed_base, i);
+        let resolved = sampling.resolve(args.seed_base, task_index);
         let (player_deck_opt, opponent_deck_opt) = resolved
             .as_ref()
             .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
             .unwrap_or((None, None));
-        let (player_deck_id, opponent_deck_id) = manifest_pair_for(&sampling, args.seed_base, i);
+        let (player_deck_id, opponent_deck_id) =
+            manifest_pair_for(&sampling, args.seed_base, task_index);
         let record = drive_one_game(
             seed,
             args.max_steps,
@@ -617,9 +635,9 @@ fn main() -> Result<()> {
     let elapsed = start.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
     let summary = RunSummary {
-        games: args.seeds,
+        games: tasks.len() as u32,
         elapsed_secs,
-        games_per_sec: args.seeds as f64 / elapsed_secs.max(1e-9),
+        games_per_sec: tasks.len() as f64 / elapsed_secs.max(1e-9),
         player_wins,
         opponent_wins,
         draws,
@@ -837,6 +855,33 @@ mod tests {
                 .get("addRootDirichlet")
                 .and_then(|v| v.as_bool()),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn model_side_flag_defaults_to_player_and_echoes_manifest() {
+        let args = Args::parse_from(["sim-mcts-selfplay"]);
+        assert_eq!(args.model_side, "player");
+        let manifest = args.manifest_args_json();
+        assert_eq!(
+            manifest.get("modelSide").and_then(|v| v.as_str()),
+            Some("player")
+        );
+
+        let args_opponent = Args::parse_from(["sim-mcts-selfplay", "--model-side", "opponent"]);
+        assert_eq!(args_opponent.model_side, "opponent");
+        let manifest_opponent = args_opponent.manifest_args_json();
+        assert_eq!(
+            manifest_opponent.get("modelSide").and_then(|v| v.as_str()),
+            Some("opponent")
+        );
+
+        let args_both = Args::parse_from(["sim-mcts-selfplay", "--model-side", "both"]);
+        assert_eq!(args_both.model_side, "both");
+        let manifest_both = args_both.manifest_args_json();
+        assert_eq!(
+            manifest_both.get("modelSide").and_then(|v| v.as_str()),
+            Some("both")
         );
     }
 }
