@@ -98,6 +98,13 @@ class ModelConfig:
     # — the ONNX graph signature is identical to v3.2 so the existing 7-input
     # Rust + serve_onnx dispatch handles the attention model unchanged.
     model_variant: str = "mlp"
+    # Stage-2 value-head program: optional action-value head trained against
+    # per-action rootMeanQ targets from rollout-leaf MCTS. When enabled the
+    # exported scalar `value` is the masked max over legal action Q values,
+    # so existing value-head-leaf MCTS can consume it without an ONNX
+    # signature change. Default False keeps all legacy checkpoints and graphs
+    # byte-compatible.
+    uses_q_value_head: bool = False
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -408,6 +415,16 @@ class CandidatePolicyNet(nn.Module):
             nn.Linear(hidden // 2, 1),
             nn.Tanh(),
         )
+        if self.config.uses_q_value_head:
+            self.q_value_head = nn.Sequential(
+                nn.LayerNorm(hidden),
+                nn.Linear(hidden, hidden // 2),
+                nn.GELU(),
+                nn.Linear(hidden // 2, 1),
+                nn.Tanh(),
+            )
+        else:
+            self.q_value_head = None
 
         # R16-P2 C2: optional per-Uma slot-token encoder. Construction is
         # gated on `uses_uma_slot_tokens` so default v3.0/v3.1 callers (which
@@ -477,7 +494,8 @@ class CandidatePolicyNet(nn.Module):
         action_card_idx: torch.Tensor | None = None,
         uma_slot_card_ids: torch.Tensor | None = None,
         uma_slot_features: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_q_values: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Candidate-conditioned forward.
 
         R7.b.2 Phase 2: `card_ids_by_zone` and `action_card_idx` are
@@ -635,5 +653,13 @@ class CandidatePolicyNet(nn.Module):
         # for the actual logits dtype (fp32 or fp16) — masks illegal actions
         # to ~-inf before softmax without overflowing.
         logits = logits.masked_fill(~action_mask.bool(), torch.finfo(logits.dtype).min)
-        value = self.value_head(state_encoded).squeeze(-1)
+        q_values: torch.Tensor | None = None
+        if self.q_value_head is not None:
+            q_values = self.q_value_head(joint).squeeze(-1)
+            masked_q = q_values.masked_fill(~action_mask.bool(), torch.finfo(q_values.dtype).min)
+            value = masked_q.max(dim=1).values
+        else:
+            value = self.value_head(state_encoded).squeeze(-1)
+        if return_q_values:
+            return logits, value, q_values
         return logits, value

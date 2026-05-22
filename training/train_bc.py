@@ -47,6 +47,8 @@ def main() -> None:
             "--model-variant set_attention requires --uma-slot-tokens; the "
             "attention encoder consumes the v3.2 slot tensors directly."
         )
+    if args.q_value_weight > 0.0 and not args.q_value_head:
+        raise SystemExit("--q-value-weight > 0 requires --q-value-head")
     if args.data_mode == "mcts-distill":
         # R12 phase C: soft policy target from MCTS visit distribution.
         dataset = MctsSelfPlayDataset(
@@ -101,6 +103,7 @@ def main() -> None:
         dropout=args.dropout,
         uses_uma_slot_tokens=uses_uma_slot_tokens,
         model_variant=args.model_variant,
+        uses_q_value_head=bool(args.q_value_head),
     )
     model = CandidatePolicyNet(config).to(device)
     # Item 11/17 KL-anchor anti-forgetting: if --kl-anchor-checkpoint is set,
@@ -166,8 +169,9 @@ def main() -> None:
             kl_anchor_weight=args.kl_anchor_weight,
             entropy_bonus=args.entropy_bonus,
             policy_weight=args.policy_weight,
+            q_value_weight=args.q_value_weight,
         )
-        val_metrics = evaluate(model, val_loader, value_weight=args.value_weight) if val_loader else {}
+        val_metrics = evaluate(model, val_loader, value_weight=args.value_weight, q_value_weight=args.q_value_weight) if val_loader else {}
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
         history.append(record)
         if args.verbose:
@@ -181,6 +185,7 @@ def main() -> None:
                 train_loss=train_metrics.get("loss"),
                 train_policy_loss=train_metrics.get("policy_loss"),
                 train_value_loss=train_metrics.get("value_loss"),
+                train_q_value_loss=train_metrics.get("q_value_loss"),
                 train_kl_loss=train_metrics.get("kl_loss"),
                 train_entropy=train_metrics.get("entropy"),
                 train_accuracy=train_metrics.get("accuracy"),
@@ -196,8 +201,8 @@ def main() -> None:
                     tb_writer.add_scalar(f"val/{key}", float(value), epoch)
             tb_writer.flush()
 
-    final_train = evaluate(model, train_loader, value_weight=args.value_weight)
-    final_val = evaluate(model, val_loader, value_weight=args.value_weight) if val_loader else {}
+    final_train = evaluate(model, train_loader, value_weight=args.value_weight, q_value_weight=args.q_value_weight)
+    final_val = evaluate(model, val_loader, value_weight=args.value_weight, q_value_weight=args.q_value_weight) if val_loader else {}
     if tb_writer is not None:
         for key, value in final_train.items():
             if isinstance(value, (int, float)) and value == value:
@@ -208,8 +213,8 @@ def main() -> None:
         tb_writer.flush()
         tb_writer.close()
     diagnostics = {
-        "train": evaluate_grouped(model, dataset, train_indices, value_weight=args.value_weight, batch_size=args.batch_size, collate_fn=collate_fn),
-        "val": evaluate_grouped(model, dataset, val_indices, value_weight=args.value_weight, batch_size=args.batch_size, collate_fn=collate_fn) if val_indices else {},
+        "train": evaluate_grouped(model, dataset, train_indices, value_weight=args.value_weight, q_value_weight=args.q_value_weight, batch_size=args.batch_size, collate_fn=collate_fn),
+        "val": evaluate_grouped(model, dataset, val_indices, value_weight=args.value_weight, q_value_weight=args.q_value_weight, batch_size=args.batch_size, collate_fn=collate_fn) if val_indices else {},
     }
     rng_state = {
         "torch": torch.get_rng_state().tolist(),
@@ -237,6 +242,8 @@ def main() -> None:
             "batch_size": args.batch_size,
             "lr": args.lr,
             "value_weight": args.value_weight,
+            "q_value_weight": args.q_value_weight,
+            "q_value_head": bool(args.q_value_head),
             "amp": use_amp,
             "grad_accum": grad_accum,
             "lr_schedule": args.lr_schedule,
@@ -330,7 +337,18 @@ def load_init_from_checkpoint(path: Path, model: CandidatePolicyNet) -> None:
     """
 
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    model.load_state_dict(payload["model_state"])
+    if model.config.uses_q_value_head:
+        missing, unexpected = model.load_state_dict(payload["model_state"], strict=False)
+        allowed_missing = {name for name, _ in model.named_parameters() if name.startswith("q_value_head.")}
+        allowed_missing.update(name for name, _ in model.named_buffers() if name.startswith("q_value_head."))
+        extra_missing = set(missing) - allowed_missing
+        if extra_missing or unexpected:
+            raise RuntimeError(
+                f"init checkpoint {path} is incompatible with q-value warm-start: "
+                f"missing={sorted(extra_missing)} unexpected={sorted(unexpected)}"
+            )
+    else:
+        model.load_state_dict(payload["model_state"])
 
 
 def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out_dir: Path, device: torch.device) -> dict[str, Any]:
@@ -599,9 +617,10 @@ def run_epoch(
     kl_anchor_weight: float = 0.0,
     entropy_bonus: float = 0.0,
     policy_weight: float = 1.0,
+    q_value_weight: float = 0.0,
 ) -> dict[str, float]:
     model.train()
-    totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "count": 0.0, "kl_loss": 0.0, "entropy": 0.0}
+    totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "q_value_loss": 0.0, "accuracy": 0.0, "count": 0.0, "kl_loss": 0.0, "entropy": 0.0}
     optimizer.zero_grad(set_to_none=True)
     use_amp = scaler is not None
     accum_step = 0
@@ -617,7 +636,7 @@ def run_epoch(
             # `--uma-slot-tokens` flag is OFF the collator omits BOTH keys,
             # so `.get(...)` returns None and the model's slot-encoder no-op
             # branch fires — byte-identical to pre-C6 forward.
-            logits, values = model(
+            outputs = model(
                 batch["state_features"],
                 batch["action_features"],
                 batch["action_mask"],
@@ -625,7 +644,13 @@ def run_epoch(
                 action_card_idx=batch.get("action_card_idx"),
                 uma_slot_card_ids=batch.get("uma_slot_card_ids"),
                 uma_slot_features=batch.get("uma_slot_features"),
+                return_q_values=q_value_weight > 0.0,
             )
+            if q_value_weight > 0.0:
+                logits, values, q_values = outputs  # type: ignore[misc]
+            else:
+                logits, values = outputs  # type: ignore[misc]
+                q_values = None
             weights = normalized_weights(batch["sample_weights"])
             policy_targets = batch.get("policy_targets")
             if policy_targets is not None:
@@ -639,6 +664,7 @@ def run_epoch(
             else:
                 policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
             value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
+            q_value_loss = q_loss_from_batch(q_values, batch)
             kl_loss = torch.zeros((), device=logits.device)
             if anchor_model is not None and kl_anchor_weight > 0.0:
                 with torch.no_grad():
@@ -667,7 +693,13 @@ def run_epoch(
             # pushes the policy toward higher entropy. The unused-tensor
             # path keeps the metric column populated even when β=0.
             policy_entropy = masked_policy_entropy(logits, batch["action_mask"])
-            loss = policy_loss * policy_weight + value_loss * value_weight + kl_loss * kl_anchor_weight - entropy_bonus * policy_entropy
+            loss = (
+                policy_loss * policy_weight
+                + value_loss * value_weight
+                + q_value_loss * q_value_weight
+                + kl_loss * kl_anchor_weight
+                - entropy_bonus * policy_entropy
+            )
         scaled = loss / max(1, grad_accum)
         if use_amp:
             scaler.scale(scaled).backward()
@@ -688,7 +720,7 @@ def run_epoch(
             if scheduler is not None:
                 scheduler.step()
             accum_step = 0
-        accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"], kl_loss=kl_loss, entropy=policy_entropy)
+        accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"], kl_loss=kl_loss, entropy=policy_entropy, q_value_loss=q_value_loss)
     return finish_metrics(totals)
 
 
@@ -706,16 +738,17 @@ def evaluate(
     loader: DataLoader | None,
     *,
     value_weight: float,
+    q_value_weight: float = 0.0,
 ) -> dict[str, float]:
     if loader is None:
         return {}
     model.eval()
-    totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "accuracy": 0.0, "count": 0.0}
+    totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "q_value_loss": 0.0, "accuracy": 0.0, "count": 0.0}
     for batch in loader:
         batch = move_batch(batch, model)
         # R7.b.2 Phase 2: forward the embedding tensors when present.
         # R16-P2 C6: same `.get(...)` slot-tensor pattern as `run_epoch`.
-        logits, values = model(
+        outputs = model(
             batch["state_features"],
             batch["action_features"],
             batch["action_mask"],
@@ -723,7 +756,13 @@ def evaluate(
             action_card_idx=batch.get("action_card_idx"),
             uma_slot_card_ids=batch.get("uma_slot_card_ids"),
             uma_slot_features=batch.get("uma_slot_features"),
+            return_q_values=q_value_weight > 0.0,
         )
+        if q_value_weight > 0.0:
+            logits, values, q_values = outputs  # type: ignore[misc]
+        else:
+            logits, values = outputs  # type: ignore[misc]
+            q_values = None
         weights = normalized_weights(batch["sample_weights"])
         policy_targets = batch.get("policy_targets")
         if policy_targets is not None:
@@ -733,8 +772,9 @@ def evaluate(
         else:
             policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
         value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
-        loss = policy_loss + value_loss * value_weight
-        accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"])
+        q_value_loss = q_loss_from_batch(q_values, batch)
+        loss = policy_loss + value_loss * value_weight + q_value_loss * q_value_weight
+        accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"], q_value_loss=q_value_loss)
     return finish_metrics(totals)
 
 
@@ -745,6 +785,7 @@ def evaluate_grouped(
     indices: list[int],
     *,
     value_weight: float,
+    q_value_weight: float,
     batch_size: int,
     collate_fn=collate_policy_batch,
 ) -> dict[str, dict[str, dict[str, float]]]:
@@ -769,6 +810,7 @@ def evaluate_grouped(
                 model,
                 DataLoader(Subset(dataset, group_indices), batch_size=batch_size, shuffle=False, collate_fn=collate_fn),
                 value_weight=value_weight,
+                q_value_weight=q_value_weight,
             )
             for name, group_indices in sorted(category_groups.items())
         }
@@ -830,11 +872,14 @@ def accumulate(
     targets: torch.Tensor,
     kl_loss: torch.Tensor | None = None,
     entropy: torch.Tensor | None = None,
+    q_value_loss: torch.Tensor | None = None,
 ) -> None:
     count = float(targets.shape[0])
     totals["loss"] += float(loss.item()) * count
     totals["policy_loss"] += float(policy_loss.item()) * count
     totals["value_loss"] += float(value_loss.item()) * count
+    if q_value_loss is not None and "q_value_loss" in totals:
+        totals["q_value_loss"] += float(q_value_loss.item()) * count
     totals["accuracy"] += float((logits.argmax(dim=1) == targets).float().sum().item())
     totals["count"] += count
     if kl_loss is not None and "kl_loss" in totals:
@@ -856,7 +901,20 @@ def finish_metrics(totals: dict[str, float]) -> dict[str, float]:
         out["kl_loss"] = totals["kl_loss"] / count
     if "entropy" in totals:
         out["entropy"] = totals["entropy"] / count
+    if "q_value_loss" in totals:
+        out["q_value_loss"] = totals["q_value_loss"] / count
     return out
+
+
+def q_loss_from_batch(q_values: torch.Tensor | None, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    if q_values is None or "q_targets" not in batch or "q_target_mask" not in batch:
+        device = q_values.device if q_values is not None else batch["state_features"].device
+        return torch.zeros((), device=device)
+    mask = batch["q_target_mask"].bool()
+    if not bool(mask.any().item()):
+        return torch.zeros((), device=q_values.device)
+    per_action = nn.functional.mse_loss(q_values, batch["q_targets"], reduction="none")
+    return per_action[mask].mean()
 
 
 def masked_log_softmax_logits(logits: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
@@ -1029,6 +1087,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--value-weight", type=float, default=0.1)
+    parser.add_argument("--q-value-head", action="store_true",
+                        help="Enable an action-value head trained from mcts-selfplay rootMeanQ targets.")
+    parser.add_argument("--q-value-weight", type=float, default=0.0,
+                        help="Weight on per-action Q-value MSE. Requires --q-value-head and rootMeanQ rows to have effect.")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--split-by", choices=["row", "episode", "seed"], default="episode")
     parser.add_argument("--ablate", action="append", choices=[
