@@ -71,48 +71,58 @@ work. Model-strength research lives in `docs/ai-research-backlog.md`.
    value-head/adaptive fallback, Expert = rollout-leaf. Persist the choice
    locally.
 
+10. **GPU inference execution provider for sim/gate throughput.**
+    Add opt-in `--device cuda` to sim-eval-gate / sim-mcts-selfplay so ONNX
+    inference can run on the local NVIDIA RTX 5000 Ada (or any CUDA box).
+    Lifts the `Mutex<Session>` serialization that caps Slice 3c parallelism
+    at 4.5× on 8 workers. Acceptance: ≥1.5× wallclock improvement at
+    workers=16 on n=200 eval-gate, wilson_lower agreement within ±0.02 of
+    CPU path. CPU path stays default + FP-deterministic vs serve_onnx.
+    Scoping: `docs/ai-research/scoping/gpu-inference-execution-provider.md`.
+    Distinct from gpu-fed-stronger-mcts.md (strength axis).
+
 ## P2 - Measurement, Data Quality, And Deck UX
 
-10. **Decision trace schema validator.**
+11. **Decision trace schema validator.**
     Validate training examples, traces, self-play rows, outcomes, and manifests
     for seed/source/episode fields, schema-feature mismatch, card vocab ids,
     malformed legal actions, and invalid selected actions.
 
-11. **Benchmark artifact index.**
+12. **Benchmark artifact index.**
     Generate a searchable index of canonical manifests and reports, including
     config, seed ranges, side split, model artifact, and headline result.
 
-12. **OOD and coverage drift gate.**
+13. **OOD and coverage drift gate.**
     Compare new data/eval traces against the coverage audit slices and fail
     fast on drift in contested decision-state coverage.
 
-13. **Deck Doctor.**
+14. **Deck Doctor.**
     Analyze deck composition and suggest legal, concrete improvements using
     card roles, energy curve, attacker lines, and trainer/supporter balance.
 
-14. **Tutorial scenarios with AI feedback.**
+15. **Tutorial scenarios with AI feedback.**
     Build small forced scenarios that teach tactical lessons using the same
     fixture machinery as the forced-state suite.
 
 ## P3 - Later Bets
 
-15. **GPU-fed MCTS scaling probe.**
+16. **GPU-fed MCTS scaling probe.**
     Tooling support for the research line in `docs/ai-research-backlog.md`;
     promote only if it changes the search-wrapped strength/latency frontier.
 
-16. **Search ablation matrix.**
+17. **Search ablation matrix.**
     Compare rollout leaf, value leaf, hybrid leaf, adaptive halt, simulation
     budgets, and root variants under named benchmarks.
 
-17. **Rule-bot-covered relabel corpus pipeline.**
+18. **Rule-bot-covered relabel corpus pipeline.**
     Productionize the P1 data recipe after the research acceptance criteria
     prove it is worth keeping.
 
-18. **Post-game why-did-I-lose investigator.**
+19. **Post-game why-did-I-lose investigator.**
     Summarize concrete game-swing moments from logs, legal actions, and MCTS
     deltas without overclaiming hidden intent.
 
-19. **Raw-policy reopen gate.**
+20. **Raw-policy reopen gate.**
     A placeholder only: require new coverage evidence and a pre-registered
     reopen criterion before spending compute on raw-policy SL again.
 
