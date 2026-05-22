@@ -140,6 +140,14 @@ def main() -> None:
         # via state.selfplay_deck_sampling below.
         "selfplay_deck_sampling": args.deck_sampling,
         "eval_deck_sampling": "fixed",
+        # per-game-pfsp-league-retry Option B: surface the pool config so a
+        # reader of events.jsonl can tell at a glance whether the run used
+        # cross-iter opponent diversity. Pool source + per-iter composition
+        # land later in the selfplay-pool events.
+        "rollout_vs_pool": bool(getattr(args, "rollout_vs_pool", False)),
+        "pool_size": int(getattr(args, "pool_size", 5)),
+        "pfsp_floor": float(getattr(args, "pfsp_floor", 0.05)),
+        "rollout_pool_state_file": getattr(args, "rollout_pool_state_file", None),
         "init_checkpoint": str(state.promoted_checkpoint) if state.promoted_checkpoint else None,
         "ts": time.time(),
     })
@@ -243,21 +251,41 @@ def run_iteration(
                              "promoted_checkpoint": str(state.promoted_checkpoint),
                              "ts": time.time()})
 
-    # --- step 1: self-play under the currently promoted checkpoint ---
-    promoted_onnx = ensure_onnx(repo_root, state.promoted_checkpoint)
+    # --- step 1: self-play ---
+    # Branch on the per-game-pfsp-league-retry opponent-pool plumbing (Option B
+    # from docs/ai-research/scoping/cross-iter-opponent-pool-selfplay.md): when
+    # --rollout-vs-pool is OFF we run a single sim-mcts-selfplay invocation
+    # against the current promoted checkpoint (legacy behavior, byte-identical
+    # to pre-Option-B); when ON we run N invocations (one per pool opponent)
+    # with per-opponent games allocated by PFSP weight, then concat into
+    # iter-N/selfplay.jsonl annotated with opponentCheckpointIter rows.
     emit_event(events_path, {"stage": "selfplay", "event_type": "started",
                              "iteration": iteration, "games": args.selfplay_games,
-                             "mcts_simulations": args.mcts_simulations, "ts": time.time()})
+                             "mcts_simulations": args.mcts_simulations,
+                             "rollout_vs_pool": bool(getattr(args, "rollout_vs_pool", False)),
+                             "ts": time.time()})
     t0 = time.time()
-    # Throughput-spike Slice 2: inference_context skips serve_onnx on the
-    # Rust path (in-process ORT) and keeps the HTTP server on the TS path.
-    with inference_context(repo_root, promoted_onnx, args) as model_url:
-        run_selfplay(repo_root, iter_dir, model_url, args, selfplay_path, selfplay_manifest, iteration)
+    pool_record: dict[str, Any] = {"rollout_vs_pool": False}
+    if getattr(args, "rollout_vs_pool", False):
+        pool_record = _run_pool_selfplay(
+            repo_root, iter_dir, iteration, args, state,
+            selfplay_path, selfplay_manifest, events_path,
+        )
+    if not pool_record.get("rollout_vs_pool", False):
+        # Legacy path (single opponent = currently promoted ckpt).
+        promoted_onnx = ensure_onnx(repo_root, state.promoted_checkpoint)
+        with inference_context(repo_root, promoted_onnx, args) as model_url:
+            run_selfplay(repo_root, iter_dir, model_url, args,
+                         selfplay_path, selfplay_manifest, iteration,
+                         games=args.selfplay_games,
+                         seed_start=args.selfplay_seed_start + iteration * args.selfplay_games)
     selfplay_elapsed = time.time() - t0
     n_rows = count_lines(selfplay_path)
     emit_event(events_path, {"stage": "selfplay", "event_type": "completed",
                              "iteration": iteration, "rows": n_rows,
-                             "elapsed_sec": selfplay_elapsed, "ts": time.time()})
+                             "elapsed_sec": selfplay_elapsed,
+                             "rollout_vs_pool": bool(pool_record.get("rollout_vs_pool", False)),
+                             "ts": time.time()})
 
     # --- step 2: distillation training, warm-started from promoted ckpt ---
     # W6 recipe-fix change 1 (r110.md §4a): the distill set is a bounded
@@ -354,6 +382,12 @@ def run_iteration(
         "distill_elapsed_sec": distill_elapsed,
         "gate_elapsed_sec": gate_elapsed,
         "crossover": crossover,
+        # per-game-pfsp-league-retry Option B: capture the pool composition
+        # used to drive this iter's selfplay (mirrors Slice-2's
+        # selfplay_deck_sampling shape — operator can stratify corpora by
+        # opponent without re-parsing the per-iter selfplay manifests).
+        # When --rollout-vs-pool is OFF, this is `{"rollout_vs_pool": False}`.
+        "rollout_pool": pool_record,
     }
     emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "iteration_completed",
                              **record, "ts": time.time()})
@@ -460,15 +494,28 @@ def run_selfplay(
     out_path: Path,
     manifest_out: Path,
     iteration: int,
+    *,
+    games: int | None = None,
+    seed_start: int | None = None,
+    log_name: str = "selfplay.log",
 ) -> None:
-    log_path = iter_dir / "selfplay.log"
+    log_path = iter_dir / log_name
+    # per-game-pfsp-league-retry Option B: callers can override games/seeds
+    # so the pool wrapper can fire N invocations with disjoint seed windows
+    # into the same iter dir. When unset (legacy path) we fall back to
+    # args.selfplay_games and the existing iter-stride seed formula —
+    # byte-identical to pre-Option-B behavior.
+    if games is None:
+        games = int(args.selfplay_games)
+    if seed_start is None:
+        seed_start = int(args.selfplay_seed_start) + int(iteration) * int(args.selfplay_games)
     # Throughput-spike Slice 2: on the Rust path, inference_context yields
     # the onnx path as `model_url` (no serve_onnx subprocess); on the TS
     # path it stays a real http:// URL. The sim-cli accepts --onnx-path on
     # the Rust binary (Slice 1) and --model-url on the TS npm script.
     cmd = resolve_engine_command(args.engine, "mcts-selfplay", repo_root) + [
-        "--games", str(args.selfplay_games),
-        "--seed-start", str(args.selfplay_seed_start + iteration * args.selfplay_games),
+        "--games", str(games),
+        "--seed-start", str(seed_start),
         "--mcts-simulations", str(args.mcts_simulations),
         "--mcts-c-puct", str(args.mcts_c_puct),
         "--mcts-prior", "policy",
@@ -521,6 +568,387 @@ def run_selfplay(
             cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT,
             check=True, env=env,
         )
+
+
+def _load_rollout_pool_state(state_file: Path) -> list[dict[str, Any]]:
+    """Read the prior-run orchestrator-state.json and return the list of
+    promoted iterations with the fields we need (checkpoint path + Wilson
+    lower bound at promotion time).
+
+    Per the scoping doc (cross-iter-opponent-pool-selfplay.md), the pool
+    draws from the last N PROMOTED iter ckpts of a prior loop's run.
+    Missing/malformed entries are dropped silently — empty pool falls
+    back to the warm-start path in `_resolve_pool_opponents`.
+    """
+    if not state_file.exists():
+        return []
+    try:
+        payload = json.loads(state_file.read_text(encoding="utf8"))
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in (payload.get("iterations") or []):
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("promote"):
+            continue
+        ckpt = entry.get("checkpoint")
+        if not ckpt:
+            continue
+        out.append({
+            "iteration": int(entry.get("iteration", -1)),
+            "checkpoint": str(ckpt),
+            "wilson_lower": float(entry.get("wilson_lower", 0.0) or 0.0),
+        })
+    return out
+
+
+def _resolve_pool_opponents(
+    state: "R12State",
+    args: argparse.Namespace,
+    events_path: Path,
+    iteration: int,
+) -> list[dict[str, Any]]:
+    """Build the opponent pool for this iter's selfplay.
+
+    Sources (in priority order):
+      1. --rollout-pool-state-file: read promoted iters from that file
+         (the "history" surface — apples-to-apples with the v3.2 retrain
+         currently feeding this experiment).
+      2. The current run's own promoted iters (state.iterations) — kicks in
+         once the loop has produced one promoted iter on its own.
+    Either source may also contribute, so we union and dedupe by
+    checkpoint path, then keep the newest --pool-size entries.
+
+    Iter-0 fallback: when no promoted iter is available anywhere, seed the
+    pool with the warm-start ckpt (state.kl_anchor_checkpoint, the fixed
+    iter-0 origin). Falls back to the legacy single-opponent path if even
+    that is unavailable.
+    """
+    pool_entries: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+
+    # From an external history state file (the "the v3.2 uniform retrain
+    # finished, point the pool at its loop dir" surface).
+    state_file_str = getattr(args, "rollout_pool_state_file", None)
+    if state_file_str:
+        state_file = Path(state_file_str)
+        external = _load_rollout_pool_state(state_file)
+        for entry in external:
+            ckpt_path = str(Path(entry["checkpoint"]).resolve())
+            if ckpt_path in seen_paths:
+                continue
+            seen_paths.add(ckpt_path)
+            pool_entries.append({
+                "iteration": entry["iteration"],
+                "checkpoint": ckpt_path,
+                "wilson_lower": entry["wilson_lower"],
+                "source": "state_file",
+            })
+
+    # From the current run's own promoted iters (builds up naturally as the
+    # loop progresses — first non-empty when iter >= 1 in a fresh run).
+    for entry in (state.iterations or []):
+        if not entry.get("promote"):
+            continue
+        ckpt = entry.get("checkpoint")
+        if not ckpt:
+            continue
+        ckpt_path = str(Path(ckpt).resolve())
+        if ckpt_path in seen_paths:
+            continue
+        seen_paths.add(ckpt_path)
+        pool_entries.append({
+            "iteration": int(entry.get("iteration", -1)),
+            "checkpoint": ckpt_path,
+            "wilson_lower": float(entry.get("wilson_lower", 0.0) or 0.0),
+            "source": "current_run",
+        })
+
+    # Sort newest-first by iteration so the --pool-size truncation keeps
+    # the most-recent promoted ckpts (mirrors OpponentPool.retain's
+    # recent_promoted policy).
+    pool_entries.sort(key=lambda e: e["iteration"], reverse=True)
+    pool_size = max(1, int(getattr(args, "pool_size", 5)))
+    pool_entries = pool_entries[:pool_size]
+
+    if not pool_entries:
+        # Iter-0 fallback: seed the pool with the warm-start origin.
+        warm = state.kl_anchor_checkpoint or state.promoted_checkpoint
+        if warm is None:
+            emit_event(events_path, {
+                "stage": "selfplay-pool", "event_type": "empty_pool_no_fallback",
+                "iteration": iteration, "ts": time.time(),
+            })
+            return []
+        pool_entries.append({
+            "iteration": -1,  # synthetic — pre-iter-0 origin
+            "checkpoint": str(Path(warm).resolve()),
+            # Use the run's current promoted Wilson lower if known so the
+            # PFSP weight is at least informed; else 0.5 (uniform-ish prior).
+            "wilson_lower": float(state.promoted_wilson_lower or 0.5),
+            "source": "warm_start",
+        })
+
+    return pool_entries
+
+
+def _pfsp_weights_from_pool(
+    pool: list[dict[str, Any]], floor: float,
+) -> list[float]:
+    """PFSP raw weights normalized to sum 1.
+
+    Mirrors training/opponent_pool.py:pfsp_weights — `max(floor, 1 - p_i)`
+    where p_i is the opponent's Wilson lower bound vs the rule-bot eval
+    (proxy for "how hard is this opponent right now"). Higher Wilson
+    means a stronger opponent, which gets a SMALLER weight — wait, that's
+    backwards. The intent in the scoping doc is "weight opponents the
+    current model loses TO" — but at iter-0 we don't have per-opponent
+    win-rate data. The closest available proxy is the opponent's
+    rule-bot strength: stronger opponents are harder, so we weight by
+    `max(floor, opponent_strength)` instead of `1 - opponent_strength`.
+    (training/opponent_pool.py uses 1-p when p is the *current model's*
+    win rate vs that opponent; here p is the opponent's win rate vs the
+    rule-bot, which is the inverse proxy.)
+
+    Falls back to uniform if all weights collapse to the floor.
+    """
+    eps = 1e-9
+    if not pool:
+        return []
+    raw: list[float] = []
+    for entry in pool:
+        # Opponent strength proxy = its rule-bot Wilson lower at promotion.
+        # Stronger opponents (higher Wilson lower) are harder for the
+        # current model, so they get a larger weight.
+        strength = float(entry.get("wilson_lower", 0.5) or 0.5)
+        raw.append(max(floor, strength))
+    if all(w <= floor + eps for w in raw):
+        n = float(len(pool))
+        return [1.0 / n] * len(pool)
+    total = sum(raw)
+    if total <= 0:
+        n = float(len(pool))
+        return [1.0 / n] * len(pool)
+    return [w / total for w in raw]
+
+
+def _allocate_games_per_opponent(total: int, weights: list[float]) -> list[int]:
+    """Distribute `total` games across opponents proportionally to weights.
+
+    Round down to integers, hand the leftover games to the highest-weight
+    opponent (deterministic largest-remainder isn't strictly necessary at
+    these small N; the highest-weight bucket already absorbs the slack
+    naturally). When `total < len(weights)` we fall back to 1 game per
+    opponent on the top-`total` opponents (mirrors the scoping doc's
+    "min(selfplay-games, pool-size) invocations with 1 game each").
+    """
+    n = len(weights)
+    if n == 0 or total <= 0:
+        return []
+    if total < n:
+        # Sort opponents by weight desc, take top `total` and give each 1 game.
+        ranked = sorted(range(n), key=lambda i: weights[i], reverse=True)
+        out = [0] * n
+        for i in ranked[:total]:
+            out[i] = 1
+        return out
+    raw = [w * total for w in weights]
+    floored = [int(x) for x in raw]
+    used = sum(floored)
+    leftover = total - used
+    if leftover > 0:
+        # Largest-remainder assignment.
+        remainders = sorted(
+            range(n),
+            key=lambda i: (raw[i] - floored[i], weights[i]),
+            reverse=True,
+        )
+        for i in remainders[:leftover]:
+            floored[i] += 1
+    return floored
+
+
+def _augment_jsonl_with_opponent(
+    src: Path, dst_handle, opponent_iter: int, opponent_checkpoint: str,
+) -> int:
+    """Append every non-empty row from src into dst_handle, augmented with
+    an `opponentCheckpointIter` + `opponentCheckpointPath` field.
+
+    Returns the count of rows written. Rows that fail to parse as JSON are
+    written as-is (defense-in-depth — never drop selfplay data on a parse
+    error; downstream distill is tolerant of unknown extra fields).
+    """
+    n = 0
+    with src.open("r", encoding="utf8") as fh:
+        for raw in fh:
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw)
+                if isinstance(row, dict):
+                    row["opponentCheckpointIter"] = int(opponent_iter)
+                    row["opponentCheckpointPath"] = str(opponent_checkpoint)
+                dst_handle.write(json.dumps(row) + "\n")
+            except Exception:
+                # Preserve the original line on parse failure — the row is
+                # still valid distill input even without the annotation.
+                dst_handle.write(raw if raw.endswith("\n") else raw + "\n")
+            n += 1
+    return n
+
+
+def _run_pool_selfplay(
+    repo_root: Path,
+    iter_dir: Path,
+    iteration: int,
+    args: argparse.Namespace,
+    state: "R12State",
+    out_path: Path,
+    manifest_out: Path,
+    events_path: Path,
+) -> dict[str, Any]:
+    """per-game-pfsp-league-retry Option B (cross-iter opponent pool selfplay).
+
+    Replace the single sim-mcts-selfplay invocation with N invocations (one
+    per opponent in the pool) and concatenate the per-opponent JSONLs into
+    `out_path` annotated with `opponentCheckpointIter` rows. Per the
+    scoping doc (docs/ai-research/scoping/cross-iter-opponent-pool-selfplay.md),
+    per-INVOCATION opponent fixing is the correct grain at workers=24 and
+    ~5-25 games/opponent/iter — each game's opponent is fixed BEFORE the
+    game starts, so we never hit the Phase J failure mode (per-RUN
+    self-promoted-at-mode collapse).
+
+    Returns a dict to be stored in the iteration record (`rollout_pool`
+    field). If the pool resolves empty AND there's no warm-start fallback,
+    returns `{"rollout_vs_pool": False}` so the caller falls back to the
+    legacy single-opponent path.
+    """
+    pool = _resolve_pool_opponents(state, args, events_path, iteration)
+    if not pool:
+        emit_event(events_path, {
+            "stage": "selfplay-pool", "event_type": "fallback_to_single",
+            "iteration": iteration, "reason": "empty_pool", "ts": time.time(),
+        })
+        return {"rollout_vs_pool": False}
+
+    floor = float(getattr(args, "pfsp_floor", 0.05) or 0.05)
+    weights = _pfsp_weights_from_pool(pool, floor)
+    games_alloc = _allocate_games_per_opponent(int(args.selfplay_games), weights)
+    # Drop opponents that got 0 games (can only happen when total < pool size).
+    nonzero = [(p, w, g) for p, w, g in zip(pool, weights, games_alloc) if g > 0]
+    if not nonzero:
+        emit_event(events_path, {
+            "stage": "selfplay-pool", "event_type": "fallback_to_single",
+            "iteration": iteration, "reason": "zero_games_alloc", "ts": time.time(),
+        })
+        return {"rollout_vs_pool": False}
+
+    emit_event(events_path, {
+        "stage": "selfplay-pool", "event_type": "pool_resolved",
+        "iteration": iteration,
+        "pool": [
+            {"opponent_iter": p["iteration"], "checkpoint": p["checkpoint"],
+             "wilson_lower": p["wilson_lower"], "source": p["source"],
+             "weight": w, "games": g}
+            for p, w, g in nonzero
+        ],
+        "ts": time.time(),
+    })
+
+    # Each invocation gets a disjoint seed window inside the iter's overall
+    # seed slab so games never collide on seeds (mirrors the iter-stride
+    # in the legacy formula).
+    iter_seed_base = int(args.selfplay_seed_start) + int(iteration) * int(args.selfplay_games)
+    seed_cursor = iter_seed_base
+
+    per_opp_paths: list[Path] = []
+    per_opp_manifests: list[Path] = []
+    total_rows = 0
+    # Concatenate as we go to bound peak disk usage (selfplay JSONL is
+    # already largish per opponent on a full-budget run; the smoke case is
+    # tiny so this is just future-proofing).
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf8") as concat_fh:
+        for opp, weight, games in nonzero:
+            opp_iter = opp["iteration"]
+            opp_ckpt = Path(opp["checkpoint"])
+            opp_label = f"iter{opp_iter}" if opp_iter >= 0 else "warm"
+            opp_out = iter_dir / f"selfplay-vs-{opp_label}.jsonl"
+            opp_manifest = iter_dir / f"selfplay-vs-{opp_label}.manifest.json"
+            opp_log = f"selfplay-vs-{opp_label}.log"
+            per_opp_paths.append(opp_out)
+            per_opp_manifests.append(opp_manifest)
+
+            opp_onnx = ensure_onnx(repo_root, opp_ckpt)
+            emit_event(events_path, {
+                "stage": "selfplay-pool", "event_type": "invocation_started",
+                "iteration": iteration, "opponent_iter": opp_iter,
+                "opponent_checkpoint": str(opp_ckpt), "weight": weight,
+                "games": games, "seed_start": seed_cursor, "ts": time.time(),
+            })
+            with inference_context(repo_root, opp_onnx, args) as model_url:
+                run_selfplay(
+                    repo_root, iter_dir, model_url, args,
+                    opp_out, opp_manifest, iteration,
+                    games=games, seed_start=seed_cursor,
+                    log_name=opp_log,
+                )
+            seed_cursor += games
+
+            rows_written = _augment_jsonl_with_opponent(
+                opp_out, concat_fh, opp_iter, str(opp_ckpt),
+            )
+            total_rows += rows_written
+            emit_event(events_path, {
+                "stage": "selfplay-pool", "event_type": "invocation_completed",
+                "iteration": iteration, "opponent_iter": opp_iter,
+                "rows": rows_written, "ts": time.time(),
+            })
+
+    # Synthesize a top-level selfplay.manifest.json so downstream tooling
+    # that reads it (none load-bearing today, but the slice-2 schema
+    # established the field) doesn't break. Sum games + reference the
+    # per-opponent manifests.
+    manifest_payload = {
+        "args": {
+            "rollout_vs_pool": True,
+            "pool_size": int(getattr(args, "pool_size", 5)),
+            "pfsp_floor": floor,
+            "deckSampling": args.deck_sampling,
+            "out": str(out_path),
+            "manifestOut": str(manifest_out),
+            "perOpponent": [
+                {
+                    "opponent_iter": p["iteration"],
+                    "checkpoint": p["checkpoint"],
+                    "weight": w,
+                    "games": g,
+                    "manifest": str(iter_dir / f"selfplay-vs-{'iter' + str(p['iteration']) if p['iteration'] >= 0 else 'warm'}.manifest.json"),
+                }
+                for (p, w, g) in nonzero
+            ],
+        },
+        "summary": {
+            "games": int(sum(g for _, _, g in nonzero)),
+            "rows": total_rows,
+            "perOpponentInvocations": len(nonzero),
+        },
+    }
+    manifest_out.write_text(json.dumps(manifest_payload, indent=2) + "\n", encoding="utf8")
+
+    return {
+        "rollout_vs_pool": True,
+        "pool_size": int(getattr(args, "pool_size", 5)),
+        "pfsp_floor": floor,
+        "pool": [
+            {"opponent_iter": p["iteration"], "checkpoint": p["checkpoint"],
+             "wilson_lower": p["wilson_lower"], "source": p["source"]}
+            for (p, _w, _g) in nonzero
+        ],
+        "pool_pfsp_weights": [w for (_p, w, _g) in nonzero],
+        "games_per_opponent": [g for (_p, _w, g) in nonzero],
+    }
 
 
 def run_distill(
@@ -1048,6 +1476,31 @@ def parse_args() -> argparse.Namespace:
                    help="W6 recipe-fix: # of most-recent prior iters mixed into the distill set.")
     p.add_argument("--w6-replay-old-fraction", type=float, default=W6_REPLAY_OLD_FRACTION,
                    help="W6 recipe-fix: fraction of the distill mixture drawn from older vintages.")
+    # per-game-pfsp-league-retry Option B (2026-05-22): cross-iter
+    # opponent-pool selfplay. When ON, the iter's selfplay budget is split
+    # across N PFSP-weighted opponents drawn from the last --pool-size
+    # promoted iter ckpts (current run + optional --rollout-pool-state-file
+    # for warm-starting from a prior run's history). Each opponent gets its
+    # own sim-mcts-selfplay invocation; per-opponent JSONLs are concatenated
+    # into the iter's selfplay.jsonl (with `opponentCheckpointIter` row
+    # annotation) for the distill stage. Default OFF preserves the legacy
+    # single-opponent (= current promoted ckpt) self-play. See scoping at
+    # docs/ai-research/scoping/cross-iter-opponent-pool-selfplay.md.
+    p.add_argument("--rollout-vs-pool", action="store_true",
+                   help="per-game-pfsp-league-retry Option B: split the iter's "
+                        "selfplay budget across PFSP-weighted prior-iter "
+                        "opponents (default OFF — legacy single-opponent path).")
+    p.add_argument("--pool-size", type=int, default=5,
+                   help="Last N promoted iter ckpts considered for the pool "
+                        "(default 5). Mirrors OpponentPool.retain recent_promoted.")
+    p.add_argument("--pfsp-floor", type=float, default=0.05,
+                   help="Minimum PFSP weight floor before normalization "
+                        "(mirrors training/opponent_pool.py). Default 0.05.")
+    p.add_argument("--rollout-pool-state-file", default=None,
+                   help="Optional path to a prior run's orchestrator-state.json. "
+                        "When set, its promoted iters seed the pool (in addition "
+                        "to the current run's own promoted iters). The cleaner "
+                        "of the two surfaces in the scoping doc.")
     # deck-pair-sampling Slice 2 (2026-05-22): default-on uniform deck
     # sampling in self-play. Eval gate stays --deck-sampling=fixed
     # unconditionally (see run_gate); this flag controls run_selfplay only.
