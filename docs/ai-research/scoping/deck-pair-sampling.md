@@ -1,7 +1,7 @@
 # Deck-Pair Sampling For Self-Play And Eval
 
 - **Date:** 2026-05-22
-- **Status:** **P0 + Slice 1 LANDED 2026-05-22**; Step 3 verdict: **MATCHUP-BROADLY-REPRESENTATIVE (Slice 2 = no-regret) + PER-MATCHUP SPREAD 19.6pp (Slice 4 PFSP becomes attractive).** n=1,000 uniform smoke on R110-W6-repro iter-2 v3.0 ckpt — aggregate wilson_lower **0.5331** (n=1000, all 22 pairs covered ~45 g/pair). Delta vs fixed-matchup ceiling 0.5811 = **-4.8pp, just inside ±5pp tolerance**. Per-matchup point estimates range **0.4565 → 0.6522** (spread 19.6pp, exceeds the 15pp PFSP threshold). Slice 2 is still the unblock condition for the rest of the queue's training-bearing items. Tracked in queue under `deck-pair-sampling` (P1). Re-surfaces archived items §6 (deck-pair sampling) and §13 (per-matchup eval gating) from `docs/archive/ai-research/ai-performance-research-backlog.md`, parked behind throughput work and never implemented.
+- **Status:** **Slices P0+1+2 LANDED 2026-05-22; training-bearing lines UNBLOCKED.** Step 3 verdict: **MATCHUP-BROADLY-REPRESENTATIVE (Slice 2 = no-regret) + PER-MATCHUP SPREAD 19.6pp (Slice 4 PFSP becomes attractive).** n=1,000 uniform smoke on R110-W6-repro iter-2 v3.0 ckpt — aggregate wilson_lower **0.5331** (n=1000, all 22 pairs covered ~45 g/pair). Delta vs fixed-matchup ceiling 0.5811 = **-4.8pp, just inside ±5pp tolerance**. Per-matchup point estimates range **0.4565 → 0.6522** (spread 19.6pp, exceeds the 15pp PFSP threshold). Tracked in queue under `deck-pair-sampling` (P1). Re-surfaces archived items §6 (deck-pair sampling) and §13 (per-matchup eval gating) from `docs/archive/ai-research/ai-performance-research-backlog.md`, parked behind throughput work and never implemented.
 - **Routing:** active backlog reference §6b; this scoping is the canonical home until landed.
 - **v3.2 interaction:** v3.2 introduces `uma_slot_card_ids` + `uma_slot_features` (positional per-Uma-slot tokens), which carry the model's primary signal about *which deck* it is facing (the active+bench Uma identities). Deck-variety sampling tests whether the v3.2 slot-token branch generalizes across opponent archetypes or has only learned the Matikane mirror. Featurizer remains deck-agnostic (global card vocab, verified zero OOV across all 13 decks); the slot-token branch reads the same vocab via the shared `card_embed` table.
 
@@ -132,6 +132,39 @@ Run: `runs/deck-sampling-step3-smoke/gate.manifest.json` (n=1,000 uniform, R110-
 - Fixed ceiling 0.5811 reference is at n=10,000; uniform smoke is n=1,000 (~3.3× wider CI). The -4.8pp gap is within the joint Wilson half-width; on a stricter n=10,000 uniform run the gap could widen or shrink within ±3pp. Slice 3's diverse-matchup gate at n=10,000 will tighten this once it lands.
 - Per-matchup CIs at n≈45 (≈±15pp) overlap heavily across the top half of the table; the **shape** (Matikane-into-archetype-X better than Matikane-into-archetype-Y) is suggestive but not statistically promotable at this sample size.
 - The probe ran with `--prior policy` on R110-W6-repro/iter-2 v3.0 ONNX; the v3.2 ceiling is still pending re-verdict #3 per the loop_note. This Step 3 verdict applies to the v3.0 reference; the v3.2 ceiling generalization claim needs an analogous uniform smoke on a v3.2 ckpt before training-bearing v3.2 work resumes under Slice 2.
+
+## Slice 2 validation — 2026-05-22
+
+Orchestrators wired (all three):
+
+- `training/r12_orchestrator.py`: `run_selfplay` passes `--deck-sampling=$args.deck_sampling` (default `uniform`) to Rust `sim-mcts-selfplay`; `run_gate` pins `--deck-sampling=fixed` unconditionally.
+- `training/dagger_orchestrator.py`: trace-gen `run_evaluator` calls forward `extra=["--deck-sampling", args.deck_sampling]` to TS `sim:evaluate-model`; eval gate via `run_eval_gate` stays fixed.
+- `training/ppo_orchestrator.py`: `rollout_with_stochastic_serve` forwards the same `extra` to `run_evaluator`; policy gate via `run_policy_gate_with_serve` stays fixed.
+
+TS plumbing: `--deck-sampling=fixed|uniform|pair=<P>:<O>` added to `backend/src/sim/evaluateModelVsHeuristic.ts` CLI (sampler mirrors the Rust row-major decomposition exactly: `(seedStart + gameIndex) % (n_player * n_ai)`; deterministic for the same `(seedStart, gameIndex)`). The flag is optional on `EvaluateModelArgs` so in-repo callers (evalGate.ts, throughputProbe.ts, rebaseline.ts, r7TeacherAgreementProbe.ts) stay byte-identical without each opting in.
+
+Manifest passthrough: each orchestrator persists `selfplay_deck_sampling` (CLI-chosen) + `eval_deck_sampling="fixed"` into `orchestrator-state.json`, and emits the mode in the `run_started` event for forward readers. Pre-Slice-2 state files default-read `selfplay_deck_sampling="uniform"` on load.
+
+Smoke evidence (`runs/deck-sampling-slice2-smoke/`, R110-W6-repro/iter-2 v3.0 ckpt, 1 iter, selfplay-games=30, eval-games=30, mcts-leaf=rollout, mcts-sims=100, workers=24, ~19 s wall):
+
+| Check | Result |
+| --- | --- |
+| Orchestrator completes 1 iter cleanly | ✓ promote=true, wl=0.4573 at n=60 fixed-gate |
+| `selfplay.jsonl` carries `playerDeckId` + `opponentDeckId` | ✓ on every row |
+| Selfplay deck-pair spread | **22 / 22 unique pairs covered** in 30 games (full cross-product visible in 30 games × ~7 decisions/game) |
+| `selfplay.manifest.json args.deckSampling` | `"uniform"` |
+| `gate.manifest.json args.deckSampling` | `"fixed"` |
+| `gate.manifest.json.summary.perMatchup` | **ABSENT** (Rust sim-eval-gate only emits it when sampling != fixed) |
+| `orchestrator-state.json.selfplay_deck_sampling` | `"uniform"` |
+| `orchestrator-state.json.eval_deck_sampling` | `"fixed"` |
+
+Per-iter timings (Rust path): selfplay 8.96 s; distill 3.88 s; gate 3.69 s. Total iter wall 16.5 s consistent with `throughput-spike-slice2-acceptance/` per-iter ~50 s at games=60 (linear in games).
+
+Build/test: `npm run build` (TS) + `cargo build --release -p sim-cli` (Rust) green; `npm run test:train` 10/10 PASS; `npm run test:dagger-orchestrator` PASS (3-iter loop with default uniform sampling). `npm run test:ppo-smoke` fails identically with and without these changes (pre-existing init-checkpoint architecture drift; not a Slice 2 regression).
+
+### Slice 3 — gating note
+
+Slice 3 (diverse-matchup eval gate at n=10k with per-matchup Wilson lower bounds) is unblocked but not yet user-gated to action. We have the broadly-representative verdict from the Step 3 smoke; diverse-matchup gating becomes urgent if and only if a recipe-axis verdict comes back that is suspected to be matchup-conditional (e.g. an HP-sweep iter shows fixed-gate gain but the worst-matchup tail collapses). Until then it stays at "scoped, do not auto-launch".
 
 ## Falsification
 
