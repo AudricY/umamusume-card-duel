@@ -6,6 +6,23 @@ in progress, scoping, or analysis docs. See `docs/ai-research/README.md`.
 
 ## Current Anchor
 
+**User directive 2026-05-22: no more AI research or training without deck
+variety.** Every post-R110 measurement (the 0.5811 tight-gate ceiling, the
+iter-2-peak-then-rot characterization, the v3.0/v3.1/v3.2 representation
+verdicts) was taken on a single near-mirror Matikane vs Matikane matchup; the
+opponent default silently falls back to AI-flavor Matikane because
+`defaultAiOpponentDeckId='riceShowerHaruUrara'` does not match any id in
+`aiPremadeDecks`. 11 AI decks and 2 player decks otherwise unused in sim.
+Featurizer is deck-agnostic (verified zero OOV across all decks). All
+training-bearing forward lines (W6-fix HP sweep, per-game-PFSP league retry,
+value-head data-program Stages 2/3, any new self-play loop) are BLOCKED until
+`deck-pair-sampling` Slices P0+1+2 land (defaults-bug fix + deck-legality
+smoke + `--deck-sampling` plumbing + data-gen rollouts default-on uniform).
+Measurement-only work on existing checkpoints (tight-gate re-verdict #3,
+high-sim regime probe) remains unblocked. Canonical scope:
+`docs/ai-research/scoping/deck-pair-sampling.md`; queue
+`deck-pair-sampling` (P1).
+
 As of 2026-05-18:
 
 - **Production stays pinned 96-d.** Rollout-leaf MCTS at W6 iter-2 is the
@@ -55,18 +72,15 @@ As of 2026-05-18:
 
 ## Active Search-Wrapped Frontier
 
-0. **Contested-state coverage pilot (R16-TD)** — DONE-FALSIFIED 2026-05-21
-   (chunk 5j n=1000 confirmation, monotonicity broken + margin sign-flipped
-   −1.8pp). See `docs/ai-research/progress/r16.md`. **Tight-gate re-verdict
-   candidate**: kill verdict held at the throughput-constrained n; not on the
-   immediate re-verdict shortlist but worth flagging.
+0. **Contested-state coverage pilot — DONE-FALSIFIED 2026-05-21** (chunk 5j
+   n=1000; monotonicity broken, margin sign-flipped −1.8pp). Canonical:
+   `docs/ai-research/progress/r16.md`.
 
-0a. **R16-P2 per-Uma slot tokens — model-feature upgrade, user-gate now
-   OPEN.** The 2026-05-19 "land all model feature upgrade items first"
-   directive is the explicit user call the prior guardrail required. A 3–4-day
-   model/ONNX migration; sequence *after* the cheap coverage pilot
-   (leverage-per-cost). Scope: `docs/ai-research/scoping/r16-model-feature-backlog-refinement.md`
-   § "P2 - Per-Uma Slot Tokens"; queue `r16-p2-per-uma-slot-tokens`.
+0a. **R16-P2 per-Uma slot tokens — DONE-MIXED-SIGNAL 2026-05-21.** C1-C7
+   landed bit-exact; C8 acceptance NO-GO at best v3.2 wl 0.5955. C8 iter-0 is
+   the re-verdict #3 candidate (+0.0144 above 0.5811 tight-gate ceiling,
+   within sampling noise). Queue `r16-p2-per-uma-slot-tokens`; canonical
+   `docs/ai-research/progress/r16.md`.
 
 0b. **W6 loop anti-degradation recipe — DEPRIORITIZED ordering, REFRAMED
    role (ceiling-path step A).** Demoted from TOP PRIORITY to P3 by the
@@ -90,50 +104,26 @@ As of 2026-05-18:
    and/or reduce replay old-fraction (0.40) / window (3). Canonical:
    `docs/ai-research/progress/r110.md` §4c; queue `w6-loop-anti-degradation`.
 
-0d. **Value-head leaf at MCTS — ceiling-path step B (R111 recipe-axis).**
-   Surfaced 2026-05-21 as its own forward-line entry (previously buried as a
-   one-line pointer inside the DONE `r12-throughput` queue entry). Root
-   mechanism behind the iter-2-peak-then-rot ceiling: in rollout-leaf mode
-   the trained value head is never used at gate/self-play
-   (`backend/src/sim/mcts.ts:552-555`), so the loop has no improving signal
-   feeding back into MCTS across iters (rule-bot rollouts at leaves are
-   fixed quality). Re-enabling the value head at leaves gives the loop a
-   positive gradient toward ground-truth `z`, which is what lets visits
-   ratchet *sharper* across iters instead of softer. Trigger condition:
-   item 0b HP sweep ran and did NOT clear the 0.6042 ceiling. COST: changes
-   the learning targets, breaks the R110 A/B chain (96-d 0.6479 production
-   claim is rollout-leaf-based); any run on this axis establishes a new
-   baseline. **Predecessor data program (item 4 below) is the binding
-   constraint, not in flight.** All prior value-head-leaf attempts (R13.W3
-   PARTIAL, R13.W8 loop regressed, R14 crossover never crossed) used the
-   shared-trunk single-scalar head trained on R4-era data; throwing epochs
-   at that recipe is closed. Item 4 enumerates the 3-stage ladder
-   (post-W6 corpus retrain → action-value head → architectural change) that
-   produces a value head this item can consume. The `training-data-deep-
-   program` 3b arm tested only the *policy* side (DPO + soft-CE BC) and is
-   now done-negative; the value side never ran. DEFERRED + USER-GATED.
-   Scope pointer: `docs/ai-research/scoping/r12-selfplay-gate-throughput.md`
-   item 4; queue `value-head-leaf-recipe-axis`.
+0d. **Value-head leaf at MCTS — CLOSED as strength lever 2026-05-21.**
+   vhleaf loop on the calibrated C8-W6FIX-ON seed produced wl=0.4250 /
+   0.4413 / 0.4209 / 0.4046 — descends after iter-1, best falls below R14.A
+   0.452 baseline, no iter clears the 0.5811 ceiling. Falsifies "calibration
+   was the missing piece." Closed as a strength lever on this seed/recipe.
+   Queue `value-head-leaf-recipe-axis`; canonical
+   `docs/ai-research/progress/r16.md`.
 
-0c. **Fork B — label-quality test matrix (umbrella over the W6 dose
-   sweep).** Raises target/teacher quality at *fixed* capacity and volume
-   (both axes closed); the M6 anti-drift arm is the W6 dose sweep, not a
-   re-plan. Deprioritized with the W6 sweep above; gated behind a
-   near-zero-cost read-only label-quality probe before any user-gated loop
-   compute. Canonical:
+0c. **Fork B — label-quality test matrix.** Umbrella over W6 dose sweep;
+   deprioritized with the sweep, gated behind a near-zero-cost read-only
+   label-quality probe. Scope:
    `docs/ai-research/scoping/forkb-label-quality-loop-recipe.md`.
 
-1. **R110 W6 reproduction — DONE.**
-   Verdict MARGINAL (best-promoted iter-2 Wilson lower 0.6042, in the
-   0.60-0.6479 band); reproduced-but-not-superior, not promoted; pinned 96-d
-   stays production. R16-P0 embedding fix confirmed working.
-   `docs/ai-research/progress/r110.md`.
+1. **R110 W6 reproduction — DONE-MARGINAL.** Best-promoted iter-2 wl=0.6042
+   (n=120), tightened to 0.5811 (n=10,000) by re-verdict #1; pin unchanged.
+   Canonical: `docs/ai-research/progress/r110.md`.
 
-2. **R16-P1 temporal/turn-state features — ABLATED NO-GO.**
-   v3.1 164-d implemented end-to-end (commits `357f0d6`/`3ce1404`); the
-   faithful strength ablation produced **no Wilson-lower win** (v3.1 ≈ v3.0,
-   best-promoted 0.5955 < v3.0 0.6042). v3.1 NOT promoted; production stays
-   pinned 96-d. Null strength signal. Canonical:
+2. **R16-P1 temporal/turn-state features — ABLATED NO-GO.** v3.1 164-d
+   produced no Wilson-lower win; re-verdict #2 confirmed v3.1 = v3.0 at
+   n=10,000. Representation axis CLOSED. Canonical:
    `docs/ai-research/progress/r16.md`.
 
 3. **GPU-fed stronger MCTS — P1 scoping, not implementation.**
@@ -211,6 +201,22 @@ Forward items, ordered by user prioritization 2026-05-21:
    that made PPO Phase J prohibitive. Worth a fresh scoping pass after
    `rust-port-orchestrator-wiring` lands.
 
+6b. **Deck-pair sampling for self-play and eval — P1, BLOCKING all new training (user directive 2026-05-22).**
+   Surfaced 2026-05-22 via deck-selection investigation: every post-R110
+   measurement (the 0.5811 tight-gate ceiling, the iter-2-peak-then-rot
+   characterization, the v3.0/v3.1/v3.2 representation verdicts) was taken on
+   a single near-mirror Matikane vs Matikane matchup. The opponent default
+   `defaultAiOpponentDeckId='riceShowerHaruUrara'` does not match any id in
+   `aiPremadeDecks`; the fallback silently lands on `ai_decks.first()`
+   (AI-flavor Matikane). 11 AI decks and 2 player decks otherwise unused in
+   sim. Featurizer is deck-agnostic (global card vocab covers every card in
+   every deck, zero OOV verified). Re-surfaces archived items §6 + §13 from
+   `docs/archive/ai-research/ai-performance-research-backlog.md`. Lands
+   ADDITIVE — fixed-matchup tight-gates stay; diverse-matchup gate is a second
+   gate. Scope: `docs/ai-research/scoping/deck-pair-sampling.md`; queue
+   `deck-pair-sampling`. P0 (defaults-bug fix + deck-legality smoke) is the
+   cheapest autonomous step; Slices 1-3 are user-gated.
+
 7. **Per-game PFSP league retry — P3, deferred-revisit.**
    Infra already built (`training/opponent_pool.py`: snapshots, PFSP weights,
    retention cap, cycling alarm, JSON persistence; wired into
@@ -240,31 +246,22 @@ relaxation) in
 `docs/ai-research/scoping/r16-training-data-backlog-refinement.md` (Fork A
 section).
 
-1. **Corpus retention + state-overlap audit — DONE.**
-   Canonical report:
-   `docs/ai-research/analysis/training-data-coverage-audit.md`. Finding:
-   retained rows are bottlenecked by contested decision-state coverage, not
-   schema/card-id loss or generic row count.
+1. **Corpus retention + state-overlap audit — DONE.** Finding: retained rows
+   bottlenecked by contested decision-state coverage. Report:
+   `docs/ai-research/analysis/training-data-coverage-audit.md`.
 
-2. **Rule-bot-covered state corpus recipe** + **3. Preference pairs on
-   rule-bot-covered states (DPO/BT)** — both SUPERSEDED 2026-05-21 by
-   `training-data-deep-program` done-negative (chunks 5a-i,
-   `docs/ai-research/progress/r16.md`). High-sim-regime caveat: kill
-   criterion (argmax-flip at 4x sims) measured at 400-800 sims; at 50,000
-   sims may differ — queue `high-sim-mcts-regime-probe`.
+2. **Rule-bot-covered corpus + DPO preference pairs — SUPERSEDED 2026-05-21**
+   by `training-data-deep-program` done-negative. High-sim-regime caveat
+   feeds `high-sim-mcts-regime-probe`. Canonical:
+   `docs/ai-research/progress/r16.md`.
 
-4. **Side-conditioned retained-data balancing — P2.**
-   If side weakness is data-linked, balance retained player/opponent decision
-   states within major phase/action buckets and require side-split gate
-   reporting. **Conditional + NOT a W6 predecessor** (option B): it fires
-   only if side weakness proves data-linked; gating the W6 sweep behind it
-   could block W6 indefinitely.
+4. **Side-conditioned retained-data balancing — P2, conditional.** Fires
+   only if side weakness proves data-linked; balance retained player/opponent
+   decision states within major phase/action buckets. Not a W6 predecessor.
 
-5. **Rule-bot mistake catalog + forced-state suite — P3.**
-   Build hand-audited tactical states that explain where MCTS beats the rule
-   bot and feed the fixture/eval tooling backlog. **P3 manual + NOT a W6
-   predecessor** (option B): fires on its own track, not in the HP-gate
-   chain.
+5. **Rule-bot mistake catalog + forced-state suite — P3 manual.** Build
+   hand-audited tactical states explaining where MCTS beats the rule bot;
+   feeds fixture/eval tooling. Not a W6 predecessor.
 
 ## Guardrails
 
