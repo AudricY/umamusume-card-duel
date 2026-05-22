@@ -50,6 +50,7 @@ class MctsSelfPlaySample:
     value_target: float
     sample_weight: float
     policy_target: np.ndarray  # shape (num_actions,), sums to 1
+    q_target: np.ndarray | None  # shape (num_actions,), root search mean-Q per action
     example: dict[str, Any]
     # R16-P0: per-zone packed card-vocab indices (8 zones, fixed
     # `CARD_ID_SHAPES`) and per-action source/target idx (shape `(A, 2)`).
@@ -170,6 +171,18 @@ def load_mcts_selfplay_samples(
                 continue
             policy_target = arr / total
             target_index = int(np.argmax(policy_target))
+            raw_root_mean_q = example.get("rootMeanQ")
+            q_target: np.ndarray | None = None
+            if raw_root_mean_q is not None:
+                q_arr = np.asarray(raw_root_mean_q, dtype=np.float32)
+                if q_arr.shape != (len(actions),):
+                    raise RowSchemaError(
+                        f"Bad rootMeanQ at {path}:{line_number}: got shape {q_arr.shape}, "
+                        f"expected ({len(actions)},)"
+                    )
+                if not np.isfinite(q_arr).all():
+                    raise RowSchemaError(f"Bad rootMeanQ at {path}:{line_number}: contains non-finite values")
+                q_target = np.clip(q_arr, -1.0, 1.0).astype(np.float32)
             state_features = encode_state(example.get("observation", {}), ablations=ablations)
             action_features = legal_actions_to_features(actions, ablations=ablations)
             if state_features.shape != (state_dim,):
@@ -225,6 +238,7 @@ def load_mcts_selfplay_samples(
                 value_target=value_target,
                 sample_weight=max(0.05, weight),
                 policy_target=policy_target,
+                q_target=q_target,
                 example=example,
                 card_ids_by_zone=card_ids_by_zone,
                 action_card_idx=action_card_idx,
@@ -249,6 +263,8 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
     value_targets = np.zeros((batch_size,), dtype=np.float32)
     sample_weights = np.ones((batch_size,), dtype=np.float32)
     policy_targets = np.zeros((batch_size, max_actions), dtype=np.float32)
+    q_targets = np.zeros((batch_size, max_actions), dtype=np.float32)
+    q_target_mask = np.zeros((batch_size, max_actions), dtype=np.bool_)
 
     # R16-P0: pack the v3 card-embedding tensors, mirroring
     # `collate_policy_batch`. `max_cards_per_zone` is the global cap (30,
@@ -307,6 +323,9 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
         value_targets[row] = sample.value_target
         sample_weights[row] = sample.sample_weight
         policy_targets[row, :count] = sample.policy_target
+        if sample.q_target is not None:
+            q_targets[row, :count] = sample.q_target
+            q_target_mask[row, :count] = True
         if card_ids_buffer is not None and action_card_idx_buffer is not None:
             for zone_index, zone in enumerate(ZONE_ORDER):
                 zone_arr = sample.card_ids_by_zone[zone]  # type: ignore[index]
@@ -330,6 +349,8 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
         "value_targets": torch.from_numpy(value_targets),
         "sample_weights": torch.from_numpy(sample_weights),
         "policy_targets": torch.from_numpy(policy_targets),
+        "q_targets": torch.from_numpy(q_targets),
+        "q_target_mask": torch.from_numpy(q_target_mask),
     }
     if card_ids_buffer is not None and action_card_idx_buffer is not None:
         batch["card_ids_by_zone"] = torch.from_numpy(card_ids_buffer)

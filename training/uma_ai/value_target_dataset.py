@@ -105,6 +105,7 @@ def _row_to_sample(
         value_target=value_target,
         sample_weight=max(0.05, weight),
         policy_target=policy_target,
+        q_target=None,
         example=example,
         card_ids_by_zone=card_ids_by_zone,
         action_card_idx=action_card_idx,
