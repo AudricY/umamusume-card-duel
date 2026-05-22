@@ -127,6 +127,30 @@ n=1000/side (chunk 5j) found all three pilot point estimates fall BELOW
 the n=1000 95% CIs and the slope sign flips — the pilot was on the low
 tail of sampling noise.
 
+#### Chunk 5j — n=1000 confirmation gate FALSIFIES cheap-slope (full table)
+
+Pre-registered n=1000/side confirmation gate run against the same three
+swept points (Option 1 contested resampling, same training recipe, same
+gate, side-balanced Wilson-lower). Setup-error rule-outs both passed:
+
+- **Sanity check PASSED**: n=300 baseline reproduces pilot 0.2416 within
+  tolerance (0.2447, Δ +0.003, well inside ±0.04 Wilson noise).
+- **Coverage smoke MATCHED pilot exactly**: `legal_action_count`
+  0.2022 / 0.3001 / 0.4500 (data path identical to pilot).
+
+| Coverage point | side-bal Wilson-lower (n=1000) | pilot (n=300) | Δ |
+| --- | ---: | ---: | ---: |
+| baseline | **0.2840** | 0.2416 | +0.0424 |
+| frac030 | **0.2860** | 0.2572 | +0.0288 |
+| frac045 | **0.2656** | 0.2635 | +0.0021 |
+
+- **Monotonicity broken**: 0.2840 < 0.2860 > 0.2656 — frac045 regressed
+  below baseline.
+- **Margin (frac045 − baseline) SIGN-FLIPPED**: −0.0184 (n=1000) vs
+  +0.0219 (pilot n=300).
+- All three pilot point estimates fall BELOW the n=1000 95% CIs.
+- Worse side stays `player` across all swept points (consistent w/ pilot).
+
 ### Methodology / discipline (full)
 
 Pre-registered protocol followed in order: (1) no-op invariant — loader
