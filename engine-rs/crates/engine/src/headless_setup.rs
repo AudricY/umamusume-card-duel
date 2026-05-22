@@ -5,6 +5,7 @@
 //! caller's `with_rng` scope so they're sequenced against the same
 //! outer PRNG the recorder used.
 
+use crate::core::card_id::CardId;
 use crate::core::constants::{AiDifficulty, CoinFlipResult, SideId};
 use crate::core::decks::{default_ai_opponent_deck, default_player_deck};
 use crate::core::random::random_float;
@@ -23,11 +24,36 @@ use crate::flow::ai::setup_selection::choose_ai_setup_selection;
 /// Panics if the AI cannot pick a basic for the player's active slot
 /// (mirrors the TS `throw new Error("Unable to choose AI setup …")`).
 pub fn setup_ai_vs_ai_game() -> GameState {
-    let player_deck = default_player_deck().to_vec();
-    let opp_deck = default_ai_opponent_deck().to_vec();
+    setup_ai_vs_ai_game_with_decks(None, None)
+}
+
+/// Variant of `setup_ai_vs_ai_game()` that lets the caller override the
+/// player / opponent deck card lists.
+///
+/// Either side accepts an `Option<&[CardId]>`: `None` keeps the default
+/// (matches `setup_ai_vs_ai_game()` exactly — same bytes for player and
+/// opponent), `Some(slice)` uses the explicit list. Used by:
+///
+/// - `--deck-sampling=uniform|pair=...` plumbing in the sim-cli binaries.
+/// - The deck-pair legality smoke
+///   (`engine-rs/crates/engine/tests/deck_pair_legality.rs`).
+///
+/// Calling `setup_ai_vs_ai_game_with_decks(None, None)` is byte-identical
+/// to `setup_ai_vs_ai_game()`; this is the seam Slice 1 of the
+/// `deck-pair-sampling` scoping doc plumbs through the CLI.
+pub fn setup_ai_vs_ai_game_with_decks(
+    player_deck: Option<&[CardId]>,
+    opponent_deck: Option<&[CardId]>,
+) -> GameState {
+    let default_player = default_player_deck();
+    let default_opp = default_ai_opponent_deck();
+    let player_slice = player_deck.unwrap_or(default_player);
+    let opp_slice = opponent_deck.unwrap_or(default_opp);
+    let player_deck_vec = player_slice.to_vec();
+    let opp_deck_vec = opp_slice.to_vec();
     let mut state = create_game(
-        &player_deck,
-        &opp_deck,
+        &player_deck_vec,
+        &opp_deck_vec,
         "Opponent",
         AiDifficulty::Hard,
         false,

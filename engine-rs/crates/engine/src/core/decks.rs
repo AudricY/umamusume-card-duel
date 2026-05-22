@@ -49,6 +49,12 @@ pub struct DeckRegistry {
 pub struct Deck {
     pub id: String,
     pub card_ids: Vec<CardId>,
+    /// Number of card ids in the source JSON entry, before catalog
+    /// interning. Used by the deck-legality smoke
+    /// (`deck_pair_legality.rs`) to detect silent drops where
+    /// `intern_deck` warned-and-skipped an unknown card id. For a
+    /// healthy deck this equals `card_ids.len()`.
+    pub source_card_count: usize,
 }
 
 pub fn decks() -> &'static DeckRegistry {
@@ -61,6 +67,7 @@ fn load() -> DeckRegistry {
         serde_json::from_str(DECKS_JSON).expect("premadeDecks.json must parse");
     let cat = catalog();
     let intern_deck = |d: PremadeDeckJson| -> Deck {
+        let source_card_count = d.card_ids.len();
         let card_ids: Vec<CardId> = d
             .card_ids
             .iter()
@@ -71,7 +78,7 @@ fn load() -> DeckRegistry {
                 })
             })
             .collect();
-        Deck { id: d.id, card_ids }
+        Deck { id: d.id, card_ids, source_card_count }
     };
     DeckRegistry {
         default_player_deck_id: parsed.default_player_deck_id,
@@ -151,7 +158,7 @@ mod tests {
     fn deck_registry_loads_known_default_ids() {
         let r = decks();
         assert_eq!(r.default_player_deck_id, "matikanetannhauser");
-        assert_eq!(r.default_ai_opponent_deck_id, "riceShowerHaruUrara");
+        assert_eq!(r.default_ai_opponent_deck_id, "matikanetannhauser");
     }
 
     #[test]
@@ -161,12 +168,17 @@ mod tests {
         // which list it's in.
         assert!(deck_by_id("matikanetannhauser").is_some());
         assert!(deck_by_id("riceShower").is_some());
-        // `defaultAiOpponentDeckId` is "riceShowerHaruUrara" in the JSON,
-        // but no deck actually has that id — TS gameData.ts also misses
-        // and falls through to the first ai deck via the cascade. Our
-        // lookup returns None for the missing id; `default_ai_opponent_deck`
-        // handles the cascade.
-        assert!(deck_by_id("riceShowerHaruUrara").is_none());
+        // `defaultAiOpponentDeckId` round-trips cleanly now that it
+        // matches the AI Matikane id (P0a defaults fix, 2026-05-22). Prior
+        // to the fix, the JSON shipped `"riceShowerHaruUrara"` — an id no
+        // deck carries — so callers silently fell through to
+        // `ai_decks.first()` via `default_ai_opponent_deck()`'s cascade.
+        let r = decks();
+        assert!(
+            deck_by_id(&r.default_ai_opponent_deck_id).is_some(),
+            "defaultAiOpponentDeckId must round-trip; current value {} has no matching deck",
+            r.default_ai_opponent_deck_id,
+        );
         assert!(deck_by_id("nope-not-a-real-deck-id").is_none());
     }
 }
