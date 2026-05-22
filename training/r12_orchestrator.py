@@ -1068,7 +1068,10 @@ def run_crossover_probe(
         "--out", str(probe_out),
         "--ratio-cap", str(args.crossover_ratio_cap),
         "--pearson-min", str(args.crossover_pearson_min),
+        "--state-dim", str(args.state_dim),
     ]
+    if args.uma_slot_tokens:
+        cmd.append("--uma-slot-tokens")
     if args.crossover_mse_floor is not None:
         cmd.extend(["--mse-floor", str(args.crossover_mse_floor)])
     if args.crossover_mse_floor_manifest:
