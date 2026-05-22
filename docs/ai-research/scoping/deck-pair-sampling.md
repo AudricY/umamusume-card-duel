@@ -1,7 +1,7 @@
 # Deck-Pair Sampling For Self-Play And Eval
 
 - **Date:** 2026-05-22
-- **Status:** ACTIVE FORWARD LINE — gates all new training per user directive 2026-05-22A ("no more AI research or training without deck variety"). Combines with directive 2026-05-22B ("all training and research uses per-Uma slot tokens (v3.2) from now on"): any new training must satisfy BOTH constraints. P0 + Slices 1, 2 are the unblock condition for the rest of the queue's training-bearing items. Tracked in queue under `deck-pair-sampling` (P1). Re-surfaces archived items §6 (deck-pair sampling) and §13 (per-matchup eval gating) from `docs/archive/ai-research/ai-performance-research-backlog.md`, parked behind throughput work and never implemented.
+- **Status:** **P0 + Slice 1 LANDED 2026-05-22**; Step 3 verdict: **MATCHUP-BROADLY-REPRESENTATIVE (Slice 2 = no-regret) + PER-MATCHUP SPREAD 19.6pp (Slice 4 PFSP becomes attractive).** n=1,000 uniform smoke on R110-W6-repro iter-2 v3.0 ckpt — aggregate wilson_lower **0.5331** (n=1000, all 22 pairs covered ~45 g/pair). Delta vs fixed-matchup ceiling 0.5811 = **-4.8pp, just inside ±5pp tolerance**. Per-matchup point estimates range **0.4565 → 0.6522** (spread 19.6pp, exceeds the 15pp PFSP threshold). Slice 2 is still the unblock condition for the rest of the queue's training-bearing items. Tracked in queue under `deck-pair-sampling` (P1). Re-surfaces archived items §6 (deck-pair sampling) and §13 (per-matchup eval gating) from `docs/archive/ai-research/ai-performance-research-backlog.md`, parked behind throughput work and never implemented.
 - **Routing:** active backlog reference §6b; this scoping is the canonical home until landed.
 - **v3.2 interaction:** v3.2 introduces `uma_slot_card_ids` + `uma_slot_features` (positional per-Uma-slot tokens), which carry the model's primary signal about *which deck* it is facing (the active+bench Uma identities). Deck-variety sampling tests whether the v3.2 slot-token branch generalizes across opponent archetypes or has only learned the Matikane mirror. Featurizer remains deck-agnostic (global card vocab, verified zero OOV across all 13 decks); the slot-token branch reads the same vocab via the shared `card_embed` table.
 
@@ -80,6 +80,58 @@ Once Slice 3 reports per-matchup Wilson lower bounds, weight rollout sampling to
 - Aggregate uniform Wilson lower **within ±5pp of the fixed-matchup 0.5811 ceiling** ⇒ the matchup is broadly representative; the existing program's verdicts are likely generalizable. Continue with Slice 2 (data-gen sampling) as a no-regret distribution widener.
 - Aggregate uniform Wilson lower **>5pp below 0.5811** ⇒ the model is matchup-specifically tuned. Existing ceiling claims are matchup-conditional. Slice 2 + Slice 3 both move up in priority — every future recipe-axis verdict should be measured on both gates.
 - Per-matchup point estimates with **>15pp spread** ⇒ there are easy and hard matchups; PFSP-weighted training (Slice 4) becomes attractive.
+
+## Step 3 verdict — 2026-05-22
+
+Run: `runs/deck-sampling-step3-smoke/gate.manifest.json` (n=1,000 uniform, R110-W6-repro/iter-2 v3.0 ckpt, sims=100, k=3, rollout-steps=200, prior=policy, leaf=rollout, workers=16, wall 68.9 s).
+
+| Metric | Value | Reference / interpretation |
+| --- | --- | --- |
+| Aggregate winRate | 0.5640 (564/1000) | vs fixed-matchup history 0.5908 (R110-W6 n=10k) |
+| Aggregate wilson_lower | **0.5331** | **vs fixed-matchup ceiling 0.5811 → -4.8pp, inside ±5pp** |
+| Aggregate wilson_upper | 0.5944 | half-width ±3.07pp at n=1000 |
+| Player-side wilson_lower | 0.5990 (wr 0.6420, 321/500) | Matikane-on-player is comfortable across opponents |
+| Opponent-side wilson_lower | 0.4425 (wr 0.4860, 243/500) | Matikane-on-opponent is the harder side |
+| Per-matchup spread | **19.6pp** (0.4565 → 0.6522) | **exceeds 15pp PFSP threshold** |
+
+**Per-matchup signal (sorted by point-estimate win-rate, n≈45/matchup, per-matchup CI ≈ ±15pp — signal-spotting only, not promotion-grade):**
+
+| matchup | games | wins | winRate |
+| --- | ---:| ---:| ---:|
+| matikanetannhauser:daiwaScarlet | 46 | 30 | 0.6522 |
+| matikanetannhauser:riceShower | 45 | 29 | 0.6444 |
+| riceShower:manhattanCafe | 45 | 28 | 0.6222 |
+| matikanetannhauser:matikanetannhauser (legacy fixed-gate pair) | 45 | 27 | 0.6000 |
+| riceShower:oguriCap | 45 | 27 | 0.6000 |
+| riceShower:superCreek | 45 | 27 | 0.6000 |
+| matikanetannhauser:manhattanCafe | 46 | 27 | 0.5870 |
+| matikanetannhauser:vodka | 46 | 27 | 0.5870 |
+| riceShower:matikanetannhauser | 46 | 27 | 0.5870 |
+| riceShower:daiwaScarlet | 45 | 26 | 0.5778 |
+| matikanetannhauser:symboliRudolf | 46 | 26 | 0.5652 |
+| matikanetannhauser:tamamoCross | 46 | 26 | 0.5652 |
+| riceShower:riceShower | 45 | 25 | 0.5556 |
+| riceShower:symboliRudolf | 45 | 25 | 0.5556 |
+| riceShower:vodka | 45 | 25 | 0.5556 |
+| matikanetannhauser:oguriCap | 46 | 25 | 0.5435 |
+| riceShower:tamamoCross | 45 | 24 | 0.5333 |
+| matikanetannhauser:mihonoBourbon | 46 | 24 | 0.5217 |
+| riceShower:agnesDigital | 45 | 23 | 0.5111 |
+| matikanetannhauser:agnesDigital | 46 | 23 | 0.5000 |
+| riceShower:mihonoBourbon | 45 | 22 | 0.4889 |
+| **matikanetannhauser:superCreek (hardest)** | 46 | 21 | 0.4565 |
+
+### Acceptance branches taken
+
+- **(within ±5pp branch)** Aggregate uniform wl=0.5331 vs fixed 0.5811 = **-4.8pp; matchup-broadly-representative.** Existing v3.0 ceiling claims are likely generalizable. **Slice 2 (data-gen rollouts default-on uniform) is no-regret** — proceed.
+- **(per-matchup spread branch)** 19.6pp spread (Matikane vs Daiwa Scarlet = 0.65, Matikane vs Super Creek = 0.46) **exceeds the 15pp threshold** the scoping doc flagged. **Slice 4 (PFSP-weighted deck sampling) becomes attractive** post-Slice-2.
+- Slice 3 priority unchanged — per-matchup Wilson lower bounds at higher n are still needed before any per-matchup gating decision; n=45 per pair is signal-spotting, not promotion-grade.
+
+### Caveats
+
+- Fixed ceiling 0.5811 reference is at n=10,000; uniform smoke is n=1,000 (~3.3× wider CI). The -4.8pp gap is within the joint Wilson half-width; on a stricter n=10,000 uniform run the gap could widen or shrink within ±3pp. Slice 3's diverse-matchup gate at n=10,000 will tighten this once it lands.
+- Per-matchup CIs at n≈45 (≈±15pp) overlap heavily across the top half of the table; the **shape** (Matikane-into-archetype-X better than Matikane-into-archetype-Y) is suggestive but not statistically promotable at this sample size.
+- The probe ran with `--prior policy` on R110-W6-repro/iter-2 v3.0 ONNX; the v3.2 ceiling is still pending re-verdict #3 per the loop_note. This Step 3 verdict applies to the v3.0 reference; the v3.2 ceiling generalization claim needs an analogous uniform smoke on a v3.2 ckpt before training-bearing v3.2 work resumes under Slice 2.
 
 ## Falsification
 
