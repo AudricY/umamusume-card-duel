@@ -107,8 +107,9 @@ class ModelConfig:
     uses_q_value_head: bool = False
     # Q-head scalarization used only when `uses_q_value_head=True`:
     # "max" preserves the first Stage-2 behavior, "mean" reduces max-Q
-    # overestimation by averaging legal Qs, and "policy_mean" uses the
-    # model's masked policy distribution as action weights.
+    # overestimation by averaging legal Qs, "top2_mean"/"top3_mean" average
+    # the best legal Q values, and "policy_mean" uses the model's masked
+    # policy distribution as action weights.
     q_value_scalar: str = "max"
 
     def to_dict(self) -> dict[str, int | float]:
@@ -669,6 +670,16 @@ class CandidatePolicyNet(nn.Module):
                 legal = action_mask.bool()
                 legal_count = legal.sum(dim=1).clamp_min(1).to(q_values.dtype)
                 value = q_values.masked_fill(~legal, 0.0).sum(dim=1) / legal_count
+            elif scalar_mode in {"top2_mean", "top3_mean"}:
+                k = 2 if scalar_mode == "top2_mean" else 3
+                legal = action_mask.bool()
+                sorted_q = masked_q.sort(dim=1, descending=True).values
+                ranks = torch.arange(sorted_q.shape[1], device=sorted_q.device).unsqueeze(0)
+                legal_count_long = legal.sum(dim=1, keepdim=True).clamp_min(1)
+                top_count = legal_count_long.clamp_max(k)
+                top_mask = ranks < top_count
+                denom = top_count.squeeze(1).to(q_values.dtype)
+                value = sorted_q.masked_fill(~top_mask, 0.0).sum(dim=1) / denom
             elif scalar_mode == "policy_mean":
                 weights = torch.softmax(logits, dim=1).to(q_values.dtype)
                 value = (weights * q_values).sum(dim=1)

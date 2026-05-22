@@ -1105,7 +1105,7 @@ def parse_args() -> argparse.Namespace:
                         help="Weight on per-action Q-value MSE. Requires --q-value-head and rootMeanQ rows to have effect.")
     parser.add_argument("--freeze-non-q-value-head", action="store_true",
                         help="When --q-value-head is enabled, train only q_value_head.* parameters.")
-    parser.add_argument("--q-value-scalar", choices=["max", "mean", "policy_mean"], default="max",
+    parser.add_argument("--q-value-scalar", choices=["max", "mean", "top2_mean", "top3_mean", "policy_mean"], default="max",
                         help="Scalar value exported from a Q-head graph; default max preserves Stage-2 behavior.")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--split-by", choices=["row", "episode", "seed"], default="episode")

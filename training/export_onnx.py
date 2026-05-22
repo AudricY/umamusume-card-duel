@@ -228,7 +228,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", required=True)
     parser.add_argument("--max-actions", type=int, default=16)
     parser.add_argument("--opset", type=int, default=17)
-    parser.add_argument("--q-value-scalar", choices=["max", "mean", "policy_mean"], default=None,
+    parser.add_argument("--q-value-scalar", choices=["max", "mean", "top2_mean", "top3_mean", "policy_mean"], default=None,
                         help="Override scalarization for Q-head checkpoints at export time.")
     return parser.parse_args()
 
