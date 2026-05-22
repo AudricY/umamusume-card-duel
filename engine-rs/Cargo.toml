@@ -32,7 +32,7 @@ arrayvec = { version = "0.7", features = ["serde"] }
 # bump in lockstep with the runtime upgrade. `ndarray` is required by the
 # IR-3 typed tensor path; default `download-binaries` / `copy-dylibs` are
 # disabled to keep release-build determinism (no network step at build).
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-21"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "api-21", "cuda"] }
 # Match ORT's transitive ndarray major (0.17 in 2.0.0-rc.12) so the
 # trait-impl bridge to `TensorRef::from_array_view` resolves; mismatched
 # majors compile to two crate instances and the From impl never fires.

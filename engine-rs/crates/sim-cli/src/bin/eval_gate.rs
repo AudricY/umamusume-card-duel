@@ -27,7 +27,7 @@ use engine::dispatcher::{
     get_forced_attack_coin_results, state_hash,
 };
 use engine::headless_setup::setup_ai_vs_ai_game;
-use engine::inference::{self, InferenceSession};
+use engine::inference::{self, Device, InferenceSession};
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
 use engine::mcts::driver::run_mcts;
 use engine::policy::actions::enumerate_legal_ai_actions;
@@ -134,6 +134,17 @@ struct Args {
     /// libonnxruntime.so location.
     #[arg(long)]
     onnx_path: Option<String>,
+    /// GPU inference EP. `cpu` (default) uses the historical
+    /// single-threaded ORT CPU path (FP-deterministic with
+    /// `serve_onnx --ort-threads 1`). `cuda` loads the ONNX session on
+    /// the CUDA EP and drops the per-call inference Mutex; this is the
+    /// Slice 3c parallelism throughput lever. See
+    /// `docs/ai-research/scoping/gpu-inference-execution-provider.md`.
+    #[arg(long, default_value = "cpu")]
+    device: String,
+    /// CUDA device id (only honored under `--device cuda`).
+    #[arg(long, default_value_t = 0)]
+    cuda_device_id: i32,
 }
 
 #[derive(Serialize)]
@@ -362,6 +373,16 @@ fn main() -> Result<()> {
     // R16-P3 spike Option A: load the ONNX policy if either leaf or
     // prior path needs the model. Same bootstrap pattern as
     // sim-mcts-selfplay — one-time graph compile, shared session.
+    let device = match args.device.as_str() {
+        "cpu" => Device::Cpu,
+        "cuda" => Device::Cuda {
+            device_id: args.cuda_device_id,
+        },
+        other => anyhow::bail!(
+            "--device must be one of 'cpu' or 'cuda' (got {})",
+            other
+        ),
+    };
     let needs_inference =
         matches!(prior, MctsPrior::Policy) || matches!(leaf, MctsLeaf::ValueHead);
     if needs_inference {
@@ -374,10 +395,13 @@ fn main() -> Result<()> {
                     "sim-eval-gate: --onnx-path is required when --prior policy or --leaf value-head is set"
                 )
             })?;
-        let session = InferenceSession::load(std::path::Path::new(onnx))
+        let session = InferenceSession::load_on(std::path::Path::new(onnx), device)
             .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
         inference::set_global(session);
-        eprintln!("sim-eval-gate: loaded inference session from {}", onnx);
+        eprintln!(
+            "sim-eval-gate: loaded inference session from {} (device={:?})",
+            onnx, device
+        );
     } else if !model_url.is_empty() {
         eprintln!(
             "sim-eval-gate: WARNING --challenger/--model-url is DEPRECATED (R16-P3); \

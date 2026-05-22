@@ -36,10 +36,12 @@
 //! hard error — silently serving with a wrong vocab corrupts the
 //! embedding inputs.
 
+use std::cell::UnsafeCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use ndarray::Array;
+use ort::ep::CUDA as CUDAExecutionProvider;
 use ort::session::Session;
 use ort::value::TensorRef;
 
@@ -137,24 +139,91 @@ impl From<featurize::FeaturizeError> for InferenceError {
     }
 }
 
+/// Selects the ORT execution provider used to load the session.
+///
+/// `Cpu` keeps the legacy single-threaded CPU path (R14.G FP-determinism
+/// contract: `intra/inter_threads = 1`, matches the
+/// `serve_onnx --ort-threads 1` server the `sim-inference-parity` smoke
+/// runs against). `Cuda` wires the ORT CUDA EP at session-build time and
+/// drops the per-call `Mutex<Session>` — the ORT CUDA EP is documented
+/// thread-safe for concurrent `Session::run` calls (see
+/// `docs/ai-research/scoping/gpu-inference-execution-provider.md` for
+/// background). The CUDA path requires `libonnxruntime.so` to be
+/// CUDA-enabled and `libonnxruntime_providers_cuda.so` to be loadable
+/// at `Session::run` time; failures surface as `InferenceError::Ort`.
+#[derive(Debug, Clone, Copy)]
+pub enum Device {
+    /// CPU EP (default). Keeps FP-determinism with `serve_onnx`.
+    Cpu,
+    /// CUDA EP, pinned to a specific device. Drops the per-call Mutex
+    /// because the underlying ORT CUDA path is reentrant.
+    Cuda { device_id: i32 },
+}
+
+impl Default for Device {
+    fn default() -> Self {
+        Device::Cpu
+    }
+}
+
+/// Internal session guard. The CPU path keeps the historical
+/// `Mutex<Session>` wrap (the existing parity contract treats the CPU
+/// session as single-threaded per binary; removing the Mutex is the
+/// out-of-scope G5 slice). The CUDA path drops the Mutex outright since
+/// the ORT CUDA EP supports concurrent `Session::run` — the underlying
+/// `Session` is `Send + Sync` per ort's declared safety contract; the
+/// `&mut self` on `Session::run` is a Rust-API artifact only. We use
+/// `UnsafeCell<Session>` to allow shared access from worker threads.
+enum SessionGuard {
+    Cpu(Mutex<Session>),
+    Cuda(UnsafeCell<Session>),
+}
+
+// Safety: `Session` is `Send + Sync` per ort's `unsafe impl`. The
+// `UnsafeCell` here is just a punch-through to call `Session::run`
+// (which has a Rust-side `&mut self`) from multiple threads — the
+// underlying ORT C API on the CUDA EP is reentrant. We never alias a
+// `&mut Session` on the CPU path (it stays behind the Mutex).
+unsafe impl Sync for SessionGuard {}
+
 /// Loaded in-process ONNX session — thread-safe per ORT's contract
 /// (`unsafe impl Send + Sync for Session`); callers wrap in an `Arc`
-/// to share across MCTS workers. The internal `Mutex<Session>` is
-/// required because `ort::Session::run` takes `&mut self` at the
-/// Rust API surface even though the underlying ORT C API is reentrant.
-/// MCTS today is single-threaded per binary, so the Mutex is
-/// effectively uncontended.
+/// to share across MCTS workers. On the CPU path the internal
+/// `Mutex<Session>` is required because `ort::Session::run` takes
+/// `&mut self` at the Rust API surface even though the underlying ORT
+/// C API is reentrant; today the CPU path is uncontended in practice.
+/// On the CUDA path the Mutex is removed — the ORT CUDA EP supports
+/// concurrent `Session::run` and the Mutex was the Slice 3c parallelism
+/// bottleneck this slice opens up.
 pub struct InferenceSession {
-    session: Mutex<Session>,
+    session: SessionGuard,
     onnx_path: PathBuf,
     schema: GraphSchema,
+    device: Device,
 }
 
 impl InferenceSession {
-    /// Construct an `InferenceSession` from an ONNX file path. Validates
-    /// the graph signature against the v3.0 contract and asserts vocab
-    /// hash parity with the sidecar.
+    /// Construct an `InferenceSession` from an ONNX file path on the
+    /// default CPU EP. Equivalent to `load_on(onnx_path, Device::Cpu)`
+    /// — kept as a back-compat entrypoint for binaries that haven't
+    /// (yet) exposed a `--device` flag.
     pub fn load(onnx_path: &Path) -> Result<Self, InferenceError> {
+        Self::load_on(onnx_path, Device::Cpu)
+    }
+
+    /// Construct an `InferenceSession` on a specific execution provider.
+    /// Validates the graph signature against the v3.0/v3.1/v3.2 contract
+    /// and asserts vocab hash parity with the sidecar before building
+    /// the ORT session.
+    ///
+    /// CPU branch keeps the historical
+    /// `intra/inter_threads = 1` FP-determinism pin (parity with
+    /// `serve_onnx --ort-threads 1`). CUDA branch wires the CUDA EP via
+    /// `with_execution_providers` and drops the intra/inter-thread pins
+    /// (thread counts on the CPU pool are irrelevant once compute is on
+    /// the GPU). CUDA also bypasses the per-call `Mutex<Session>`; see
+    /// `SessionGuard`.
+    pub fn load_on(onnx_path: &Path, device: Device) -> Result<Self, InferenceError> {
         // Sidecar vocab hash parity. We load the sidecar BEFORE building
         // the ORT session so a vocab mismatch is the first error the
         // operator sees (cheap, deterministic, no ORT cost).
@@ -175,20 +244,30 @@ impl InferenceSession {
             }
         }
 
-        // Build a single-threaded ORT session. R14.G rationale: pin
+        // Build the ORT session per device. R14.G CPU rationale: pin
         // intra/inter-op = 1 to keep FP-determinism on the policy logits
         // (matches the `serve_onnx --ort-threads 1` server default the
-        // parity smoke runs against). Threading the engine wider here
-        // adds tiny FP non-determinism that bleeds into MCTS visit
-        // counts; out of scope for the parity slice.
-        let session = Session::builder()
-            .map_err(InferenceError::from)?
-            .with_intra_threads(1)
-            .map_err(InferenceError::from)?
-            .with_inter_threads(1)
-            .map_err(InferenceError::from)?
-            .commit_from_file(onnx_path)
-            .map_err(InferenceError::from)?;
+        // parity smoke runs against). On CUDA the CPU thread pins are
+        // irrelevant — compute runs on the GPU.
+        let session = match device {
+            Device::Cpu => Session::builder()
+                .map_err(InferenceError::from)?
+                .with_intra_threads(1)
+                .map_err(InferenceError::from)?
+                .with_inter_threads(1)
+                .map_err(InferenceError::from)?
+                .commit_from_file(onnx_path)
+                .map_err(InferenceError::from)?,
+            Device::Cuda { device_id } => Session::builder()
+                .map_err(InferenceError::from)?
+                .with_execution_providers([CUDAExecutionProvider::default()
+                    .with_device_id(device_id)
+                    .build()
+                    .error_on_failure()])
+                .map_err(InferenceError::from)?
+                .commit_from_file(onnx_path)
+                .map_err(InferenceError::from)?,
+        };
 
         // Graph-signature validation. Detects v3.0/v3.1 (5-input
         // contract; discriminated by `state_features` last-dim 110 vs
@@ -197,11 +276,22 @@ impl InferenceSession {
         // missing) is rejected explicitly.
         let schema = validate_graph_signature(&session)?;
 
+        let guard = match device {
+            Device::Cpu => SessionGuard::Cpu(Mutex::new(session)),
+            Device::Cuda { .. } => SessionGuard::Cuda(UnsafeCell::new(session)),
+        };
+
         Ok(InferenceSession {
-            session: Mutex::new(session),
+            session: guard,
             onnx_path: onnx_path.to_path_buf(),
             schema,
+            device,
         })
+    }
+
+    /// Active execution provider for this session. Diagnostic only.
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Drive a single `(observation, legal_actions)` pair through the
@@ -331,33 +421,25 @@ impl InferenceSession {
         // Hold the lock across both `run()` and the tensor extraction
         // — `outputs[i].try_extract_tensor` borrows from the session,
         // so we must finish copying out the f32 buffers before the
-        // lock guard drops.
-        let (logits_vec, value_scalar) = {
-            let mut sess = self.session.lock().expect("inference session mutex poisoned");
-            let outputs = sess.run(inputs)?;
-
-            // Outputs order matches `serve_onnx.PolicyServer.session.run(...)`:
-            // [logits (float[B, A]), value (float[B])]. The ONNX graph
-            // declares the output order; we read by index 0 / 1.
-            let (_logits_shape, logits_flat) = outputs[0]
-                .try_extract_tensor::<f32>()
-                .map_err(InferenceError::from)?;
-            let (_value_shape, value_flat) = outputs[1]
-                .try_extract_tensor::<f32>()
-                .map_err(InferenceError::from)?;
-            if logits_flat.len() != n_actions {
-                return Err(InferenceError::OutputShape(format!(
-                    "logits has {} elements, expected {}",
-                    logits_flat.len(),
-                    n_actions
-                )));
+        // lock guard drops. On the CUDA path we punch through the
+        // `UnsafeCell` instead of locking; the ORT CUDA EP is reentrant
+        // on `Session::run` and the `&mut self` is purely a Rust-API
+        // artifact.
+        let (logits_vec, value_scalar) = match &self.session {
+            SessionGuard::Cpu(mutex) => {
+                let mut sess = mutex.lock().expect("inference session mutex poisoned");
+                let outputs = sess.run(inputs)?;
+                extract_logits_and_value(&outputs, n_actions)?
             }
-            if value_flat.is_empty() {
-                return Err(InferenceError::OutputShape(
-                    "value tensor is empty".into(),
-                ));
+            SessionGuard::Cuda(cell) => {
+                // Safety: see `unsafe impl Sync for SessionGuard` —
+                // the ORT CUDA EP supports concurrent `Session::run`,
+                // so granting `&mut Session` to multiple threads
+                // simultaneously is sound for this EP.
+                let sess: &mut Session = unsafe { &mut *cell.get() };
+                let outputs = sess.run(inputs)?;
+                extract_logits_and_value(&outputs, n_actions)?
             }
-            (logits_flat.to_vec(), value_flat[0])
         };
 
         // Masked softmax — mirror of `serve_onnx.masked_softmax`. All
@@ -380,6 +462,35 @@ impl InferenceSession {
 pub struct PredictionV3 {
     pub probs: Vec<f32>,
     pub value: f32,
+}
+
+/// Read `(logits_vec, value_scalar)` out of an ORT `SessionOutputs`.
+/// Outputs order matches `serve_onnx.PolicyServer.session.run(...)`:
+/// `[logits (float[B, A]), value (float[B])]`. Factored out so the
+/// CPU/CUDA dispatch in `predict_v3` doesn't duplicate the extract.
+fn extract_logits_and_value(
+    outputs: &ort::session::SessionOutputs<'_>,
+    n_actions: usize,
+) -> Result<(Vec<f32>, f32), InferenceError> {
+    let (_logits_shape, logits_flat) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(InferenceError::from)?;
+    let (_value_shape, value_flat) = outputs[1]
+        .try_extract_tensor::<f32>()
+        .map_err(InferenceError::from)?;
+    if logits_flat.len() != n_actions {
+        return Err(InferenceError::OutputShape(format!(
+            "logits has {} elements, expected {}",
+            logits_flat.len(),
+            n_actions
+        )));
+    }
+    if value_flat.is_empty() {
+        return Err(InferenceError::OutputShape(
+            "value tensor is empty".into(),
+        ));
+    }
+    Ok((logits_flat.to_vec(), value_flat[0]))
 }
 
 /// Numerically-stable masked softmax. Mirrors the `serve_onnx`
