@@ -85,6 +85,12 @@ class OrchestratorState:
     consecutive_failures: int = 0
     halted: bool = False
     halt_reason: str | None = None
+    # deck-pair-sampling Slice 2 (2026-05-22): trace-gen deck-sampling
+    # mode in effect for this run. Captured once at run start and
+    # persisted into orchestrator-state.json so a later reader can tell
+    # whether a checkpoint's training corpus saw deck variety. Eval gate
+    # always uses fixed (see run_policy_gate_with_serve).
+    selfplay_deck_sampling: str = "uniform"
 
 
 def main() -> None:
@@ -101,6 +107,13 @@ def main() -> None:
     if args.resume_state:
         state = load_state(Path(args.resume_state))
 
+    # deck-pair-sampling Slice 2 (2026-05-22): CLI override pins the trace-gen
+    # sampling mode for this run. Resumed runs still respect the operator's
+    # current --deck-sampling choice. Persist immediately so a crash in iter-0
+    # still leaves a readable mode in orchestrator-state.json.
+    state.selfplay_deck_sampling = args.deck_sampling
+    save_state(out_dir / "orchestrator-state.json", state)
+
     events = EventWriter(out_dir)
     events.emit_run(
         stage="orchestrator",
@@ -109,6 +122,11 @@ def main() -> None:
         games=args.games,
         teacher=args.teacher,
         epochs=args.epochs,
+        # deck-pair-sampling Slice 2: record the sampling mode in the run-
+        # start event so a later reader does not have to cross-reference
+        # orchestrator-state.json. Eval gate is always 'fixed'.
+        selfplay_deck_sampling=args.deck_sampling,
+        eval_deck_sampling="fixed",
         resumed_from_iter=max((e["iteration"] for e in state.iterations), default=-1),
     )
 
@@ -246,6 +264,9 @@ def run_iteration(
             trace_teacher=cfg.trace_teachers or cfg.teacher,
             rollout_crn_samples=cfg.rollout_crn_samples,
             manifest_out=trace_manifest,
+            # deck-pair-sampling Slice 2: widen the trace-gen distribution.
+            # Forwarded to TS `sim:evaluate-model --deck-sampling=<mode>`.
+            extra=["--deck-sampling", args.deck_sampling],
         )
     else:
         run_evaluator_with_model(
@@ -818,6 +839,8 @@ def run_evaluator_with_model(
             rollout_crn_samples=cfg.rollout_crn_samples,
             model_url=model_url,
             manifest_out=manifest_out,
+            # deck-pair-sampling Slice 2: widen the trace-gen distribution.
+            extra=["--deck-sampling", args.deck_sampling],
         )
 
 
@@ -1055,6 +1078,10 @@ def save_state(path: Path, state: OrchestratorState) -> None:
                 "consecutive_failures": state.consecutive_failures,
                 "halted": state.halted,
                 "halt_reason": state.halt_reason,
+                # deck-pair-sampling Slice 2 (2026-05-22): persist the trace-gen
+                # sampling mode. Eval gate is always 'fixed'.
+                "selfplay_deck_sampling": state.selfplay_deck_sampling,
+                "eval_deck_sampling": "fixed",
             },
             indent=2,
         )
@@ -1072,6 +1099,9 @@ def load_state(path: Path) -> OrchestratorState:
         consecutive_failures=int(payload.get("consecutive_failures", 0)),
         halted=bool(payload.get("halted", False)),
         halt_reason=payload.get("halt_reason"),
+        # deck-pair-sampling Slice 2: default to "uniform" for missing keys
+        # (pre-Slice-2 state files). Operator's CLI flag re-pins on next save.
+        selfplay_deck_sampling=str(payload.get("selfplay_deck_sampling") or "uniform"),
     )
 
 
@@ -1116,6 +1146,16 @@ def parse_args() -> argparse.Namespace:
                         help="Max allowed Wilson lower drop per opponent vs prior recorded eval (item 13).")
     parser.add_argument("--pool-eval-seed-start", type=int, default=20000,
                         help="Seed offset for pool matchup evals; per-opponent seeds are derived deterministically from iteration and opponent index.")
+    # deck-pair-sampling Slice 2 (2026-05-22): default-on uniform deck
+    # sampling in trace-gen / self-play. Eval gate (`run_eval_gate`) stays
+    # at fixed unconditionally (preserves apples-to-apples tight-gate
+    # history). Accepts the same surface as the Rust sim-cli sampler:
+    # fixed | uniform | pair=<player>:<opponent>.
+    parser.add_argument("--deck-sampling", default="uniform",
+                        help="Trace-gen / self-play deck-pair sampling mode "
+                             "(default 'uniform' post-Slice-2). Accepts: fixed | "
+                             "uniform | pair=<player>:<opponent>. Eval gate "
+                             "ALWAYS uses fixed regardless of this flag.")
     parser.add_argument("--resume-state", default=None)
     return parser.parse_args()
 

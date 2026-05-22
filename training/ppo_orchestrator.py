@@ -96,6 +96,12 @@ class OrchestratorState:
     consecutive_failures: int = 0
     halted: bool = False
     halt_reason: str | None = None
+    # deck-pair-sampling Slice 2 (2026-05-22): PPO rollout deck-sampling
+    # mode in effect for this run. Captured once at run start and
+    # persisted into orchestrator-state.json so a later reader can tell
+    # whether a checkpoint's training corpus saw deck variety. Eval gate
+    # always uses fixed (see run_policy_gate_with_serve).
+    selfplay_deck_sampling: str = "uniform"
 
 
 def main() -> None:
@@ -125,6 +131,11 @@ def main() -> None:
         shutil.copy2(init_from, parent_checkpoint)
     state.promoted_checkpoint = parent_checkpoint
     state.promoted_wilson_lower = args.eval_min_ci_lower
+    # deck-pair-sampling Slice 2 (2026-05-22): CLI override pins the
+    # rollout sampling mode for this run. Persist immediately so a crash
+    # in iter-0 still leaves a readable mode in orchestrator-state.json.
+    state.selfplay_deck_sampling = args.deck_sampling
+    save_state(out_dir / "orchestrator-state.json", state)
 
     events_path = Path(args.events_out) if args.events_out else (out_dir / "events.jsonl")
     events = EventWriter(events_path)
@@ -562,6 +573,9 @@ def rollout_with_stochastic_serve(
     if opponent_checkpoint is not None:
         opp_onnx = iter_dir / "opponent.onnx"
         export_checkpoint_to_onnx(repo_root, opponent_checkpoint, opp_onnx)
+    # deck-pair-sampling Slice 2: widen the rollout distribution by default.
+    # Forwarded to TS `sim:evaluate-model --deck-sampling=<mode>`.
+    deck_sampling_extra = ["--deck-sampling", args.deck_sampling]
     with stochastic_serve_onnx_context(repo_root, onnx_path, cfg.temperature, args) as model_url:
         if opponent_checkpoint is not None:
             with _greedy_serve_onnx_context(repo_root, opp_onnx, args) as opp_url:
@@ -579,6 +593,7 @@ def rollout_with_stochastic_serve(
                     model_url=model_url,
                     opponent_model_url=opp_url,
                     manifest_out=manifest_out,
+                    extra=deck_sampling_extra,
                 )
         else:
             run_evaluator(
@@ -594,6 +609,7 @@ def rollout_with_stochastic_serve(
                 rollout_crn_samples=1,
                 model_url=model_url,
                 manifest_out=manifest_out,
+                extra=deck_sampling_extra,
             )
 
 
@@ -910,6 +926,10 @@ def save_state(path: Path, state: OrchestratorState) -> None:
                 "consecutive_failures": state.consecutive_failures,
                 "halted": state.halted,
                 "halt_reason": state.halt_reason,
+                # deck-pair-sampling Slice 2 (2026-05-22): persist the
+                # rollout sampling mode. Eval gate is always 'fixed'.
+                "selfplay_deck_sampling": state.selfplay_deck_sampling,
+                "eval_deck_sampling": "fixed",
             },
             indent=2,
         )
@@ -987,6 +1007,15 @@ def parse_args() -> argparse.Namespace:
                         help="R5: rollout against a PFSP-sampled opponent from --pool-path instead of rule-bot.")
     parser.add_argument("--pool-path", default=None,
                         help="Path to opponent-pool.json (default: out_dir/opponent-pool.json).")
+    # deck-pair-sampling Slice 2 (2026-05-22): default-on uniform deck
+    # sampling in PPO rollouts. Eval gate (`run_eval_gate`) stays at fixed
+    # unconditionally (preserves apples-to-apples tight-gate history).
+    # Accepts: fixed | uniform | pair=<player>:<opponent>.
+    parser.add_argument("--deck-sampling", default="uniform",
+                        help="PPO rollout deck-pair sampling mode (default "
+                             "'uniform' post-Slice-2). Accepts: fixed | uniform "
+                             "| pair=<player>:<opponent>. Eval/promotion gate "
+                             "ALWAYS uses fixed regardless of this flag.")
     return parser.parse_args()
 
 

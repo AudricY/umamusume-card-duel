@@ -97,6 +97,12 @@ class R12State:
     # checkpoint) is what gives cumulative anti-drift. Persisted across
     # resume so a restarted run keeps anchoring to the same origin ckpt.
     kl_anchor_checkpoint: Path | None = None
+    # deck-pair-sampling Slice 2 (2026-05-22): self-play deck-sampling mode
+    # in effect for this run. Captured once at run start and persisted into
+    # orchestrator-state.json so a later reader can tell whether a
+    # checkpoint's training corpus saw deck variety. Eval gate is always
+    # 'fixed' (see run_gate); only the self-play mode is configurable.
+    selfplay_deck_sampling: str = "uniform"
 
 
 def main() -> None:
@@ -115,6 +121,11 @@ def main() -> None:
         state = load_state(Path(args.resume_state))
     if state.promoted_checkpoint is None and args.init_checkpoint:
         state.promoted_checkpoint = Path(args.init_checkpoint).resolve()
+    # deck-pair-sampling Slice 2 (2026-05-22): CLI override pins the
+    # self-play sampling mode for this run. Always reflect the CLI value
+    # into state — a resumed run still respects the operator's current
+    # --deck-sampling choice instead of silently inheriting the old one.
+    state.selfplay_deck_sampling = args.deck_sampling
 
     emit_event(events_path, {
         "stage": "r12-orchestrator", "event_type": "run_started",
@@ -122,12 +133,25 @@ def main() -> None:
         "selfplay_games": args.selfplay_games,
         "mcts_simulations": args.mcts_simulations,
         "eval_games": args.eval_games,
+        # deck-pair-sampling Slice 2: deck-sampling mode applied to self-play
+        # this iter. Eval gate is always 'fixed' (see run_gate); recording the
+        # self-play mode lets a later reader tell whether a checkpoint's
+        # training corpus saw deck variety. Mirrored into orchestrator-state
+        # via state.selfplay_deck_sampling below.
+        "selfplay_deck_sampling": args.deck_sampling,
+        "eval_deck_sampling": "fixed",
         "init_checkpoint": str(state.promoted_checkpoint) if state.promoted_checkpoint else None,
         "ts": time.time(),
     })
 
     if state.promoted_checkpoint is None:
         raise SystemExit("must pass --init-checkpoint or --resume-state with a promoted_checkpoint set")
+
+    # deck-pair-sampling Slice 2: persist the selected sampling mode up front
+    # so orchestrator-state.json carries the choice even if iter-0 crashes
+    # mid-selfplay. A later reader can tell whether a checkpoint's training
+    # corpus saw deck variety just from orchestrator-state.json.
+    save_state(out_dir / "orchestrator-state.json", state)
 
     # W6 recipe-fix change 2 (r110.md §4a): capture the fixed KL anchor ONCE,
     # before any iteration runs, as the iter-0 / SL warm-start checkpoint.
@@ -464,6 +488,15 @@ def run_selfplay(
         "--workers", str(args.workers),
         "--out", str(out_path),
         "--manifest-out", str(manifest_out),
+        # deck-pair-sampling Slice 2 (2026-05-22): self-play widens its deck
+        # distribution by default. Default is `uniform` over the 13 player×AI
+        # pairs (cf. `docs/ai-research/scoping/deck-pair-sampling.md`); the
+        # Step-3 smoke verdict (aggregate Wilson-lower -4.8pp vs fixed-matchup
+        # ceiling, within ±5pp envelope) classified this as no-regret. Eval
+        # gate stays --deck-sampling=fixed (run_gate below) so tight-gate
+        # history remains apples-to-apples. Override with --deck-sampling on
+        # the orchestrator for legacy reproducibility runs.
+        "--deck-sampling", args.deck_sampling,
     ]
     # The Rust sim-mcts-selfplay binary makes per-decision row recording
     # opt-in via --record-rows (TS mctsSelfPlay.ts always records). The
@@ -656,6 +689,15 @@ def run_gate(
         "--min-games", str(args.eval_games),
         "--progress-out", str(iter_dir / "gate-progress.jsonl"),
         "--workers", str(args.workers),
+        # deck-pair-sampling Slice 2 (2026-05-22): eval-gate ALWAYS pins to
+        # --deck-sampling=fixed regardless of the orchestrator's selfplay
+        # sampling. The tight-gate history (0.5811 v3.0 ceiling and every
+        # §4d/§4e re-verdict number) is built on fixed-matchup eval; flipping
+        # the gate would break apples-to-apples comparability. Per-iter gate
+        # at n=2×eval_games is also too noisy (Wilson half-width >±20pp) to
+        # absorb matchup variance; diverse-matchup eval is a Slice 3 concern
+        # at higher n. (See scoping doc § "Open questions".)
+        "--deck-sampling", "fixed",
     ]
     # Throughput-spike Slice 2 (mirror run_selfplay): on the Rust path,
     # `model_url` is actually the onnx path (yielded by inference_context)
@@ -897,6 +939,11 @@ def save_state(path: Path, state: R12State) -> None:
         "consecutive_failures": state.consecutive_failures,
         "halted": state.halted,
         "halt_reason": state.halt_reason,
+        # deck-pair-sampling Slice 2 (2026-05-22): self-play deck-sampling
+        # mode in effect for this run. Reader can stratify corpora by deck
+        # variety without re-parsing the per-iter selfplay manifests.
+        "selfplay_deck_sampling": state.selfplay_deck_sampling,
+        "eval_deck_sampling": "fixed",
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf8")
 
@@ -916,6 +963,11 @@ def load_state(path: Path) -> R12State:
     state.consecutive_failures = int(payload.get("consecutive_failures") or 0)
     state.halted = bool(payload.get("halted") or False)
     state.halt_reason = payload.get("halt_reason")
+    # deck-pair-sampling Slice 2 (2026-05-22): older pre-Slice-2 state files
+    # do not have this key — default to "uniform" (the new default) since
+    # older runs were all "fixed" but the only legitimate resume target is a
+    # fresh post-Slice-2 run; CLI override re-sets it on next save_state.
+    state.selfplay_deck_sampling = str(payload.get("selfplay_deck_sampling") or "uniform")
     return state
 
 
@@ -996,6 +1048,17 @@ def parse_args() -> argparse.Namespace:
                    help="W6 recipe-fix: # of most-recent prior iters mixed into the distill set.")
     p.add_argument("--w6-replay-old-fraction", type=float, default=W6_REPLAY_OLD_FRACTION,
                    help="W6 recipe-fix: fraction of the distill mixture drawn from older vintages.")
+    # deck-pair-sampling Slice 2 (2026-05-22): default-on uniform deck
+    # sampling in self-play. Eval gate stays --deck-sampling=fixed
+    # unconditionally (see run_gate); this flag controls run_selfplay only.
+    # Accepts the same surface as the Rust sim-cli sampler: fixed | uniform
+    # | pair=<player>:<opponent>. Override to `fixed` for legacy
+    # reproducibility runs that need the single-matchup distribution.
+    p.add_argument("--deck-sampling", default="uniform",
+                   help="Self-play deck-pair sampling mode (default 'uniform' "
+                        "post-Slice-2). Accepts: fixed | uniform | "
+                        "pair=<player>:<opponent>. Eval gate ALWAYS uses fixed "
+                        "regardless of this flag — see run_gate.")
     # Engine dispatch for the per-iter sim CLIs (selfplay + gate). Rust
     # is the default since the engine port merged (handoff doc Phase 1g —
     # ~140-220x MCTS throughput, flag-compatible via clap aliases). TS

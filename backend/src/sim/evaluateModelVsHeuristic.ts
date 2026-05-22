@@ -140,6 +140,18 @@ export type EvaluateModelArgs = {
   opponentMctsPrior: "uniform" | "policy";
   opponentMctsAdaptiveRatio: number;
   opponentMctsAdaptiveMinSims: number;
+  // deck-pair-sampling Slice 2 (2026-05-22): self-play / trace-gen deck
+  // sampling mode. Default "fixed" preserves byte-identical pre-Slice-2
+  // behavior; "uniform" samples a (player, ai) deck pair per game from
+  // the 13-pair cross-product; "pair=<P>:<O>" pins a literal pair. Mirrors
+  // the Rust sim-cli surface (see `engine::deck_sampling::DeckSampling`).
+  // Eval-gate stays at "fixed" — this flag controls only the per-game
+  // setupAiVsAiGame deck pair. Sampler is seed-derived; deterministic for
+  // the same (seedStart, gameIndex). Optional so the in-repo callers that
+  // build an EvaluateModelArgs literal (evalGate.ts, throughputProbe.ts,
+  // rebaseline.ts, r7TeacherAgreementProbe.ts) stay byte-identical without
+  // each having to opt into the flag.
+  deckSampling?: string;
 };
 
 type GameResult = {
@@ -250,7 +262,12 @@ async function main() {
     for (let index = 0; index < args.games; index += 1) {
       const seed = String(args.seedStart + index);
       const gameStart = Date.now();
-      const result = await runModelVsHeuristicGame(args, seed, modelSide);
+      // deck-pair-sampling Slice 2: resolve the deck pair from the seed-
+      // derived index (mirrors Rust sim-cli per-game decompose). `undefined`
+      // for fixed/registry-defaults preserves byte-identical pre-Slice-2
+      // behavior; otherwise this overrides the per-game deck pair.
+      const deckPair = resolveDeckSampling(args.deckSampling ?? "fixed", args.seedStart, index);
+      const result = await runModelVsHeuristicGame(args, seed, modelSide, deckPair);
       if (args.decisionTraceOut && result.decisionTraces.length) {
         appendFileSync(args.decisionTraceOut, result.decisionTraces.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf8");
       }
@@ -298,13 +315,27 @@ async function main() {
   console.log(JSON.stringify(output, null, 2));
 }
 
-export async function runModelVsHeuristicGame(args: EvaluateModelArgs, seed: string, modelSide: SideId): Promise<GameResult> {
+export async function runModelVsHeuristicGame(
+  args: EvaluateModelArgs,
+  seed: string,
+  modelSide: SideId,
+  // deck-pair-sampling Slice 2: optional per-game deck-pair override (the
+  // sampling-resolved pair). When `undefined`, setupAiVsAiGame falls through
+  // to registry defaults exactly like pre-Slice-2.
+  deckPair?: { playerDeckId: string; opponentDeckId: string },
+): Promise<GameResult> {
   const rng = createSeededRng(`${seed}:${modelSide}`, "model-vs-heuristic");
-  return withRng(rng, () => runModelVsHeuristicGameWithRng(args, seed, modelSide, rng));
+  return withRng(rng, () => runModelVsHeuristicGameWithRng(args, seed, modelSide, rng, deckPair));
 }
 
-async function runModelVsHeuristicGameWithRng(args: EvaluateModelArgs, seed: string, modelSide: SideId, rng: Rng): Promise<GameResult> {
-  let state = setupAiVsAiGame();
+async function runModelVsHeuristicGameWithRng(
+  args: EvaluateModelArgs,
+  seed: string,
+  modelSide: SideId,
+  rng: Rng,
+  deckPair?: { playerDeckId: string; opponentDeckId: string },
+): Promise<GameResult> {
+  let state = setupAiVsAiGame(deckPair);
   let terminalReason: GameResult["terminalReason"] = "maxSteps";
   let modelActions = 0;
   let heuristicFallbacks = 0;
@@ -1569,6 +1600,71 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     opponentMctsPrior: parseMctsPrior(get("--opponent-mcts-prior", get("--mcts-prior", "uniform"))),
     opponentMctsAdaptiveRatio: Number(get("--opponent-mcts-adaptive-ratio", get("--mcts-adaptive-ratio", "0"))),
     opponentMctsAdaptiveMinSims: Number(get("--opponent-mcts-adaptive-min-sims", get("--mcts-adaptive-min-sims", "20"))),
+    // deck-pair-sampling Slice 2: validated up front so a typo on the
+    // orchestrator surface fails at arg-parse, not on the first game.
+    deckSampling: validateDeckSampling(get("--deck-sampling", "fixed")),
+  };
+}
+
+/**
+ * deck-pair-sampling Slice 2 (2026-05-22): validate a --deck-sampling value.
+ * Accepts `fixed`, `uniform`, or `pair=<playerId>:<opponentId>`. Mirrors the
+ * Rust `engine::deck_sampling::DeckSampling::parse` surface. Pair-id
+ * validation against the deck registry happens at game-setup time via
+ * resolveDeckPair's existing throw-on-unknown path; here we only enforce
+ * the syntactic surface so the orchestrator can pass through unchanged.
+ */
+function validateDeckSampling(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed === "fixed" || trimmed === "uniform") return trimmed;
+  if (trimmed.startsWith("pair=")) {
+    const rest = trimmed.slice("pair=".length);
+    const colon = rest.indexOf(":");
+    if (colon <= 0 || colon === rest.length - 1) {
+      throw new Error(`--deck-sampling pair must be pair=<player>:<opponent> (got '${raw}')`);
+    }
+    return trimmed;
+  }
+  throw new Error(`--deck-sampling must be one of: fixed, uniform, pair=<player>:<opponent> (got '${raw}')`);
+}
+
+/**
+ * deck-pair-sampling Slice 2: resolve the per-game deck-pair from the
+ * sampling mode + a seed-derived index. Mirrors the Rust
+ * `engine::deck_sampling::DeckSampling::resolve` row-major decomposition
+ * exactly so the TS and Rust paths produce identical pair sequences for
+ * the same (seedStart, gameIndex).
+ *
+ * Returns `undefined` for `fixed` so the caller falls through to
+ * `setupAiVsAiGame()` defaults (byte-identical to pre-Slice-2 behavior).
+ */
+function resolveDeckSampling(
+  mode: string,
+  seedStart: number,
+  gameIndex: number,
+): { playerDeckId: string; opponentDeckId: string } | undefined {
+  if (mode === "fixed") return undefined;
+  if (mode.startsWith("pair=")) {
+    const rest = mode.slice("pair=".length);
+    const colon = rest.indexOf(":");
+    return {
+      playerDeckId: rest.slice(0, colon),
+      opponentDeckId: rest.slice(colon + 1),
+    };
+  }
+  // uniform: row-major decompose (seedStart + gameIndex) % (n_player * n_ai).
+  // Stable across reordering; same (seedStart, gameIndex) → same pair.
+  const nPlayer = premadeDecks.length;
+  const nAi = aiPremadeDecks.length;
+  if (nPlayer === 0 || nAi === 0) return undefined;
+  const total = nPlayer * nAi;
+  const raw = ((seedStart >>> 0) + (gameIndex >>> 0)) >>> 0;
+  const combined = raw % total;
+  const playerIdx = Math.floor(combined / nAi);
+  const aiIdx = combined % nAi;
+  return {
+    playerDeckId: premadeDecks[playerIdx]!.id,
+    opponentDeckId: aiPremadeDecks[aiIdx]!.id,
   };
 }
 
