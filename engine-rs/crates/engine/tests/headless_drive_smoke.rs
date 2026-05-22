@@ -144,6 +144,7 @@ fn throughput_mcts_games() {
         prior: MctsPrior::Uniform,
         rollout_crn_samples: 3,
         rollout_steps: 200,
+        value_head_rollout_blend: 0.0,
         add_root_dirichlet: false,
         dirichlet_alpha: 0.3,
         dirichlet_epsilon: 0.25,

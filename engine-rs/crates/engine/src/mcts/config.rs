@@ -28,6 +28,11 @@ pub struct MctsConfig {
     pub prior: MctsPrior,
     pub rollout_crn_samples: u32,
     pub rollout_steps: u32,
+    /// When `leaf=value-head`, optionally blend rollout evaluation into
+    /// leaf scoring: `(1 - blend) * value_head + blend * rollout`.
+    /// Defaults to 0.0, preserving pure value-head behavior.
+    #[serde(default)]
+    pub value_head_rollout_blend: f64,
     pub add_root_dirichlet: bool,
     pub dirichlet_alpha: f64,
     pub dirichlet_epsilon: f64,
@@ -63,6 +68,7 @@ impl Default for MctsConfig {
             prior: MctsPrior::Uniform,
             rollout_crn_samples: 3,
             rollout_steps: 200,
+            value_head_rollout_blend: 0.0,
             add_root_dirichlet: false,
             dirichlet_alpha: 0.3,
             dirichlet_epsilon: 0.25,

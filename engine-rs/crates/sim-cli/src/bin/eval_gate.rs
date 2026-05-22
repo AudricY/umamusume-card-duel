@@ -74,6 +74,10 @@ struct Args {
     /// Rollout step cap. Orchestrator alias: --mcts-rollout-steps.
     #[arg(long, alias = "mcts-rollout-steps", default_value_t = 200)]
     rollout_steps: u32,
+    /// Optional rollout blend for value-head leaves. 0.0 is pure value-head;
+    /// 1.0 is rollout leaf scoring with the value-head/policy graph loaded.
+    #[arg(long, alias = "mcts-value-head-rollout-blend", default_value_t = 0.0)]
+    value_head_rollout_blend: f64,
     #[arg(long, default_value_t = 1000)]
     max_steps: u32,
     /// Manifest output (mirrors TS --manifest-out).
@@ -364,6 +368,7 @@ fn main() -> Result<()> {
         prior,
         rollout_crn_samples: args.k,
         rollout_steps: args.rollout_steps,
+        value_head_rollout_blend: args.value_head_rollout_blend,
         // TS parity (`backend/src/sim/evalGate.ts:509`):
         // `mctsRootDirichlet: argv.includes("--mcts-root-dirichlet")` →
         // false by default for evaluation determinism. Rust eval-gate
@@ -751,6 +756,7 @@ fn main() -> Result<()> {
         "sims": args.sims,
         "k": args.k,
         "rolloutSteps": args.rollout_steps,
+        "valueHeadRolloutBlend": args.value_head_rollout_blend,
         "maxSteps": args.max_steps,
         "leaf": args.leaf,
         "prior": args.prior,
@@ -947,4 +953,3 @@ mod tests {
         assert_eq!(b.seeds, 7);
     }
 }
-

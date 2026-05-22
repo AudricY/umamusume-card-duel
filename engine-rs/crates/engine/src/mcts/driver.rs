@@ -81,7 +81,10 @@ pub fn run_mcts(
     }
 
     // Cache root value.
-    if matches!(config.leaf, MctsLeaf::ValueHead) && root.cached_leaf_value.is_some() {
+    if matches!(config.leaf, MctsLeaf::ValueHead)
+        && config.value_head_rollout_blend <= 0.0
+        && root.cached_leaf_value.is_some()
+    {
         diagnostics.root_value = root.cached_leaf_value.unwrap();
     } else {
         let mut leaf_rng = root_rng.fork("root-leaf");
@@ -194,7 +197,10 @@ pub fn run_mcts(
                     if let Some(v) = term {
                         leaf_scalar = v;
                         diagnostics.terminal_leafs += 1;
-                    } else if matches!(config.leaf, MctsLeaf::ValueHead) && cached.is_some() {
+                    } else if matches!(config.leaf, MctsLeaf::ValueHead)
+                        && config.value_head_rollout_blend <= 0.0
+                        && cached.is_some()
+                    {
                         leaf_scalar = cached.unwrap();
                     } else {
                         let mut leaf_rng =
@@ -531,7 +537,16 @@ fn leaf_value(
     }
     match config.leaf {
         MctsLeaf::Rollout => rollout_leaf_value(state, model_side, config, rng),
-        MctsLeaf::ValueHead => value_head_leaf_value(state, model_side, model_url),
+        MctsLeaf::ValueHead => {
+            let value = value_head_leaf_value(state, model_side, model_url);
+            let blend = config.value_head_rollout_blend.clamp(0.0, 1.0);
+            if blend > 0.0 {
+                let rollout = rollout_leaf_value(state, model_side, config, rng);
+                (1.0 - blend) * value + blend * rollout
+            } else {
+                value
+            }
+        }
     }
 }
 
@@ -811,6 +826,7 @@ mod tests {
             prior: MctsPrior::Uniform,
             rollout_crn_samples: 1,
             rollout_steps: 1,
+            value_head_rollout_blend: 0.0,
             add_root_dirichlet: false,
             dirichlet_alpha: 0.3,
             dirichlet_epsilon: 0.25,
@@ -841,6 +857,7 @@ mod tests {
             prior: MctsPrior::Uniform,
             rollout_crn_samples: 1,
             rollout_steps: 20,
+            value_head_rollout_blend: 0.0,
             add_root_dirichlet: false,
             dirichlet_alpha: 0.3,
             dirichlet_epsilon: 0.25,

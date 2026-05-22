@@ -526,6 +526,7 @@ fn main() -> Result<()> {
         prior,
         rollout_crn_samples: args.k,
         rollout_steps: args.rollout_steps,
+        value_head_rollout_blend: 0.0,
         add_root_dirichlet,
         dirichlet_alpha: args.dirichlet_alpha,
         dirichlet_epsilon: args.dirichlet_epsilon,

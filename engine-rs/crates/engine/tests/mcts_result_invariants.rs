@@ -22,6 +22,7 @@ fn default_config(sims: u32) -> MctsConfig {
         prior: MctsPrior::Uniform,
         rollout_crn_samples: 2,
         rollout_steps: 100,
+        value_head_rollout_blend: 0.0,
         add_root_dirichlet: false,
         dirichlet_alpha: 0.3,
         dirichlet_epsilon: 0.25,
