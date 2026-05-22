@@ -96,35 +96,57 @@ work. Model-strength research lives in `docs/ai-research-backlog.md`.
     Compare new data/eval traces against the coverage audit slices and fail
     fast on drift in contested decision-state coverage.
 
-14. **Deck Doctor.**
+14. **Rich data bank at new throughput + deck-variety regime.**
+    Contingent P2 data-direction probe (queue
+    `rich-data-bank-at-throughput-variety-regime`). Tests whether the R7
+    raw-policy SL plateau (wl <= 0.33 across R7/R8/R7.b.2/mcts-distill-v1) is
+    a corpus-distribution artifact, not a model-capacity or architecture
+    limit. The existing-corpus data axis was DONE-NEGATIVE across chunks
+    5a-i + 5j on the 3a relabel corpus (model-policy-driven rollouts, single
+    matchup, ~12k rows). Two unlocks landed 2026-05-22 make a fundamentally
+    different corpus tractable: G5 + Slice 3 Rust path (~140-220x TS engine,
+    7.11x at workers=16) and `deck-pair-sampling` Slice 2 default-on uniform
+    selfplay (22/22 matchup coverage). The conjunction rule-bot-driven x
+    deck-uniform x high-sim relabel x 50k+ games x fresh raw-policy SL is
+    novel under the new regime. Acceptance: `wl >= 0.40` reopens raw-policy
+    SL. Falsification (`wl < 0.30`) combined with attention-probe Slice 2
+    closes the raw-policy ceiling as fundamental. CONTINGENT on
+    `set-attention-architecture-probe` Slice 2 falsifying OR explicit user
+    gate; promotes P2 -> P1 on falsification. Architecture axis sibling, not
+    a duplicate of the attention probe. Scope:
+    `docs/ai-research/scoping/rich-data-bank-at-throughput-variety-regime.md`.
+
+15. **Deck Doctor.**
     Analyze deck composition and suggest legal, concrete improvements using
     card roles, energy curve, attacker lines, and trainer/supporter balance.
 
-15. **Tutorial scenarios with AI feedback.**
+16. **Tutorial scenarios with AI feedback.**
     Build small forced scenarios that teach tactical lessons using the same
     fixture machinery as the forced-state suite.
 
 ## P3 - Later Bets
 
-16. **GPU-fed MCTS scaling probe.**
+17. **GPU-fed MCTS scaling probe.**
     Tooling support for the research line in `docs/ai-research-backlog.md`;
     promote only if it changes the search-wrapped strength/latency frontier.
 
-17. **Search ablation matrix.**
+18. **Search ablation matrix.**
     Compare rollout leaf, value leaf, hybrid leaf, adaptive halt, simulation
     budgets, and root variants under named benchmarks.
 
-18. **Rule-bot-covered relabel corpus pipeline.**
+19. **Rule-bot-covered relabel corpus pipeline.**
     Productionize the P1 data recipe after the research acceptance criteria
     prove it is worth keeping.
 
-19. **Post-game why-did-I-lose investigator.**
+20. **Post-game why-did-I-lose investigator.**
     Summarize concrete game-swing moments from logs, legal actions, and MCTS
     deltas without overclaiming hidden intent.
 
-20. **Raw-policy reopen gate.**
+21. **Raw-policy reopen gate.**
     A placeholder only: require new coverage evidence and a pre-registered
-    reopen criterion before spending compute on raw-policy SL again.
+    reopen criterion before spending compute on raw-policy SL again. (Item
+    14 is the active execution path for this gate; this item remains as the
+    generic placeholder for future reopen criteria.)
 
 ## Closed Pointer
 

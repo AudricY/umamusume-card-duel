@@ -253,6 +253,16 @@ warm-started from the Slice 2 ckpt:
 
 ## Relation to active queue items
 
+- **Parallel/contingent sibling:** `rich-data-bank-at-throughput-variety-regime`
+  (P2 SCOPED 2026-05-22, queue
+  `rich-data-bank-at-throughput-variety-regime`). Tests the
+  *corpus-distribution* axis vs this probe's *trunk-shape* axis. If
+  this probe's Slice 2 falsifies (`wl < 0.30` on R4-era rollout corpus),
+  the corpus-distribution line promotes P2 -> P1 as the parallel-axis
+  falsification candidate. If this probe's Slice 2 passes, the
+  corpus-distribution line stays P2 — architecture-axis is the active
+  forward line. Scope:
+  `docs/ai-research/scoping/rich-data-bank-at-throughput-variety-regime.md`.
 - **GATED behind:**
   - `deck-pair-sampling` (Slice 2 must land so selfplay can run with
     uniform sampling).

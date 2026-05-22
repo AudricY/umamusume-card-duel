@@ -257,6 +257,7 @@ This is a measurement workstream, not a hypothesis-test. The "falsification" fra
 - **Does NOT block measurement-only work**: `tight-gate-reverdict-program` (re-verdict #3) and `high-sim-mcts-regime-probe` run on existing checkpoints; their distributions are unchanged.
 - **Architecturally parallel to** `per-game-pfsp-league-retry` (cross-iter opponent-pool selfplay) — both are "sample one knob per game from a pool." Different knobs (checkpoint vs deck); no code-share required for Slices P0–3. Post-unblock, PFSP probes run with `--deck-sampling=uniform` so both diversity axes are tested in the same probe.
 - **Predecessor for** any future "per-matchup gating" work — archived backlog item §13 surfaces naturally once Slice 3 emits per-matchup Wilson lower bounds.
+- **Consumed by** `rich-data-bank-at-throughput-variety-regime` (P2 SCOPED, queue `rich-data-bank-at-throughput-variety-regime`) — the contingent corpus-distribution probe defaults to `--deck-sampling=uniform` for its 50k-game rule-bot vs rule-bot corpus gen. No additional Slice 2 work required; the wiring landed 2026-05-22 (commit `0e391f3`).
 
 ## Open questions
 
