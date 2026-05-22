@@ -68,6 +68,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--out", default=None, help="If set, write the result JSON to this path in addition to stdout.")
+    parser.add_argument("--state-dim", type=int, default=110,
+                        help="Feature width for the value-target corpus. Default 110 (v3.0).")
+    parser.add_argument("--uma-slot-tokens", action="store_true",
+                        help="Emit and forward v3.2 per-Uma slot tensors during the probe.")
     return parser.parse_args()
 
 
@@ -104,7 +108,11 @@ def main() -> None:
     device = torch.device(args.device)
 
     mse_floor = resolve_mse_floor(args, repo_root)
-    dataset = ValueTargetDataset(args.data)
+    dataset = ValueTargetDataset(
+        args.data,
+        state_dim=args.state_dim,
+        uses_uma_slot_tokens=bool(args.uma_slot_tokens),
+    )
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -132,12 +140,20 @@ def main() -> None:
                 card_ids_by_zone = card_ids_by_zone.to(device)
             if action_card_idx is not None:
                 action_card_idx = action_card_idx.to(device)
+            uma_slot_card_ids = batch.get("uma_slot_card_ids")
+            uma_slot_features = batch.get("uma_slot_features")
+            if uma_slot_card_ids is not None:
+                uma_slot_card_ids = uma_slot_card_ids.to(device)
+            if uma_slot_features is not None:
+                uma_slot_features = uma_slot_features.to(device)
             _logits, value_pred = model(
                 state,
                 actions,
                 mask,
                 card_ids_by_zone=card_ids_by_zone,
                 action_card_idx=action_card_idx,
+                uma_slot_card_ids=uma_slot_card_ids,
+                uma_slot_features=uma_slot_features,
             )
             preds.extend(value_pred.detach().cpu().tolist())
             targets.extend(value_target.detach().cpu().tolist())
@@ -174,6 +190,8 @@ def main() -> None:
         "crossed": crossed,
         "checkpoint": args.checkpoint,
         "data": args.data,
+        "state_dim": args.state_dim,
+        "uma_slot_tokens": bool(args.uma_slot_tokens),
         "mean_pred": mean_p,
         "mean_target": mean_t,
         "std_pred": math.sqrt(var_p),

@@ -26,10 +26,13 @@ from .dataset import ROW_SCHEMA_VERSION, RowSchemaError
 from .features import (
     ACTION_DIM,
     STATE_DIM,
+    UMA_SLOT_COUNT,
+    UMA_SLOT_FEATURE_DIM,
     action_card_idx_pair,
+    feature_builder_for_state_dim,
     legal_actions_to_features,
     observation_to_card_ids,
-    observation_to_features,
+    observation_to_uma_slots,
 )
 from .selfplay_dataset import MctsSelfPlayDataset, MctsSelfPlaySample
 
@@ -40,6 +43,8 @@ def _row_to_sample(
     min_actions: int,
     ablations: set[str] | None,
     allow_missing_card_ids: bool = False,
+    state_dim: int = STATE_DIM,
+    uses_uma_slot_tokens: bool = False,
 ) -> MctsSelfPlaySample | None:
     actions = example.get("legalActions", [])
     visits = example.get("visitDistribution", [])
@@ -52,9 +57,9 @@ def _row_to_sample(
     policy_target = arr / total
     target_index = int(np.argmax(policy_target))
     observation = example.get("observation", {})
-    state_features = observation_to_features(observation, ablations=ablations)
+    state_features = feature_builder_for_state_dim(state_dim)(observation, ablations=ablations)
     action_features = legal_actions_to_features(actions, ablations=ablations)
-    if state_features.shape != (STATE_DIM,):
+    if state_features.shape != (state_dim,):
         return None
     if action_features.shape[1:] != (ACTION_DIM,):
         return None
@@ -72,6 +77,14 @@ def _row_to_sample(
         action_card_idx = np.stack(
             [action_card_idx_pair(action) for action in actions], axis=0
         )
+    uma_slot_card_ids: np.ndarray | None = None
+    uma_slot_features: np.ndarray | None = None
+    if uses_uma_slot_tokens:
+        uma_slot_card_ids, uma_slot_features = observation_to_uma_slots(observation)
+        if uma_slot_card_ids.shape != (UMA_SLOT_COUNT,):
+            return None
+        if uma_slot_features.shape != (UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM):
+            return None
     raw_root_value = example.get("rootValue")
     if raw_root_value is None:
         return None
@@ -95,6 +108,8 @@ def _row_to_sample(
         example=example,
         card_ids_by_zone=card_ids_by_zone,
         action_card_idx=action_card_idx,
+        uma_slot_card_ids=uma_slot_card_ids,
+        uma_slot_features=uma_slot_features,
     )
 
 
@@ -104,6 +119,8 @@ def _load_value_target_samples(
     min_actions: int = 2,
     ablations: set[str] | None = None,
     allow_missing_card_ids: bool = False,
+    state_dim: int = STATE_DIM,
+    uses_uma_slot_tokens: bool = False,
 ) -> Iterable[MctsSelfPlaySample]:
     with Path(path).open("r", encoding="utf8") as fh:
         for line_number, line in enumerate(fh, start=1):
@@ -125,6 +142,8 @@ def _load_value_target_samples(
                 min_actions=min_actions,
                 ablations=ablations,
                 allow_missing_card_ids=allow_missing_card_ids,
+                state_dim=state_dim,
+                uses_uma_slot_tokens=uses_uma_slot_tokens,
             )
             if sample is not None:
                 yield sample
@@ -140,6 +159,8 @@ class ValueTargetDataset(MctsSelfPlayDataset):
         min_actions: int = 2,
         ablations: set[str] | None = None,
         allow_missing_card_ids: bool = False,
+        state_dim: int = STATE_DIM,
+        uses_uma_slot_tokens: bool = False,
     ) -> None:
         # Intentionally skip super().__init__ — load with the alternative reader
         # so we can drop rows missing rootValue without spurious "no samples"
@@ -147,12 +168,16 @@ class ValueTargetDataset(MctsSelfPlayDataset):
         self.path = Path(path)
         self.ablations = ablations or set()
         self.allow_missing_card_ids = allow_missing_card_ids
+        self.state_dim = state_dim
+        self.uses_uma_slot_tokens = uses_uma_slot_tokens
         self.samples = list(
             _load_value_target_samples(
                 self.path,
                 min_actions=min_actions,
                 ablations=self.ablations,
                 allow_missing_card_ids=allow_missing_card_ids,
+                state_dim=state_dim,
+                uses_uma_slot_tokens=uses_uma_slot_tokens,
             )
         )
         if not self.samples:

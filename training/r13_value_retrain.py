@@ -43,6 +43,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--events-out", default=None, help="If set, writes per-epoch events to this jsonl path.")
+    parser.add_argument("--state-dim", type=int, default=110,
+                        help="Feature width for the value-target corpus. Default 110 (v3.0).")
+    parser.add_argument("--uma-slot-tokens", action="store_true",
+                        help="Emit v3.2 per-Uma slot tensors while retraining the value head.")
     return parser.parse_args()
 
 
@@ -88,9 +92,15 @@ def main() -> None:
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "lr": args.lr,
+        "state_dim": args.state_dim,
+        "uma_slot_tokens": bool(args.uma_slot_tokens),
     })
 
-    dataset = ValueTargetDataset(args.data)
+    dataset = ValueTargetDataset(
+        args.data,
+        state_dim=args.state_dim,
+        uses_uma_slot_tokens=bool(args.uma_slot_tokens),
+    )
     n_total = len(dataset)
     n_val = max(1, int(round(n_total * args.val_fraction)))
     n_train = max(1, n_total - n_val)
@@ -151,6 +161,12 @@ def main() -> None:
                 card_ids_by_zone = card_ids_by_zone.to(device)
             if action_card_idx is not None:
                 action_card_idx = action_card_idx.to(device)
+            uma_slot_card_ids = batch.get("uma_slot_card_ids")
+            uma_slot_features = batch.get("uma_slot_features")
+            if uma_slot_card_ids is not None:
+                uma_slot_card_ids = uma_slot_card_ids.to(device)
+            if uma_slot_features is not None:
+                uma_slot_features = uma_slot_features.to(device)
             with torch.set_grad_enabled(training):
                 _logits, value_pred = model(
                     state,
@@ -158,6 +174,8 @@ def main() -> None:
                     mask,
                     card_ids_by_zone=card_ids_by_zone,
                     action_card_idx=action_card_idx,
+                    uma_slot_card_ids=uma_slot_card_ids,
+                    uma_slot_features=uma_slot_features,
                 )
                 # Plain weighted MSE — rootValue is a regression target,
                 # not a class label. tanh saturation in the head guards
@@ -213,6 +231,8 @@ def main() -> None:
             "init_checkpoint": args.init_checkpoint,
             "device": str(device),
             "frozen": "trunk+policy_head",
+            "state_dim": args.state_dim,
+            "uma_slot_tokens": bool(args.uma_slot_tokens),
             "history": history,
         },
     }
