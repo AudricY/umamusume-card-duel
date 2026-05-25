@@ -183,6 +183,17 @@ fn to_public_side_observation(
         .map(|e| energy_label_camel(*e).to_string())
         .collect();
 
+    // v3.6 obs-contract extension: per-side typed energy_pool (≤3 colors),
+    // public from setup onward. Same serialization shape as `energy_zone`
+    // (lowercase EnergyType string names) so v3.6 builders can encode a
+    // typed multihot from `side.get("energyPool")`. See
+    // `docs/ai-research/scoping/v36-priors-and-arithmetic-scoping.md` §3.4.
+    let energy_pool: Vec<String> = side
+        .energy_pool
+        .iter()
+        .map(|e| energy_label_camel(*e).to_string())
+        .collect();
+
     let hand_card_ids = if include_private_hand {
         Some(
             side.hand
@@ -207,6 +218,7 @@ fn to_public_side_observation(
             .map(|a| to_public_uma_observation(state, a, side_turns_taken)),
         bench,
         energy_zone,
+        energy_pool,
         used_supporter_this_turn: side.used_supporter_this_turn,
         used_retreat_this_turn: side.used_retreat_this_turn,
         used_stadium_this_turn: side.used_stadium_this_turn,
