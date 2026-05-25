@@ -43,7 +43,7 @@
 
 | Surface | Pre-slice | Post-slice | Compatibility |
 |---|---|---|---|
-| `state_features` dim | 164 | **164 unchanged** | v3.2 byte-stable; slots 0-163 identical bytes. Weakness-bonus correction changes **the semantics** of slot 84 (`can_ko`) and the damage features in `_uma_readiness_features`. Old checkpoints' weights still apply — the input distribution shifts, which is fundamentally an input correction. |
+| `state_features` dim | 164 | **164 unchanged** | v3.2 byte-stable; slots 0-163 identical bytes. Weakness-bonus correction changes **the semantics** of slots 91/92 (`can_ko`) and the damage features in `_uma_readiness_features`. Old checkpoints' weights still apply — the input distribution shifts, which is fundamentally an input correction. |
 | `state_features` schema version (`STATE_FEATURE_SCHEMA_VERSION`) | 3.1 (164-d marker) | **3.1.1** patch bump | Documents the semantic correction without changing dispatch. `_SCHEMA_BY_STATE_DIM[164]` resolution unchanged. |
 | `action_features` dim | 48 | **48 unchanged** | Width preserved. |
 | `ACTION_FEATURE_SCHEMA_VERSION` | 2 | **3** | Per-slot semantics changed for slots 8, 10, 26, 28. Bumped per the canonical pointer at `frontend/src/game/engine/ai-policy/actions.ts:487-551`. |
@@ -63,7 +63,7 @@ A parity smoke must show byte-identical state vectors across the two paths on a 
 
 ### Existing checkpoint compatibility
 
-- Weakness correction shifts the **input distribution** for slot 84 (some rows that were 0 become 1) and for the underlying damage features (some are doubled). Model weights stay loadable. Inference behavior changes by design.
+- Weakness correction shifts the **input distribution** for slots 91/92 (some rows that were 0 become 1) and for the underlying damage features (some are doubled). Model weights stay loadable. Inference behavior changes by design.
 - Action schema bump invalidates rows produced by ACTION_FEATURE_SCHEMA_VERSION=2 datasets at training time — the export pipeline must dispatch on the action-schema-version per row. If the dataset format does not currently embed `action_feature_schema_version`, this slice adds it (a one-field metadata bump).
 - Production serving (`serve_onnx.py`) must be updated to refuse mismatched action-schema-version requests with a fail-fast error (consistent with the C5 "LANDMINE" pattern at `r16-model-feature-backlog-refinement.md:633-642`).
 
@@ -154,7 +154,7 @@ Per handoff §6 "Constraints / what's off-limits":
 - No opponent hand IDs added (hidden-info regression guard).
 - No raw turn-stamps emitted (bounded-norm booleans only).
 - No ability-name strings (counts only).
-- v3.2 byte freeze (slots 0-163) respected — semantics-only change on slot 84, no layout change.
+- v3.2 byte freeze (slots 0-163) respected — semantics-only change on slots 91/92, no layout change.
 - `_SCHEMA_BY_STATE_DIM` fail-fast dispatch unchanged — no silent fallback.
 - Init parity preserved — no tail added means zero-init residual is N/A; existing checkpoints load verbatim with shifted input distribution.
 

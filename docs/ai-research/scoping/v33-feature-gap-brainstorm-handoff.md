@@ -88,11 +88,11 @@ Source: `frontend/src/game/engine/ai-policy/actions.ts:487-551`.
 4. **Retreat cost + swap-in readiness** — retreat candidates differ only in slot 0 (the heuristic).
 5. **Evolution Δhp / Δdamage / Δability** — slots 14-17 describe the evolve card in isolation, not the upgrade delta.
 
-**Free cleanup wins (no width growth):**
-- Slot 8 and slot 26 are exact duplicates.
-- Slot 28 compares a uid to a slot index (different ID spaces) — near-always 0; dead bit.
-- Slot 10 is polysemic (energy count for attach, targetValue for combat, unused for trainer) — disambiguate or split.
-- Slots 11/29-31/12 partially re-encode the kind index (slot 2). Redundant.
+**Free cleanup wins (no width growth):** **LANDED 2026-05-25 commit `5ea1758` (ACTION_FEATURE_SCHEMA_VERSION 2 → 3).**
+- Slot 8 and slot 26 are exact duplicates. **Resolved: slot 26 repurposed to combat `lethalTarget` flag (a previously-hidden combat-planner output).**
+- Slot 28 compares a uid to a slot index (different ID spaces) — near-always 0; dead bit. **Resolved: repurposed to trainer `effect.heal` magnitude / 100.**
+- Slot 10 is polysemic (energy count for attach, targetValue for combat, unused for trainer) — disambiguate or split. **Resolved: now exclusively combat `targetValue / 200`. Attach `amount` semantic dropped (already in slot 8); setup `amount` dropped (already in `score`).**
+- Slots 11/29-31/12 partially re-encode the kind index (slot 2). Redundant. **Deferred — not a correctness bug, left for a future action-schema audit.**
 
 ### C. Game-mechanic-driven synthesised features (forward arithmetic)
 
@@ -100,7 +100,7 @@ These require synthesis across observation fields, not just plucking.
 
 1. **Lethal-in-N / clock differential** — turns-to-KO own & opp active given current energy + realised attach budget. The dominant race-vs-stabilise decision.
 2. **Net point swing if opp gusts my weakest bencher** — single-feature explanation for a whole class of catastrophic losses (`gust_opponent` trainers).
-3. **Weakness-adjusted effective damage** — `can_ko` (slot 84) and `damage/150` ignore `weakness_bonus` when defender type matches attacker's weakness. Systematic bias on ~30% of matchups. **Cheapest "free win" candidate — single multiply.**
+3. **Weakness-adjusted effective damage** — `can_ko` (slots 91/92 in the 110-d head; `_card_awareness_features` intra-block indices 23/24) and `damage/150` ignore `weakness_bonus` when defender type matches attacker's weakness. Systematic bias on ~30% of matchups. **Cheapest "free win" candidate — single multiply.** **LANDED 2026-05-25 commit `8141772`.**
 4. **Energy ETA per Uma** — turns-to-attack-ready accounting for energy-zone color mismatch.
 5. **Searchable targets remaining in deck** — own deck composition is fully known (decklist − hand − discard − in-play). A search trainer with zero valid targets is dead, but the model can't tell.
 6. **Bench-refill safety** — `would_lose_on_active_KO` (last Uma + no promote available). Binary catastrophe the policy should never blunder.
