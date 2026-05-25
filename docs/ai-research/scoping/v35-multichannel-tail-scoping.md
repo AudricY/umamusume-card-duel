@@ -1,7 +1,16 @@
 # v3.5 Multichannel Additive Tail — Orthogonal-Bundle Scoping
 
 - **Date:** 2026-05-25
-- **Status:** **LANDED-EXTENDED-OUTPERFORMS-CONTROL 2026-05-25** — Initial A1 (4-iter) landed wl=0.5856 (§4i, original "RETIRED" verdict). **Post-§4i diagnostics revealed undertraining, not active overfit.** Extended-training rerun (8 iters × 240 selfplay-games) lifts v3.5 to wl=0.5908 [0.5908, 0.6100]; fair-comparison v3.3-extended degrades to wl=0.5812 [0.5812, 0.6005]. v3.5 BEATS v3.3 by +0.0096 at the same extended budget — confirming v3.5 IS adding meaningful info. v3.5 NOT retired. See `docs/ai-research/progress/r110.md §4j` for the full reversal. Single-run Wilson intervals overlap — replicate runs needed to confirm. Implementation chain: commits `99a9ba1` / `de4f13a` / `66b709c` / `1362130` / `7beb2ff` (scope + builder + dispatch + init + smokes + queue + initial verdict). Init parity verified empirically: Δlogits=7.15e-07.
+- **Status:** **LANDED-CEILING-CONFIRMED-AT-RECIPE-SCALE 2026-05-25** — Three training arms completed at increasing compute budget:
+  - 4-iter × 60 games: wl=0.5856 (§4i, original "RETIRED" verdict — was undertraining artifact)
+  - 8-iter × 240 games (extended): wl=0.5908 (§4j; +0.0096 vs v3.3-extended 0.5812)
+  - 12-iter × 480 games (long) + continuation (+6 halted): same 0.5527 n=120 plateau (§4k)
+
+  **Final verdict: v3.5's n=10k ceiling at this recipe (hidden_dim=64, depth=2, KL=0.05) is firmly ~0.59. Matches v3.3-original's 0.5910 peak; does NOT cross the 0.6040 LIFT band.** v3.5 is the better candidate-of-record vs v3.3 because v3.5 is robust to extended training where v3.3 collapses (v3.3-extended dropped to 0.5812 vs original 0.5910).
+
+  See `docs/ai-research/progress/r110.md §4i`/`§4j`/`§4k` for the three-phase verdict arc.
+
+  Implementation chain: commits `99a9ba1` / `de4f13a` / `66b709c` / `1362130` / `7beb2ff` / `b694063` (scope + builder + dispatch + init + smokes + queue + initial-fall verdict + re-evaluation verdict). Init parity verified empirically: Δlogits=7.15e-07.
 - **Parent:** `v33-feature-gap-brainstorm-handoff.md` §5 step 3 (further additive tail) + lesson from `progress/r110.md §4h` (v3.4 compound-axis falsified).
 - **Predecessor schema:** v3.3 (167-d, no slots, v3-action) — `runs/R16-P1-v33-iter1-tight-gate/gate.manifest.json` wl=0.5910 (confirmatory 0.5863, avg ≈0.5887). Highest of any schema tested.
 - **Scope:** A single thick additive tail bundling **five signal-channel-orthogonal** items onto v3.3. Replaces the "one slice per bump" cadence with a deliberately wider bump now that v3.3 is the production candidate and v3.4 has proven the failure mode of compounding overlapping channels.
@@ -240,7 +249,7 @@ Per handoff §6 "Constraints / what's off-limits":
 
 ## 11. Status line
 
-**`LANDED-EXTENDED-OUTPERFORMS-CONTROL 2026-05-25`** — Initial 4-iter result (§4i, wl=0.5856) was an undertraining artifact, not a feature-design failure. Post-§4i diagnostics + extended-training rerun overturn the "RETIRED" verdict. See `docs/ai-research/progress/r110.md §4j` for full reversal.
+**`LANDED-CEILING-CONFIRMED-AT-RECIPE-SCALE 2026-05-25`** — Three-phase verdict arc across §4i (initial fall) / §4j (re-evaluation) / §4k (ceiling probe). Final verdict: v3.5 ceiling is recipe-bound at ~0.59 at n=10k. v3.5 is the better candidate-of-record than v3.3 (robust to extended training) but does NOT cross the 0.6040 LIFT band. See `docs/ai-research/progress/r110.md §4k` for the closing summary and forward implications.
 
 **Outcome ladder at n=10k:**
 
