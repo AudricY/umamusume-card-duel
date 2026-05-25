@@ -37,28 +37,27 @@ pub fn get_known_remaining_deck_counts(side: &SideState) -> KnownRemainingDeckCo
 }
 
 pub fn count_consumed_basics(side: &SideState) -> i32 {
+    // Slice 3i: hot-loop classifier — `catalog().is_basic_umamusume(cid)`
+    // is a `Vec<bool>` index, replacing the `Card` variant match + `u.stage`
+    // load this used to perform on every iteration. Identical result, but
+    // skips the catalog struct field touch (and the L1 hit it took to
+    // resolve `Card::Umamusume(_)` past the enum tag).
     let cat = catalog();
     let mut count = 0i32;
     // Iteration order: hand → discard → all-umamusume.
     for &cid in side.hand.iter() {
-        if let Some(Card::Umamusume(u)) = cat.get(cid) {
-            if u.stage == 0 {
-                count += 1;
-            }
+        if cat.is_basic_umamusume(cid) {
+            count += 1;
         }
     }
     for &cid in side.discard.iter() {
-        if let Some(Card::Umamusume(u)) = cat.get(cid) {
-            if u.stage == 0 {
-                count += 1;
-            }
+        if cat.is_basic_umamusume(cid) {
+            count += 1;
         }
     }
     for inst in get_all_umamusume(side) {
-        if let Some(Card::Umamusume(u)) = cat.get(inst.card_id) {
-            if u.stage == 0 {
-                count += 1;
-            }
+        if cat.is_basic_umamusume(inst.card_id) {
+            count += 1;
         }
     }
     count

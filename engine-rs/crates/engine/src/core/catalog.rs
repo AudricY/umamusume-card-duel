@@ -99,6 +99,12 @@ pub struct Catalog {
     pub interner: CardIdInterner,
     /// Indexed by `CardId.0 as usize`.
     pub cards: Vec<Card>,
+    /// Per-CardId fast-classify table — built once at catalog init so
+    /// hot loops (`count_consumed_basics`, `get_known_remaining_deck_counts`)
+    /// can avoid the full `Card` variant match + struct field load on
+    /// every iteration. `count_consumed_basics` showed up at ~7%
+    /// inclusive in the post-3h rollout flamegraph at sims=800.
+    pub is_basic_umamusume: Vec<bool>,
 }
 
 impl Catalog {
@@ -128,9 +134,16 @@ impl Catalog {
         matches!(self.get(id), Some(Card::Umamusume(_)))
     }
 
-    /// Mirror of `core/catalog.ts:26` `isBasicUmamusumeInDeck`.
+    /// Mirror of `core/catalog.ts:26` `isBasicUmamusumeInDeck`. O(1) via
+    /// the precomputed `is_basic_umamusume` table — bypasses the
+    /// `Card` variant tag-check + struct field load that drove
+    /// `count_consumed_basics` up to ~7% inclusive in the post-3h
+    /// rollout flamegraph.
     pub fn is_basic_umamusume(&self, id: CardId) -> bool {
-        matches!(self.get(id), Some(Card::Umamusume(u)) if u.stage == 0)
+        self.is_basic_umamusume
+            .get(id.index())
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -191,16 +204,20 @@ fn load_catalog() -> Catalog {
     // Intern in iteration order so CardId.0 is stable run-to-run.
     let mut interner = CardIdInterner::new();
     let mut cards = Vec::with_capacity(expanded.len());
+    let mut is_basic_umamusume = Vec::with_capacity(expanded.len());
     for (id, card) in expanded.into_iter() {
         let cid = interner.intern(&id);
         debug_assert_eq!(cid.index(), cards.len());
+        let is_basic = matches!(&card, Card::Umamusume(u) if u.stage == 0);
         cards.push(card);
+        is_basic_umamusume.push(is_basic);
     }
 
     Catalog {
         weakness_bonus: raw.weakness_bonus,
         interner,
         cards,
+        is_basic_umamusume,
     }
 }
 
