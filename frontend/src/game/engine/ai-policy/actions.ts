@@ -18,7 +18,17 @@ import { getAiPhase } from "./phase";
 import type { AiPhase, LegalAiAction } from "./types";
 import type { PlayChoices } from "../core/playTypes";
 
-export const ACTION_FEATURE_SCHEMA_VERSION = 2;
+// v33-correctness-fix Fix 2-4 bumped 2 → 3. Slot 10 was polysemic
+// (setup/attach/combat overloads on `amount`); slot 26 was an exact
+// duplicate of slot 8; slot 28 compared `target.uid` to `targetSlot`
+// (different ID spaces — near-always 0). New layout:
+//   slot 10 = combat targetValue / 200 (0 outside combat)
+//   slot 26 = combat lethalTarget flag (0/1, outside combat = 0)
+//   slot 28 = trainer effect.heal magnitude / 100 (0 outside trainer)
+// Rust mirror (`engine-rs/.../policy/actions.rs::build_features`) and
+// Python ACTION_FEATURE_SCHEMA_VERSION constant in
+// `training/uma_ai/features.py` bumped to match.
+export const ACTION_FEATURE_SCHEMA_VERSION = 3;
 export const ACTION_FEATURE_COUNT = 48;
 const ENERGY_TYPES: EnergyType[] = ["grass", "fire", "water", "lightning", "psychic", "fighting", "darkness", "steel", "colorless", "dragon"];
 
@@ -84,7 +94,6 @@ function enumerateSetupActions(state: GameState, sideId: SideId): LegalAiAction[
       phase: "setup",
       kind: "setupChooseBoard",
       sourceCardId: active.cardId,
-      amount: benchHandIndexes.length,
     }),
     actionSourceCardIdx: cardVocabIndex(active.cardId),
     actionTargetCardIdx: null,
@@ -219,7 +228,6 @@ function enumerateAttachActions(state: GameState, side: SideState): LegalAiActio
         kind: "attachEnergy",
         target,
         targetSlot: slot,
-        amount: attachedEnergyCount(target),
       }),
       actionSourceCardIdx: null,
       actionTargetCardIdx: cardVocabIndex(target.cardId),
@@ -409,7 +417,8 @@ function enumerateCombatActions(state: GameState, side: SideState): LegalAiActio
         score: candidate.score + (candidate.lethalTarget ? 100 : 0) + (candidate.keepsSafe ? 20 : 0),
         phase: "combat" as const,
         kind: candidate.decision.kind,
-        amount: candidate.targetValue,
+        targetValue: candidate.targetValue,
+        lethalTarget: candidate.lethalTarget,
         endsTurn: candidate.decision.kind === "attack",
       };
       actions.push({
@@ -493,7 +502,8 @@ function features(input: {
   choiceCardId?: string;
   target?: UmamusumeInstance;
   targetSlot?: number;
-  amount?: number;
+  targetValue?: number;
+  lethalTarget?: boolean;
   endsTurn?: boolean;
 }): number[] {
   const vector = Array.from({ length: ACTION_FEATURE_COUNT }, () => 0);
@@ -507,7 +517,7 @@ function features(input: {
   vector[7] = input.target ? input.target.hp / Math.max(1, input.target.maxHp) : 0;
   vector[8] = input.target ? attachedEnergyCount(input.target) / 6 : 0;
   vector[9] = input.targetSlot === undefined ? -1 : input.targetSlot / 4;
-  vector[10] = input.amount ?? 0;
+  vector[10] = input.targetValue !== undefined ? input.targetValue / 200 : 0;
   vector[11] = input.endsTurn ? 1 : 0;
   const sourceCard = input.sourceCardId ? getCard(input.sourceCardId) : null;
   vector[12] = input.kind === "pass" ? 1 : 0;
@@ -524,9 +534,9 @@ function features(input: {
   vector[23] = sourceCard?.kind === "trainer" && (sourceCard.effect.extraEnergyAttach || sourceCard.effect.attachEnergyFromZoneToBench) ? 1 : 0;
   vector[24] = sourceCard?.kind === "trainer" ? (sourceCard.effect.activeAttackDamageBonus ?? 0) / 100 : 0;
   vector[25] = input.target ? input.target.maxHp / 180 : 0;
-  vector[26] = input.target ? attachedEnergyCount(input.target) / 6 : 0;
+  vector[26] = input.lethalTarget ? 1 : 0;
   vector[27] = input.target ? input.target.specialConditions.length / 4 : 0;
-  vector[28] = input.target && input.target.uid === input.targetSlot ? 1 : 0;
+  vector[28] = sourceCard?.kind === "trainer" ? (sourceCard.effect.heal ?? 0) / 100 : 0;
   vector[29] = input.kind === "attack" || input.kind === "retreatAttack" ? 1 : 0;
   vector[30] = input.kind === "useAbility" ? 1 : 0;
   vector[31] = input.kind === "endTurn" ? 1 : 0;

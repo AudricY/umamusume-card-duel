@@ -31,7 +31,15 @@ ACTION_DIM = 48
 # the default builder (and default manifest version) remain v3.0; v3.1 is
 # opt-in by state dim.
 STATE_FEATURE_SCHEMA_VERSION = 3.1
-ACTION_FEATURE_SCHEMA_VERSION = 2
+# v33-correctness-fix Fix 2-4 bumped 2 → 3. Action-vector slot 10 was
+# polysemic (setup/attach/combat overloads on `amount`); slot 26 was an
+# exact duplicate of slot 8; slot 28 compared `target.uid` to
+# `targetSlot` (different ID spaces — near-always 0). New layout
+# documented at `frontend/src/game/engine/ai-policy/actions.ts:21-32`
+# and `engine-rs/crates/engine/src/policy/actions.rs:46-58`. This
+# constant is metadata only — Python does not compute action features;
+# it's consumed by `train_bc.py` / `train_ppo.py` manifest writers.
+ACTION_FEATURE_SCHEMA_VERSION = 3
 
 # --- Serving-schema 96/110/164 freeze contract (r16 P1 prerequisite) -------
 # `serve_onnx` resolves the feature builder from the loaded ONNX graph's

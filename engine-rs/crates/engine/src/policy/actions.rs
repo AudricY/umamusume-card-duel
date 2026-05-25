@@ -44,7 +44,15 @@ use crate::policy::types::{AiPhase, LegalAiAction};
 
 /// `ai-policy/actions.ts:21`. Per-action feature schema version. Bump if
 /// the layout of the 48-element `features` vector changes.
-pub const ACTION_FEATURE_SCHEMA_VERSION: u32 = 2;
+///
+/// v33-correctness-fix Fix 2-4 bumped 2 → 3. Slot 10 was polysemic
+/// (setup/attach/combat overloads on `amount`); slot 26 was an exact
+/// duplicate of slot 8; slot 28 compared `target.uid` to `target_slot`
+/// (different ID spaces — near-always 0). New layout:
+///   slot 10 = combat `target_value` / 200 (0 outside combat)
+///   slot 26 = combat `lethal_target` flag (0/1, outside combat = 0)
+///   slot 28 = trainer `effect.heal` magnitude / 100 (0 outside trainer)
+pub const ACTION_FEATURE_SCHEMA_VERSION: u32 = 3;
 
 /// `ai-policy/actions.ts:22`. Per-action feature count — locks the Python
 /// collator's input width.
@@ -176,7 +184,6 @@ fn enumerate_setup_actions(state: &GameState, side_id: SideId) -> Vec<LegalAiAct
         phase: AiPhase::Setup,
         kind: "setupChooseBoard",
         source_card_id: Some(active_card_id),
-        amount: Some(bench_hand_indexes.len() as f64),
         ..Default::default()
     });
 
@@ -444,7 +451,6 @@ fn enumerate_attach_actions(state: &GameState, side: &SideState) -> Vec<LegalAiA
             kind: "attachEnergy",
             target: Some(target),
             target_slot: Some(slot as f64),
-            amount: Some(attached_energy_count(target) as f64),
             ..Default::default()
         });
         out.push(LegalAiAction {
@@ -697,7 +703,8 @@ fn enumerate_combat_actions(state: &GameState, side: &SideState) -> Vec<LegalAiA
                 // kind (which can be "retreatAttack"). features feed off
                 // the decision kind.
                 kind: decision_kind,
-                amount: Some(candidate.target_value),
+                target_value: Some(candidate.target_value),
+                lethal_target: Some(candidate.lethal_target),
                 ends_turn: Some(ends_turn),
                 source_card_id,
                 target,
@@ -1083,7 +1090,8 @@ struct FeatureInput<'a> {
     choice_card_id: Option<CardId>,
     target: Option<&'a UmamusumeInstance>,
     target_slot: Option<f64>,
-    amount: Option<f64>,
+    target_value: Option<f64>,
+    lethal_target: Option<bool>,
     ends_turn: Option<bool>,
 }
 
@@ -1124,7 +1132,7 @@ fn build_features(input: FeatureInput<'_>) -> Vec<f64> {
         Some(slot) => slot / 4.0,
         None => -1.0,
     };
-    v[10] = input.amount.unwrap_or(0.0);
+    v[10] = input.target_value.map(|tv| tv / 200.0).unwrap_or(0.0);
     v[11] = if input.ends_turn.unwrap_or(false) { 1.0 } else { 0.0 };
     let source_card: Option<&Card> = input.source_card_id.and_then(|cid| cat.get(cid));
     v[12] = if input.kind == "pass" { 1.0 } else { 0.0 };
@@ -1190,22 +1198,13 @@ fn build_features(input: FeatureInput<'_>) -> Vec<f64> {
         _ => 0.0,
     };
     v[25] = input.target.map(|t| t.max_hp as f64 / 180.0).unwrap_or(0.0);
-    v[26] = match input.target {
-        Some(t) => attached_energy_count(t) as f64 / 6.0,
-        None => 0.0,
-    };
+    v[26] = if input.lethal_target.unwrap_or(false) { 1.0 } else { 0.0 };
     v[27] = input
         .target
         .map(|t| t.special_conditions.len() as f64 / 4.0)
         .unwrap_or(0.0);
-    v[28] = match (input.target, input.target_slot) {
-        (Some(t), Some(slot)) => {
-            if (t.uid as f64) == slot {
-                1.0
-            } else {
-                0.0
-            }
-        }
+    v[28] = match source_card {
+        Some(Card::Trainer(t)) => t.effect.heal.unwrap_or(0) as f64 / 100.0,
         _ => 0.0,
     };
     v[29] = if input.kind == "attack" || input.kind == "retreatAttack" {
@@ -1814,5 +1813,105 @@ mod tests {
         assert!(a >= 0.0 && a <= 1.0);
         // Distinct strings → distinct (with vanishing collision prob).
         assert_ne!(hash_to_unit("foo"), hash_to_unit("bar"));
+    }
+
+    // ----------------------------------------------------------------
+    // v33-correctness-fix Fix 2-4: action-slot layout (10/26/28).
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn schema_version_bumped_to_three() {
+        assert_eq!(ACTION_FEATURE_SCHEMA_VERSION, 3);
+    }
+
+    #[test]
+    fn slot_10_holds_combat_target_value_normalised_by_200() {
+        let feats = build_features(FeatureInput {
+            score: 0.0,
+            phase: AiPhase::Combat,
+            kind: "attack",
+            target_value: Some(150.0),
+            ..Default::default()
+        });
+        assert_eq!(feats[10], 150.0 / 200.0);
+        // Outside combat (no target_value): slot 10 == 0.
+        let feats_setup = build_features(FeatureInput {
+            score: 0.0,
+            phase: AiPhase::Setup,
+            kind: "setupChooseBoard",
+            ..Default::default()
+        });
+        assert_eq!(feats_setup[10], 0.0);
+    }
+
+    #[test]
+    fn slot_26_is_combat_lethal_flag() {
+        let feats_lethal = build_features(FeatureInput {
+            score: 0.0,
+            phase: AiPhase::Combat,
+            kind: "attack",
+            lethal_target: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(feats_lethal[26], 1.0);
+        let feats_nonlethal = build_features(FeatureInput {
+            score: 0.0,
+            phase: AiPhase::Combat,
+            kind: "attack",
+            lethal_target: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(feats_nonlethal[26], 0.0);
+        // Outside combat / not provided: 0.
+        let feats_unset = build_features(FeatureInput {
+            score: 0.0,
+            phase: AiPhase::Attach,
+            kind: "attachEnergy",
+            ..Default::default()
+        });
+        assert_eq!(feats_unset[26], 0.0);
+    }
+
+    #[test]
+    fn slot_28_is_trainer_heal_amount_normalised_by_100() {
+        // Find a trainer with a heal effect from the catalog. If none
+        // exists in this catalog snapshot the test is vacuous, but the
+        // build_features path is still exercised.
+        let cat = catalog();
+        let mut heal_card_id: Option<CardId> = None;
+        let mut heal_amount: Option<i32> = None;
+        for (idx, card) in cat.cards.iter().enumerate() {
+            if let Card::Trainer(t) = card {
+                if let Some(h) = t.effect.heal {
+                    if h > 0 {
+                        heal_card_id = Some(CardId(idx as u16));
+                        heal_amount = Some(h);
+                        break;
+                    }
+                }
+            }
+        }
+        if let (Some(cid), Some(h)) = (heal_card_id, heal_amount) {
+            let feats = build_features(FeatureInput {
+                score: 0.0,
+                phase: AiPhase::TrainerBefore,
+                kind: "playTrainer",
+                source_card_id: Some(cid),
+                ..Default::default()
+            });
+            assert!(
+                (feats[28] - h as f64 / 100.0).abs() < 1e-9,
+                "expected slot28 = {} / 100 = {}, got {}",
+                h, h as f64 / 100.0, feats[28]
+            );
+        }
+        // Non-trainer source → 0.
+        let feats_no_trainer = build_features(FeatureInput {
+            score: 0.0,
+            phase: AiPhase::Combat,
+            kind: "attack",
+            ..Default::default()
+        });
+        assert_eq!(feats_no_trainer[28], 0.0);
     }
 }
