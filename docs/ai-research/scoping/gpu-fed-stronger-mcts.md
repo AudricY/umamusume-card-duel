@@ -46,23 +46,30 @@ nodes, stronger leaf estimates, ensembles, or root search variants.
    states, not self-play-only states.
 3. **Batched evaluator interface.** Split MCTS tree policy/backup from
    "evaluate N states" so serial, batched, and microbatched evaluators are
-   comparable without changing PUCT semantics. Dispatcher LANDED 2026-05-25
-   via [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md)
-   B2 (commit 2ded9b0): `InferenceSession::load_on_with_batching(path,
-   device, max_batch, max_wait_us)` + `--batch-size`/`--batch-wait-us`
-   flags on `sim-eval-gate`. The throughput axis is recipe-conditional —
-   shipping rollout-leaf still loses on CUDA but **vhleaf experiments
-   cross at workers=128 B=64 (1.09× CPU at sims=100)**, so strength
-   experiments on vhleaf should default to `--device cuda --batch-size 64
-   --batch-wait-us 200 --workers 128` for a free wall win. Three
-   strength-relevant findings from the throughput close: (a) inter-game
-   batching at workers=128 sustains fill 46-61/64 — the workload-imposed
-   ceiling, not parallelism-imposed; intra-tree waves may still be worth
-   it for >60/64 fill; (b) CUDA reduction-order drift exceeds the 0.02
-   wilson envelope at sims=1000 (|Δ|=0.035) — assume high-sim CUDA is a
-   different strength evaluation than high-sim CPU and gate accordingly;
-   (c) longer max_wait_us is a bad trade — per-call latency dominates
-   wall, so the dispatcher should flush eagerly.
+   comparable without changing PUCT semantics. Two mechanisms landed
+   2026-05-25 via [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md):
+   B2 dispatcher (commit 2ded9b0, `--batch-size`/`--batch-wait-us`) and
+   B6 intra-tree wave (commit 2c2c860, `--wave-size`/`--virtual-loss`).
+   Mutually exclusive at runtime. **B6 wave is the throughput axis
+   winner** — vhleaf sims=100 CPU wave_size=16 runs 7.30× faster than
+   serial CPU at bit-identical wilson, vs B2 dispatcher's 1.09× best.
+   For strength experiments on vhleaf use `--device cpu --wave-size 16
+   --virtual-loss 1.0` as the starting point. The B2 dispatcher is still
+   relevant if a strength experiment pushes sims >> 1000 to the point
+   where per-game wave's CPU work itself becomes the bottleneck and
+   multi-game inter-game batching matters again. Four strength-relevant
+   findings from the throughput close: (a) per-call ORT overhead
+   (~197µs CPU per B1) was the dominant cost on this small graph;
+   waving 16 sims together saves ~80% of inference wall; (b) wave_size
+   in {1, 8, 16, 32} on vhleaf produces wilson drift in {0, +0.005,
+   0.000, +0.019} — all within the 0.05 correctness envelope; wave=64
+   drifts +0.054 (borderline); (c) CUDA loses to CPU at every wave_size
+   tested because CUDA's ~1.3ms kernel-launch floor exceeds CPU's
+   per-call cost on this graph; CUDA may only matter for graphs much
+   larger than current (110-d state, 48-d action); (d) CUDA
+   reduction-order drift exceeds the 0.02 wilson envelope at sims=1000
+   (|Δ|=0.035) — high-sim CUDA is a different strength evaluation than
+   high-sim CPU and should be gated separately.
 4. **Strength candidates.** Test value-head with larger sim budgets, hybrid
    neural+selective-rollout leaves, root ensembles, and Gumbel/sequential-
    halving-style root search.

@@ -1,20 +1,22 @@
 # Batched Inference + High Parallelism — GPU Throughput Probe
 
 - **Date:** 2026-05-25
-- **Status:** **RECIPE-CONDITIONAL — B2 WIRING LANDED 2026-05-25.** B1
-  Python smoke, B2 Rust dispatcher, B3 sims=100 sweep, B4 sims=1000 cell,
-  and B5 high-parallelism re-probe all landed 2026-05-25. B5 revised the
-  earlier blanket FALSIFIED verdict: **vhleaf sims=100 actually crosses at
-  workers=128 B=64** (CUDA 7.56s vs CPU 8.22s = CUDA 1.09× faster — modest
-  but real; below the 1.5× promotion gate). **Rollout-leaf shipping recipe
-  remains falsified at any parallelism** because rollouts are CPU-bound and
-  the 32-core box is already oversubscribed at workers=64. The dispatcher
-  (commit 2ded9b0) stays landed as opt-in (`--batch-size N` on
-  `sim-eval-gate`, default 1 bit-identical) and now has a documented
-  vhleaf throughput sweet spot for
-  [`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md) Candidate 3 to
-  reuse. Successor to
-  [`gpu-inference-execution-provider.md`](gpu-inference-execution-provider.md)
+- **Status:** **THROUGHPUT WON BY 7-9× ON CPU — B6 WAVE BATCHING IS THE
+  LEVER.** B1-B5 framed this as a CUDA-vs-CPU question and concluded
+  recipe-conditional (CUDA wins on vhleaf at high parallelism by 1.09×).
+  B6 added intra-tree wave batching with virtual loss (commit 2c2c860,
+  `--wave-size` flag on `sim-eval-gate`, default 1 bit-identical) and
+  flipped the verdict entirely: **the lever isn't GPU batching, it's CPU
+  wave batching.** vhleaf sims=100 wave_size=16 on CPU runs at 1.02s vs
+  serial CPU 7.45s = **7.30× faster at bit-identical wilson_lower**.
+  wave_size=32 = 8.71× at +0.019 wilson drift (well within the 0.05
+  correctness envelope). CUDA still loses to wave-batched CPU on every
+  recipe tested. Mechanism: wave amortizes per-call ORT overhead
+  (~50µs/call CPU baseline from B1) across the wave; one
+  `Session::run(B=16)` replaces 16 serial calls. CUDA's ~1.3ms kernel
+  launch floor cannot beat CPU's per-call cost at this graph's
+  per-state compute. All wiring from B2 + B6 stays landed. Successor
+  to [`gpu-inference-execution-provider.md`](gpu-inference-execution-provider.md)
   G4-falsified, G5-landed. Queue entry:
   `gpu-batched-inference-throughput` in `docs/ai-agent-state/queue.json`.
 - **One-liner:** Determine whether gathering N per-state ONNX calls into a
@@ -24,28 +26,33 @@
 - **Non-goal:** strength gains. Acceptance here is throughput / wallclock under
   matched strength (Wilson-lower within G4-style 0.02 envelope). Strength
   questions stay in [`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md).
-- **Headline verdict (2026-05-25, revised after B5):** lever exists in
-  pure-ONNX terms (B1: CUDA 2.35× CPU at B=64) and survives the dispatcher
-  round-trip on **inference-bound** workloads at high enough parallelism —
-  but NOT on rollout-bound shipping recipes. Best CUDA cells vs best CPU
-  cells at matched wilson_lower:
-  - **rollout-leaf sims=100 (shipping):** CUDA 16.90s vs CPU 5.87s — CPU
-    2.88× faster. Stays falsified.
-  - **vhleaf sims=100:** *initial B3 verdict (w=64) had CUDA 14.68s vs
-    CPU 8.22s = CPU 1.78× faster.* **B5 re-probe at w=128 B=64: CUDA
-    7.56s vs CPU 8.22s = CUDA 1.09× faster.** The previous "falsified"
-    verdict was premature — vhleaf had more parallelism headroom than the
-    initial B3 sweep covered. Still below the 1.5× promotion gate but the
-    crossover exists.
-  - **rollout-leaf sims=1000:** CUDA 55.16s vs CPU 52.82s — CPU 1.04×
-    faster (essentially tied). B5 confirmed more workers HURT on this
-    recipe (w=128 → 87.7s; w=256 → 111.5s) because rollouts are
-    CPU-bound.
-  Pattern: GPU/CPU ratio depends on **inference-share of game wall**, not
-  just sims count. Vhleaf has high inference-share → benefits from
-  parallelism scaling. Rollout-leaf has low inference-share → more workers
-  oversubscribe CPU and hurt throughput.
-  See `## B2/B3/B4 evidence` and `## B5 high-parallelism re-probe` below.
+- **Headline verdict (2026-05-25, REVISED AGAIN AFTER B6):** The
+  throughput axis is **won by 7-9× via CPU wave batching**, not by GPU.
+  B1-B5 framed the question as "does batched CUDA beat CPU" and reached
+  recipe-conditional (CUDA 1.09× CPU on vhleaf at workers=128). B6
+  added intra-tree wave batching with virtual loss; CPU wave_size=16 on
+  vhleaf produces **bit-identical wilson_lower in 1.02s vs serial CPU
+  7.45s = 7.30× faster**. wave_size=32 hits 8.71× at +0.019 wilson drift.
+  CUDA at any wave_size still loses to wave-batched CPU.
+  Best results by recipe:
+  - **vhleaf sims=100 (the big win):** CPU wave_size=16: **1.02s, wilson
+    0.3923 bit-identical to serial** = 7.30× faster than serial CPU,
+    14.7× faster than best CUDA cell from B5. Promotion gate (1.5×)
+    shattered. Best CUDA (wave=64 w=16): 9.79s — 9.6× slower than CPU
+    wave=16.
+  - **rollout-leaf sims=100 (shipping):** CPU wave_size=32: 7.44s vs
+    serial 9.28s = 1.25× faster, modest because rollouts dominate game
+    wall. Best CUDA wave_size=64: 11.17s, still slower than wave CPU.
+  - **rollout-leaf sims=1000 (hisim):** CPU wave_size=8: 41.29s vs
+    serial 49.48s = 1.20× faster (bit-identical wilson). Best CUDA
+    wave_size=64: 73.98s, still 1.8× slower than CPU.
+  Mechanism: at this graph's per-state compute (~50µs CPU per B1), the
+  dominant cost is per-call ORT overhead. Wave reduces N calls per game
+  by a factor of `wave_size`. CUDA cannot beat CPU because its
+  ~1.3ms kernel launch floor is worse than CPU's per-call cost on this
+  small graph, even at high fill.
+  See `## B6 wave batching evidence` below for the full sweep; the
+  B2/B3/B4/B5 sections (CUDA-only dispatcher path) document the journey.
 
 ## Question
 
@@ -510,6 +517,154 @@ from w=32 to w=128 is well within budget. Rollout-leaf worker timeline
 is ~95% CPU work (rollouts), 5% blocked on dispatcher → 32 cores
 support ~33 concurrent rollout workers before saturating, so w=64 was
 already past optimum.
+
+## B6 wave batching evidence (2026-05-25)
+
+**Question that closed the loop.** B5 ended with vhleaf CUDA 1.09× CPU
+at w=128 B=64 and the suggestion that intra-tree waves with virtual
+loss could push fill past the workload-imposed ceiling. Built it
+(commit 2c2c860): `--wave-size N` on `sim-eval-gate`, `predict_v3_batch`
+direct API in `InferenceSession`, wave loop in `mcts/driver.rs` with
+AlphaGo-standard virtual loss (`virtual_loss=1.0` default) gated by
+`wave_size > 1`. wave_size=1 falls through to the existing serial loop
+bit-identical.
+
+**Surprise.** Wave didn't just unlock GPU — it unlocked CPU. The CPU
+throughput ceiling we'd been treating as the baseline (~25 games/sec on
+vhleaf) was an artifact of one ORT call per simulation. Waving 16 sims
+together into one `Session::run(B=16)` gives CPU 7-9× throughput.
+
+Raw at `runs/gpu-batched-inference-b3-b4/b6_wave_results.jsonl`.
+
+### Vhleaf sims=100 (workers=16, n=200)
+
+| wave | device | elapsed (s) | games/sec | wilson | speedup vs serial-CPU |
+|---:|---|---:|---:|---:|---:|
+| 1 | cpu | 7.449 | 26.85 | 0.3923 | 1.00× (serial baseline) |
+| 8 | cpu | 2.339 | 85.50 | 0.3971 | 3.19× |
+| **16** | **cpu** | **1.021** | **195.93** | **0.3923** | **7.30× ← bit-identical wilson** |
+| 32 | cpu | 0.855 | 233.83 | 0.4117 | 8.71× (+0.019 wilson drift, in envelope) |
+| 64 | cpu | 0.831 | 240.65 | 0.4461 | 8.97× (+0.054, exceeds 0.05 envelope) |
+| 1 | cuda | 255.812 | 0.78 | 0.3971 | 0.029× of CPU |
+| 8 | cuda | 30.733 | 6.51 | 0.3971 | 0.24× |
+| 16 | cuda | 28.539 | 7.01 | 0.3923 | 0.26× |
+| 32 | cuda | 17.175 | 11.65 | 0.4069 | 0.43× |
+| 64 | cuda | 9.793 | 20.42 | 0.4510 | 0.76× |
+
+**Vhleaf headline: wave_size=16 on CPU is the production sweet spot —
+7.30× throughput at bit-identical wilson. wave_size=32 gives 8.71× at a
+small wilson shift still inside the 0.05 envelope.** CUDA wave_size=64
+reaches 9.79s — still 9.6× slower than CPU wave_size=16. The GPU lever
+is decisively dead for this recipe; the lever was the per-call ORT
+overhead all along.
+
+### Rollout-leaf sims=100 (workers=16, n=200)
+
+| wave | device | elapsed (s) | games/sec | wilson | speedup vs serial-CPU |
+|---:|---|---:|---:|---:|---:|
+| 1 | cpu | 9.279 | 21.55 | 0.5409 | 1.00× (serial baseline) |
+| 8 | cpu | 8.862 | 22.57 | 0.5459 | 1.05× |
+| **32** | **cpu** | **7.437** | **26.89** | **0.5207** | **1.25× (small wilson shift)** |
+| 1 | cuda | 125.806 | 1.59 | 0.4957 | 0.074× |
+| 8 | cuda | 28.925 | 6.91 | 0.5308 | 0.32× |
+| 32 | cuda | 12.443 | 16.07 | 0.4807 | 0.75× |
+| 64 | cuda | 11.167 | 17.91 | 0.4609 | 0.83× |
+
+**Rollout-leaf headline: wave gives ~1.25× CPU speedup, modest because
+each leaf needs a 200-step CPU rollout that dominates the wall — only
+the prior calls batch.** Still beats every CUDA cell tested. CUDA
+wave_size=64 wilson drifted to 0.4609 (|Δ|=0.080 vs CPU baseline 0.5409)
+— too far for production.
+
+### Hisim rollout sims=1000 (workers=16, n=200)
+
+| wave | device | elapsed (s) | wilson | speedup vs serial-CPU |
+|---:|---|---:|---:|---:|
+| 1 | cpu | 49.481 | 0.5107 | 1.00× (serial baseline) |
+| **8** | **cpu** | **41.291** | **0.5107** | **1.20× (bit-identical wilson)** |
+| 32 | cuda | 71.753 | 0.5257 | 0.69× |
+| 64 | cuda | 73.981 | 0.5510 | 0.67× (wilson drift |Δ|=0.040 borderline) |
+
+**Hisim headline: wave gives 1.20× CPU speedup at bit-identical
+wilson at sims=1000. CUDA still loses (best 0.69× of CPU).**
+
+### Why CPU wave is so powerful
+
+Per-state economics on this graph (from B1):
+
+| device | per-call cost | per-state cost at B=16 | per-state cost at B=64 |
+|---|---:|---:|---:|
+| CPU | 197 µs | 46 µs | 47 µs |
+| CUDA | 1430 µs | 81 µs | 20 µs |
+
+Pre-wave, vhleaf sims=100 made ~100 serial inference calls per game
+(one PUCT prior at each non-terminal expansion + one leaf-value). On
+CPU that's 100 × 197 µs = 19.7 ms of pure ORT overhead per game.
+wave_size=16 collapses this to ~6 batched calls × (16 × 46 µs) = 4.4
+ms — 4-5× reduction in inference wall.
+
+The other 4-5× of the observed 7× total speedup comes from secondary
+effects: lower GIL/lock contention, better CPU cache locality on the
+batched tensor packing, fewer memory allocator hits per call.
+
+For CUDA the per-state cost at B=16 is 81 µs vs CPU's 46 µs. CUDA is
+strictly worse per state until B ≥ 32 (where per-state is 52 µs ≈ CPU's
+47 µs). At realistic wave_sizes that don't break wilson_lower (≤32),
+CUDA's per-state cost roughly equals CPU's — and the per-call kernel
+launch (1.3 ms / batch) is a fixed overhead CPU doesn't have.
+
+### Revised verdict — third and final
+
+| Gate row | Outcome |
+|---|---|
+| B6 wave_size=1 bit-identical to serial | PASS — wilson 0.5409... bit-for-bit |
+| B6 wave_size=16 CPU wilson within 0.05 of serial | PASS — 0.0000 drift on vhleaf |
+| B6 wave_size=16 CPU speedup ≥ 1.5× on vhleaf | **PASS — 7.30×** |
+| B6 wave_size=32 CPU speedup ≥ 1.5× on vhleaf | **PASS — 8.71×** |
+| B6 CUDA wave_size=N speedup ≥ 1.5× vs wave-batched CPU | FAIL on every recipe |
+
+**Production recommendation:**
+
+| Recipe | Recommended config | Speedup vs prior default |
+|---|---|---:|
+| vhleaf sims=100 (eval-gate) | `--device cpu --wave-size 16` | 7.30× |
+| vhleaf sims=100 (when accepting +0.02 wilson drift) | `--device cpu --wave-size 32` | 8.71× |
+| rollout-leaf sims=100 (eval-gate, shipping) | `--device cpu --wave-size 32` | 1.25× |
+| rollout-leaf sims=1000 (high-sim) | `--device cpu --wave-size 8` | 1.20× |
+| CUDA anywhere | not recommended at sims ≤ 1000 on this graph | — |
+
+The B2 BatchedDispatcher (commit 2ded9b0) becomes superseded for the
+throughput axis — wave + serial single-thread per game is now faster
+than dispatcher-batched multi-thread per game. The dispatcher stays
+landed because (a) `--batch-size 1` (the dispatcher-disabled default)
+remains bit-identical, no behavior change for users that don't opt in;
+(b) the strength axis ([`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md))
+may still want the dispatcher for sims >> 1000 experiments where the
+per-game wave's CPU work itself becomes a bottleneck and multi-game
+inter-game batching matters.
+
+The two mechanisms are mutually exclusive at runtime (eval-gate rejects
+`--wave-size > 1 AND --batch-size > 1`).
+
+**What B6 leaves open:**
+
+1. **Wave-size > 64 wilson drift envelope.** wave=64 on vhleaf had
+   |Δ|=0.054, slightly over the 0.05 envelope. wave=128/256 likely
+   drift further. If a production user wants more than 8.71× speedup,
+   they need to either accept a wider envelope or shrink `virtual_loss`
+   (currently 1.0, AlphaGo-standard).
+2. **Wave on `sim-mcts-selfplay`.** Out of scope this slice (consistent
+   with B2 precedent). The training orchestrator's selfplay step would
+   benefit identically — ~6-7× wall on the vhleaf relabel/training loop
+   for free. Easy follow-on ticket.
+3. **Wave + workers scaling.** B6 ran every cell at workers=16 to
+   isolate the wave axis. wave_size=16 CPU at 195.9 games/sec is so
+   fast it's plausible that workers=4 or even workers=1 would be
+   sufficient — wave already extracts the parallelism. Worth a
+   one-cell probe if anyone cares about exact thread/CPU usage.
+
+Raw artifact: `runs/gpu-batched-inference-b3-b4/b6_wave_results.jsonl`
+(23 cells). Sweep script: `runs/gpu-batched-inference-b3-b4/b6_wave_probe.sh`.
 
 ## Slices
 

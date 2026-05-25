@@ -294,17 +294,16 @@ validation across three worker counts).
 ## Crosslinks
 
 - [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md)
-  — successor for the `next_action` (b) lever (batched dispatch).
-  CLOSED 2026-05-25 with RECIPE-CONDITIONAL verdict (revised from
-  initial blanket FALSIFIED after a high-parallelism re-probe at
-  workers ∈ {96, 128, 256}): vhleaf sims=100 actually crosses at
-  workers=128 B=64 (CUDA 1.09× CPU), but rollout-leaf at any sims and
-  any parallelism stays falsified — more workers strictly hurt because
-  rollouts are CPU-bound and the 32-core box oversubscribes at w=64+.
-  G4's rollout-leaf throughput-motivation falsification still stands.
-  Wiring (commit 2ded9b0) stays as opt-in for the strength axis
-  ([`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md) Candidate 3),
-  which now has a documented vhleaf throughput sweet spot.
+  — successor for the `next_action` (b) lever. CLOSED 2026-05-25 with
+  a much bigger win than expected: B6 intra-tree wave batching
+  (commit 2c2c860, `--wave-size N` on `sim-eval-gate`) gives
+  **vhleaf sims=100 CPU 7.30× faster than serial at bit-identical
+  wilson**. CUDA loses to wave-batched CPU on every recipe tested —
+  the lever was per-call ORT overhead (~197µs CPU), not device
+  throughput. G4's rollout-leaf CUDA-loses-to-CPU finding still
+  stands and is dwarfed by B6's CPU wave win. Wiring (B2 commit
+  2ded9b0 + B6 commit 2c2c860) stays as opt-in; production
+  recommendation: `--wave-size 16` on CPU for vhleaf experiments.
 - `gpu-fed-stronger-mcts.md` — sibling, strength axis. Shares CUDA EP
   wiring but acceptance is "Wilson-lower beats production at higher
   sims", not "wallclock faster at same recipe".
