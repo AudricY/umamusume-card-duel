@@ -238,7 +238,11 @@ pub fn drive_mcts_game_json(
             let mcts_seed = format!(
                 "{}:{}:{}:mcts",
                 seed,
-                if model_side == SideId::Player { "player" } else { "opponent" },
+                if model_side == SideId::Player {
+                    "player"
+                } else {
+                    "opponent"
+                },
                 step
             );
             let (result, used_after_mcts) = with_rng(step_rng.clone(), || {
@@ -335,6 +339,7 @@ fn build_config(args: &McTsArgs) -> MctsConfig {
         prior,
         rollout_crn_samples: args.rollout_crn_samples.unwrap_or(3),
         rollout_steps: args.rollout_steps.unwrap_or(200),
+        record_rollout_leaf_samples: 0,
         value_head_rollout_blend: args.value_head_rollout_blend.unwrap_or(0.0),
         add_root_dirichlet: args.add_root_dirichlet.unwrap_or(false),
         dirichlet_alpha: args.dirichlet_alpha.unwrap_or(0.3),
@@ -378,7 +383,13 @@ pub fn run_mcts_json(
     };
     let model_url = config.model_url.clone();
     let (result, used_rng) = with_rng(rng, || {
-        run_mcts(&state, side, &config, model_url.as_str(), mcts_seed.as_str())
+        run_mcts(
+            &state,
+            side,
+            &config,
+            model_url.as_str(),
+            mcts_seed.as_str(),
+        )
     });
     let result_json = serde_json::to_string(&result)
         .map_err(|e| napi::Error::from_reason(format!("serialize mcts result: {e}")))?;
@@ -425,14 +436,18 @@ pub fn mcts_step_json(
     // but produces a different rng advance schedule than production
     // sim-cli. Aligning them means goldens captured one path apply to
     // the other.
-    let (legal, used_rng_after_legal) = with_rng(rng, || {
-        enumerate_legal_ai_actions(&state, side)
-    });
+    let (legal, used_rng_after_legal) = with_rng(rng, || enumerate_legal_ai_actions(&state, side));
     if legal.is_empty() {
         return Err(napi::Error::from_reason("no legal actions"));
     }
     let (result, used_rng_after_mcts) = with_rng(used_rng_after_legal, || {
-        run_mcts(&state, side, &config, model_url.as_str(), mcts_seed_owned.as_str())
+        run_mcts(
+            &state,
+            side,
+            &config,
+            model_url.as_str(),
+            mcts_seed_owned.as_str(),
+        )
     });
     let chosen_idx = result.selected_index.min(legal.len() - 1);
     let chosen = legal[chosen_idx].clone();

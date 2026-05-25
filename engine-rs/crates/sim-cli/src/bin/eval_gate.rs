@@ -376,6 +376,7 @@ fn main() -> Result<()> {
         prior,
         rollout_crn_samples: args.k,
         rollout_steps: args.rollout_steps,
+        record_rollout_leaf_samples: 0,
         value_head_rollout_blend: args.value_head_rollout_blend,
         // TS parity (`backend/src/sim/evalGate.ts:509`):
         // `mctsRootDirichlet: argv.includes("--mcts-root-dirichlet")` →
@@ -412,10 +413,7 @@ fn main() -> Result<()> {
         "cuda" => Device::Cuda {
             device_id: args.cuda_device_id,
         },
-        other => anyhow::bail!(
-            "--device must be one of 'cpu' or 'cuda' (got {})",
-            other
-        ),
+        other => anyhow::bail!("--device must be one of 'cpu' or 'cuda' (got {})", other),
     };
     let needs_inference = selection != "random"
         && (matches!(prior, MctsPrior::Policy) || matches!(leaf, MctsLeaf::ValueHead));
@@ -497,8 +495,7 @@ fn main() -> Result<()> {
         player_deck_id: &'static str,
         opponent_deck_id: &'static str,
     }
-    let outcomes: Arc<Mutex<Vec<Option<Outcome>>>> =
-        Arc::new(Mutex::new(vec![None; total_tasks]));
+    let outcomes: Arc<Mutex<Vec<Option<Outcome>>>> = Arc::new(Mutex::new(vec![None; total_tasks]));
     // BufWriter wrapped in Mutex: each completed game appends one JSONL
     // line and flushes. Lines arrive out-of-order under parallelism;
     // consumers should not assume monotone gameIndex.
@@ -701,10 +698,7 @@ fn main() -> Result<()> {
                     opp_wins += 1;
                 }
             }
-            let key = (
-                o.player_deck_id.to_string(),
-                o.opponent_deck_id.to_string(),
-            );
+            let key = (o.player_deck_id.to_string(), o.opponent_deck_id.to_string());
             let entry = per_matchup.entry(key).or_insert((0u32, 0u32));
             entry.0 += 1; // games
             if model_won {
@@ -922,10 +916,7 @@ mod tests {
         assert_eq!(tasks.len(), 10, "both must schedule 2N tasks");
         // Player block first, then opponent block — mirrors TS
         // `for (const side of sides) for (let index = 0; ...)`.
-        let player_block: Vec<_> = tasks
-            .iter()
-            .filter(|(_, s)| *s == SideId::Player)
-            .collect();
+        let player_block: Vec<_> = tasks.iter().filter(|(_, s)| *s == SideId::Player).collect();
         let opponent_block: Vec<_> = tasks
             .iter()
             .filter(|(_, s)| *s == SideId::Opponent)
