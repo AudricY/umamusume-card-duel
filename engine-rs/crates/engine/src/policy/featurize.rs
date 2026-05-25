@@ -51,6 +51,13 @@ pub const STATE_DIM_V3_1: usize = 164;
 /// graph produces bit-identical iter-0 outputs (new Linear columns are
 /// zero-init in `make_v33_tail_init.py`).
 pub const STATE_DIM_V3_3: usize = 167;
+/// Mirrors `STATE_DIM_V3_5` in Python — 212-d v3.5 multichannel-tail
+/// builder (`v35-multichannel-tail-scoping.md`). Layout is the frozen
+/// v3.3 167-d head + 45-bit channel-orthogonal tail. Tail-init is
+/// zero-init residual: a v3.3 ckpt loaded into the v3.5 graph produces
+/// bit-identical iter-0 outputs (new Linear columns are zero-init in
+/// `make_v35_tail_init.py`).
+pub const STATE_DIM_V3_5: usize = 212;
 /// Mirrors `ACTION_DIM` (48-d action feature vector — pre-computed
 /// TS-side and carried verbatim on `LegalAiAction.features`).
 pub const ACTION_DIM: usize = 48;
@@ -108,6 +115,21 @@ fn side_to_str(side: crate::core::constants::SideId) -> &'static str {
 // `PENDING_CHOICE_KINDS` (Python) — order is load-bearing for the one-hot
 // at slots [97, 98, 99] (slot 97 is "none").
 const PENDING_CHOICE_KINDS: [&str; 2] = ["promoteAfterKnockout", "switchAfterGust"];
+
+// v35-multichannel-tail special-condition vocab. FROZEN. Mirrors Python
+// `_V35_CONDITION_VOCAB`. Sourced from
+// `frontend/src/game/engine/flow/specialConditions.ts` / `flow/turn.ts` /
+// `flow/eligibility.ts` — these five tokens are the complete set the
+// engine emits into `special_conditions: Vec<String>`. Adding a new
+// arm requires bumping the schema (additive v3.6 tail), never editing
+// this vocab.
+const V35_CONDITION_VOCAB: [&str; 5] = [
+    "paralysed",
+    "burned",
+    "poisoned",
+    "asleep",
+    "frozen",
+];
 
 // Energy-type label order MUST match Python `_energy_vector` and the
 // JSON keys emitted by the observation builder (`energy_label_camel`).
@@ -360,6 +382,90 @@ pub fn observation_state_features_v3_3(obs: &PublicObservation) -> Vec<f32> {
     f[164] = if obs.opponent.used_supporter_this_turn { 1.0 } else { 0.0 };
     f[165] = if obs.opponent.used_retreat_this_turn { 1.0 } else { 0.0 };
     f[166] = if obs.opponent.used_stadium_this_turn { 1.0 } else { 0.0 };
+
+    f
+}
+
+fn v35_condition_one_hot(uma: Option<&PublicUmaObservation>, out: &mut [f32]) {
+    // 5-bit one-hot over `V35_CONDITION_VOCAB`. Multiple conditions set
+    // multiple bits. Missing Uma → all zeros (`out` is presumed
+    // zero-init). Unknown tokens → silently dropped (mirrors Python
+    // `_v35_condition_one_hot`).
+    debug_assert_eq!(out.len(), V35_CONDITION_VOCAB.len());
+    let Some(uma) = uma else { return; };
+    for cond in &uma.special_conditions {
+        if let Some(idx) = V35_CONDITION_VOCAB.iter().position(|v| *v == cond.as_str()) {
+            out[idx] = 1.0;
+        }
+    }
+}
+
+fn v35_energy_front_one_hot(side: &PublicSideObservation, out: &mut [f32]) {
+    // 10-bit one-hot over `ENERGY_TYPES_ORDER` for the front-of-queue
+    // entry of this side's `energy_zone`. Empty zone or unknown type →
+    // all zeros. Mirrors Python `_v35_energy_front_one_hot`.
+    debug_assert_eq!(out.len(), ENERGY_TYPES_ORDER.len());
+    let zone = &side.energy_zone;
+    let Some(front) = zone.first() else { return; };
+    if let Some(idx) = ENERGY_TYPES_ORDER.iter().position(|t| *t == front.as_str()) {
+        out[idx] = 1.0;
+    }
+}
+
+fn v35_bench_refill_catastrophe(side: &PublicSideObservation) -> f32 {
+    // 1.0 if no non-null bench Uma to promote on active KO. Minimum-
+    // viable terminal-state predicate (scoping doc §4.5). Mirrors
+    // Python `_v35_bench_refill_catastrophe`.
+    if side.bench.iter().any(|b| b.is_some()) {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+/// v35-multichannel-tail: 212-d builder. Slots 0–166 are byte-identical
+/// to v3.3 (produced by calling `observation_state_features_v3_3`
+/// directly, NOT re-derived); slots [167:212] are the 45-bit channel-
+/// orthogonal tail. Mirrors `observation_to_features_v3_5` in Python.
+///
+/// Tail layout (absolute):
+///   [167:177] phase one-hot (10) — temporal-cadence channel
+///   [177:182] own active per-condition one-hot (5)
+///   [182:187] opp active per-condition one-hot (5)
+///   [187:197] own energy-zone front-of-queue typed one-hot (10)
+///   [197:207] opp energy-zone front-of-queue typed one-hot (10)
+///   [207:210] opp discard role buckets (3)
+///   [210]     own would_lose_on_active_KO (bench empty)
+///   [211]     opp would_lose_on_active_KO (bench empty)
+pub fn observation_state_features_v3_5(obs: &PublicObservation) -> Vec<f32> {
+    let mut f = vec![0.0f32; STATE_DIM_V3_5];
+    let head = observation_state_features_v3_3(obs);
+    debug_assert_eq!(head.len(), STATE_DIM_V3_3);
+    f[..STATE_DIM_V3_3].copy_from_slice(&head);
+
+    // [167:177] phase one-hot — unknown phase → all zeros.
+    if let Some(idx) = PHASES.iter().position(|&p| p == obs.phase) {
+        f[167 + idx] = 1.0;
+    }
+
+    // [177:182] own active per-condition; [182:187] opp active.
+    v35_condition_one_hot(obs.own.active.as_ref(), &mut f[177..182]);
+    v35_condition_one_hot(obs.opponent.active.as_ref(), &mut f[182..187]);
+
+    // [187:197] own energy-zone front; [197:207] opp energy-zone front.
+    v35_energy_front_one_hot(&obs.own, &mut f[187..197]);
+    v35_energy_front_one_hot(&obs.opponent, &mut f[197..207]);
+
+    // [207:210] opp discard role buckets — mirror of own slots 84-86
+    // inside the v3.0 head's `_card_awareness_features` block (own
+    // discard at values[16:19] of that 28-d block). REUSES
+    // `discard_role_features` for bit-exactness with Python.
+    let opp_buckets = discard_role_features(&obs.opponent.discard);
+    f[207..210].copy_from_slice(&opp_buckets);
+
+    // [210] own would_lose_on_active_KO; [211] opp.
+    f[210] = v35_bench_refill_catastrophe(&obs.own);
+    f[211] = v35_bench_refill_catastrophe(&obs.opponent);
 
     f
 }
@@ -1571,6 +1677,112 @@ mod tests {
         assert_eq!(v33b[29], 0.0);
         assert_eq!(v33b[30], 0.0);
         assert_eq!(v33b[31], 0.0);
+    }
+
+    // ----------------------------------------------------------------
+    // v3.5 multichannel-tail (v35-multichannel-tail-scoping.md)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn v3_5_state_vector_dimension_is_212() {
+        let obs = fixture();
+        let v = observation_state_features_v3_5(&obs);
+        assert_eq!(v.len(), STATE_DIM_V3_5);
+        assert_eq!(STATE_DIM_V3_5, 212);
+    }
+
+    #[test]
+    fn v3_5_head_is_byte_identical_to_v3_3() {
+        // The first 167 slots MUST be byte-equal to the standalone v3.3
+        // builder — this is the core layering contract that lets a v3.3
+        // ckpt warm-start a v3.5 graph via zero-init residual.
+        let obs = fixture();
+        let v33 = observation_state_features_v3_3(&obs);
+        let v35 = observation_state_features_v3_5(&obs);
+        assert_eq!(&v35[..STATE_DIM_V3_3], &v33[..]);
+    }
+
+    #[test]
+    fn v3_5_tail_emits_phase_one_hot() {
+        // Fresh fixture phase should land on exactly one of the 10 bits.
+        let obs = fixture();
+        let v35 = observation_state_features_v3_5(&obs);
+        let phase_one_hot = &v35[167..177];
+        let set: f32 = phase_one_hot.iter().sum();
+        assert!(set <= 1.0, "phase one-hot is non-exclusive");
+        // Mutate the phase; the one-hot moves accordingly.
+        let mut obs2 = obs.clone();
+        obs2.phase = AiPhase::Combat;
+        let v35b = observation_state_features_v3_5(&obs2);
+        let combat_idx = PHASES.iter().position(|&p| p == AiPhase::Combat).unwrap();
+        assert_eq!(v35b[167 + combat_idx], 1.0);
+        // Every other phase bit is zero.
+        for i in 0..10 {
+            if i != combat_idx {
+                assert_eq!(v35b[167 + i], 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn v3_5_tail_emits_condition_one_hot() {
+        let mut obs = fixture();
+        // Stamp the own active with two conditions; opp active with one.
+        if let Some(active) = obs.own.active.as_mut() {
+            active.special_conditions = vec!["paralysed".to_string(), "burned".to_string()];
+        }
+        if let Some(active) = obs.opponent.active.as_mut() {
+            active.special_conditions = vec!["frozen".to_string()];
+        }
+        let v35 = observation_state_features_v3_5(&obs);
+        // own [177:182] — paralysed=0, burned=1.
+        assert_eq!(v35[177], 1.0);
+        assert_eq!(v35[178], 1.0);
+        assert_eq!(v35[179], 0.0);
+        assert_eq!(v35[180], 0.0);
+        assert_eq!(v35[181], 0.0);
+        // opp [182:187] — frozen=4.
+        assert_eq!(v35[182], 0.0);
+        assert_eq!(v35[183], 0.0);
+        assert_eq!(v35[184], 0.0);
+        assert_eq!(v35[185], 0.0);
+        assert_eq!(v35[186], 1.0);
+    }
+
+    #[test]
+    fn v3_5_tail_emits_energy_zone_front() {
+        let mut obs = fixture();
+        obs.own.energy_zone = vec!["fire".to_string(), "water".to_string()];
+        obs.opponent.energy_zone = vec!["psychic".to_string()];
+        let v35 = observation_state_features_v3_5(&obs);
+        // own [187:197] — front="fire" at index 1.
+        let own_front: Vec<f32> = v35[187..197].to_vec();
+        assert_eq!(own_front[1], 1.0, "fire should be set at index 1");
+        assert_eq!(own_front.iter().sum::<f32>(), 1.0, "exactly one own-front bit");
+        // opp [197:207] — front="psychic" at index 4.
+        let opp_front: Vec<f32> = v35[197..207].to_vec();
+        assert_eq!(opp_front[4], 1.0, "psychic should be set at index 4");
+        assert_eq!(opp_front.iter().sum::<f32>(), 1.0, "exactly one opp-front bit");
+    }
+
+    #[test]
+    fn v3_5_tail_emits_bench_refill_catastrophe() {
+        let mut obs = fixture();
+        // Empty both benches. Fresh fixture has populated benches, so
+        // wipe them.
+        obs.own.bench = vec![None, None, None];
+        obs.opponent.bench = vec![None, None, None];
+        let v35 = observation_state_features_v3_5(&obs);
+        assert_eq!(v35[210], 1.0, "own bench-refill bit = 1.0 when no bench");
+        assert_eq!(v35[211], 1.0, "opp bench-refill bit = 1.0 when no bench");
+
+        // Put one Uma on own bench; own bit flips to 0.
+        let mut obs2 = obs.clone();
+        let proto = obs2.opponent.active.clone().or_else(|| obs2.own.active.clone());
+        obs2.own.bench[0] = proto;
+        let v35b = observation_state_features_v3_5(&obs2);
+        assert_eq!(v35b[210], 0.0, "own bench-refill flips when bench has a Uma");
+        assert_eq!(v35b[211], 1.0, "opp still no bench → still 1.0");
     }
 
     #[test]

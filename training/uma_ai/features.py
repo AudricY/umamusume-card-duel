@@ -80,8 +80,26 @@ STATE_FEATURE_SCHEMA_VERSION_V3_3 = 3.3
 # slot tokens (`uses_uma_slot_tokens=True`). The state-vector dim itself
 # is unchanged from v3.3; v3.4 differs only by the slot-token ONNX input
 # pair. Labeled 3.4 in meta.json when both axes are active so downstream
-# tooling can distinguish the compound ckpt from a plain v3.3 ckpt.
+# tooling can distinguish the compound ckpt from a plain v3.3 ckpt. v3.4
+# FALSIFIED 2026-05-25 (progress/r110.md §4h); kept here for dispatch
+# completeness, not as a recommended schema.
 STATE_FEATURE_SCHEMA_VERSION_V3_4 = 3.4
+# v35-multichannel-tail (`v35-multichannel-tail-scoping.md`): v3.5 extends
+# v3.3's 167-d head with 45 channel-orthogonal bits in the tail. Layout:
+#   [167:177] phase one-hot (10) — temporal-cadence channel
+#   [177:182] own active per-condition one-hot (5) — uma-condition channel
+#   [182:187] opp active per-condition one-hot (5) — uma-condition channel
+#   [187:197] own energy-zone front-of-queue typed one-hot (10) — energy-color
+#   [197:207] opp energy-zone front-of-queue typed one-hot (10) — energy-color
+#   [207:210] opp discard role buckets (3) — zone-residual symmetry (mirror
+#             of own slots 84-86 inside _card_awareness_features [16:19])
+#   [210]     own would_lose_on_active_KO (bench empty) — terminal-state synth
+#   [211]     opp would_lose_on_active_KO (bench empty) — terminal-state synth
+# Channels chosen so each new bit touches signal v3.3 cannot express.
+# Slot-tokens (v3.2/v3.4) EXCLUDED — proven channel-overlap with opp-flag
+# tail at progress/r110.md §4h.
+STATE_DIM_V3_5 = 212  # v35-multichannel-tail: v3.3 head + 45-bit tail
+STATE_FEATURE_SCHEMA_VERSION_V3_5 = 3.5
 assert STATE_DIM == STATE_DIM_V3, (
     f"STATE_DIM ({STATE_DIM}) must equal the frozen v3.0 dim "
     f"STATE_DIM_V3 ({STATE_DIM_V3}). The 110-d v3.0 builder is frozen for "
@@ -454,9 +472,155 @@ def observation_to_features_v3_3(
     return features
 
 
+# v35-multichannel-tail: vocabularies and slot offsets for the 45-bit tail.
+# FROZEN — adding a new vocab arm in the future must be an additive bump
+# (v3.6 or later), never a mutation of these tuples or the slot offsets.
+
+# Special-condition vocab. Sourced from
+# `frontend/src/game/engine/flow/specialConditions.ts` / `flow/turn.ts` /
+# `flow/eligibility.ts` — these five tokens are the complete set the engine
+# emits into `specialConditions: string[]` as of 2026-05-25. Matches the
+# /5 cap at v3.0 slot 20 (`condition_count_norm`) so the one-hot is
+# information-complete vs the legacy "count cap = 5" encoding.
+_V35_CONDITION_VOCAB: tuple[str, ...] = (
+    "paralysed",
+    "burned",
+    "poisoned",
+    "asleep",
+    "frozen",
+)
+
+# Energy-zone front-of-queue vocab. REUSES `_UMA_SLOT_ENERGY_TYPES` order
+# verbatim (10 entries: grass, fire, water, lightning, psychic, fighting,
+# darkness, steel, colorless, dragon). Defined later in this module; we
+# index into it by string at v3.5 emit time.
+
+# v3.5 tail slot offsets (absolute, in the 212-d vector).
+_V35_PHASE_ONE_HOT_START = 167          # [167:177] 10 bits
+_V35_PHASE_ONE_HOT_END = 177
+_V35_OWN_COND_START = 177               # [177:182] 5 bits
+_V35_OWN_COND_END = 182
+_V35_OPP_COND_START = 182               # [182:187] 5 bits
+_V35_OPP_COND_END = 187
+_V35_OWN_ENERGY_FRONT_START = 187       # [187:197] 10 bits
+_V35_OWN_ENERGY_FRONT_END = 197
+_V35_OPP_ENERGY_FRONT_START = 197       # [197:207] 10 bits
+_V35_OPP_ENERGY_FRONT_END = 207
+_V35_OPP_DISCARD_BUCKETS_START = 207    # [207:210] 3 bits
+_V35_OPP_DISCARD_BUCKETS_END = 210
+_V35_OWN_BENCH_REFILL_SLOT = 210        # 1 bit
+_V35_OPP_BENCH_REFILL_SLOT = 211        # 1 bit
+
+
+def _v35_condition_one_hot(uma: dict[str, Any] | None) -> np.ndarray:
+    """5-bit one-hot over `_V35_CONDITION_VOCAB` for the given Uma's
+    `specialConditions` list. Multiple conditions set multiple bits. Missing
+    / null Uma → all zeros. Unknown tokens (vocab drift) → silently dropped
+    (the count/5 legacy slot still surfaces them via cardinality)."""
+
+    values = np.zeros(len(_V35_CONDITION_VOCAB), dtype=np.float32)
+    if not uma:
+        return values
+    conditions = uma.get("specialConditions") or []
+    for cond in conditions:
+        try:
+            idx = _V35_CONDITION_VOCAB.index(str(cond))
+        except ValueError:
+            continue
+        values[idx] = 1.0
+    return values
+
+
+def _v35_energy_front_one_hot(side: dict[str, Any]) -> np.ndarray:
+    """10-bit one-hot over `_UMA_SLOT_ENERGY_TYPES` for the front-of-queue
+    entry of this side's `energyZone`. Empty / missing zone → all zeros.
+    Unknown energy type → all zeros."""
+
+    values = np.zeros(len(_UMA_SLOT_ENERGY_TYPES), dtype=np.float32)
+    zone = side.get("energyZone") or []
+    if not zone:
+        return values
+    front = str(zone[0])
+    try:
+        idx = _UMA_SLOT_ENERGY_TYPES.index(front)
+    except ValueError:
+        return values
+    values[idx] = 1.0
+    return values
+
+
+def _v35_bench_refill_catastrophe(side: dict[str, Any]) -> float:
+    """1.0 if this side has no non-null bench Uma to promote on active KO.
+    Minimum-viable terminal-state predicate; HP threshold deferred (see
+    scoping doc §4.5)."""
+
+    bench = side.get("bench") or []
+    has_promotable = any(u for u in bench)
+    return 0.0 if has_promotable else 1.0
+
+
+def observation_to_features_v3_5(
+    observation: dict[str, Any], ablations: set[FeatureAblation] | None = None
+) -> np.ndarray:
+    """v35-multichannel-tail: 212-d. Slots 0–166 are byte-identical to v3.3
+    (produced by calling `observation_to_features_v3_3` directly, NOT
+    re-derived); slots [167:212] are the 45-bit channel-orthogonal tail."""
+
+    base = observation_to_features_v3_3(observation, ablations=ablations)
+    assert base.shape == (STATE_DIM_V3_3,), (
+        f"v3.5 base reuse expected ({STATE_DIM_V3_3},), got {base.shape}"
+    )
+
+    features = np.zeros(STATE_DIM_V3_5, dtype=np.float32)
+    features[0:STATE_DIM_V3_3] = base
+
+    own = observation.get("own", {}) or {}
+    opponent = observation.get("opponent", {}) or {}
+
+    # Phase one-hot [167:177]. Unknown phase → all zeros (the legacy
+    # ordinal at slot 0 already encodes "unknown→0" as stadiumOrEnd index 0
+    # by default; the one-hot here is strictly additive).
+    phase = observation.get("phase")
+    if phase in PHASES:
+        features[_V35_PHASE_ONE_HOT_START + PHASES.index(phase)] = 1.0
+
+    # Per-condition one-hot, own [177:182] and opp [182:187].
+    features[_V35_OWN_COND_START:_V35_OWN_COND_END] = _v35_condition_one_hot(
+        own.get("active")
+    )
+    features[_V35_OPP_COND_START:_V35_OPP_COND_END] = _v35_condition_one_hot(
+        opponent.get("active")
+    )
+
+    # Energy-zone front-of-queue typed one-hot, own [187:197] and opp [197:207].
+    features[_V35_OWN_ENERGY_FRONT_START:_V35_OWN_ENERGY_FRONT_END] = (
+        _v35_energy_front_one_hot(own)
+    )
+    features[_V35_OPP_ENERGY_FRONT_START:_V35_OPP_ENERGY_FRONT_END] = (
+        _v35_energy_front_one_hot(opponent)
+    )
+
+    # Opp-side discard role buckets [207:210] — mirror of own slots 84-86
+    # inside _card_awareness_features (own discard at values[16:19] of that
+    # 28-d block). REUSES `_discard_role_features` for bit-exactness.
+    features[_V35_OPP_DISCARD_BUCKETS_START:_V35_OPP_DISCARD_BUCKETS_END] = (
+        _discard_role_features(opponent.get("discard") or [])
+    )
+
+    # Bench-refill catastrophe bits [210] own, [211] opp.
+    features[_V35_OWN_BENCH_REFILL_SLOT] = _v35_bench_refill_catastrophe(own)
+    features[_V35_OPP_BENCH_REFILL_SLOT] = _v35_bench_refill_catastrophe(opponent)
+
+    assert features.shape == (STATE_DIM_V3_5,), (
+        f"observation_to_features_v3_5 emitted {features.shape}, "
+        f"expected ({STATE_DIM_V3_5},)."
+    )
+    return features
+
+
 # Builder selector keyed off the state dim. Mirrors the existing serve_onnx
 # `_SCHEMA_BY_STATE_DIM` discrimination (graph dim -> builder) so training /
-# dataset code can opt into v3.1/v3.3 without a new framework: pass the
+# dataset code can opt into v3.1/v3.3/v3.5 without a new framework: pass the
 # state dim and get the matching frozen builder. v3.0 (110) stays the
 # default everywhere `STATE_DIM` is referenced.
 _BUILDER_BY_STATE_DIM = {
@@ -464,6 +628,7 @@ _BUILDER_BY_STATE_DIM = {
     STATE_DIM_V3: observation_to_features,
     STATE_DIM_V3_1: observation_to_features_v3_1,
     STATE_DIM_V3_3: observation_to_features_v3_3,
+    STATE_DIM_V3_5: observation_to_features_v3_5,
 }
 
 
@@ -472,14 +637,16 @@ _SCHEMA_VERSION_BY_STATE_DIM = {
     STATE_DIM_V3: STATE_FEATURE_SCHEMA_VERSION_V3,
     STATE_DIM_V3_1: STATE_FEATURE_SCHEMA_VERSION_V3_1,
     STATE_DIM_V3_3: STATE_FEATURE_SCHEMA_VERSION_V3_3,
+    STATE_DIM_V3_5: STATE_FEATURE_SCHEMA_VERSION_V3_5,
 }
 
 
 def feature_builder_for_state_dim(state_dim: int):
     """Return the frozen observation->features builder for a state dim.
 
-    96 -> v2, 110 -> v3.0, 164 -> v3.1. Unknown dims raise (never silently
-    fall back) — same fail-loud contract the serve_onnx guard enforces."""
+    96 -> v2, 110 -> v3.0, 164 -> v3.1, 167 -> v3.3, 212 -> v3.5. Unknown
+    dims raise (never silently fall back) — same fail-loud contract the
+    serve_onnx guard enforces."""
 
     try:
         return _BUILDER_BY_STATE_DIM[state_dim]

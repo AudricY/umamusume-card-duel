@@ -184,7 +184,9 @@ The R16 verdict was "schema closed *at the compute scale we trained at*." The 12
    - Energy-zone typed contents (~80 bits for both sides, depth 2-3).
    - Per-condition one-hot (5 bits) replacing/supplementing paralysed+count.
    - Bench temporal moved into widened slot tokens (drop the mean aggregate).
-   - **Opp-side flags (3 bits)** — deferred from step 1, lands as part of the additive tail with a new `_SCHEMA_BY_STATE_DIM[167]` dispatch entry.
+   - **Opp-side flags (3 bits)** — deferred from step 1, lands as part of the additive tail with a new `_SCHEMA_BY_STATE_DIM[167]` dispatch entry. **LANDED 2026-05-25 as v3.3 (`v33-additive-tail-scoping.md`).**
+   - **v3.4 compound-axis (v3.3 + slot tokens) FALSIFIED 2026-05-25** (`progress/r110.md §4h`, wl=0.5860 < v3.3 0.5910); slot tokens shadow opp-flag's board-state channel. Slot tokens excluded from any future v3.x on this base.
+   - **Next thick bundle scoped: v3.5 multichannel additive tail** (`v35-multichannel-tail-scoping.md`, 2026-05-25, USER-GATED). Bundles 5 signal-channel-orthogonal items (phase one-hot, per-condition one-hot, energy-zone typed front, opp-side discard buckets, bench-refill catastrophe) onto v3.3 → state_dim=212. Picks one item per signal channel to avoid the v3.4 failure mode.
 4. **Only if set-attention crosses 0.40** → seriously scope a token-first v4 revamp. Until then, hold it as a contingency.
 
 ---
