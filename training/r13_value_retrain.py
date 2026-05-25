@@ -53,6 +53,8 @@ def parse_args() -> argparse.Namespace:
                         help="When >0, add KL(anchor_policy || model_policy) on legal actions.")
     parser.add_argument("--policy-anchor-checkpoint", default=None,
                         help="Checkpoint to use as the policy anchor. Defaults to --init-checkpoint.")
+    parser.add_argument("--model-variant", choices=["mlp", "set_attention"], default=None,
+                        help="Optionally override model_config.model_variant before loading weights.")
     return parser.parse_args()
 
 
@@ -96,6 +98,23 @@ def masked_policy_kl(anchor_logits: torch.Tensor, logits: torch.Tensor, mask: to
     return (anchor_probs * (anchor_log_probs - log_probs)).sum(dim=1)
 
 
+def load_init_state(model: CandidatePolicyNet, state: dict[str, torch.Tensor], *, allow_new_prefixes: tuple[str, ...]) -> None:
+    if not allow_new_prefixes:
+        model.load_state_dict(state)
+        return
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    unexpected = list(unexpected)
+    disallowed_missing = [
+        key for key in missing
+        if not any(str(key).startswith(prefix) for prefix in allow_new_prefixes)
+    ]
+    if unexpected or disallowed_missing:
+        raise RuntimeError(
+            "init checkpoint does not match requested model variant: "
+            f"unexpected={unexpected} disallowed_missing={disallowed_missing}"
+        )
+
+
 def emit_event(events_path: Path | None, stage: str, event_type: str, data: dict) -> None:
     if events_path is None:
         return
@@ -127,6 +146,7 @@ def main() -> None:
         "train_scope": args.train_scope,
         "policy_anchor_weight": args.policy_anchor_weight,
         "policy_anchor_checkpoint": args.policy_anchor_checkpoint or args.init_checkpoint,
+        "model_variant": args.model_variant,
     })
 
     dataset = ValueTargetDataset(
@@ -156,9 +176,16 @@ def main() -> None:
     raw_cfg = payload.get("model_config")
     if raw_cfg is None:
         raw_cfg = payload.get("metadata", {}).get("model_config")
-    config = ModelConfig.from_dict(raw_cfg or {})
+    cfg_dict = dict(raw_cfg or {})
+    source_model_variant = str(cfg_dict.get("model_variant", "mlp"))
+    if args.model_variant is not None:
+        cfg_dict["model_variant"] = args.model_variant
+    config = ModelConfig.from_dict(cfg_dict)
     model = CandidatePolicyNet(config)
-    model.load_state_dict(payload["model_state"])
+    new_prefixes: tuple[str, ...] = ()
+    if args.model_variant is not None and args.model_variant != source_model_variant:
+        new_prefixes = ("set_attention_encoder.",)
+    load_init_state(model, payload["model_state"], allow_new_prefixes=new_prefixes)
     model.to(device)
     configure_train_scope(model, args.train_scope)
 
@@ -304,6 +331,8 @@ def main() -> None:
             "train_scope": args.train_scope,
             "policy_anchor_weight": args.policy_anchor_weight,
             "policy_anchor_checkpoint": args.policy_anchor_checkpoint or args.init_checkpoint,
+            "source_model_variant": source_model_variant,
+            "model_variant": config.model_variant,
             "state_dim": args.state_dim,
             "uma_slot_tokens": bool(args.uma_slot_tokens),
             "history": history,
