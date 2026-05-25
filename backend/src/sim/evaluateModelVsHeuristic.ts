@@ -80,6 +80,9 @@ export type EvaluateModelArgs = {
   // 1-action; another large fraction has a runaway top action by sim 30).
   mctsAdaptiveRatio: number;
   mctsAdaptiveMinSims: number;
+  // AlphaZero-style two-sided MCTS (default false). See
+  // `docs/ai-research/scoping/two-sided-mcts-scoping.md`.
+  mctsTwoSided: boolean;
   // Optional JSONL progress stream. When set, the per-game loop writes one
   // line per completed game (game index, side, winner, wall-clock elapsed)
   // so `tail -f` is meaningful while a 200-game gate runs. The TS process
@@ -710,6 +713,7 @@ async function chooseMctsAction(
     maxNodes: args.mctsMaxNodes,
     adaptiveRatio: args.mctsAdaptiveRatio,
     adaptiveMinSims: args.mctsAdaptiveMinSims,
+    twoSided: args.mctsTwoSided,
   });
 }
 
@@ -739,6 +743,7 @@ async function chooseOpponentMctsAction(
       maxNodes: args.opponentMctsMaxNodes,
       adaptiveRatio: args.opponentMctsAdaptiveRatio,
       adaptiveMinSims: args.opponentMctsAdaptiveMinSims,
+      twoSided: args.mctsTwoSided,
     });
     return { action: decision.action, selectedIndex: decision.selectedIndex };
   } catch {
@@ -760,6 +765,7 @@ type RunMctsForSideOverrides = {
   maxNodes: number;
   adaptiveRatio: number;
   adaptiveMinSims: number;
+  twoSided?: boolean;
 };
 
 async function runMctsForSide(
@@ -787,6 +793,7 @@ async function runMctsForSide(
     maxNodes: Math.max(64, overrides.maxNodes),
     adaptiveRatio: Math.max(0, overrides.adaptiveRatio),
     adaptiveMinSims: Math.max(1, overrides.adaptiveMinSims),
+    twoSided: overrides.twoSided === true,
   });
   const result = await runMcts(state, sideId, config, modelUrl, seed);
   const selectedIndex = Math.min(Math.max(0, result.selectedIndex), legalActions.length - 1);
@@ -821,6 +828,7 @@ async function runMctsRelabel(
     dirichletEpsilon: args.mctsDirichletEpsilon,
     collapseMaxSteps: Math.max(1, args.mctsCollapseMaxSteps),
     maxNodes: Math.max(64, args.mctsMaxNodes),
+    twoSided: args.mctsTwoSided,
     adaptiveRatio: Math.max(0, args.mctsAdaptiveRatio),
     adaptiveMinSims: Math.max(1, args.mctsAdaptiveMinSims),
   });
@@ -1588,6 +1596,7 @@ function parseArgs(argv: string[]): EvaluateModelArgs {
     mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
     mctsAdaptiveRatio: Number(get("--mcts-adaptive-ratio", "0")),
     mctsAdaptiveMinSims: Number(get("--mcts-adaptive-min-sims", "20")),
+    mctsTwoSided: argv.includes("--mcts-two-sided"),
     progressOut: get("--progress-out", "") || null,
     opponentSelection: parseOpponentSelection(get("--opponent-selection", "rule")),
     opponentMctsSimulations: Number(get("--opponent-mcts-simulations", get("--mcts-simulations", "100"))),

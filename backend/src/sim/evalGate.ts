@@ -511,6 +511,7 @@ function parseArgs(argv: string[]): Args {
     mctsDirichletEpsilon: Number(get("--mcts-dirichlet-epsilon", "0.25")),
     mctsAdaptiveRatio: Number(get("--mcts-adaptive-ratio", "0")),
     mctsAdaptiveMinSims: Number(get("--mcts-adaptive-min-sims", "20")),
+    mctsTwoSided: argv.includes("--mcts-two-sided"),
     progressOut: get("--progress-out", "") || null,
     opponentSelection: parseOpponentSelection(get("--opponent-selection", "rule")),
     opponentMctsSimulations: Number(get("--opponent-mcts-simulations", get("--mcts-simulations", "100"))),

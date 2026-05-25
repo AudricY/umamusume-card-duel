@@ -31,6 +31,7 @@ fn default_config(sims: u32) -> MctsConfig {
         collapse_max_steps: 64,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 50,
+        two_sided: false,
         model_url: String::new(),
         onnx_path: None,
     }

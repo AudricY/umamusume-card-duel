@@ -53,6 +53,7 @@ fn drive_mcts_game(seed: &str) -> (String, u32, Option<SideId>) {
         collapse_max_steps: 64,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 30,
+        two_sided: false,
         model_url: String::new(),
         onnx_path: None,
     };

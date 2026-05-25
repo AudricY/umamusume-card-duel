@@ -99,6 +99,14 @@ struct Args {
     /// Heuristic-collapse cap. Orchestrator alias: --mcts-collapse-max-steps.
     #[arg(long, alias = "mcts-collapse-max-steps", default_value_t = 64)]
     collapse_max: u32,
+    /// AlphaZero-style two-sided MCTS. Default false (single-sided
+    /// rule-bot-collapse path; byte-identical to pre-flag behavior).
+    /// When set, opponent decision points become real tree nodes, the
+    /// policy/value net is queried for whoever is to move, and backup
+    /// uses sign-flips per ply. See
+    /// `docs/ai-research/scoping/two-sided-mcts-scoping.md`.
+    #[arg(long, alias = "mcts-two-sided", default_value_t = false)]
+    mcts_two_sided: bool,
     /// Selection mode. `mcts` uses the configured MCTS policy; `random`
     /// chooses uniformly among legal modeled-side actions as a floor
     /// baseline. Other values are accepted for orchestrator-flag parity
@@ -391,6 +399,7 @@ fn main() -> Result<()> {
         collapse_max_steps: args.collapse_max,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
+        two_sided: args.mcts_two_sided,
         model_url: model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
     };
@@ -776,6 +785,7 @@ fn main() -> Result<()> {
         "progressOut": args.progress_out,
         "workers": args.workers,
         "deckSampling": args.deck_sampling,
+        "mctsTwoSided": args.mcts_two_sided,
     });
     let status = if passed { "PASS" } else { "FAIL" };
     let inner = GateInnerSummary {

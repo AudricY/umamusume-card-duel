@@ -320,6 +320,9 @@ struct McTsArgs {
     dirichlet_epsilon: Option<f64>,
     max_nodes: Option<u32>,
     collapse_max_steps: Option<u32>,
+    /// AlphaZero-style two-sided MCTS. Default false (single-sided).
+    /// See `docs/ai-research/scoping/two-sided-mcts-scoping.md`.
+    two_sided: Option<bool>,
     model_url: Option<String>,
 }
 
@@ -348,6 +351,7 @@ fn build_config(args: &McTsArgs) -> MctsConfig {
         collapse_max_steps: args.collapse_max_steps.unwrap_or(64),
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
+        two_sided: args.two_sided.unwrap_or(false),
         model_url: args.model_url.clone().unwrap_or_default(),
         // NAPI consumer does not yet plumb ONNX path; the JS-side
         // backend would need to call `inference::set_global` manually

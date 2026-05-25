@@ -10,7 +10,7 @@ adding or moving research docs.
 | What is the active research frontier? | `docs/ai-research-backlog.md` |
 | What AI tooling, UX, eval, or production-hardening work is queued? | `docs/ai-feature-engineering-backlog.md` |
 | What happened in a completed R15+ phase? | `docs/ai-research/progress/r<N>.md` |
-| What is the pre-registered hypothesis, sweep recipe, or exit gate for a topic? | `docs/ai-research/scoping/<topic>.md` |
+| What is the pre-registered hypothesis, sweep recipe, or exit gate for a topic? | `docs/ai-research/scoping/<topic>.md` (e.g. `two-sided-mcts-scoping.md` for the AZ-style MCTS flag) |
 | What durable analysis report supports a backlog item? | `docs/ai-research/analysis/<topic>.md` plus any sidecar JSON |
 | What is the live agent queue or blocker state? | `docs/ai-agent-state/queue.json` and `docs/ai-agent-state/escalations.md` |
 | What are durable harness conventions? | `docs/ai-agent-state/notes.md` |

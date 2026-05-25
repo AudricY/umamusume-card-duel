@@ -206,6 +206,7 @@ fn v4_replay_for_seed(
         collapse_max_steps: 64,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
+        two_sided: false,
         model_url: String::new(),
         onnx_path: None,
     };
