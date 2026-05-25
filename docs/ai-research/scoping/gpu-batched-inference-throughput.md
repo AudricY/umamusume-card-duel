@@ -1,13 +1,19 @@
 # Batched Inference + High Parallelism — GPU Throughput Probe
 
 - **Date:** 2026-05-25
-- **Status:** **THROUGHPUT FALSIFIED — B2 WIRING LANDED 2026-05-25.** B1
-  Python smoke, B2 Rust dispatcher, B3 sims=100 sweep, and B4 sims=1000 cell
-  all landed 2026-05-25. End-to-end batched GPU dispatch is slower than CPU
-  on every shipping recipe tested. The dispatcher (commit 2ded9b0) stays
-  landed as opt-in (`--batch-size N` on `sim-eval-gate`, default 1
-  bit-identical) because [`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md)
-  Candidate 3 reuses it for the strength axis. Successor to
+- **Status:** **RECIPE-CONDITIONAL — B2 WIRING LANDED 2026-05-25.** B1
+  Python smoke, B2 Rust dispatcher, B3 sims=100 sweep, B4 sims=1000 cell,
+  and B5 high-parallelism re-probe all landed 2026-05-25. B5 revised the
+  earlier blanket FALSIFIED verdict: **vhleaf sims=100 actually crosses at
+  workers=128 B=64** (CUDA 7.56s vs CPU 8.22s = CUDA 1.09× faster — modest
+  but real; below the 1.5× promotion gate). **Rollout-leaf shipping recipe
+  remains falsified at any parallelism** because rollouts are CPU-bound and
+  the 32-core box is already oversubscribed at workers=64. The dispatcher
+  (commit 2ded9b0) stays landed as opt-in (`--batch-size N` on
+  `sim-eval-gate`, default 1 bit-identical) and now has a documented
+  vhleaf throughput sweet spot for
+  [`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md) Candidate 3 to
+  reuse. Successor to
   [`gpu-inference-execution-provider.md`](gpu-inference-execution-provider.md)
   G4-falsified, G5-landed. Queue entry:
   `gpu-batched-inference-throughput` in `docs/ai-agent-state/queue.json`.
@@ -18,17 +24,28 @@
 - **Non-goal:** strength gains. Acceptance here is throughput / wallclock under
   matched strength (Wilson-lower within G4-style 0.02 envelope). Strength
   questions stay in [`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md).
-- **Headline verdict (2026-05-25):** lever exists in pure-ONNX terms (B1:
-  CUDA 2.35× CPU at B=64) but does NOT survive the round-trip through the
-  inter-game dispatcher + MCTS workload. Best CUDA cells vs best CPU cells
-  at matched wilson_lower:
-  - **rollout-leaf sims=100:** CUDA 16.90s vs CPU 5.87s — CPU 2.88× faster.
-  - **vhleaf sims=100:** CUDA 14.68s vs CPU 8.22s — CPU 1.78× faster.
+- **Headline verdict (2026-05-25, revised after B5):** lever exists in
+  pure-ONNX terms (B1: CUDA 2.35× CPU at B=64) and survives the dispatcher
+  round-trip on **inference-bound** workloads at high enough parallelism —
+  but NOT on rollout-bound shipping recipes. Best CUDA cells vs best CPU
+  cells at matched wilson_lower:
+  - **rollout-leaf sims=100 (shipping):** CUDA 16.90s vs CPU 5.87s — CPU
+    2.88× faster. Stays falsified.
+  - **vhleaf sims=100:** *initial B3 verdict (w=64) had CUDA 14.68s vs
+    CPU 8.22s = CPU 1.78× faster.* **B5 re-probe at w=128 B=64: CUDA
+    7.56s vs CPU 8.22s = CUDA 1.09× faster.** The previous "falsified"
+    verdict was premature — vhleaf had more parallelism headroom than the
+    initial B3 sweep covered. Still below the 1.5× promotion gate but the
+    crossover exists.
   - **rollout-leaf sims=1000:** CUDA 55.16s vs CPU 52.82s — CPU 1.04×
-    faster (essentially tied; the gap closed but did not invert).
-  Crossover trajectory shows GPU/CPU ratio rising with sims and inference
-  share, but no recipe we ship crossed the 1.5× promotion gate.
-  See `## B2/B3/B4 evidence` below.
+    faster (essentially tied). B5 confirmed more workers HURT on this
+    recipe (w=128 → 87.7s; w=256 → 111.5s) because rollouts are
+    CPU-bound.
+  Pattern: GPU/CPU ratio depends on **inference-share of game wall**, not
+  just sims count. Vhleaf has high inference-share → benefits from
+  parallelism scaling. Rollout-leaf has low inference-share → more workers
+  oversubscribe CPU and hurt throughput.
+  See `## B2/B3/B4 evidence` and `## B5 high-parallelism re-probe` below.
 
 ## Question
 
@@ -340,18 +357,23 @@ end-to-end cost, and the realistic cost loses.
 
 ### Verdict and what stays landed
 
-Per the scoping doc's gates table (revised in this slice):
+(Originally close-out for B3/B4; superseded by B5 below for the
+vhleaf-specific verdict — kept here as the as-of-B4 record.)
+
+Per the scoping doc's gates table (revised in B3/B4):
 
 | Gate row | Outcome |
 |---|---|
 | B2 wilson drift > 0.02 at B=32 | PASS — CPU bit-identical, CUDA 0.015 |
-| B3 no cell crosses 1.5× | FAIL on both recipes → ran B4 |
-| B4 no cell crosses 1.5× | FAIL → close throughput probe |
-| B3 vhleaf crosses, rollout doesn't | n/a — both failed |
+| B3 no cell crosses 1.5× | FAIL on both recipes at workers≤64 → ran B4 |
+| B4 no cell crosses 1.5× | FAIL → user pushback prompted B5 re-probe |
 
-**Throughput axis CLOSED.** Batched GPU dispatch is not a wallclock
-win on any shipping recipe even at high sims. CPU remains the
-production default for `sim-eval-gate` and selfplay.
+**As-of-B4 close (since revised):** Batched GPU dispatch is not a
+wallclock win on any shipping recipe even at high sims. CPU remains
+the production default for `sim-eval-gate` and selfplay.
+
+**Revised in B5:** rollout-leaf shipping recipe close stands; vhleaf
+close was premature — see `## B5 high-parallelism re-probe`.
 
 **What stays landed (commit 2ded9b0):**
 - `BatchedDispatcher` + `load_on_with_batching` in `engine-rs/crates/engine/src/inference/mod.rs`
@@ -390,6 +412,104 @@ Raw sweep artifact: `runs/gpu-batched-inference-b3-b4/results.jsonl`
 (20 cells). Sweep script preserved at
 `runs/gpu-batched-inference-b3-b4/sweep.sh` for re-run on future
 ckpts.
+
+## B5 high-parallelism re-probe (2026-05-25, after pushback)
+
+The B3/B4 sweep capped workers at 64 and concluded the throughput axis
+was falsified. User pushback ("have we actually scaled parallelism
+enough?") flagged that fill on the best B3 cells was still
+work-share-limited (vhleaf w=64 B=64 fill 46/64, hisim w=64 B=32 fill
+24/32). Re-probe at workers ∈ {96, 128, 256} and orthogonal levers
+(max_batch=128, max_wait_us=2000). Raw at
+`runs/gpu-batched-inference-b3-b4/hp_probe_results.jsonl`.
+
+**Vhleaf sims=100 (CPU baseline 8.22s at w=32):**
+
+| B | workers | wait_us | wilson | elapsed (s) | games/sec | mean_fill | vs CPU |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 64 | 96 | 200 | 0.3826 | 8.03 | 24.91 | 48.37 | **1.02× CUDA** |
+| **64** | **128** | **200** | **0.3826** | **7.56** | **26.47** | **46.60** | **1.09× CUDA** ← **best, CUDA crosses CPU** |
+| 64 | 256 | 200 | 0.3826 | 9.02 | 22.18 | 43.69 | 0.91× of CPU (oversubscribed) |
+| 128 | 128 | 200 | 0.3923 | 7.94 | 25.19 | 60.96 | 1.04× CUDA |
+| 128 | 256 | 200 | 0.3923 | 7.95 | 25.15 | 57.16 | 1.03× CUDA |
+| 64 | 128 | 2000 | 0.3826 | 11.23 | 17.80 | 46.72 | 0.73× of CPU (longer wait hurt) |
+
+**Vhleaf headline: CUDA *does* cross CPU at w=128 B=64 (1.09× faster).
+Still below 1.5× promotion gate but the lever is real.** The earlier
+B3 verdict missed this because workers=64 was below the sweet spot.
+
+Three additional reads:
+- **Fill ceiling is workload-imposed, not parallelism-imposed.** At
+  max_batch=64, fill caps at ~46-48 regardless of workers (w=96 →
+  48.37; w=128 → 46.60; w=256 → 43.69). The MCTS workload can sustain
+  ~46-48 concurrent in-flight inference requests per dispatcher flush
+  window; pushing more workers doesn't extract more — it just
+  oversubscribes CPU. B=128 reaches fill 57-61 because the dispatcher
+  flush window is wider (more requests can arrive before flush) but
+  per-call kernel latency rises slightly with B, netting roughly the
+  same elapsed.
+- **Longer max_wait_us hurts.** w=128 B=64 with wait_us=2000 added 4ms
+  per response on average — 11.23s vs 7.56s (1.49× slower). Per-call
+  latency dominates total wall; trading higher fill for longer wait is
+  a bad deal at this graph's tiny per-call cost.
+- **Oversubscription wall at w=256.** 256 workers on 32 cores is 8×
+  oversubscribed. Per-worker context-switch overhead and CPU-side MCTS
+  work both regress. The sweet spot is w≈128 (4× oversubscribed) —
+  enough concurrency to keep dispatcher fill high without crushing the
+  per-worker progress rate.
+
+**Hisim rollout sims=1000 (CPU baseline 52.82s at w=16; original B4
+best CUDA was w=64 B=32 → 55.16s):**
+
+| B | workers | wait_us | wilson | elapsed (s) | games/sec | mean_fill | vs CPU |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 32 | 128 | 200 | 0.5057 | 87.73 | 2.28 | 21.09 | 0.60× of CPU |
+| 64 | 128 | 200 | 0.5107 | 104.56 | 1.91 | 25.33 | 0.51× of CPU |
+| 64 | 256 | 200 | 0.5258 | 111.52 | 1.79 | 26.09 | 0.47× of CPU |
+| 128 | 256 | 200 | 0.5359 | 108.98 | 1.84 | 28.79 | 0.48× of CPU |
+
+**Hisim headline: more workers strictly HURT. Falsification holds.**
+The B4 best (w=64 B=32 → 55.16s) was already past the parallelism
+optimum for this recipe. Rollout-leaf at sims=1000 spends most wall in
+the 200-step CPU rollouts; oversubscribing 32 cores with 128-256 OS
+threads slows each per-game rollout enough that the additional fill
+gains (24 → 29) don't compensate.
+
+### Revised verdict
+
+The B3/B4 close was right on *rollout-leaf* (the shipping recipe) but
+wrong on *vhleaf*. The error mode: I capped workers at 64 — sufficient
+to saturate CPU, insufficient to saturate the dispatcher when each
+worker spends most time *blocked* on the dispatcher (vhleaf path)
+rather than computing (rollout path).
+
+Updated gates outcome:
+
+| Gate row | Outcome |
+|---|---|
+| B3 vhleaf no cell crosses 1.5× | Confirmed (best 1.09× at w=128 B=64) |
+| B3 rollout no cell crosses 1.5× | Confirmed |
+| B4 no cell crosses 1.5× | Confirmed |
+| B5: workers>64 helps vhleaf | YES — w=128 is the sweet spot |
+| B5: workers>64 helps rollout | NO — CPU-bound recipe regresses with oversubscription |
+
+**For the strength axis** ([`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md)),
+this changes the playbook: vhleaf experiments on CUDA should default
+to `--batch-size 64 --batch-wait-us 200 --workers 128`. That gives a
+~1.1× wall win vs CPU at matched wilson, freeing budget for
+higher-sim cells. Rollout-leaf experiments stay on CPU at workers=16-32.
+
+**For the shipping recipe** (production eval-gate at sims=100
+rollout-leaf), the original close still stands: CPU is the right
+default; batched CUDA loses 2.88×.
+
+**Why CUDA can win on vhleaf but not rollout, mechanically:** vhleaf
+worker timeline is ~12% CPU work, 88% blocked on dispatcher → 32 cores
+support ~250 concurrent vhleaf workers before saturating, so going
+from w=32 to w=128 is well within budget. Rollout-leaf worker timeline
+is ~95% CPU work (rollouts), 5% blocked on dispatcher → 32 cores
+support ~33 concurrent rollout workers before saturating, so w=64 was
+already past optimum.
 
 ## Slices
 

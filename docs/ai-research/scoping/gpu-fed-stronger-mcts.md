@@ -50,15 +50,19 @@ nodes, stronger leaf estimates, ensembles, or root search variants.
    via [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md)
    B2 (commit 2ded9b0): `InferenceSession::load_on_with_batching(path,
    device, max_batch, max_wait_us)` + `--batch-size`/`--batch-wait-us`
-   flags on `sim-eval-gate`. The throughput axis closed (CPU still beats
-   batched CUDA on every shipping recipe) but the dispatcher correctness
-   gate passed; strength experiments here can reuse it directly. Two
+   flags on `sim-eval-gate`. The throughput axis is recipe-conditional —
+   shipping rollout-leaf still loses on CUDA but **vhleaf experiments
+   cross at workers=128 B=64 (1.09× CPU at sims=100)**, so strength
+   experiments on vhleaf should default to `--device cuda --batch-size 64
+   --batch-wait-us 200 --workers 128` for a free wall win. Three
    strength-relevant findings from the throughput close: (a) inter-game
-   batching only sustains fill 23-47/64 in MCTS workloads (intra-tree
-   waves may be needed for >60/64 fill); (b) CUDA reduction-order drift
-   exceeds the 0.02 wilson envelope at sims=1000 (|Δ|=0.035) — assume
-   high-sim CUDA is a different strength evaluation than high-sim CPU and
-   gate accordingly.
+   batching at workers=128 sustains fill 46-61/64 — the workload-imposed
+   ceiling, not parallelism-imposed; intra-tree waves may still be worth
+   it for >60/64 fill; (b) CUDA reduction-order drift exceeds the 0.02
+   wilson envelope at sims=1000 (|Δ|=0.035) — assume high-sim CUDA is a
+   different strength evaluation than high-sim CPU and gate accordingly;
+   (c) longer max_wait_us is a bad trade — per-call latency dominates
+   wall, so the dispatcher should flush eagerly.
 4. **Strength candidates.** Test value-head with larger sim budgets, hybrid
    neural+selective-rollout leaves, root ensembles, and Gumbel/sequential-
    halving-style root search.

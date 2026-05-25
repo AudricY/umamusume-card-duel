@@ -295,12 +295,16 @@ validation across three worker counts).
 
 - [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md)
   — successor for the `next_action` (b) lever (batched dispatch).
-  CLOSED 2026-05-25: B2 dispatcher wiring landed (commit 2ded9b0), B3
-  sims=100 sweep + B4 sims=1000 cell both falsified the throughput
-  hypothesis on every shipping recipe (best CUDA cell remained CPU 1.04×
-  faster at sims=1000). Wiring stays as opt-in for the strength axis
-  ([`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md) Candidate 3).
-  G4's throughput-motivation falsification stands.
+  CLOSED 2026-05-25 with RECIPE-CONDITIONAL verdict (revised from
+  initial blanket FALSIFIED after a high-parallelism re-probe at
+  workers ∈ {96, 128, 256}): vhleaf sims=100 actually crosses at
+  workers=128 B=64 (CUDA 1.09× CPU), but rollout-leaf at any sims and
+  any parallelism stays falsified — more workers strictly hurt because
+  rollouts are CPU-bound and the 32-core box oversubscribes at w=64+.
+  G4's rollout-leaf throughput-motivation falsification still stands.
+  Wiring (commit 2ded9b0) stays as opt-in for the strength axis
+  ([`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md) Candidate 3),
+  which now has a documented vhleaf throughput sweet spot.
 - `gpu-fed-stronger-mcts.md` — sibling, strength axis. Shares CUDA EP
   wiring but acceptance is "Wilson-lower beats production at higher
   sims", not "wallclock faster at same recipe".
