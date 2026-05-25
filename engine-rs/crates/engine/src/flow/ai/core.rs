@@ -317,7 +317,15 @@ fn choose_trainer_index_for_two_turn_bundle(
 
     let mut best_index: Option<usize> = None;
     let mut best_score: f64 = f64::NEG_INFINITY;
-    let mut scored_payload: Vec<Value> = Vec::new();
+    // Trainer-bundle-scores telemetry is opt-in. When disabled (default)
+    // skip the per-iteration Map allocs + post-loop payload assembly.
+    // The score computation stays — it picks the actual best hand index.
+    let telemetry_enabled = super::telemetry::is_enabled();
+    let mut scored_payload: Vec<Value> = if telemetry_enabled {
+        Vec::with_capacity(top.len())
+    } else {
+        Vec::new()
+    };
     for (handi, _) in top.iter().copied() {
         let score = simulate_trainer_attach_combat_bundle(
             state,
@@ -327,41 +335,45 @@ fn choose_trainer_index_for_two_turn_bundle(
             deps,
             turn_goal,
         );
-        let card_id = side.hand.get(handi).copied();
-        let mut record = Map::new();
-        record.insert("handIndex".into(), json!(handi));
-        record.insert(
-            "cardId".into(),
-            match card_id {
-                Some(c) => match cat.interner.resolve(c) {
-                    Some(s) => json!(s),
+        if telemetry_enabled {
+            let card_id = side.hand.get(handi).copied();
+            let mut record = Map::new();
+            record.insert("handIndex".into(), json!(handi));
+            record.insert(
+                "cardId".into(),
+                match card_id {
+                    Some(c) => match cat.interner.resolve(c) {
+                        Some(s) => json!(s),
+                        None => Value::Null,
+                    },
                     None => Value::Null,
                 },
-                None => Value::Null,
-            },
-        );
-        // Number(score.toFixed(2)) → round to 2 decimals.
-        let rounded = round_to_2dp(score);
-        record.insert("score".into(), json!(rounded));
-        scored_payload.push(Value::Object(record));
+            );
+            // Number(score.toFixed(2)) → round to 2 decimals.
+            let rounded = round_to_2dp(score);
+            record.insert("score".into(), json!(rounded));
+            scored_payload.push(Value::Object(record));
+        }
         if score > best_score {
             best_score = score;
             best_index = Some(handi);
         }
     }
-    let mut payload = Map::new();
-    payload.insert("side".into(), json!(side_id_tag(side_id)));
-    payload.insert("turn".into(), json!(state.turn_number));
-    payload.insert("goal".into(), json!(turn_goal.tag()));
-    payload.insert("candidates".into(), Value::Array(scored_payload));
-    payload.insert(
-        "selectedHandIndex".into(),
-        match best_index.or_else(|| trainer_indexes.first().copied()) {
-            Some(idx) => json!(idx),
-            None => Value::Null,
-        },
-    );
-    emit_ai_telemetry(AiTelemetryEvent::TrainerBundleScores, payload);
+    if telemetry_enabled {
+        let mut payload = Map::new();
+        payload.insert("side".into(), json!(side_id_tag(side_id)));
+        payload.insert("turn".into(), json!(state.turn_number));
+        payload.insert("goal".into(), json!(turn_goal.tag()));
+        payload.insert("candidates".into(), Value::Array(scored_payload));
+        payload.insert(
+            "selectedHandIndex".into(),
+            match best_index.or_else(|| trainer_indexes.first().copied()) {
+                Some(idx) => json!(idx),
+                None => Value::Null,
+            },
+        );
+        emit_ai_telemetry(AiTelemetryEvent::TrainerBundleScores, payload);
+    }
     best_index.or_else(|| trainer_indexes.first().copied())
 }
 
@@ -586,51 +598,58 @@ pub fn ai_resolve_combat_decision(
             )
         });
 
-    let mut top3_payload: Vec<Value> = Vec::new();
-    let mut sorted_top = candidates.clone();
-    sorted_top.sort_by(|a, b| {
-        b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for c in sorted_top.iter().take(3) {
-        let mut rec = Map::new();
-        rec.insert("id".into(), json!(&c.id));
-        rec.insert("score".into(), json!(round_to_2dp(c.score)));
-        rec.insert("keepsSafe".into(), json!(c.keeps_safe));
-        rec.insert("lethalTarget".into(), json!(c.lethal_target));
-        rec.insert(
-            "decision".into(),
-            json!(match c.decision {
-                AiCombatDecision::Attack(_) => "attack",
-                AiCombatDecision::EndTurn => "endTurn",
-            }),
+    // Combat-candidates telemetry: pure observer side-effect, but the
+    // payload assembly clones the entire `candidates` Vec and sort-by-
+    // score'd it just to keep the top 3. Skip the work when the sink is
+    // disabled (the default; `__UMA_AI_TELEMETRY__` is opt-in). Same
+    // payload shape preserved for telemetry-enabled callers.
+    if super::telemetry::is_enabled() {
+        let mut top3_payload: Vec<Value> = Vec::new();
+        let mut sorted_top = candidates.clone();
+        sorted_top.sort_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for c in sorted_top.iter().take(3) {
+            let mut rec = Map::new();
+            rec.insert("id".into(), json!(&c.id));
+            rec.insert("score".into(), json!(round_to_2dp(c.score)));
+            rec.insert("keepsSafe".into(), json!(c.keeps_safe));
+            rec.insert("lethalTarget".into(), json!(c.lethal_target));
+            rec.insert(
+                "decision".into(),
+                json!(match c.decision {
+                    AiCombatDecision::Attack(_) => "attack",
+                    AiCombatDecision::EndTurn => "endTurn",
+                }),
+            );
+            top3_payload.push(Value::Object(rec));
+        }
+        let mut payload = Map::new();
+        payload.insert("side".into(), json!(side_id_tag(side_id)));
+        payload.insert("turn".into(), json!(state.turn_number));
+        payload.insert(
+            "tacticalGoal".into(),
+            match tactical_choice.as_ref().map(|m| m.goal) {
+                Some(super::types::AiTacticalGoal::SecureLethal) => json!("secure_lethal"),
+                Some(super::types::AiTacticalGoal::DenyOpponentLethal) => {
+                    json!("deny_opponent_lethal")
+                }
+                Some(super::types::AiTacticalGoal::MaximizeExpectedDamage) => {
+                    json!("maximize_expected_damage")
+                }
+                None => Value::Null,
+            },
         );
-        top3_payload.push(Value::Object(rec));
+        payload.insert(
+            "selectedId".into(),
+            selected
+                .as_ref()
+                .map(|c| json!(&c.id))
+                .unwrap_or(Value::Null),
+        );
+        payload.insert("top3".into(), Value::Array(top3_payload));
+        emit_ai_telemetry(AiTelemetryEvent::CombatCandidates, payload);
     }
-    let mut payload = Map::new();
-    payload.insert("side".into(), json!(side_id_tag(side_id)));
-    payload.insert("turn".into(), json!(state.turn_number));
-    payload.insert(
-        "tacticalGoal".into(),
-        match tactical_choice.as_ref().map(|m| m.goal) {
-            Some(super::types::AiTacticalGoal::SecureLethal) => json!("secure_lethal"),
-            Some(super::types::AiTacticalGoal::DenyOpponentLethal) => {
-                json!("deny_opponent_lethal")
-            }
-            Some(super::types::AiTacticalGoal::MaximizeExpectedDamage) => {
-                json!("maximize_expected_damage")
-            }
-            None => Value::Null,
-        },
-    );
-    payload.insert(
-        "selectedId".into(),
-        selected
-            .as_ref()
-            .map(|c| json!(&c.id))
-            .unwrap_or(Value::Null),
-    );
-    payload.insert("top3".into(), Value::Array(top3_payload));
-    emit_ai_telemetry(AiTelemetryEvent::CombatCandidates, payload);
 
     let Some(selected) = selected else {
         return AiCombatDecisionResult {
@@ -960,6 +979,16 @@ fn score_basic_bench_candidate(
 }
 
 fn emit_turn_goal_telemetry(state: &GameState, side_id: SideId, phase: &str, goal: AiTurnGoal) {
+    // Telemetry is disabled by default (sink early-exits when
+    // `__UMA_AI_TELEMETRY__` is unset). Building the payload — three
+    // `json!` allocs + `explain_ai_turn_goal` Vec + per-tag `String::from`
+    // — happens on every rollout-step heuristic AI decision (~200 steps ×
+    // 3 CRN × 800 sims/decision). Skip the work when the sink will throw
+    // it away. Same payload shape preserved for callers that opt in via
+    // `set_enabled(true)`.
+    if !super::telemetry::is_enabled() {
+        return;
+    }
     let mut payload = Map::new();
     payload.insert("phase".into(), json!(phase));
     payload.insert("side".into(), json!(side_id_tag(side_id)));
