@@ -47,6 +47,8 @@ def parse_args() -> argparse.Namespace:
                         help="Feature width for the value-target corpus. Default 110 (v3.0).")
     parser.add_argument("--uma-slot-tokens", action="store_true",
                         help="Emit v3.2 per-Uma slot tensors while retraining the value head.")
+    parser.add_argument("--train-scope", choices=["value-head", "all"], default="value-head",
+                        help="Train only value_head.* (default) or all model parameters for fit diagnostics.")
     return parser.parse_args()
 
 
@@ -64,6 +66,18 @@ def freeze_trunk_and_policy(model: CandidatePolicyNet) -> None:
     model.eval()
     for module in model.value_head.modules():
         module.train()
+
+
+def configure_train_scope(model: CandidatePolicyNet, train_scope: str) -> None:
+    if train_scope == "value-head":
+        freeze_trunk_and_policy(model)
+        return
+    if train_scope == "all":
+        for param in model.parameters():
+            param.requires_grad = True
+        model.train()
+        return
+    raise ValueError(f"unknown train_scope={train_scope!r}")
 
 
 def emit_event(events_path: Path | None, stage: str, event_type: str, data: dict) -> None:
@@ -94,6 +108,7 @@ def main() -> None:
         "lr": args.lr,
         "state_dim": args.state_dim,
         "uma_slot_tokens": bool(args.uma_slot_tokens),
+        "train_scope": args.train_scope,
     })
 
     dataset = ValueTargetDataset(
@@ -127,7 +142,7 @@ def main() -> None:
     model = CandidatePolicyNet(config)
     model.load_state_dict(payload["model_state"])
     model.to(device)
-    freeze_trunk_and_policy(model)
+    configure_train_scope(model, args.train_scope)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
@@ -230,7 +245,8 @@ def main() -> None:
             "data": args.data,
             "init_checkpoint": args.init_checkpoint,
             "device": str(device),
-            "frozen": "trunk+policy_head",
+            "frozen": "trunk+policy_head" if args.train_scope == "value-head" else "none",
+            "train_scope": args.train_scope,
             "state_dim": args.state_dim,
             "uma_slot_tokens": bool(args.uma_slot_tokens),
             "history": history,
