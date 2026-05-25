@@ -99,8 +99,10 @@ struct Args {
     /// Heuristic-collapse cap. Orchestrator alias: --mcts-collapse-max-steps.
     #[arg(long, alias = "mcts-collapse-max-steps", default_value_t = 64)]
     collapse_max: u32,
-    /// Selection mode (mcts | rollout | planner). Currently only mcts
-    /// is wired in this binary; accepted for orchestrator-flag parity.
+    /// Selection mode. `mcts` uses the configured MCTS policy; `random`
+    /// chooses uniformly among legal modeled-side actions as a floor
+    /// baseline. Other values are accepted for orchestrator-flag parity
+    /// and currently fall back to `mcts`.
     #[arg(long, default_value = "mcts")]
     selection: String,
     /// Model-side rotation: "both" (default — alternate per-seed),
@@ -280,6 +282,7 @@ fn drive_one_game(
     seed: u32,
     model_side: SideId,
     max_steps: u32,
+    selection: &str,
     config: &MctsConfig,
     player_deck: Option<&[engine::core::card_id::CardId]>,
     opponent_deck: Option<&[engine::core::card_id::CardId]>,
@@ -310,13 +313,18 @@ fn drive_one_game(
 
         let pre_hash = state_hash(&state);
         let next_state = if side == model_side && legal.len() > 1 {
-            let mcts_seed = format!("{}:{:?}:{}:mcts", seed_str, side, s);
-            let model_url = config.model_url.clone();
-            let (mcts_result, used_rng) = with_rng(step_rng.clone(), || {
-                run_mcts(&state, side, config, model_url.as_str(), mcts_seed.as_str())
-            });
-            step_rng = used_rng;
-            let idx = mcts_result.selected_index.min(legal.len() - 1);
+            let idx = if selection == "random" {
+                let r = step_rng.next_f64();
+                ((r * legal.len() as f64).floor() as usize).min(legal.len() - 1)
+            } else {
+                let mcts_seed = format!("{}:{:?}:{}:mcts", seed_str, side, s);
+                let model_url = config.model_url.clone();
+                let (mcts_result, used_rng) = with_rng(step_rng.clone(), || {
+                    run_mcts(&state, side, config, model_url.as_str(), mcts_seed.as_str())
+                });
+                step_rng = used_rng;
+                mcts_result.selected_index.min(legal.len() - 1)
+            };
             let chosen = legal[idx].clone();
             let (ns, used_rng) = with_rng(step_rng.clone(), || {
                 let forced = get_forced_attack_coin_results(&state);
@@ -385,8 +393,7 @@ fn main() -> Result<()> {
         model_url: model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
     };
-    // Accept for orchestrator-flag parity (no-op stubs for now).
-    let _ = args.selection;
+    let selection = args.selection.clone();
     let _ = args.min_ci_lower;
     let _ = args.min_games;
     // `--workers` is consumed below; resolve `0` to available_parallelism.
@@ -410,8 +417,8 @@ fn main() -> Result<()> {
             other
         ),
     };
-    let needs_inference =
-        matches!(prior, MctsPrior::Policy) || matches!(leaf, MctsLeaf::ValueHead);
+    let needs_inference = selection != "random"
+        && (matches!(prior, MctsPrior::Policy) || matches!(leaf, MctsLeaf::ValueHead));
     if needs_inference {
         let onnx = args
             .onnx_path
@@ -519,6 +526,7 @@ fn main() -> Result<()> {
     let tasks_arc: Arc<Vec<(u32, SideId)>> = Arc::new(tasks);
     let config_arc = Arc::new(config);
     let sampling_arc = Arc::new(sampling);
+    let selection_arc = Arc::new(selection);
     let seed_base = args.seed_base;
 
     // Effective worker count: never more than tasks (no-op extras
@@ -536,6 +544,7 @@ fn main() -> Result<()> {
             let tasks_arc = Arc::clone(&tasks_arc);
             let outcomes = Arc::clone(&outcomes);
             let config_arc = Arc::clone(&config_arc);
+            let selection_arc = Arc::clone(&selection_arc);
             let completed_counter = Arc::clone(&completed_counter);
             let running_wins_counter = Arc::clone(&running_wins_counter);
             let progress_writer = progress_writer.as_ref().map(Arc::clone);
@@ -565,6 +574,7 @@ fn main() -> Result<()> {
                         seed,
                         model_side,
                         max_steps,
+                        selection_arc.as_str(),
                         &config_arc,
                         player_deck_opt,
                         opponent_deck_opt,
