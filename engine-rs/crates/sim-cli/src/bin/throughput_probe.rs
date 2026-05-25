@@ -89,7 +89,6 @@ fn build_realistic_state() -> GameState {
         uid,
         card_id: CardId(uid as u16),
         evolution_card_ids: ArrayVec::new(),
-        species: format!("Species{}", uid),
         stage: 0,
         hp: 60,
         max_hp: 60,
