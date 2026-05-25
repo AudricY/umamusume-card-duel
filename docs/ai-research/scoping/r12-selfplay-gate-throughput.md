@@ -252,6 +252,25 @@ involvement. The call-site interfaces (`.iter()`, `.into_iter()`,
 needed a type-annotation update. workers=1: 0.932 → 1.033 g/s (+11%);
 workers=16: 6.199 → 7.438 g/s (+20%).
 
+### Slice 3i — remove denormalized `species` field; forced_coins move semantics (2026-05-25, `b576336`)
+
+`UmamusumeInstance.species: String` was a TS-port artifact — evolution
+(`flow/evolution.rs:79-80`) mutates `card_id` and `species` in lockstep,
+so the field was always redundant with `catalog().get(card_id).species`.
+Replaced direct field access with a `species(&self) -> &'static str`
+method that resolves through the catalog at call time. Removes one
+heap alloc per `UmamusumeInstance::clone`.
+
+Also dropped the four `forced_coins.clone()` calls in `mcts/driver.rs`
+(modeled-step + collapse + rollout_heuristic) where the value was used
+once after the clone — pass by move instead.
+
+Throughput unchanged at this scale (the alloc churn from species was
+small in the post-3h profile); the change is structural cleanup that
+makes future Tier 4 interning of `SideState.title` /
+`used_ability_names_*` easier and reduces the `UmamusumeInstance`
+struct size by one `String` (~24 bytes).
+
 ### Cumulative throughput vs baseline anchor (sims=800, 40 games, prior=uniform/leaf=rollout)
 
 | Slice                              | w=1 g/s | w=16 g/s | Cumulative vs 0.60 anchor |
@@ -262,9 +281,46 @@ workers=16: 6.199 → 7.438 g/s (+20%).
 | 3f telemetry gating                | 0.831   | 6.141    | 10.2×                     |
 | 3g state_fingerprint               | 0.932   | 6.199    | 10.3×                     |
 | 3h get_all_umamusume ArrayVec      | 1.033   | 7.438    | **12.4×**                 |
+| 3i species field + forced_coins    | ~1.0    | 7.338    | 12.2× (cleanup, no perf)  |
 
-JSONL md5 `65fc72a1…` unchanged across every slice — all changes are
-provably trajectory-neutral, no parity gate required.
+JSONL md5 `65fc72a1…` unchanged across **every** slice — all 6
+optimizations are provably trajectory-neutral (clones, denormalized
+fields, telemetry payload assembly, hex-vs-u128 equality, ArrayVec
+storage), so no strength-A/B gate is required. Engine test suite is
+133/133 green throughout.
+
+### Why subtree reuse / transposition cache / batched leaf eval did NOT land
+
+The user explicitly relaxed the contract from "bit-identical" to "don't
+regress measured strength," which unlocks the bigger algorithmic levers
+in the handoff doc's Tier 2/4. None of them fit a single autonomous
+session in this worktree:
+
+- **Subtree reuse** (~1.5-2× sims-equivalent). For `model_side=both`
+  (production), each MCTS tree assumes the other side plays
+  heuristically (`step_from_model_decision` collapses through opponent
+  via `collapse_until_model_or_terminal`), so the cached child's state
+  is for a heuristic-opponent response — not the MCTS-opponent
+  response that actually happens. The cached visits/Q are stale and
+  trade-off is unknown without a strength A/B. Easier under
+  `model_side=player|opponent` (eval-gate, single-side recipes).
+  ~80 LOC + flag + head-to-head A/B harness.
+
+- **Transposition cache on `state_fingerprint`** for
+  `predict_policy_and_value`. Only helps `prior=policy` or
+  `leaf=value-head` paths — neither is in this worktree's measurement
+  regime (no ONNX checkpoint staged). The infra is ~30 LOC but
+  measurement requires policy work.
+
+- **Batched leaf evaluation + virtual loss** (handoff Tier 4, 2-3 days).
+  Reworks `driver.rs`'s raw-pointer descent + changes hard-coded
+  `(1, …)` ORT shapes at `inference/mod.rs:344-369` to `(K, …)`.
+  Highest absolute ceiling but multi-session.
+
+- **`SideState.title` and `used_ability_names_*` interning** (handoff
+  Tier 4). Bit-identical work but touches every test fixture and
+  ability-emit site. Multi-hour mechanical refactor; clean structurally
+  but throughput delta is modest at sub-10% per the post-3i profile.
 
 ### Follow-ups (not yet landed)
 

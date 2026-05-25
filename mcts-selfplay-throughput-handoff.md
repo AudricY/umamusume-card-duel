@@ -2,13 +2,18 @@
 
 - **Date:** 2026-05-25
 - **Branch:** `feat/ai`
-- **Status:** Slices 3d-3h LANDED. **12.4× wall-clock vs the 0.60 g/s
-  baseline anchor** at workers=16 (7.438 g/s, 40-game sweep, prior=uniform
-  leaf=rollout). All five slices preserve JSONL md5 `65fc72a1…`. Evidence
-  in `docs/ai-research/scoping/r12-selfplay-gate-throughput.md` §
-  "Slice 3d/3e/3f/3g/3h". Remaining: orchestrator fanout cleanup,
-  prior=policy retest, Tier 2 algorithmic (subtree reuse), Tier 4 String
-  interning.
+- **Status:** Slices 3d-3i LANDED. **12.4× wall-clock vs the 0.60 g/s
+  baseline anchor** at workers=16 (7.438 g/s peak, 40-game sweep,
+  prior=uniform leaf=rollout). All six slices preserve JSONL md5
+  `65fc72a1…` and pass 133/133 engine tests. Evidence in
+  `docs/ai-research/scoping/r12-selfplay-gate-throughput.md` §
+  "Slice 3d-3i". The bigger algorithmic levers (subtree reuse,
+  transposition cache, batched leaf eval) were *unlocked* by the user's
+  later "drop bit-identity, don't regress strength" relaxation but
+  remain unland for this-session-only reasons documented in the
+  scoping doc — they need either ONNX staging (for transposition /
+  value-head paths) or a head-to-head strength A/B harness (subtree
+  reuse) that doesn't exist in this worktree.
 - **Predecessor docs (read these in order if cold):**
   - `docs/ai-research/scoping/throughput-optimization-spike.md` — Slice 1–3 (Rust ORT in-process, 4.18× wall)
   - `docs/ai-research/scoping/gpu-inference-execution-provider.md` — G5 lock-free `UnsafeCell<Session>` for `sim-eval-gate` (7.11× at workers=16)
