@@ -67,6 +67,22 @@ A parity smoke must show byte-identical state vectors across the two paths on a 
 - Action schema bump invalidates rows produced by ACTION_FEATURE_SCHEMA_VERSION=2 datasets at training time — the export pipeline must dispatch on the action-schema-version per row. If the dataset format does not currently embed `action_feature_schema_version`, this slice adds it (a one-field metadata bump).
 - Production serving (`serve_onnx.py`) must be updated to refuse mismatched action-schema-version requests with a fail-fast error (consistent with the C5 "LANDMINE" pattern at `r16-model-feature-backlog-refinement.md:633-642`).
 
+### HAZARD — action-feature train/inference mismatch on v2-trained ckpts
+
+**Symptom risk:** Any sim-eval-gate or sim-mcts-selfplay binary BUILT FROM THE POST-FIX SOURCE will emit v3 action features. Running such a binary against a checkpoint TRAINED WITH v2 action features (i.e., everything that exists before the ablation arms train) silently degrades MCTS prior quality — the policy net sees feature semantics it was never trained on. The schema-version constant is now embedded in checkpoint manifests but **the Rust binary does not yet enforce a match**.
+
+**Active mitigations:**
+
+1. **Re-verdict #3 was fired with the May 25 11:38 binary (pre-fix).** The eval is bit-faithful to re-verdicts #1/#2 because the binary still emits v2 action features at runtime even though the source tree carries v3. Verified: `ls -la engine-rs/target/release/sim-eval-gate` shows the pre-edit timestamp; the next `cargo build --release` will produce a v3-emitting binary.
+2. **Ablation arms train fresh** under v3 features, so they are self-consistent.
+3. **Any future re-evaluation of a v2-trained checkpoint** under a freshly rebuilt binary must EITHER (a) revert the action-features change in a workspace before the eval, or (b) be flagged as expected-degraded.
+
+**Recommended hardening (out-of-slice but high-priority):**
+
+- Extend the Rust `inference::mod` ONNX loader to read `action_feature_schema_version` from the sidecar `policy.onnx.meta.json` (training already writes this field via `train_bc.py:1025`). At load time, refuse to run if the binary's compiled `ACTION_FEATURE_SCHEMA_VERSION` ≠ the manifest's, OR emit a clear stderr warning. Pattern mirrors `_SCHEMA_BY_STATE_DIM` fail-fast dispatch.
+- Mirror in `serve_onnx.py` for the HTTP path.
+- File: tracked as a follow-up under the queue entry `v33-correctness-fix`.
+
 ## 3. Per-fix specifications
 
 ### Fix 1 — Weakness-bonus correction
