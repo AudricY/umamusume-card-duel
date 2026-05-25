@@ -544,6 +544,8 @@ def run_selfplay(
         "--mcts-rollout-crn-samples", str(args.mcts_rollout_crn_samples),
         "--mcts-rollout-steps", str(args.mcts_rollout_steps),
         "--workers", str(args.workers),
+        "--wave-size", str(args.mcts_wave_size),
+        "--virtual-loss", str(args.mcts_virtual_loss),
         "--out", str(out_path),
         "--manifest-out", str(manifest_out),
         # deck-pair-sampling Slice 2 (2026-05-22): self-play widens its deck
@@ -1129,6 +1131,8 @@ def run_gate(
         "--mcts-prior", "policy",
         "--mcts-collapse-max-steps", str(args.mcts_collapse_max_steps),
         "--mcts-max-nodes", str(args.mcts_max_nodes),
+        "--wave-size", str(args.mcts_wave_size),
+        "--virtual-loss", str(args.mcts_virtual_loss),
         "--min-ci-lower", str(args.eval_min_ci_lower),
         "--min-games", str(args.eval_games),
         "--progress-out", str(iter_dir / "gate-progress.jsonl"),
@@ -1453,6 +1457,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mcts-rollout-steps", type=int, default=200)
     p.add_argument("--mcts-collapse-max-steps", type=int, default=64)
     p.add_argument("--mcts-max-nodes", type=int, default=5000)
+    p.add_argument("--mcts-wave-size", type=int, default=1)
+    p.add_argument("--mcts-virtual-loss", type=float, default=1.0)
     p.add_argument("--dirichlet-alpha", type=float, default=0.3)
     p.add_argument("--dirichlet-epsilon", type=float, default=0.25)
     p.add_argument("--temperature-moves", type=int, default=6)
