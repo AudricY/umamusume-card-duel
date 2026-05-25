@@ -1312,13 +1312,38 @@ fn has_enough_energy_for_attack(u: &UmamusumeInstance, cost: &EnergyCost) -> boo
     typed_required == 0 && total_attached >= total_required
 }
 
+std::thread_local! {
+    /// Reusable packed-state buffer for `state_fingerprint`. `pack_into`
+    /// clears the buffer before writing, and `state_fingerprint` only
+    /// borrows it for the duration of the hash, so this is safe to reuse
+    /// across calls on the same thread.
+    static FINGERPRINT_BUF: std::cell::RefCell<Vec<u8>> =
+        std::cell::RefCell::new(Vec::with_capacity(512));
+}
+
+/// Numeric structural fingerprint — same byte stream as `state_hash` but
+/// without the hex-formatting allocation or the per-call `Vec<u8>` for the
+/// packed buffer. MCTS only ever compares two hashes for equality
+/// (`mcts/driver.rs:470, 503-520, 643-688`), so the hex String wrapper is
+/// pure overhead. Use this for equality checks; use `state_hash` only when
+/// you need the hex form (e.g., as part of a cache key).
+pub fn state_fingerprint(state: &GameState) -> u128 {
+    FINGERPRINT_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        crate::core::packed::pack_into(state, &mut buf);
+        crate::fingerprint::fingerprint(&buf)
+    })
+}
+
 /// Structural hash of the engine state — replaces the TS string fingerprint
 /// for MCTS's no-progress loop break. Bit-identity with TS is not required
 /// because both the recompute-per-step and the carry-forward versions in
-/// `mcts.ts` only compare two Rust-side hashes for equality.
+/// `mcts.ts` only compare two Rust-side hashes for equality. Prefer
+/// `state_fingerprint` when the result is used purely for equality —
+/// `state_hash` exists for the cache-key path
+/// (`mcts/driver.rs:325` `"<hex>:precollapse"`).
 pub fn state_hash(state: &GameState) -> String {
-    let packed = crate::core::packed::pack(state);
-    format!("{:032x}", crate::fingerprint::fingerprint(&packed))
+    format!("{:032x}", state_fingerprint(state))
 }
 
 /// `evaluateModelVsHeuristic.ts:1129` `advanceModeledTurnStep`. Applies one

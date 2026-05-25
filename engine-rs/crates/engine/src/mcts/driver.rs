@@ -20,7 +20,7 @@ use crate::core::random::{with_rng, Rng};
 use crate::core::state::{CurrentSide, GameState};
 use crate::dispatcher::{
     advance_modeled_turn_step, advance_opponent_turn_step, advance_player_ai_turn_step,
-    get_forced_attack_coin_results, state_hash,
+    get_forced_attack_coin_results, state_fingerprint, state_hash,
 };
 use crate::mcts::config::{MctsConfig, MctsDiagnostics, MctsLeaf, MctsPrior, MctsResult};
 use crate::mcts::math::{argmax, entropy, mcts_terminal_value, puct_select};
@@ -467,7 +467,7 @@ fn step_from_model_decision(
     // their comments for the rationale.
     let forced_coins = with_rng_borrow(rng, || get_forced_attack_coin_results(state));
     let next_state = advance_modeled_turn_step(state, model_side, action, forced_coins.clone());
-    if state_hash(&next_state) == state_hash(state) {
+    if state_fingerprint(&next_state) == state_fingerprint(state) {
         return None;
     }
     if next_state.game_over {
@@ -491,7 +491,7 @@ fn collapse_until_model_or_terminal(
     rng: &mut Rng,
 ) -> GameState {
     let mut current = state.clone();
-    let mut before: Option<String> = None;
+    let mut before: Option<u128> = None;
     for _ in 0..max_steps {
         if current.game_over {
             break;
@@ -500,7 +500,7 @@ fn collapse_until_model_or_terminal(
             break;
         }
         if before.is_none() {
-            before = Some(state_hash(&current));
+            before = Some(state_fingerprint(&current));
         }
         let side_id = match current.current_side {
             CurrentSide::Player => SideId::Player,
@@ -516,8 +516,8 @@ fn collapse_until_model_or_terminal(
         } else {
             advance_opponent_turn_step(&mut current, forced.clone());
         }
-        let after = state_hash(&current);
-        if Some(&after) == before.as_ref() {
+        let after = state_fingerprint(&current);
+        if Some(after) == before {
             break;
         }
         before = Some(after);
@@ -640,7 +640,7 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
     let verbose = VERBOSE_FIRST_ROLLOUT.with(|c| c.get()) && rollout_idx == 1;
     let outer_draws_before = peek_active_outer_draws().unwrap_or(0);
     let mut next = state.clone();
-    let mut before: Option<String> = None;
+    let mut before: Option<u128> = None;
     let mut step_idx: u32 = 0;
     let end_reason: u8 = 'rollout: loop {
         if step_idx >= max_steps {
@@ -650,7 +650,7 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
             break 'rollout 0; // game_over
         }
         if before.is_none() {
-            before = Some(state_hash(&next));
+            before = Some(state_fingerprint(&next));
         }
         let side_id = match next.current_side {
             CurrentSide::Player => SideId::Player,
@@ -681,8 +681,8 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
                 step_idx, side_id, pre_opponent_step, advance_draws, next.turn_number
             );
         }
-        let after = state_hash(&next);
-        if Some(&after) == before.as_ref() {
+        let after = state_fingerprint(&next);
+        if Some(after) == before {
             break 'rollout 2; // state_unchanged
         }
         before = Some(after);
