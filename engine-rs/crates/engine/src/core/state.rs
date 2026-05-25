@@ -33,12 +33,20 @@ use super::constants::{
 };
 
 /// `shared/src/types.ts:160` `UmamusumeInstance`.
+///
+/// `species` is intentionally NOT stored — it is derivable from
+/// `card_id` via the catalog (evolution mutates both `card_id` and the
+/// would-be `species` in lockstep at `evolution.rs:79-80`). Removing
+/// the denormalized `String` field drops one heap alloc per
+/// `UmamusumeInstance::clone` (~3 instances × 2 sides cloned on every
+/// `GameState::clone`). Access via `umamusume.species()`. `stage` is
+/// kept as a hot direct-field access since the catalog lookup pattern
+/// would be too churny.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UmamusumeInstance {
     pub uid: u32,
     pub card_id: CardId,
     pub evolution_card_ids: ArrayVec<CardId, MAX_EVOLUTION_CHAIN>,
-    pub species: String,
     pub stage: u8,
     pub hp: i32,
     pub max_hp: i32,
@@ -56,6 +64,23 @@ pub struct UmamusumeInstance {
     pub attack_blocked_until_own_turn: Option<u32>,
     pub paralysed_until_own_turn: Option<u32>,
     pub tool_card_id: Option<CardId>,
+}
+
+impl UmamusumeInstance {
+    /// Species name, resolved from the live catalog via `card_id`. Read
+    /// over the previously-stored `species: String` field; the field was
+    /// removed because evolution mutates `card_id` and the would-be
+    /// `species` in lockstep (`flow/evolution.rs:79-80`), so the
+    /// denormalized copy was always redundant. Returns `""` if the
+    /// `card_id` is missing from the catalog (should not happen in a
+    /// well-formed state).
+    pub fn species(&self) -> &'static str {
+        use crate::core::catalog::{catalog, Card};
+        match catalog().get(self.card_id) {
+            Some(Card::Umamusume(u)) => u.species.as_str(),
+            _ => "",
+        }
+    }
 }
 
 /// `shared/src/types.ts:185` `SetupState`.

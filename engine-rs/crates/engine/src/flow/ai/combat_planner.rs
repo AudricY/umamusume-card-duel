@@ -411,7 +411,7 @@ fn explicit_evolution_deck_indexes(side: &SideState, attack: &crate::core::effec
         .enumerate()
         .filter_map(|(idx, &cid)| match cat.get(cid) {
             Some(Card::Umamusume(c))
-                if c.evolves_from.as_deref() == Some(active.species.as_str())
+                if c.evolves_from.as_deref() == Some(active.species())
                     && c.stage == next_stage =>
             {
                 Some(idx)
@@ -716,7 +716,6 @@ mod tests {
             uid,
             card_id,
             evolution_card_ids: ArrayVec::new(),
-            species: String::new(),
             stage: 0,
             hp: 60,
             max_hp: 60,

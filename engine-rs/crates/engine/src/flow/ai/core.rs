@@ -943,7 +943,7 @@ fn score_basic_bench_candidate(
         .count() as i32;
     let same_species_already_in_play = get_all_umamusume(side)
         .into_iter()
-        .any(|u| u.species == card.species);
+        .any(|u| u.species() == card.species.as_str());
     let mut score: f64 = (card.hp as f64) * 0.5 + (attack.damage as f64);
     score += score_attack_energy_pool_fit(side, &attack.cost);
     score += (84.0_f64)

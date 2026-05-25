@@ -78,7 +78,6 @@ mod tests {
             uid,
             card_id: CardId(0),
             evolution_card_ids: ArrayVec::new(),
-            species: String::new(),
             stage: 0,
             hp: 50,
             max_hp: 60,

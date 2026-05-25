@@ -665,7 +665,7 @@ fn is_useful_evolution_search_hit(side: &SideState, card_id: crate::core::card_i
     }
     get_all_umamusume(side).into_iter().any(|target| {
         let evolves_from = card.evolves_from.as_deref();
-        target.species.as_str() == evolves_from.unwrap_or("")
+        target.species() == evolves_from.unwrap_or("")
             && (target.stage as i32) == (card.stage as i32 - 1)
     })
 }
@@ -720,7 +720,7 @@ fn score_card_future_value(
                 .into_iter()
                 .filter(|um| {
                     let evolves_from = u.evolves_from.as_deref().unwrap_or("");
-                    um.species.as_str() == evolves_from
+                    um.species() == evolves_from
                         && (um.stage as i32) == (u.stage as i32 - 1)
                 })
                 .collect();
@@ -728,7 +728,7 @@ fn score_card_future_value(
                 value += 70.0;
             }
             if let Some(active) = &side.active {
-                if u.evolves_from.as_deref() == Some(active.species.as_str())
+                if u.evolves_from.as_deref() == Some(active.species())
                     && (u.stage as i32) == (active.stage as i32 + 1)
                 {
                     value += 45.0;
@@ -922,7 +922,6 @@ mod tests {
             uid: 1,
             card_id: basic_cid,
             evolution_card_ids: ArrayVec::new(),
-            species: basic_card.species.clone(),
             stage: basic_card.stage,
             hp: basic_card.hp,
             max_hp: basic_card.hp,

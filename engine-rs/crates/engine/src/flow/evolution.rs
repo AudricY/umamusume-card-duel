@@ -48,7 +48,7 @@ pub fn is_valid_evolution_target(
         Some(s) => s.as_str(),
         None => return false,
     };
-    if umamusume.species != evolves_from {
+    if umamusume.species() != evolves_from {
         return false;
     }
     if umamusume.stage as i32 != evolution_card.stage as i32 - 1 {
@@ -77,7 +77,8 @@ pub fn evolve_umamusume(
     let prev_card_id = umamusume.card_id;
     let _ = umamusume.evolution_card_ids.try_push(prev_card_id);
     umamusume.card_id = evolution_card_id;
-    umamusume.species = evolution_card.species.clone();
+    // species() now derives from card_id via the catalog — no
+    // synchronization needed here. stage stays as a hot direct field.
     umamusume.stage = evolution_card.stage;
     umamusume.max_hp = evolution_card.hp;
     umamusume.hp = evolution_card.hp - damage;

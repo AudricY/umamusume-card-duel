@@ -729,7 +729,7 @@ fn evolve_active_from_deck(
             Some(a) => a,
             None => return,
         };
-        (active.species.clone(), active.stage)
+        (active.species().to_string(), active.stage)
     };
 
     let is_active_evolution = |cid: crate::core::card_id::CardId| -> bool {
@@ -1248,7 +1248,6 @@ mod tests {
             uid,
             card_id: CardId(0),
             evolution_card_ids: ArrayVec::new(),
-            species: String::new(),
             stage: 0,
             hp: 60,
             max_hp: 60,

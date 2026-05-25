@@ -277,7 +277,7 @@ fn to_public_uma_observation(
     PublicUmaObservation {
         uid: umamusume.uid,
         card_id: card_id_str,
-        species: umamusume.species.clone(),
+        species: umamusume.species().to_string(),
         stage: umamusume.stage,
         hp: umamusume.hp,
         max_hp: umamusume.max_hp,

@@ -194,7 +194,7 @@ fn should_dig_for_evolution(side: &SideState) -> bool {
         pool.into_iter().any(|&cid| {
             matches!(cat.get(cid), Some(Card::Umamusume(c))
                 if c.stage == next_stage
-                    && c.evolves_from.as_deref() == Some(target.species.as_str()))
+                    && c.evolves_from.as_deref() == Some(target.species()))
         })
     })
 }

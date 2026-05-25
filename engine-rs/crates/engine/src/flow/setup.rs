@@ -50,7 +50,6 @@ pub fn create_umamusume(card_id: CardId, turn_number: u32) -> UmamusumeInstance 
         uid: next_umamusume_id(),
         card_id,
         evolution_card_ids: ArrayVec::new(),
-        species: card.species.clone(),
         stage: card.stage,
         hp: card.hp,
         max_hp: card.hp,

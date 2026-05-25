@@ -466,7 +466,7 @@ fn step_from_model_decision(
     // random_float(). Same fix as rollout_heuristic + collapse — see
     // their comments for the rationale.
     let forced_coins = with_rng_borrow(rng, || get_forced_attack_coin_results(state));
-    let next_state = advance_modeled_turn_step(state, model_side, action, forced_coins.clone());
+    let next_state = advance_modeled_turn_step(state, model_side, action, forced_coins);
     if state_fingerprint(&next_state) == state_fingerprint(state) {
         return None;
     }
@@ -512,9 +512,9 @@ fn collapse_until_model_or_terminal(
         // internals call random_float() reading the ambient outer rng.
         let forced = with_rng_borrow(rng, || get_forced_attack_coin_results(&current));
         if side_id == SideId::Player {
-            advance_player_ai_turn_step(&mut current, forced.clone());
+            advance_player_ai_turn_step(&mut current, forced);
         } else {
-            advance_opponent_turn_step(&mut current, forced.clone());
+            advance_opponent_turn_step(&mut current, forced);
         }
         let after = state_fingerprint(&current);
         if Some(after) == before {
@@ -668,9 +668,9 @@ fn rollout_heuristic(state: &GameState, rng: &mut Rng, max_steps: u32) -> GameSt
         // randomFloat() from the storage provider. Do NOT re-install the
         // inner rng here; let the recorder's outer with_rng remain active.
         if side_id == SideId::Player {
-            advance_player_ai_turn_step(&mut next, forced.clone());
+            advance_player_ai_turn_step(&mut next, forced);
         } else {
-            advance_opponent_turn_step(&mut next, forced.clone());
+            advance_opponent_turn_step(&mut next, forced);
         }
         ROLLOUT_STATS.with(|s| s.borrow_mut().total_advance_calls += 1);
         if verbose {

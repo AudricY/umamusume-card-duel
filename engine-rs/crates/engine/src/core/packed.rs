@@ -182,7 +182,7 @@ fn pack_instance(inst: &UmamusumeInstance, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&c.0.to_le_bytes());
     }
     // species is a denormalized lookup key; treat as a hashed digest.
-    buf.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(inst.species.as_bytes()).to_le_bytes());
+    buf.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(inst.species().as_bytes()).to_le_bytes());
     buf.push(inst.stage);
     buf.extend_from_slice(&inst.hp.to_le_bytes());
     buf.extend_from_slice(&inst.max_hp.to_le_bytes());

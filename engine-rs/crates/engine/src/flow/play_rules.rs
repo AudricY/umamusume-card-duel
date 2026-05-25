@@ -154,7 +154,7 @@ pub fn get_rainbow_uncap_evolution_hand_options<'a>(
     let mut out = Vec::new();
     for (idx, cid) in side.hand.iter().copied().enumerate() {
         if let Some(Card::Umamusume(c)) = cat.get(cid) {
-            if c.stage == 2 && c.evolves_from.as_deref() == Some(umamusume.species.as_str()) {
+            if c.stage == 2 && c.evolves_from.as_deref() == Some(umamusume.species()) {
                 out.push((idx, c));
             }
         }
