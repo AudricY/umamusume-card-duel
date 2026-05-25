@@ -15,7 +15,7 @@
   - **Add (six channels, 44 bits):**
     1. **Both-side `energy_pool` typed multihot (20 bits, 10×2)** — *future-roll* color distribution; replaces the dead `energy_zone.front` channel with the actually-prior-rich form of the same signal class.
     2. **Both-side prize one-hot ×4 (8 bits, 4×2)** — non-linear win-condition urgency, complements `f[3]=points/3` ratio.
-    3. **Both-side bench typed energy aggregate (20 bits, 10×2)** — already-committed energies on bench Umas; opp threat-by-color, a known coverage gap (head-110 collapses this to scalar `energy_total`).
+    3. **Opp-only bench typed energy aggregate (10 bits)** — already-committed energies on opp bench Umas; opp threat-by-color, a known coverage gap (head-110 collapses this to scalar `energy_total`). Own bench dropped at impl reconciliation: 6-channel sum was 54, but TL;DR locked at +34 net (STATE_DIM 246, 44 bits added). Own bench typed cut as the lowest-priority redundancy (v3.5 head already exposes own.active typed energies; own.bench energies are partly inferable from the rest of the own-side state).
     4. **Both-side lethal-next-turn face-value predicate (2 bits, 1×2)** — minimal arithmetic: opp.active can KO own.active *at face value* (max single-attack base damage, no weakness, no bonuses).
     5. **Both-side active secondary-attack readiness + would-KO (4 bits, 2×2)** — addresses `featurize.rs:709` only-consults-`attacks[0]` gap.
 - **Net change:** −10 + 44 = **+34 bits**. v3.5 keeps slots `[0:197]` byte-stable; new bits at `[197:246]` (and slot `[197:207]` is the freshly-vacated opp.energy_zone band — repurposed for the new energy-pool channel).
@@ -42,7 +42,7 @@ v3.5's hard channel-orthogonality rule (§1 of `v35-multichannel-tail-scoping.md
 |---|---|---|---|
 | Both-side energy_pool typed | Future-energy distribution | v3.5 `energy_zone.front` is **point-in-time depth-1**, structurally dead on opp. Pool is **multinomial prior over the rest of the game**. | None — orthogonal to depth-1 boolean and to attached-energy typed |
 | Both-side prize one-hot ×4 | Win-condition urgency (non-linear) | v3.1 has `points/3` ratio (slots 3-4). Linear. | Low — non-linearity is the new signal; ratio retained |
-| Both-side bench typed energy aggregate | Already-committed energy threat (off-active) | v3.5 has active.energies typed via head-110. Bench typed is via slot tokens, which v3.3+v3.5 EXCLUDE. | None — recovers a signal v3.4 falsified at the slot-token axis but admits at the head-aggregate axis (different representation) |
+| Opp-only bench typed energy aggregate | Already-committed energy threat (off-active) | v3.5 has active.energies typed via head-110. Bench typed is via slot tokens, which v3.3+v3.5 EXCLUDE. | None — recovers a signal v3.4 falsified at the slot-token axis but admits at the head-aggregate axis (different representation). Own bench cut at impl reconciliation; opp side carries the threat-by-color signal. |
 | Both-side lethal-next-turn face-value | Terminal-state arithmetic | v3.5 has `would_lose_on_active_KO` = (bench empty). v3.6 extends to "active dies even with bench non-empty" via direct HP-vs-damage comparison. | Low — extends, does not duplicate |
 | Both-side secondary attack readiness + KO | `active.attacks[1]` representation | v3.5 + v3.3 + v3.1 head ALL only consult `attacks[0]` (`featurize.rs:709`). | None — completely new |
 
@@ -128,7 +128,19 @@ Risk: this surface touches the observation contract that selfplay → distill �
 2. **Python `observation_to_features_v3_6` + `STATE_DIM_V3_6 = 246`** in `training/uma_ai/features.py`.
    - Call `observation_to_features_v3_5(...)` to seed slots [0:212].
    - Zero-overwrite slots [197:207] (the dead opp.energy_zone.front band).
-   - Append 44 bits at indices [212:246] in the fixed layout below.
+   - Repurpose [197:207] in-band for `own.energy_pool` typed multihot (10 bits).
+   - Append 34 bits at indices [212:246] in this LOCKED layout:
+     - `[212:222]` (10) — opp.energy_pool typed multihot.
+     - `[222:226]` (4) — own prize one-hot over remaining-prize `{3,2,1,0}`.
+     - `[226:230]` (4) — opp prize one-hot over remaining-prize `{3,2,1,0}`.
+     - `[230:240]` (10) — opp bench typed energy aggregate (multihot over the 10 energy types; bit set iff any opp bench Uma has ≥1 attached energy of that type).
+     - `[240]` (1) — own_lethal_next_turn (face-value, §4.5 Channel 4).
+     - `[241]` (1) — opp_lethal_next_turn (face-value, §4.5 Channel 4).
+     - `[242]` (1) — own_secondary_attack_usable (§4.5 Channel 5).
+     - `[243]` (1) — own_secondary_attack_would_KO (§4.5 Channel 5).
+     - `[244]` (1) — opp_secondary_attack_usable (§4.5 Channel 5).
+     - `[245]` (1) — opp_secondary_attack_would_KO (§4.5 Channel 5).
+   - **Reconciliation note (impl phase):** the §4.5 channel breakdown sums to 54 bits across BOTH sides for all channels. The TL;DR locks STATE_DIM at 246 (net +34 bits). To hit 246, **own bench typed energy aggregate (10 bits) was DROPPED** at impl; opp bench typed kept since opp-threat-by-color is the stated rationale and own bench is partly redundant with v3.5's head energies. If a later replication wants own bench typed back, bump STATE_DIM_V3_6 to 256 and append at [246:256] — non-destructive of the [0:246] layout.
    - **Alternative:** write fresh layered builder from v3.3 to avoid the in-place zero-overwrite. **Final choice:** layered-on-v3.5 with zero-overwrite, to keep slot-stability invariant tight and the column-drop visible in code review.
 3. **Rust mirror in `featurize.rs`** — new `observation_state_features_v3_6` function, called when policy/dispatch picks v3.6. Bit-exact parity.
 4. **Schema dispatch updates** — `_SCHEMA_BY_STATE_DIM[246] = STATE_FEATURE_SCHEMA_VERSION_V3_6` in `features.py`; `serve_onnx.py` schema table; Rust `inference/mod.rs` ONNX-graph signature check accepts state_dim=246 for v3.6 dispatch.
@@ -146,9 +158,9 @@ Per side, 10 bits, one per energy color in `_UMA_SLOT_ENERGY_TYPES` (grass, fire
 
 Per side, 4 bits, one-hot over remaining-prize-counts `{3, 2, 1, 0}` derived as `3 − points_taken`. (Points are 0-indexed at start, increment on opponent KO; game ends at 3.) The "0" bit means "game would be over" — should never fire at a player-decision point; included for completeness and for terminal-frame featurization paths.
 
-#### Channel 3 — Bench typed energy aggregate
+#### Channel 3 — Bench typed energy aggregate (OPP-ONLY at v3.6)
 
-Per side, 10 bits, one per energy color. Bit set iff the side's bench Umas have **at least one attached energy of that type** across all bench slots (does NOT include the active). Aggregate multihot, same vocab as Channel 1.
+10 bits, one per energy color. Bit set iff the **opp** side's bench Umas have **at least one attached energy of that type** across all bench slots (does NOT include the active). Aggregate multihot, same vocab as Channel 1. Own bench aggregate dropped at impl-phase reconciliation to keep STATE_DIM at 246 (see §4 step 2); own.active typed energies already in v3.5 head. Symmetry can be restored at v3.7 if signal lifts and bench-aggregate-own becomes desired.
 
 #### Channel 4 — Lethal-next-turn face-value
 
