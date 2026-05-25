@@ -32,8 +32,9 @@ pub struct MctsConfig {
     pub rollout_crn_samples: u32,
     pub rollout_steps: u32,
     /// Opt-in diagnostic/training capture: when non-zero and
-    /// `leaf=rollout`, `run_mcts` returns up to this many non-terminal
-    /// leaf states evaluated by rollout, with the rollout scalar attached.
+    /// `leaf=rollout`, `run_mcts` returns an evenly-spaced sample of up to
+    /// this many non-terminal leaf states evaluated by rollout, with the
+    /// rollout scalar attached.
     /// This is off by default so normal MCTS calls keep the historical
     /// result shape and memory profile.
     #[serde(default)]

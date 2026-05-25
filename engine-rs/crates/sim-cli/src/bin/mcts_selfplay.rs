@@ -112,7 +112,9 @@ struct Args {
     /// Intended for value-head retraining on the leaf-state distribution.
     #[arg(long, default_value_t = false)]
     record_rollout_leaf_rows: bool,
-    /// Cap rollout leaf rows recorded per MCTS decision.
+    /// Cap rollout leaf rows recorded per MCTS decision. The engine keeps an
+    /// evenly-spaced deterministic sample from all eligible rollout leaves,
+    /// not just the first N leaves reached by selection.
     #[arg(long, default_value_t = 8)]
     rollout_leaf_rows_per_decision: u32,
     /// LEGACY: `/predict` server URL. R16-P3 spike Option A landed

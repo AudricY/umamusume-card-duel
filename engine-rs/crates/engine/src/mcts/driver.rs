@@ -301,7 +301,10 @@ pub fn run_mcts(
         selected_index: best_index,
         visits,
         diagnostics,
-        rollout_leaf_samples,
+        rollout_leaf_samples: downsample_rollout_leaf_samples(
+            rollout_leaf_samples,
+            config.record_rollout_leaf_samples,
+        ),
     }
 }
 
@@ -590,7 +593,7 @@ fn maybe_record_rollout_leaf_sample(
     rollout_value: f64,
     max_samples: u32,
 ) {
-    if max_samples == 0 || samples.len() >= max_samples as usize || state.game_over {
+    if max_samples == 0 || state.game_over {
         return;
     }
     let legal_actions = enumerate_legal_ai_actions(state, model_side);
@@ -604,6 +607,40 @@ fn maybe_record_rollout_leaf_sample(
         legal_actions,
         rollout_value,
     });
+}
+
+fn downsample_rollout_leaf_samples(
+    samples: Vec<MctsLeafSample>,
+    max_samples: u32,
+) -> Vec<MctsLeafSample> {
+    let max_samples = max_samples as usize;
+    if max_samples == 0 || samples.len() <= max_samples {
+        return samples;
+    }
+    spread_sample_indices(samples.len(), max_samples)
+        .into_iter()
+        .map(|idx| samples[idx].clone())
+        .collect()
+}
+
+fn spread_sample_indices(total: usize, max_samples: usize) -> Vec<usize> {
+    if max_samples == 0 || total == 0 {
+        return Vec::new();
+    }
+    if total <= max_samples {
+        return (0..total).collect();
+    }
+    if max_samples == 1 {
+        return vec![total / 2];
+    }
+    let last = total - 1;
+    let denom = max_samples - 1;
+    (0..max_samples)
+        .map(|i| {
+            // Integer-rounded linspace over [0, last].
+            (i * last + denom / 2) / denom
+        })
+        .collect()
 }
 
 fn value_head_leaf_value(state: &GameState, model_side: SideId, _model_url: &str) -> f64 {
@@ -951,5 +988,14 @@ mod tests {
                 "visit count should match simulations"
             );
         }
+    }
+
+    #[test]
+    fn spread_sample_indices_cover_leaf_prefix_middle_and_tail() {
+        assert_eq!(spread_sample_indices(0, 8), Vec::<usize>::new());
+        assert_eq!(spread_sample_indices(5, 8), vec![0, 1, 2, 3, 4]);
+        assert_eq!(spread_sample_indices(10, 1), vec![5]);
+        assert_eq!(spread_sample_indices(10, 4), vec![0, 3, 6, 9]);
+        assert_eq!(spread_sample_indices(101, 5), vec![0, 25, 50, 75, 100]);
     }
 }
