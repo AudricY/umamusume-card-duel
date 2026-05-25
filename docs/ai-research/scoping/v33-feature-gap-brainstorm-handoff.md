@@ -10,10 +10,10 @@
 ## TL;DR
 
 - v3.2's feature contract has real gaps, but most are **additively fixable** under the existing freeze-and-zero-init-residual pattern.
-- The "schema axis is closed" verdict from R16 was **conditional on the pre-speedup compute regime**. The 12.4× MCTS speedup landed 2026-05-25 (`f75b347`), so re-verdict #3 (v3.2 at n=10k) is now compute-affordable — but it remains user-gated. The v3.2 ceiling claim "officially UNKNOWN" stands until the user fires it.
-- Recommended sequencing (unchanged in shape, advanced in state): **correctness fixes first** (only step actionable without user gate) → user fires re-verdict #3 → if schema axis moves, land additive v3.3 tail → only then consider a token-first v4 revamp.
+- The "schema axis is closed" verdict from R16 was **conditional on the pre-speedup compute regime**. The 12.4× MCTS speedup landed 2026-05-25 (`f75b347`), and re-verdict #3 was fired the same day per user approval. **Result: v3.2 wl=0.5877 at n=10k vs v3.0 0.5811 and v3.1 0.5810 — directional positive, +0.0066, intervals overlap.** The schema axis is no longer closed; canonical writeup at `progress/r110.md § 4f`.
+- Recommended sequencing (state-advanced): **correctness fixes first DONE** (commits `8141772`, `5ea1758`) → **re-verdict #3 FIRED, MARGINAL-POSITIVE** → **additive v3.3 tail UNGATED** (opp-side flags become the first tail item) → token-first v4 revamp still contingent on set-attention crossing 0.40.
 - A clean-slate revamp is **not** recommended today. It only becomes attractive if set-attention crosses its 0.40 gate (currently MARGINAL at Slice 2 wl=0.3205, Slice 3 never run).
-- **Next concrete action:** correctness-fix slice (weakness-bonus correction, action-slot dedupe/disambiguate, opp-side flags). See `v33-correctness-fix-scoping.md`.
+- **Next concrete actions:** (a) v33-correctness-fix ablation arms (A0–A3) — user-approved, training-heavy; (b) opp-side flags additive-tail scoping doc — now justified per re-verdict #3 outcome.
 
 ---
 
