@@ -603,6 +603,7 @@ fn maybe_record_rollout_leaf_sample(
     samples.push(MctsLeafSample {
         model_side,
         turn_number: state.turn_number,
+        state: state.clone(),
         observation: build_public_observation(state, model_side),
         legal_actions,
         rollout_value,

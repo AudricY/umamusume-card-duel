@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use engine::core::constants::SideId;
 use engine::core::random::{with_rng, Rng};
-use engine::core::state::CurrentSide;
+use engine::core::state::{CurrentSide, GameState};
 use engine::deck_sampling::{manifest_pair_for, DeckSampling};
 use engine::dispatcher::{
     advance_modeled_turn_step, advance_opponent_turn_step, advance_player_ai_turn_step,
@@ -269,6 +269,11 @@ struct SelfPlayRow {
     /// "mandatory, sampling-independent".
     player_deck_id: String,
     opponent_deck_id: String,
+    /// Optional exact hidden-state snapshot for rollout-leaf rows. Kept
+    /// absent on normal root selfplay rows so the TS-flat schema lock stays
+    /// byte-stable; downstream value-target loaders ignore this extra field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leaf_state: Option<GameState>,
 }
 
 const ROW_SCHEMA_VERSION: u32 = 1;
@@ -431,6 +436,7 @@ fn drive_one_game(
                     result: None,
                     player_deck_id: player_deck_id.to_string(),
                     opponent_deck_id: opponent_deck_id.to_string(),
+                    leaf_state: None,
                 });
             }
             if record_rollout_leaf_rows {
@@ -463,6 +469,7 @@ fn drive_one_game(
                         result: None,
                         player_deck_id: player_deck_id.to_string(),
                         opponent_deck_id: opponent_deck_id.to_string(),
+                        leaf_state: Some(sample.state.clone()),
                     });
                 }
             }
@@ -849,6 +856,7 @@ mod tests {
             }),
             player_deck_id: "matikanetannhauser".to_string(),
             opponent_deck_id: "matikanetannhauser".to_string(),
+            leaf_state: None,
         };
         let value = serde_json::to_value(&row).expect("serialize row");
         let object = value.as_object().expect("row is a JSON object");
@@ -929,6 +937,7 @@ mod tests {
             result: None,
             player_deck_id: "matikanetannhauser".to_string(),
             opponent_deck_id: "matikanetannhauser".to_string(),
+            leaf_state: None,
         };
         let mut rows = vec![make("player"), make("opponent"), make("player")];
         fill_terminal_result(&mut rows, Some("opponent"), 1, 3);

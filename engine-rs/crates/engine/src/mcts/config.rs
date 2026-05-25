@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::core::constants::SideId;
+use crate::core::state::GameState;
 use crate::policy::types::{LegalAiAction, PublicObservation};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +117,7 @@ pub struct MctsDiagnostics {
 pub struct MctsLeafSample {
     pub model_side: SideId,
     pub turn_number: u32,
+    pub state: GameState,
     pub observation: PublicObservation,
     pub legal_actions: Vec<LegalAiAction>,
     pub rollout_value: f64,
