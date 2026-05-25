@@ -293,6 +293,10 @@ validation across three worker counts).
 
 ## Crosslinks
 
+- [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md)
+  — successor for the `next_action` (b) lever (batched dispatch). Scoping
+  only as of 2026-05-25; B1 smoke gates whether the ONNX exporter admits
+  dynamic batch.
 - `gpu-fed-stronger-mcts.md` — sibling, strength axis. Shares CUDA EP
   wiring but acceptance is "Wilson-lower beats production at higher
   sims", not "wallclock faster at same recipe".

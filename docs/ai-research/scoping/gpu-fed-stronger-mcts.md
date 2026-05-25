@@ -46,7 +46,11 @@ nodes, stronger leaf estimates, ensembles, or root search variants.
    states, not self-play-only states.
 3. **Batched evaluator interface.** Split MCTS tree policy/backup from
    "evaluate N states" so serial, batched, and microbatched evaluators are
-   comparable without changing PUCT semantics.
+   comparable without changing PUCT semantics. Throughput half scoped
+   separately in
+   [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md)
+   (inter-game batching over existing OS-thread workers, no intra-tree wave
+   restructuring); reuse any dispatcher landed there.
 4. **Strength candidates.** Test value-head with larger sim budgets, hybrid
    neural+selective-rollout leaves, root ensembles, and Gumbel/sequential-
    halving-style root search.
