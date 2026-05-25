@@ -98,6 +98,15 @@ pub enum InferenceError {
         expected: String,
         runtime: String,
     },
+    /// `action_feature_schema_version` between runtime and sidecar disagrees.
+    /// Mirror of [`VocabHashMismatch`] for the v33-correctness-fix Fix 2-4
+    /// action-slot bump (2 → 3). Running mismatched action features against
+    /// a checkpoint trained at a different schema silently degrades MCTS
+    /// prior quality — fail-fast.
+    ActionSchemaMismatch {
+        expected: u32,
+        runtime: u32,
+    },
     /// ONNX graph signature does not match the v3.0 contract.
     SchemaMismatch(String),
     /// Action featurization error (e.g. ACTION_DIM mismatch).
@@ -117,6 +126,13 @@ impl std::fmt::Display for InferenceError {
             InferenceError::VocabHashMismatch { expected, runtime } => write!(
                 f,
                 "card vocab hash mismatch: sidecar={expected} runtime={runtime}"
+            ),
+            InferenceError::ActionSchemaMismatch { expected, runtime } => write!(
+                f,
+                "action_feature_schema_version mismatch: sidecar={expected} runtime={runtime}. \
+                 Running mismatched action features silently degrades MCTS prior quality. \
+                 Either rebuild against the sidecar's schema OR re-export the ONNX from a \
+                 freshly-trained checkpoint at the runtime's schema."
             ),
             InferenceError::SchemaMismatch(s) => write!(f, "schema mismatch: {s}"),
             InferenceError::Featurize(e) => write!(f, "featurize: {e}"),
@@ -254,6 +270,26 @@ impl InferenceSession {
                 return Err(InferenceError::VocabHashMismatch {
                     expected,
                     runtime: runtime_hash,
+                });
+            }
+        }
+
+        // v33-correctness-fix Fix 2-4: assert action_feature_schema_version
+        // parity. Sidecars from before this field landed (e.g. existing
+        // v3.0/v3.1/v3.2 ckpts pre-export-onnx-update) omit the key; we
+        // skip the check in that case (legacy ckpt under unknown schema —
+        // operator's responsibility to ensure compatibility). Fresh
+        // exports stamp the field, so any mismatch is operator error.
+        let sidecar_action_schema = sidecar
+            .get("action_feature_schema_version")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        if let Some(expected) = sidecar_action_schema {
+            let runtime = crate::policy::actions::ACTION_FEATURE_SCHEMA_VERSION;
+            if expected != runtime {
+                return Err(InferenceError::ActionSchemaMismatch {
+                    expected,
+                    runtime,
                 });
             }
         }
