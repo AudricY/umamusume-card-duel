@@ -686,6 +686,31 @@ fn rollout_leaf_value(
     }
 }
 
+pub fn rollout_leaf_value_for_state(
+    state: &GameState,
+    model_side: SideId,
+    rollout_crn_samples: u32,
+    rollout_steps: u32,
+    seed: &str,
+) -> f64 {
+    if state.game_over {
+        return mcts_terminal_value(state, model_side);
+    }
+    let outer_rng = Rng::from_seed(seed, "mcts-leaf-relabel-outer");
+    let (value, _) = with_rng(outer_rng, || {
+        let rng = Rng::from_seed(seed, "mcts-leaf-relabel");
+        let k = rollout_crn_samples.max(1);
+        let mut sum = 0.0;
+        for i in 0..k {
+            let mut sample_rng = rng.fork(&format!("rollout-crn-{}", i));
+            let sample = rollout_heuristic(state, &mut sample_rng, rollout_steps);
+            sum += mcts_terminal_value(&sample, model_side);
+        }
+        sum / k as f64
+    });
+    value
+}
+
 thread_local! {
     /// Per-rollout-termination-reason counters (instrumentation only).
     /// Reset via `reset_rollout_stats()`; readable via `rollout_stats()`.

@@ -33,6 +33,10 @@ path = "src/bin/export_training.rs"
 name = "sim-inference-parity"
 path = "src/bin/inference_parity.rs"
 
+[[bin]]
+name = "sim-relabel-leaf-values"
+path = "src/bin/relabel_leaf_values.rs"
+
 [dependencies]
 engine = { path = "../engine" }
 serde.workspace = true
