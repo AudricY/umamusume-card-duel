@@ -29,7 +29,7 @@ use engine::dispatcher::{
 };
 use engine::headless_setup::setup_ai_vs_ai_game_with_decks;
 use engine::inference::{self, Device, InferenceSession};
-use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior, MctsRootActionSelection};
 use engine::mcts::driver::run_mcts;
 use engine::policy::actions::enumerate_legal_ai_actions;
 use serde::Serialize;
@@ -93,6 +93,14 @@ struct Args {
     /// PUCT constant. Orchestrator alias: --mcts-c-puct.
     #[arg(long, alias = "mcts-c-puct", default_value_t = 1.5)]
     c_puct: f64,
+    /// Root action readout. `max-visits` is standard MCTS; `max-mean-q`
+    /// is an opt-in diagnostic for learned value leaves.
+    #[arg(
+        long,
+        alias = "mcts-root-action-selection",
+        default_value = "max-visits"
+    )]
+    root_action_selection: String,
     /// MCTS tree-node cap. Orchestrator alias: --mcts-max-nodes.
     #[arg(long, alias = "mcts-max-nodes", default_value_t = 5_000)]
     max_nodes: u32,
@@ -368,6 +376,15 @@ fn main() -> Result<()> {
         "policy" => MctsPrior::Policy,
         _ => MctsPrior::Uniform,
     };
+    let root_action_selection = match args.root_action_selection.as_str() {
+        "max-mean-q" | "max_mean_q" => MctsRootActionSelection::MaxMeanQ,
+        "max-visits" | "max_visits" => MctsRootActionSelection::MaxVisits,
+        other => {
+            return Err(anyhow::anyhow!(
+                "--mcts-root-action-selection must be max-visits or max-mean-q, got {other:?}"
+            ));
+        }
+    };
     let model_url = args.challenger.clone().unwrap_or_default();
     let config = MctsConfig {
         simulations: args.sims,
@@ -391,6 +408,7 @@ fn main() -> Result<()> {
         collapse_max_steps: args.collapse_max,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
+        root_action_selection,
         model_url: model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
     };
@@ -765,6 +783,7 @@ fn main() -> Result<()> {
         "leaf": args.leaf,
         "prior": args.prior,
         "cPuct": args.c_puct,
+        "rootActionSelection": args.root_action_selection,
         "maxNodes": args.max_nodes,
         "collapseMax": args.collapse_max,
         "selection": args.selection,

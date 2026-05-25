@@ -35,7 +35,7 @@ use engine::core::random::{with_rng, Rng};
 use engine::core::state::{CurrentSide, GameState};
 use engine::dispatcher::{advance_modeled_turn_step, get_forced_attack_coin_results};
 use engine::headless_setup::setup_ai_vs_ai_game;
-use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior, MctsRootActionSelection};
 use engine::mcts::driver::{
     reset_rollout_stats, rollout_stats, run_mcts, set_verbose_first_rollout,
 };
@@ -206,6 +206,7 @@ fn v4_replay_for_seed(
         collapse_max_steps: 64,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
+        root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: String::new(),
         onnx_path: None,
     };

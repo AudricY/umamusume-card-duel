@@ -24,6 +24,7 @@ use crate::dispatcher::{
 };
 use crate::mcts::config::{
     MctsConfig, MctsDiagnostics, MctsLeaf, MctsLeafSample, MctsPrior, MctsResult,
+    MctsRootActionSelection,
 };
 use crate::mcts::math::{argmax, entropy, mcts_terminal_value, puct_select};
 use crate::mcts::node::MctsNode;
@@ -283,19 +284,7 @@ pub fn run_mcts(
         .collect();
     diagnostics.visited_hashes = total_nodes;
 
-    // Argmax visits, tiebreak by mean Q.
-    let mut best_index = 0usize;
-    let mut best_visits: i64 = -1;
-    let mut best_q = f64::NEG_INFINITY;
-    for i in 0..visits.len() {
-        let n = visits[i] as i64;
-        let q = diagnostics.root_mean_q[i];
-        if n > best_visits || (n == best_visits && q > best_q) {
-            best_visits = n;
-            best_q = q;
-            best_index = i;
-        }
-    }
+    let best_index = select_root_action(&visits, &diagnostics.root_mean_q, config);
 
     MctsResult {
         selected_index: best_index,
@@ -312,6 +301,55 @@ pub fn run_mcts(
 struct PathStep {
     node_ptr: *mut MctsNode,
     action_index: usize,
+}
+
+fn select_root_action(visits: &[u32], mean_q: &[f64], config: &MctsConfig) -> usize {
+    let mut best_index = 0usize;
+    match config.root_action_selection {
+        MctsRootActionSelection::MaxVisits => {
+            // Historical behavior: argmax visits, tiebreak by mean Q.
+            let mut best_visits: i64 = -1;
+            let mut best_q = f64::NEG_INFINITY;
+            for i in 0..visits.len() {
+                let n = visits[i] as i64;
+                let q = mean_q.get(i).copied().unwrap_or(0.0);
+                if n > best_visits || (n == best_visits && q > best_q) {
+                    best_visits = n;
+                    best_q = q;
+                    best_index = i;
+                }
+            }
+        }
+        MctsRootActionSelection::MaxMeanQ => {
+            // Diagnostic behavior for learned leaves: choose by backed-up
+            // value among visited root actions, tiebreak by visits. Unvisited
+            // actions are ignored unless every visit count is zero.
+            let mut best_q = f64::NEG_INFINITY;
+            let mut best_visits: i64 = -1;
+            let mut saw_visited = false;
+            for i in 0..visits.len() {
+                let n = visits[i] as i64;
+                if n <= 0 {
+                    continue;
+                }
+                saw_visited = true;
+                let q = mean_q.get(i).copied().unwrap_or(0.0);
+                if q > best_q || (q == best_q && n > best_visits) {
+                    best_q = q;
+                    best_visits = n;
+                    best_index = i;
+                }
+            }
+            if !saw_visited {
+                let fallback = MctsConfig {
+                    root_action_selection: MctsRootActionSelection::MaxVisits,
+                    ..config.clone()
+                };
+                return select_root_action(visits, mean_q, &fallback);
+            }
+        }
+    }
+    best_index
 }
 
 fn build_model_decision_node(
@@ -958,6 +996,7 @@ mod tests {
             collapse_max_steps: 4,
             adaptive_ratio: 0.0,
             adaptive_min_sims: 100,
+            root_action_selection: MctsRootActionSelection::MaxVisits,
             model_url: String::new(),
             onnx_path: None,
         };
@@ -990,6 +1029,7 @@ mod tests {
             collapse_max_steps: 8,
             adaptive_ratio: 0.0,
             adaptive_min_sims: 100,
+            root_action_selection: MctsRootActionSelection::MaxVisits,
             model_url: String::new(),
             onnx_path: None,
         };

@@ -23,7 +23,7 @@ use engine::dispatcher::{
     advance_opponent_turn_step, advance_player_ai_turn_step, get_forced_attack_coin_results,
 };
 use engine::headless_setup::setup_ai_vs_ai_game;
-use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior, MctsRootActionSelection};
 use engine::mcts::driver::run_mcts;
 use engine::policy::actions::enumerate_legal_ai_actions;
 
@@ -57,6 +57,7 @@ fn first_mcts_decision(seed: &str) -> (u32, usize, usize, String, u32, f64) {
         collapse_max_steps: 64,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 50,
+        root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: String::new(),
         onnx_path: None,
     };

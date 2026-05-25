@@ -18,7 +18,7 @@ use engine::dispatcher::{
     get_forced_attack_coin_results, state_hash,
 };
 use engine::headless_setup::setup_ai_vs_ai_game;
-use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior, MctsRootActionSelection};
 use engine::mcts::driver::run_mcts;
 use engine::policy::actions::enumerate_legal_ai_actions;
 
@@ -348,6 +348,7 @@ fn build_config(args: &McTsArgs) -> MctsConfig {
         collapse_max_steps: args.collapse_max_steps.unwrap_or(64),
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
+        root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: args.model_url.clone().unwrap_or_default(),
         // NAPI consumer does not yet plumb ONNX path; the JS-side
         // backend would need to call `inference::set_global` manually

@@ -22,6 +22,13 @@ pub enum MctsPrior {
     Policy,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MctsRootActionSelection {
+    MaxVisits,
+    MaxMeanQ,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MctsConfig {
@@ -52,6 +59,12 @@ pub struct MctsConfig {
     pub collapse_max_steps: u32,
     pub adaptive_ratio: f64,
     pub adaptive_min_sims: u32,
+    /// Final root action readout. `MaxVisits` is standard MCTS and the
+    /// historical default. `MaxMeanQ` is an opt-in diagnostic for learned
+    /// leaves, where visit counts can be dominated by the policy prior while
+    /// the leaf scalar may carry the better action ranking.
+    #[serde(default = "default_root_action_selection")]
+    pub root_action_selection: MctsRootActionSelection,
     /// LEGACY: was the `/predict` HTTP server URL when the engine called
     /// out to `serve_onnx.py`. R16-P3 spike Option A landed in-process
     /// ORT (see `crate::inference`); this field is retained for one
@@ -89,10 +102,15 @@ impl Default for MctsConfig {
             collapse_max_steps: 64,
             adaptive_ratio: 0.0,
             adaptive_min_sims: 20,
+            root_action_selection: MctsRootActionSelection::MaxVisits,
             model_url: String::new(),
             onnx_path: None,
         }
     }
+}
+
+fn default_root_action_selection() -> MctsRootActionSelection {
+    MctsRootActionSelection::MaxVisits
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

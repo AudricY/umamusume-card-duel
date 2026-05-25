@@ -10,7 +10,7 @@ use engine::core::constants::SideId;
 use engine::core::random::{with_rng, Rng};
 use engine::core::state::CurrentSide;
 use engine::headless_setup::setup_ai_vs_ai_game;
-use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior, MctsRootActionSelection};
 use engine::mcts::driver::run_mcts;
 use engine::policy::actions::enumerate_legal_ai_actions;
 
@@ -31,6 +31,7 @@ fn default_config(sims: u32) -> MctsConfig {
         collapse_max_steps: 64,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 50,
+        root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: String::new(),
         onnx_path: None,
     }

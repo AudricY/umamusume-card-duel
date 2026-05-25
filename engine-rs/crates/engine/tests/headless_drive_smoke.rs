@@ -129,7 +129,7 @@ fn throughput_mcts_games() {
     use engine::dispatcher::{
         advance_modeled_turn_step, advance_opponent_turn_step, get_forced_attack_coin_results,
     };
-    use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+    use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior, MctsRootActionSelection};
     use engine::mcts::driver::run_mcts;
     use engine::policy::actions::enumerate_legal_ai_actions;
 
@@ -149,6 +149,7 @@ fn throughput_mcts_games() {
         collapse_max_steps: 64,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
+        root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: String::new(),
         onnx_path: None,
     };

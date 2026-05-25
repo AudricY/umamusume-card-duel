@@ -24,7 +24,7 @@ use engine::dispatcher::{
 };
 use engine::headless_setup::setup_ai_vs_ai_game_with_decks;
 use engine::inference::{self, InferenceSession};
-use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
+use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior, MctsRootActionSelection};
 use engine::mcts::driver::run_mcts;
 use engine::mcts::sample::pick_from_visits;
 use engine::policy::actions::enumerate_legal_ai_actions;
@@ -594,6 +594,7 @@ fn main() -> Result<()> {
         collapse_max_steps: args.collapse_max,
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
+        root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: args.model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
     };
