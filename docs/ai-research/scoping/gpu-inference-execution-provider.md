@@ -294,9 +294,13 @@ validation across three worker counts).
 ## Crosslinks
 
 - [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md)
-  — successor for the `next_action` (b) lever (batched dispatch). Scoping
-  only as of 2026-05-25; B1 smoke gates whether the ONNX exporter admits
-  dynamic batch.
+  — successor for the `next_action` (b) lever (batched dispatch).
+  CLOSED 2026-05-25: B2 dispatcher wiring landed (commit 2ded9b0), B3
+  sims=100 sweep + B4 sims=1000 cell both falsified the throughput
+  hypothesis on every shipping recipe (best CUDA cell remained CPU 1.04×
+  faster at sims=1000). Wiring stays as opt-in for the strength axis
+  ([`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md) Candidate 3).
+  G4's throughput-motivation falsification stands.
 - `gpu-fed-stronger-mcts.md` — sibling, strength axis. Shares CUDA EP
   wiring but acceptance is "Wilson-lower beats production at higher
   sims", not "wallclock faster at same recipe".

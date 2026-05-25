@@ -1,12 +1,15 @@
 # Batched Inference + High Parallelism — GPU Throughput Probe
 
 - **Date:** 2026-05-25
-- **Status:** SCOPING — B1 prereq smoke LANDED 2026-05-25 (Python ORT, no
-  engine-rs changes). Successor to
+- **Status:** **THROUGHPUT FALSIFIED — B2 WIRING LANDED 2026-05-25.** B1
+  Python smoke, B2 Rust dispatcher, B3 sims=100 sweep, and B4 sims=1000 cell
+  all landed 2026-05-25. End-to-end batched GPU dispatch is slower than CPU
+  on every shipping recipe tested. The dispatcher (commit 2ded9b0) stays
+  landed as opt-in (`--batch-size N` on `sim-eval-gate`, default 1
+  bit-identical) because [`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md)
+  Candidate 3 reuses it for the strength axis. Successor to
   [`gpu-inference-execution-provider.md`](gpu-inference-execution-provider.md)
-  G4-falsified, G5-landed. Sibling to
-  [`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md) Candidate 3 ("batched
-  evaluator interface"). Queue entry:
+  G4-falsified, G5-landed. Queue entry:
   `gpu-batched-inference-throughput` in `docs/ai-agent-state/queue.json`.
 - **One-liner:** Determine whether gathering N per-state ONNX calls into a
   single `Session::run(B=N)`, fed by high-parallelism inter-game workers, makes
@@ -15,13 +18,17 @@
 - **Non-goal:** strength gains. Acceptance here is throughput / wallclock under
   matched strength (Wilson-lower within G4-style 0.02 envelope). Strength
   questions stay in [`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md).
-- **B1 headline (2026-05-25):** CUDA crosses CPU **at B≈32** on bare ONNX
-  dispatch (2.35× CPU at B=64). GPU per-call cost is a ~1.3 ms launch floor,
-  nearly flat in B up to 64; CPU is ~50 µs/state, plateau from B=4. So the
-  lever exists — but it's only useful in regimes where (a) inference is a
-  meaningful share of game wall AND (b) we can sustain B≈32+ in flight.
-  Rollout-leaf at sims=100 fails (a); vhleaf and/or high-sim regimes pass
-  (a). See `## B1 evidence` below.
+- **Headline verdict (2026-05-25):** lever exists in pure-ONNX terms (B1:
+  CUDA 2.35× CPU at B=64) but does NOT survive the round-trip through the
+  inter-game dispatcher + MCTS workload. Best CUDA cells vs best CPU cells
+  at matched wilson_lower:
+  - **rollout-leaf sims=100:** CUDA 16.90s vs CPU 5.87s — CPU 2.88× faster.
+  - **vhleaf sims=100:** CUDA 14.68s vs CPU 8.22s — CPU 1.78× faster.
+  - **rollout-leaf sims=1000:** CUDA 55.16s vs CPU 52.82s — CPU 1.04×
+    faster (essentially tied; the gap closed but did not invert).
+  Crossover trajectory shows GPU/CPU ratio rising with sims and inference
+  share, but no recipe we ship crossed the 1.5× promotion gate.
+  See `## B2/B3/B4 evidence` below.
 
 ## Question
 
@@ -202,6 +209,188 @@ keep the wilson_lower gate.
 Smoke is preserved at `training/gpu_batched_inference_smoke.py` for
 re-run on future ckpts; ~5 seconds wall + ~7 seconds wall on CPU + CUDA.
 
+## B2/B3/B4 evidence (2026-05-25)
+
+Engine-side dispatcher (commit 2ded9b0) added to
+`engine-rs/crates/engine/src/inference/mod.rs`. New constructor
+`InferenceSession::load_on_with_batching(path, device, max_batch,
+max_wait_us)`: with `max_batch=1` keeps the historical inline path
+(bit-identical, no channel hop); with `max_batch>1` moves the `Session`
+into a dispatcher thread that pulls per-row requests off an mpsc, pads
+per-row `n_actions` to the batch max, calls `Session::run` once with
+B=N, slices outputs, fans back via per-request response channels.
+`sim-eval-gate` gains `--batch-size` (default 1) and `--batch-wait-us`
+(default 200) and logs `batches=N requests=M mean_fill=F` at end of run.
+
+### B2 — dispatcher correctness
+
+| Recipe | Device | --batch-size | wilson_lower | Notes |
+|---|---|---|---|---|
+| rollout sims=100, workers=16 | cpu | 1 | 0.5409361758928832 | inline baseline |
+| rollout sims=100, workers=16 | cpu | 32 | 0.5409361758928832 | bit-identical (CPU reduction order is B-independent per B1) |
+| rollout sims=100, workers=16 | cuda | 1 | 0.4957060908195922 | matches the historical G5 doc number — see "wilson drift" note below |
+| rollout sims=100, workers=16 | cuda | 32 | 0.5107194625547862 | |Δ| vs CUDA B=1 = 0.015 < 0.02 envelope — PASS; mean_fill 8.66 |
+
+**B2 dispatcher correctness gate PASSED** — CPU bit-identical at B=1 vs
+B=32; CUDA within the 0.02 envelope at B=32 vs B=1. Bit-identical CPU is
+the load-bearing correctness proof: tensor packing, padding, and
+row-slicing are all correct.
+
+**Wilson drift note.** CPU baseline at B=1 produces 0.5409 today vs the
+G5 doc's 0.4957. The CUDA B=1 path reproduces 0.4957 exactly. Both
+shifts are reproducible; engine-rs has had zero commits since G5
+(2026-05-22, fb7d3f8) per `git log -- engine-rs/`. Likely cause: rustc
+version, ORT library load order, or some non-engine-rs default (deck
+sampling, RNG) changed FP behavior on the CPU `Session::run` path
+between G5 measurement and now. Files-separately concern; the B2
+correctness gate is **B=1 vs B=N on the same device**, which both
+devices pass independently.
+
+### B3 — rollout-leaf and value-head sims=100 sweep
+
+All cells n=200 (`--games 100 --model-side both`), `--rollout-steps
+200 --prior policy`, `runs/R110-W6-repro/iter-0/policy.onnx` for
+rollout-leaf, `runs/R16-P2-c8-w6fix-on-extended-2x-games/loop/iter-1/policy.onnx`
+for vhleaf (C8-W6FIX-ON iter-1, the historical vhleaf-readiness-gate
+crossover ckpt). Raw results at
+`runs/gpu-batched-inference-b3-b4/results.jsonl`.
+
+**Rollout-leaf:**
+
+| Device | B | workers | wilson | elapsed (s) | games/sec | mean_fill | speedup vs CPU best |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| cpu | 1 | 16 | 0.5409 | 6.71 | 29.78 | inline | 0.88× |
+| **cpu** | **1** | **32** | **0.5409** | **5.87** | **34.04** | **inline** | **1.00× ← CPU best** |
+| cuda | 16 | 32 | 0.5258 | 16.90 | 11.83 | 13.58 | 0.35× |
+| cuda | 16 | 64 | 0.5308 | 23.19 | 8.63 | 13.74 | 0.25× |
+| cuda | 32 | 32 | 0.5308 | 25.75 | 7.77 | 14.21 | 0.23× |
+| cuda | 32 | 64 | 0.5359 | 18.03 | 11.09 | 21.68 | 0.33× |
+| cuda | 64 | 32 | 0.5308 | 27.23 | 7.35 | 14.18 | 0.22× |
+| cuda | 64 | 64 | 0.5308 | 25.79 | 7.75 | 22.88 | 0.23× |
+
+**Best CUDA: 16.90s (B=16, w=32) vs CPU 5.87s — CPU 2.88× faster. Gate
+1.5× FAIL.** All cells within 0.02 wilson envelope.
+
+**Value-head leaf:**
+
+| Device | B | workers | wilson | elapsed (s) | games/sec | mean_fill | speedup vs CPU best |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| cpu | 1 | 16 | 0.3923 | 8.49 | 23.56 | inline | 0.97× |
+| **cpu** | **1** | **32** | **0.3923** | **8.22** | **24.34** | **inline** | **1.00× ← CPU best** |
+| cuda | 16 | 32 | 0.3875 | 23.62 | 8.47 | 15.48 | 0.35× |
+| cuda | 16 | 64 | 0.3875 | 24.91 | 8.03 | 15.35 | 0.33× |
+| cuda | 32 | 32 | 0.3875 | 29.04 | 6.89 | 28.57 | 0.28× |
+| cuda | 32 | 64 | 0.3875 | 25.89 | 7.72 | 28.40 | 0.32× |
+| cuda | 64 | 32 | 0.3875 | 17.67 | 11.32 | 28.63 | 0.46× |
+| cuda | 64 | 64 | 0.3826 | 14.68 | 13.63 | 46.49 | 0.56× |
+
+**Best CUDA: 14.68s (B=64, w=64, mean_fill 46.49) vs CPU 8.22s — CPU
+1.78× faster. Gate 1.5× FAIL.** All cells within 0.02 wilson envelope.
+
+Note vhleaf wilson ~0.39 is far below rollout-leaf production 0.64 —
+expected per `docs/ai-research/progress/r16.md:170,1063-1112`; the
+vhleaf model is run here for *throughput* measurement only, not as a
+strength candidate.
+
+### B4 — rollout-leaf sims=1000 (high-sim cell)
+
+| Device | B | workers | wilson | elapsed (s) | games/sec | mean_fill | speedup vs CPU |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **cpu** | **1** | **16** | **0.5107** | **52.82** | **3.79** | **inline** | **1.00× ← CPU best** |
+| cuda | 32 | 32 | 0.5157 | 106.92 | 1.87 | 15.32 | 0.49× |
+| cuda | 64 | 32 | 0.5460 | 74.31 | 2.69 | 16.07 | 0.71× |
+| cuda | 32 | 64 | 0.4758 | 55.16 | 3.63 | 23.69 | 0.96× |
+
+**Best CUDA: 55.16s (B=32, w=64) vs CPU 52.82s — CPU 1.04× faster.
+Gate 1.5× FAIL.** The gap closed (sims=100 was 2.88×, sims=1000 is
+1.04×) but did not invert. **Wilson drift on the best cell is 0.035 —
+exceeds the 0.02 envelope**, suggesting CUDA reduction-order drift
+compounds at high sims (more inference calls per game → more
+accumulated bias). The B=64 w=32 cell shows the same drift direction
+(|Δ|=0.035). A strength-axis user of sims=1000 + CUDA should
+re-validate wilson agreement at the target sims count, not assume the
+sims=100 envelope holds.
+
+### Why does pure-ONNX 2.35× crossover not survive the round-trip?
+
+B1 (Python smoke, bare `Session.run`) measured CUDA 50,190 states/sec
+vs CPU 21,345 at B=64. That's the raw device economics — kernel-launch
+overhead amortized over 64 rows. The B3/B4 dispatcher cells should
+have closed most of that gap on vhleaf (where inference is the hot
+path). They didn't.
+
+Two compounding overheads eat the win:
+
+1. **Dispatcher per-request cost.** Each `predict_v3` call now hops
+   through an mpsc::sync_channel (request + per-call response channel
+   + Vec allocation for the packed row). At 100 sims/game × 200 games
+   × ~32 concurrent workers = ~6×10^5 dispatcher hops total. Even at
+   ~10µs per hop (channel + tensor pack + slice-back) that's ~6
+   seconds of pure dispatcher overhead — comparable to the entire
+   CUDA elapsed time on the rollout-leaf cells.
+2. **MCTS workload doesn't sustain fill.** Best fill on rollout-leaf
+   is 22.88 of 64 (35%); even on vhleaf, only the w=64+B=64 cell hit
+   46.49 of 64 (73%). Below-max fill means the actual per-call CUDA
+   latency stays close to the B=1 launch floor (~1.3 ms), not the
+   amortized B=64 cost (~20 µs/state).
+
+The Python smoke avoided both: no channel, max-fill always B=64,
+single-thread dispatch. The dispatcher path is closer to the realistic
+end-to-end cost, and the realistic cost loses.
+
+### Verdict and what stays landed
+
+Per the scoping doc's gates table (revised in this slice):
+
+| Gate row | Outcome |
+|---|---|
+| B2 wilson drift > 0.02 at B=32 | PASS — CPU bit-identical, CUDA 0.015 |
+| B3 no cell crosses 1.5× | FAIL on both recipes → ran B4 |
+| B4 no cell crosses 1.5× | FAIL → close throughput probe |
+| B3 vhleaf crosses, rollout doesn't | n/a — both failed |
+
+**Throughput axis CLOSED.** Batched GPU dispatch is not a wallclock
+win on any shipping recipe even at high sims. CPU remains the
+production default for `sim-eval-gate` and selfplay.
+
+**What stays landed (commit 2ded9b0):**
+- `BatchedDispatcher` + `load_on_with_batching` in `engine-rs/crates/engine/src/inference/mod.rs`
+- `--batch-size` and `--batch-wait-us` flags on `sim-eval-gate`
+- `mean_fill` end-of-run instrumentation
+
+Reason to keep the wiring: [`gpu-fed-stronger-mcts.md`](gpu-fed-stronger-mcts.md)
+Candidate 3 (batched evaluator interface) is the strength axis that
+reuses this exact dispatcher. The strength-axis question is "wilson at
+sims=N with batched CUDA beats production ceiling at fixed wallclock
+budget" — a different acceptance, and one where the dispatcher's
+correctness (proven here) is the load-bearing prerequisite.
+
+**What stays unbuilt:** the `--device cuda` and `--batch-size` flags on
+`sim-mcts-selfplay`. They were out of scope this slice; if the strength
+axis needs batched CUDA selfplay, that's a small follow-on ticket.
+
+**Open questions for the strength axis (not pursued here):**
+
+1. Does CUDA reduction-order drift cross the wilson envelope at
+   sims=2000+? B4 showed |Δ|=0.035 at sims=1000; the strength axis may
+   need a tighter test or accept that high-sim CUDA is a different
+   strength evaluation than high-sim CPU.
+2. Does intra-tree wave batching (virtual loss + leaf-collection
+   waves) sustain higher fill than the inter-game-only path? B4's best
+   cell only fills 24/64; an intra-tree path could plausibly hit
+   60+/64. That's a strength-axis question because waves change PUCT
+   visit distributions.
+3. Is there a recipe at sims=5000–10000 where the pure-ONNX 2.35×
+   crossover finally survives the dispatcher overhead? Linear-fit
+   extrapolation from B3 (0.35× @ sims=100) to B4 (0.96× @ sims=1000)
+   suggests sims≈1200 for parity, sims≈2500 for 1.5× crossover —
+   speculative.
+
+Raw sweep artifact: `runs/gpu-batched-inference-b3-b4/results.jsonl`
+(20 cells). Sweep script preserved at
+`runs/gpu-batched-inference-b3-b4/sweep.sh` for re-run on future
+ckpts.
+
 ## Slices
 
 ### B1 — Single-call B>1 smoke (LANDED 2026-05-25)
@@ -219,7 +408,10 @@ The Rust-side equivalent (verifying ort 2.0.0-rc.12's B>1 path on the
 CUDA EP) folds into B2's bit-identical-at-B=1 acceptance plus the wider
 acceptance numbers; no separate Rust smoke needed.
 
-### B2 — Flush-collector around `predict_v3`
+### B2 — Flush-collector around `predict_v3` (LANDED 2026-05-25, commit 2ded9b0)
+
+Acceptance gates met — see `## B2/B3/B4 evidence` above. Original
+scoping follows for reference.
 
 Add an internal `BatchedDispatcher` to `InferenceSession` parameterized by
 `(max_batch: usize, max_wait_us: u64)`. Worker threads call a
@@ -255,7 +447,11 @@ Default `--batch-size 1` keeps current behavior bit-for-bit.
 **Effort:** ~1.5 days. Heaviest piece is the dispatcher itself — handful of
 hundreds of lines, thread-safe queue, conditional flush.
 
-### B3 — Recipe × batch sweep, single-axis-at-a-time
+### B3 — Recipe × batch sweep, single-axis-at-a-time (LANDED 2026-05-25, FALSIFIED)
+
+Acceptance gate (≥1.5× wallclock on at least one cell) NOT MET on
+either rollout-leaf or vhleaf. Full results in `## B2/B3/B4
+evidence`. Original scoping follows for reference.
 
 Two recipes × three batch sizes × two worker counts, n=200 each. CPU
 baseline column reused from existing G5 results where possible. Batch
@@ -290,7 +486,14 @@ slice.
 
 **Effort:** ~half day to run + record once B2 lands.
 
-### B4 — High-sim cell (promoted from optional 2026-05-25)
+### B4 — High-sim cell (LANDED 2026-05-25, FALSIFIED)
+
+Acceptance gate NOT MET — best CUDA cell still 1.04× slower than CPU
+at sims=1000. The gap closed substantially (2.88× → 1.04×) but did
+not invert. Wilson drift on the best CUDA cell exceeds the 0.02
+envelope (|Δ|=0.035), separate finding for the strength axis. Full
+results in `## B2/B3/B4 evidence`. Original scoping follows for
+reference.
 
 B1 showed B≥32 is needed for crossover; sims=1000 multiplies inference
 share on rollout-leaf to roughly 5× the sims=100 baseline (~25% wall

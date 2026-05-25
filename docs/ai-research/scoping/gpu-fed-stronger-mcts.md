@@ -46,11 +46,19 @@ nodes, stronger leaf estimates, ensembles, or root search variants.
    states, not self-play-only states.
 3. **Batched evaluator interface.** Split MCTS tree policy/backup from
    "evaluate N states" so serial, batched, and microbatched evaluators are
-   comparable without changing PUCT semantics. Throughput half scoped
-   separately in
-   [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md)
-   (inter-game batching over existing OS-thread workers, no intra-tree wave
-   restructuring); reuse any dispatcher landed there.
+   comparable without changing PUCT semantics. Dispatcher LANDED 2026-05-25
+   via [`gpu-batched-inference-throughput.md`](gpu-batched-inference-throughput.md)
+   B2 (commit 2ded9b0): `InferenceSession::load_on_with_batching(path,
+   device, max_batch, max_wait_us)` + `--batch-size`/`--batch-wait-us`
+   flags on `sim-eval-gate`. The throughput axis closed (CPU still beats
+   batched CUDA on every shipping recipe) but the dispatcher correctness
+   gate passed; strength experiments here can reuse it directly. Two
+   strength-relevant findings from the throughput close: (a) inter-game
+   batching only sustains fill 23-47/64 in MCTS workloads (intra-tree
+   waves may be needed for >60/64 fill); (b) CUDA reduction-order drift
+   exceeds the 0.02 wilson envelope at sims=1000 (|Δ|=0.035) — assume
+   high-sim CUDA is a different strength evaluation than high-sim CPU and
+   gate accordingly.
 4. **Strength candidates.** Test value-head with larger sim budgets, hybrid
    neural+selective-rollout leaves, root ensembles, and Gumbel/sequential-
    halving-style root search.
