@@ -8,6 +8,8 @@
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -60,9 +62,13 @@ struct Args {
     /// Leaf mode. Orchestrator alias: --mcts-leaf.
     #[arg(long, alias = "mcts-leaf", default_value = "rollout")]
     leaf: String,
-    /// Worker fan-out (ignored — Rust runs single-process; orchestrator
-    /// parallelises by spawning multiple Rust binaries).
-    #[arg(long, default_value_t = 1)]
+    /// Worker fan-out. `0` ⇒ `std::thread::available_parallelism()` (matches
+    /// `sim-eval-gate`). Slice 3d ported the `eval_gate.rs` work-stealing
+    /// pool here: a single shared `OnceLock<InferenceSession>` is reused by
+    /// all workers (G5 lock-free `UnsafeCell<Session>` contract), per-task
+    /// outcomes are stored by `task_index` and concatenated in order after
+    /// the scope so JSONL output stays bit-identical to `--workers 1`.
+    #[arg(long, default_value_t = 0)]
     workers: u32,
     /// Modeled side: "player", "opponent", or "both". Default "player"
     /// preserves the historical TS/Rust self-play row distribution.
@@ -537,7 +543,13 @@ fn main() -> Result<()> {
         model_url: args.model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
     };
-    let _ = args.workers;
+    let workers: usize = if args.workers == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        args.workers as usize
+    };
     let temperature_moves = args.temperature_moves;
     let temperature_value = args.temperature_value;
 
@@ -554,9 +566,11 @@ fn main() -> Result<()> {
         .iter()
         .flat_map(|&side| (0..args.seeds).map(move |i| (args.seed_base + i, side)))
         .collect();
+    let total_tasks = tasks.len();
+    let effective_workers = workers.max(1).min(total_tasks.max(1));
     eprintln!(
-        "sim-mcts-selfplay: sims={} K={} rollout_steps={} prior={} leaf={} seeds-per-side={} model-side={} (=> {} total games) base={}",
-        args.sims, args.k, args.rollout_steps, args.prior, args.leaf, args.seeds, args.model_side, tasks.len(), args.seed_base,
+        "sim-mcts-selfplay: sims={} K={} rollout_steps={} prior={} leaf={} seeds-per-side={} model-side={} (=> {} total games) base={} workers={} (requested {})",
+        args.sims, args.k, args.rollout_steps, args.prior, args.leaf, args.seeds, args.model_side, tasks.len(), args.seed_base, effective_workers, args.workers,
     );
 
     let mut writer: Option<fs::File> = match args.out.as_ref() {
@@ -577,31 +591,86 @@ fn main() -> Result<()> {
     let mut draws = 0u32;
     let mut terminal_reasons = TerminalReasons::default();
 
-    for (task_index, (seed, model_side)) in tasks.iter().copied().enumerate() {
-        let task_index = task_index as u32;
-        // Slice 1: deck-pair resolution per game. `task_index` is the
-        // game-relative index used both by the sampler (uniform mod
-        // n_pairs) and by the manifest tag.
-        let resolved = sampling.resolve(args.seed_base, task_index);
-        let (player_deck_opt, opponent_deck_opt) = resolved
-            .as_ref()
-            .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
-            .unwrap_or((None, None));
-        let (player_deck_id, opponent_deck_id) =
-            manifest_pair_for(&sampling, args.seed_base, task_index);
-        let record = drive_one_game(
-            seed,
-            args.max_steps,
-            &config,
-            model_side,
-            args.record_rows,
-            temperature_moves,
-            temperature_value,
-            player_deck_opt,
-            opponent_deck_opt,
-            player_deck_id,
-            opponent_deck_id,
-        );
+    // Per-task GameRecord slots, populated by worker threads and walked in
+    // task-index order after the scope to preserve bit-identical JSONL
+    // output vs. `--workers 1`. Slice 3d: prior code ran a sequential
+    // `for (task_index, (seed, model_side)) in tasks.iter()` loop here
+    // because the CLI's `--workers` flag was a no-op (the 50k-row corpus
+    // was produced by 8 hand-launched processes per `docs/ai-agent-state/
+    // digests/2026-05-25.md`). Mirror of `eval_gate.rs:540-620` work-stealing
+    // pool — single shared `OnceLock<InferenceSession>` reused by all
+    // workers (G5 lock-free `UnsafeCell<Session>` contract verified at
+    // workers=16 → 7.11× for the gate path).
+    let outcomes: Arc<Mutex<Vec<Option<GameRecord>>>> =
+        Arc::new(Mutex::new((0..total_tasks).map(|_| None).collect()));
+    let task_cursor = Arc::new(AtomicUsize::new(0));
+    let tasks_arc: Arc<Vec<(u32, SideId)>> = Arc::new(tasks);
+    let config_arc = Arc::new(config);
+    let sampling_arc = Arc::new(sampling);
+    let seed_base = args.seed_base;
+    let max_steps = args.max_steps;
+    let record_rows = args.record_rows;
+
+    std::thread::scope(|s| -> Result<()> {
+        let mut handles = Vec::with_capacity(effective_workers);
+        for _worker_id in 0..effective_workers {
+            let task_cursor = Arc::clone(&task_cursor);
+            let tasks_arc = Arc::clone(&tasks_arc);
+            let outcomes = Arc::clone(&outcomes);
+            let config_arc = Arc::clone(&config_arc);
+            let sampling_arc = Arc::clone(&sampling_arc);
+            handles.push(s.spawn(move || -> Result<()> {
+                loop {
+                    let task_index = task_cursor.fetch_add(1, Ordering::Relaxed);
+                    if task_index >= tasks_arc.len() {
+                        break;
+                    }
+                    let (seed, model_side) = tasks_arc[task_index];
+                    // Slice 1: deck-pair resolution per game. `task_index`
+                    // is the game-relative index used both by the sampler
+                    // (uniform mod n_pairs) and by the manifest tag.
+                    let resolved = sampling_arc.resolve(seed_base, task_index as u32);
+                    let (player_deck_opt, opponent_deck_opt) = resolved
+                        .as_ref()
+                        .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
+                        .unwrap_or((None, None));
+                    let (player_deck_id, opponent_deck_id) =
+                        manifest_pair_for(&sampling_arc, seed_base, task_index as u32);
+                    let record = drive_one_game(
+                        seed,
+                        max_steps,
+                        &config_arc,
+                        model_side,
+                        record_rows,
+                        temperature_moves,
+                        temperature_value,
+                        player_deck_opt,
+                        opponent_deck_opt,
+                        player_deck_id,
+                        opponent_deck_id,
+                    );
+                    let mut guard = outcomes.lock().expect("outcomes mutex poisoned");
+                    guard[task_index] = Some(record);
+                }
+                Ok(())
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked")?;
+        }
+        Ok(())
+    })?;
+
+    // Walk outcomes in task-index order for deterministic aggregation +
+    // JSONL emission. Worker completion order is non-deterministic, but
+    // output ordering is — single-worker and multi-worker runs must
+    // produce byte-identical `--out` files for the parity smoke to pass.
+    let outcomes_vec = Arc::try_unwrap(outcomes)
+        .map_err(|_| anyhow::anyhow!("outcomes Arc still has outstanding references"))?
+        .into_inner()
+        .map_err(|e| anyhow::anyhow!("outcomes mutex poisoned: {}", e))?;
+    for record in outcomes_vec.into_iter() {
+        let record = record.expect("worker did not fill outcome slot");
         match record.terminal_reason.as_str() {
             "game_over" => terminal_reasons.game_over += 1,
             "stalled" => terminal_reasons.stalled += 1,
@@ -613,7 +682,7 @@ fn main() -> Result<()> {
             _ => draws += 1,
         }
         if let Some(w) = writer.as_mut() {
-            if args.record_rows {
+            if record_rows {
                 // TS-flat shape: one line per decision row. This is what
                 // `training/uma_ai/selfplay_dataset.py:load_mcts_selfplay_samples`
                 // expects (Slice 2 schema gap — `kind`/`schemaVersion`/
@@ -636,9 +705,9 @@ fn main() -> Result<()> {
     let elapsed = start.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
     let summary = RunSummary {
-        games: tasks.len() as u32,
+        games: total_tasks as u32,
         elapsed_secs,
-        games_per_sec: tasks.len() as f64 / elapsed_secs.max(1e-9),
+        games_per_sec: total_tasks as f64 / elapsed_secs.max(1e-9),
         player_wins,
         opponent_wins,
         draws,
