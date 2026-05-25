@@ -4,7 +4,16 @@
 //! (active first, then bench in push-order), several flow files iterate
 //! exactly this order to build hash keys.
 
+use arrayvec::ArrayVec;
+
+use crate::core::constants::MAX_UMA_IN_PLAY_PER_SIDE;
 use crate::core::state::{SideState, UmamusumeInstance};
+
+/// Inline-storage return type for `get_all_umamusume`. Capacity is
+/// `MAX_UMA_IN_PLAY_PER_SIDE = MAX_BENCH + 1 = 4`, so the result stays on
+/// the stack — eliminates a per-call `Vec` allocation that was visible at
+/// ~11% inclusive in the rollout flamegraph at sims=800.
+pub type AllUmamusume<'a> = ArrayVec<&'a UmamusumeInstance, MAX_UMA_IN_PLAY_PER_SIDE>;
 
 /// `core/umamusume.ts:3` `attachedEnergyCount`. Sum of all attached
 /// energies, regardless of type.
@@ -15,8 +24,8 @@ pub fn attached_energy_count(umamusume: &UmamusumeInstance) -> u32 {
 /// `core/umamusume.ts:7` `getAllUmamusume`. Active first (if any), then
 /// bench in push-order. **Iteration order is part of the engine
 /// contract.**
-pub fn get_all_umamusume(side: &SideState) -> Vec<&UmamusumeInstance> {
-    let mut out = Vec::with_capacity(1 + side.bench.len());
+pub fn get_all_umamusume(side: &SideState) -> AllUmamusume<'_> {
+    let mut out = AllUmamusume::new();
     if let Some(a) = &side.active {
         out.push(a);
     }

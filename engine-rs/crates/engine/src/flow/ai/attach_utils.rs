@@ -183,7 +183,7 @@ pub fn estimate_attack_damage_output(
     let all_in_play_count = own_in_play_count + 1 + defending_side.bench.len() as i32;
 
     use crate::core::effects::AttackTarget;
-    let targets: Vec<&UmamusumeInstance> = match attack.target_opponent {
+    let targets: crate::core::umamusume::AllUmamusume<'_> = match attack.target_opponent {
         Some(AttackTarget::Any) => get_all_umamusume(defending_side),
         _ => defending_side.active.as_ref().into_iter().collect(),
     };
