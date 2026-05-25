@@ -62,7 +62,7 @@ Spec:
 - ~30 LOC `HashMap<u64, (Vec<f64>, f64)>` per `run_mcts` call (or per game).
 - `state_hash` already available via `dispatcher::state_hash`.
 
-### Tier 3 — Hot-path micro-opts (~20–35% combined, ~2 days, near-zero risk)
+### Tier 3 — Hot-path micro-opts — LANDED (cumulative ~5x at workers=1, ~2x at workers=16 over Tier 1)
 
 Batch into one commit per `feedback_bigger_fixes_at_once`.
 
@@ -76,14 +76,18 @@ Batch into one commit per `feedback_bigger_fixes_at_once`.
 - **Compact `LegalAiActionLite` for MCTS-internal use.** Drop `String id`, `Vec<f64> features` (48 floats), `serde_json::Value` payload (`engine-rs/crates/engine/src/policy/actions.rs:262-281`). Keep the full struct only for the row recorder. ~3 allocs saved per action × ~8 actions per node × ~500 nodes/decision.
 - **Inline `String` fields → interned IDs** (`UmamusumeInstance.species`, `SideState.title`, `used_ability_names_*`) — makes `GameState::clone` close to a memcpy.
 
-## Critical pre-Tier-3 measurement
+## Critical pre-Tier-3 measurement — RESOLVED
 
-Nobody has a flamegraph. Tier 3/4 estimates are reasoned, not measured. **Before committing past Tier 1**, do both:
-
-1. `cargo flamegraph -p sim-cli --bin sim-mcts-selfplay -- --sims 800 --seeds 5` at workers=16 to see whether the ORT prior-call or the heuristic rollout dominates.
-2. Re-run the baseline manifest with `--prior uniform --leaf rollout` (zero code change) to isolate the ORT-call share of wall.
-
-The answer determines next ordering: if rollout dominates → Tier 3 micro-opts next. If ORT dominates → Tier 2 algorithmic (subtree + transposition) buys time and we eventually pay for Tier 4 batching.
+samply replaced the broken `cargo flamegraph -> perf` chain (WSL2 ships
+no `perf` binary; samply needs `perf_event_paranoid <= 1`). Build the
+binary with `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` so addr2line
+can resolve symbols; run `samply record --save-only -o profile.json.gz
+--rate 999 …`; parse with the small Python in
+`/tmp/profile_inclusive.py` (gist below if you need it). The
+`--prior uniform --leaf rollout` measurement showed rollout dominates
+(workers=1 baseline went from 0.60 → 0.636 g/s without the policy
+prior — ORT call share was ~6%), so Tier 3 micro-opts were the right
+branch. Slices 3e-3h delivered.
 
 ## Recommended sequencing
 
