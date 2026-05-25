@@ -139,6 +139,26 @@ struct Args {
     /// stamped with `playerDeckId` + `opponentDeckId`.
     #[arg(long, default_value = "fixed")]
     deck_sampling: String,
+    /// Intra-tree wave size for MCTS. `1` (default) keeps the historical
+    /// serial loop bit-identical. `>1` selects this many leaves per
+    /// wave (with virtual loss along each path so wave members diverge),
+    /// batches their `predict_v3` calls into a single
+    /// `InferenceSession::predict_v3_batch`, then backs them all up.
+    /// Pushes dispatcher fill from the workload-imposed ~46/64 ceiling
+    /// (B5 finding) up toward `wave_size` regardless of the cross-game
+    /// worker count. Mutually exclusive with `--batch-size > 1` (the
+    /// cross-thread batched dispatcher); the two mechanisms target the
+    /// same lever and combining them just adds the dispatcher's mpsc +
+    /// per-request channel cost on top of the wave's intent.
+    #[arg(long, default_value_t = 1)]
+    wave_size: u32,
+    /// AlphaGo-standard virtual loss applied during wave-member
+    /// selection. Only consulted when `--wave-size > 1`. `1.0` (default)
+    /// matches AlphaGo Zero / Lc0; lower values pessimize less and let
+    /// wave members converge on the same path more often, higher values
+    /// over-spread exploration.
+    #[arg(long, default_value_t = 1.0)]
+    virtual_loss: f64,
 }
 
 impl Args {
@@ -172,6 +192,8 @@ impl Args {
             "modelUrl": self.model_url,
             "onnxPath": self.onnx_path,
             "deckSampling": self.deck_sampling,
+            "waveSize": self.wave_size,
+            "virtualLoss": self.virtual_loss,
         })
     }
 }
@@ -597,11 +619,13 @@ fn main() -> Result<()> {
         root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: args.model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
-        // B6 wave-batching opt-in is wired through `sim-eval-gate` only
-        // for now; selfplay keeps the serial loop until the strength
-        // axis lands a recipe that needs intra-tree waves.
-        wave_size: 1,
-        virtual_loss: 1.0,
+        // B6 wave-batching: `--wave-size 1` (default) keeps the historical
+        // serial loop bit-identical. `>1` enables intra-tree wave batching
+        // (see flag docs on `Args::wave_size`). Ported from `sim-eval-gate`
+        // where the throughput win on vhleaf sims=100 was 7.30× at
+        // bit-identical wilson.
+        wave_size: args.wave_size,
+        virtual_loss: args.virtual_loss,
     };
     // Slice 3d: honor `--workers N` by running games concurrently in
     // N OS threads within one process, sharing the OnceLock
@@ -639,8 +663,8 @@ fn main() -> Result<()> {
     // contend on the cursor). Matches the cap in `eval_gate.rs`.
     let effective_workers = workers.max(1).min(total_tasks.max(1));
     eprintln!(
-        "sim-mcts-selfplay: sims={} K={} rollout_steps={} prior={} leaf={} seeds-per-side={} model-side={} (=> {} total games) base={} workers={} (requested {})",
-        args.sims, args.k, args.rollout_steps, args.prior, args.leaf, args.seeds, args.model_side, total_tasks, args.seed_base, effective_workers, args.workers,
+        "sim-mcts-selfplay: sims={} K={} rollout_steps={} prior={} leaf={} seeds-per-side={} model-side={} (=> {} total games) base={} workers={} (requested {}) wave_size={} virtual_loss={}",
+        args.sims, args.k, args.rollout_steps, args.prior, args.leaf, args.seeds, args.model_side, total_tasks, args.seed_base, effective_workers, args.workers, args.wave_size, args.virtual_loss,
     );
 
     let mut writer: Option<fs::File> = match args.out.as_ref() {
