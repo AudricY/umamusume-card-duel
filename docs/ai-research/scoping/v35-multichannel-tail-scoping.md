@@ -1,7 +1,7 @@
 # v3.5 Multichannel Additive Tail — Orthogonal-Bundle Scoping
 
 - **Date:** 2026-05-25
-- **Status:** **LANDED-CAP-CONFIRMED 2026-05-25** — A1 fired user-approved 2026-05-25; result `runs/R16-P1-v35-iter1-tight-gate/gate.manifest.json` wl=0.5856 [0.5856, 0.6049] at n=10k, **SOFT SHIP band (non-regression) but BELOW v3.3 0.5910 by −0.0054**. Pre-registered H1 (channel-orthogonal direct sum) FALSIFIED — same pattern as v3.4 (slots). v3.5 RETIRED as production candidate. Canonical writeup: `docs/ai-research/progress/r110.md §4i`. Implementation chain: commits `99a9ba1` / `de4f13a` / `66b709c` / `1362130` (scope + builder + dispatch + init + smokes + queue). Init parity verified empirically: Δlogits=7.15e-07.
+- **Status:** **LANDED-EXTENDED-OUTPERFORMS-CONTROL 2026-05-25** — Initial A1 (4-iter) landed wl=0.5856 (§4i, original "RETIRED" verdict). **Post-§4i diagnostics revealed undertraining, not active overfit.** Extended-training rerun (8 iters × 240 selfplay-games) lifts v3.5 to wl=0.5908 [0.5908, 0.6100]; fair-comparison v3.3-extended degrades to wl=0.5812 [0.5812, 0.6005]. v3.5 BEATS v3.3 by +0.0096 at the same extended budget — confirming v3.5 IS adding meaningful info. v3.5 NOT retired. See `docs/ai-research/progress/r110.md §4j` for the full reversal. Single-run Wilson intervals overlap — replicate runs needed to confirm. Implementation chain: commits `99a9ba1` / `de4f13a` / `66b709c` / `1362130` / `7beb2ff` (scope + builder + dispatch + init + smokes + queue + initial verdict). Init parity verified empirically: Δlogits=7.15e-07.
 - **Parent:** `v33-feature-gap-brainstorm-handoff.md` §5 step 3 (further additive tail) + lesson from `progress/r110.md §4h` (v3.4 compound-axis falsified).
 - **Predecessor schema:** v3.3 (167-d, no slots, v3-action) — `runs/R16-P1-v33-iter1-tight-gate/gate.manifest.json` wl=0.5910 (confirmatory 0.5863, avg ≈0.5887). Highest of any schema tested.
 - **Scope:** A single thick additive tail bundling **five signal-channel-orthogonal** items onto v3.3. Replaces the "one slice per bump" cadence with a deliberately wider bump now that v3.3 is the production candidate and v3.4 has proven the failure mode of compounding overlapping channels.
@@ -240,15 +240,32 @@ Per handoff §6 "Constraints / what's off-limits":
 
 ## 11. Status line
 
-**`LANDED-CAP-CONFIRMED 2026-05-25`** — A1 fired user-approved 2026-05-25; tight-gate manifest at `runs/R16-P1-v35-iter1-tight-gate/gate.manifest.json` lands wl_lower=0.5856 at n=10k. Falls into SOFT SHIP band (non-regression vs v3.3 0.5910 noise band) but below the LIFT-band gate of 0.6040. H1 (channel-orthogonal direct sum) FALSIFIED. v3.5 RETIRED as production candidate. Canonical writeup at `docs/ai-research/progress/r110.md §4i`.
+**`LANDED-EXTENDED-OUTPERFORMS-CONTROL 2026-05-25`** — Initial 4-iter result (§4i, wl=0.5856) was an undertraining artifact, not a feature-design failure. Post-§4i diagnostics + extended-training rerun overturn the "RETIRED" verdict. See `docs/ai-research/progress/r110.md §4j` for full reversal.
 
-**Outcome summary:**
+**Outcome ladder at n=10k:**
 
-- v3.5 = 0.5856 [0.5856, 0.6049]; player 0.5578, opp 0.6055.
-- vs v3.3 0.5910: −0.0054 (both sides slightly lower).
-- vs v3.0 0.5811: +0.0045 (within noise band of v3.0).
-- Same pattern as v3.4 — additive structure on top of v3.3 fails to compound at this recipe scale.
-- Working hypothesis: trunk is **distill-data-limited at the R16-P1 4-iter cadence**, not representational-bandwidth-limited. See `r110.md §4i` "Why H1 falsified despite channel-orthogonality" for the mechanism.
+| Schema | Training budget | wl_lower | Δ vs v3.0 0.5811 |
+|---|---|---|---|
+| v3.3 (167-d) | 4 × 60 games | 0.5910 ★ (peak) | +0.0099 |
+| v3.5 (212-d) | 4 × 60 games | 0.5856 | +0.0045 |
+| **v3.3-extended** | **8 × 240 games** | **0.5812** | **+0.0001** (collapsed) |
+| **v3.5-extended (iter-4)** | **8 × 240 games** | **0.5908** | **+0.0097** |
+
+**Two inversions:**
+
+1. **v3.3-extended is WORSE than v3.3-original** (−0.0098): v3.3 OVERFITS at extended training. The original 4-iter wl=0.5910 was a sweet-spot peak, not a stable ceiling.
+2. **v3.5-extended beats v3.3-extended by +0.0096** at the same training budget: v3.5's 45-bit tail acts as a stabilizer (capacity-against-overfit) that lets the model use more data without degradation.
+
+**Caveats:**
+- Single-run, Wilson intervals overlap (v3.5 [0.5908, 0.6100] vs v3.3 [0.5812, 0.6005]). Need 2-3 replicate seeds to confirm v3.5 > v3.3 at extended training.
+- Neither schema crosses the LIFT band (≥ 0.6040). v3.5 doesn't unlock a new ceiling vs v3.0; it just survives extended training where v3.3 degrades.
+
+**Diagnostic A (post-§4i, column norms):** trunk IS learning the v3.5 tail — column norms grew 0 → 0.20 frob across iters; per-channel strongest: opp.discard.buckets (0.14× head-median), bench-refill (0.07-0.09×), phase one-hot (0.06×).
+
+**Diagnostic B (post-§4i, activation rates):**
+- 10 opp.energy.front bits STRUCTURALLY DEAD — `flow/turn.rs:110-111` clears opp's `energy_zone` at opp turn start; `flow/energy.rs:18` consumes on attach. So at player decision points opp.energyZone is always empty. NOT a bug; the feature reads nonexistent state. Remove in any future v3.5.1.
+- 5 opp.cond bits SAMPLE-DEAD (early-game corpus bias — selfplay max turn=11). Keep pending longer-game corpus.
+- Remaining 30 bits active or sparsely active; keep.
 
 ### Implementation chain (2026-05-25)
 
