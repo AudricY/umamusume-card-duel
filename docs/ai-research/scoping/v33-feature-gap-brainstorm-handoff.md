@@ -172,17 +172,19 @@ The R16 verdict was "schema closed *at the compute scale we trained at*." The 12
 ## 5. Recommended sequencing
 
 1. **Land correctness fixes** (no compute risk, gains compound at any scale):
-   - Weakness-bonus adjustment in `_card_awareness_features` (`can_ko`, damage features).
-   - Dedupe action slots 8/26, repurpose slot 28, disambiguate slot 10.
-   - Add opp-side `usedSupporter/Retreat/Stadium` flags (3 bits).
+   - Weakness-bonus adjustment in `_card_awareness_features` (`can_ko`, damage features). **LANDED 2026-05-25 commit `8141772`.**
+   - Dedupe action slots 8/26, repurpose slot 28, disambiguate slot 10. **LANDED 2026-05-25 commit `5ea1758` (ACTION_FEATURE_SCHEMA_VERSION 2 → 3).**
+   - Add opp-side `usedSupporter/Retreat/Stadium` flags (3 bits). **DEFERRED to v3.3 additive tail (step 3) per scoping doc `v33-correctness-fix-scoping.md` §6** — width bump requires re-verdict #3 movement to justify.
+   - Combined ablation A0/A1/A2/A3 queued and user-approved 2026-05-25; see queue id `v33-correctness-fix`.
 2. **Once the MCTS speedup lands, run the queued re-verdicts** before committing to anything bigger:
-   - v3.2 n=10k tight-gate re-verdict (already user-gated in the queue).
-   - Set-attention Slice 2/3 re-verdict.
+   - v3.2 n=10k tight-gate re-verdict. **FIRED 2026-05-25 (user-approved)** — manifest at `runs/v32-uniform-retrain-iter1-tight-gate/gate.manifest.json`; verdict writeup at `progress/r110.md § 4f`.
+   - Set-attention Slice 2/3 re-verdict. **Slice 2 still MARGINAL (wl=0.3205 < 0.40 gate)**; Slice 3 not run, gated on Slice 2 ≥ 0.40 AND re-verdict #3 outcome.
 3. **If schema axis shows movement** at the new scale → land an **additive v3.3 tail** with the high-conviction structural fixes:
    - Phase one-hot (10 bits) supplementing slot 0.
    - Energy-zone typed contents (~80 bits for both sides, depth 2-3).
    - Per-condition one-hot (5 bits) replacing/supplementing paralysed+count.
    - Bench temporal moved into widened slot tokens (drop the mean aggregate).
+   - **Opp-side flags (3 bits)** — deferred from step 1, lands as part of the additive tail with a new `_SCHEMA_BY_STATE_DIM[167]` dispatch entry.
 4. **Only if set-attention crosses 0.40** → seriously scope a token-first v4 revamp. Until then, hold it as a contingency.
 
 ---
