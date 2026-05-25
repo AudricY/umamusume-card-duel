@@ -77,20 +77,24 @@ The new Rust loader guard (commit `6a7dd84`) checks `action_feature_schema_versi
 
 ## 4. Ablation plan
 
-**Recipe baseline:** v3.2 uniform-retrain recipe (the path that produced the lineage best wl=0.5877). Same recipe parameters except for the state-feature schema bump.
+**Implementation note (2026-05-25, post-skeleton):** the v3.3 builder I implemented is layered on **v3.1** (164-d, with temporal, no slots), not v3.2 (110-d, no temporal, with slots). v3.3 state vector = v3.1 head + 3-bit opp-flag tail = 167-d. This is the natural composition for the state-vector axis — v3.2 is the slot-token axis (orthogonal). A "v3.2 + opp-flag" variant (state_dim=113) would be a separate slice for the slot-token + opp-flag combination. v3.3 here tests the **opp-flag tail on top of v3.1's temporal block**.
+
+**Recipe baseline:** R16-P1 v3.1 mirror (the path that produced v3.1 iter-3 wl=0.5810 at n=10k per re-verdict #2). Same recipe parameters except for the state-feature schema bump.
 
 **Arms:**
-- **A0** (baseline): v3.2 retrain (no change). Must reproduce the lineage best wl=0.5877 ± n=10k CI as a sanity check.
-- **A1**: v3.3 retrain (v3.2 head + 3-bit opp-side flag tail). Trained from `make_v33_tail_init.py` output (bit-identical to v3.2 init at iter-0).
+- **A0** (baseline): v3.1 retrain — i.e. reuse the existing R16-P1 iter-3 wl=0.5810 measurement at n=10k. NO new training required; the re-verdict #2 manifest at `runs/R16-P1-v3.1-iter3-tight-gate/gate.manifest.json` IS the A0 reference.
+- **A1**: v3.3 retrain (v3.1 head + 3-bit opp-side flag tail). Built from `make_v33_tail_init.py` (commit pending) applied to `runs/R16-P1-v31-ablation/loop/iter-3/checkpoint.pt`. Bit-identical iter-0 contract verified (delta_logits = 0.0 exactly). Then run R16-P1 mirror recipe.
 
-**Sample size:** n=10k tight gate per arm (mirrors the re-verdict cadence). Smoke at n=240 first as sanity.
+**Sample size:** n=10k tight gate for A1 (mirrors the re-verdict cadence). Smoke at n=240 first as sanity. A0 ceiling already established at n=10k.
 
 **Decision rules:**
-1. **Non-regression (ship gate):** wl_lower(A1) ≥ wl_lower(A0) − 0.013.
-2. **Lift bonus (promotion case):** wl_lower(A1) ≥ wl_lower(A0) + 0.013 AND wl_lower(A1) ≥ 0.5811 + 0.013 (i.e., clears v3.0 ceiling+upper bound combined). Triggers production-candidacy discussion.
-3. **Hard fail:** wl_lower(A1) < wl_lower(A0) − 0.013 falsifies the "free 3 bits" claim — pause additive-tail strategy and re-investigate the gap audit's threat-assessment assumption.
+1. **Non-regression (ship gate):** wl_lower(A1) ≥ 0.5810 − 0.013 = 0.5680.
+2. **Lift bonus (promotion case):** wl_lower(A1) ≥ 0.5810 + 0.013 = 0.5940 AND wl_lower(A1) ≥ 0.5811 + 0.013 = 0.5941 (clears v3.0 ceiling decisively).
+3. **Hard fail:** wl_lower(A1) < 0.5680 falsifies the "free 3 bits" claim — pause additive-tail strategy and re-investigate the gap audit's threat-assessment assumption.
 
-**Estimated wall:** v3.2 uniform-retrain wall was ~5.5 min for 4 iters. v3.3 should match. Plus n=10k tight-gate ~11 min per arm. **Total: ~30-40 min wall** assuming fresh training runs cleanly to a halt-after-2 outcome.
+**Note on relationship to re-verdict #3:** v3.2 (slot tokens) hit wl=0.5877 at n=10k vs v3.1 0.5810 — slot tokens give +0.0066 on the slot axis. v3.3 tests the opp-flag axis. If both axes lift independently, a future v3.4 = v3.1 + slots + opp-flag (state_dim 167 + slot tokens) would compound.
+
+**Estimated wall:** v3.1-style recipe wall is ~10-15 min for the loop at G5 fast path. Plus n=10k tight-gate ~11 min. **Total: ~25-30 min wall**.
 
 ## 5. Out of scope (explicit)
 
