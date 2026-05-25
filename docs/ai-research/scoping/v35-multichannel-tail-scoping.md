@@ -1,7 +1,7 @@
 # v3.5 Multichannel Additive Tail — Orthogonal-Bundle Scoping
 
 - **Date:** 2026-05-25
-- **Status:** SCOPING — pre-registered. No code, no run. User-gated before A1 fires.
+- **Status:** IMPLEMENTED — pre-registered scope LANDED 2026-05-25. Python builder + Rust mirror (commit `99a9ba1`), inference dispatch (commit `de4f13a`), ckpt expander + smokes (commit `66b709c`). A1 training arm USER-GATED. Init parity verified empirically: Δlogits=7.15e-07 against v3.3 lineage best (`runs/R16-P1-v33-ablation/loop/iter-1/checkpoint.pt`).
 - **Parent:** `v33-feature-gap-brainstorm-handoff.md` §5 step 3 (further additive tail) + lesson from `progress/r110.md §4h` (v3.4 compound-axis falsified).
 - **Predecessor schema:** v3.3 (167-d, no slots, v3-action) — `runs/R16-P1-v33-iter1-tight-gate/gate.manifest.json` wl=0.5910 (confirmatory 0.5863, avg ≈0.5887). Highest of any schema tested.
 - **Scope:** A single thick additive tail bundling **five signal-channel-orthogonal** items onto v3.3. Replaces the "one slice per bump" cadence with a deliberately wider bump now that v3.3 is the production candidate and v3.4 has proven the failure mode of compounding overlapping channels.
@@ -240,4 +240,30 @@ Per handoff §6 "Constraints / what's off-limits":
 
 ## 11. Status line
 
-`SCOPING — pre-registered`. Flips to IN-FLIGHT at A1-fire (user-gated); flips to LANDED when the progress writeup lands at `docs/ai-research/progress/v35-multichannel-tail.md` or as an r110.md §4i section.
+`IMPLEMENTED — A1 USER-GATED`. Code surface complete (Python builder + Rust mirror + dispatch + ckpt expander + smokes; all parity tests PASS). Flips to IN-FLIGHT at A1-fire (user-gated); flips to LANDED when the progress writeup lands at `docs/ai-research/progress/v35-multichannel-tail.md` or as an r110.md §4i section.
+
+### Implementation chain (2026-05-25)
+
+| Commit | Files | Notes |
+|---|---|---|
+| `99a9ba1` | `features.py`, `featurize.rs`, `v35-multichannel-tail-scoping.md`, `v33-feature-gap-brainstorm-handoff.md` | Python `observation_to_features_v3_5` + Rust `observation_state_features_v3_5` + frozen condition vocab + 6 Rust parity tests (head byte-identity, phase/cond/energy/bench tail subcases). Handoff doc §5 step 3 pointer chain updated. |
+| `de4f13a` | `inference/mod.rs`, `serve_onnx.py` | Rust `GraphSchema::V3_5` enum variant + 5-input contract dispatch (state_dim=212 → V3_5). serve_onnx schema-table row + valid-tokens + encoder selector for v3.3 / v3.4 / v3.5. |
+| `66b709c` | `make_v35_tail_init.py`, `v35_multichannel_tail_smoke.py`, `v35_tail_init_smoke.py` | Ckpt expander (167→212 widening, 45 zero-init columns; refuses non-v3.3 and slot-token sources). Two smokes (Python builder layout + init-parity). v33 smokes still PASS — no regression. |
+
+### Verification status
+
+| Surface | Status | Evidence |
+|---|---|---|
+| Python builder shape, byte-identity vs v3.3 | PASS | `training/v35_multichannel_tail_smoke.py` 4/4 cases |
+| Rust mirror parity | PASS | 6 unit tests in `featurize.rs::tests::v3_5_*` |
+| Schema dispatch (Python + Rust) | PASS | `feature_builder_for_state_dim(212) → observation_to_features_v3_5`; Rust 5-input contract accepts state_dim=212 → V3_5 |
+| ONNX export | PRESUMED PASS | `export_onnx.py` uses `feature_builder_for_state_dim` and `schema_version_for_state_dim` which both route 212 correctly; not exercised end-to-end here |
+| Ckpt expander + init parity | PASS | Built from v3.3 iter-1 lineage best; Δlogits=7.15e-07 < 1e-5 tolerance; `v35_tail_init_smoke.py` 6/6 cases |
+| Refusal of bad sources | PASS | v3.1 ckpt refused (state_dim mismatch); v3.4 ckpt refused (slot-token guard) |
+| v33 smokes after v3.5 changes | PASS | `v33_additive_tail_smoke` + `v33_tail_init_smoke` both green |
+
+### What's NOT verified (out of scope for this slice)
+
+- Full self-play loop at state_dim=212 (requires A1 fire — USER-GATED).
+- ONNX graph export end-to-end (will be exercised the first time `make_v35_tail_init.py` output is passed to `export_onnx.py`; the dispatch path is structurally correct but unsmoked).
+- Rust binary rebuild from updated Rust dispatch (binary at `runs/R16-P1-v33-ablation/...` was built against v3.3 only; v3.5 state_dim=212 ONNX would need a freshly-built binary to consume).
