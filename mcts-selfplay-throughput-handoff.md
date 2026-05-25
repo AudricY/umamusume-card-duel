@@ -2,12 +2,13 @@
 
 - **Date:** 2026-05-25
 - **Branch:** `feat/ai`
-- **Status:** Tier 1 LANDED (commit `f75e556`); 5.6× at workers=8 on the
-  prior=uniform/leaf=rollout 40-game sweep. Bit-identical JSONL across
-  workers ∈ {1,4,8,16,32} (md5 `65fc72a1…`). Evidence lives in
-  `docs/ai-research/scoping/r12-selfplay-gate-throughput.md` § "Slice 3d".
-  Tier 2 next: flamegraph at workers=16 to decide between subtree
-  reuse + transposition cache vs Tier 3 micro-opts.
+- **Status:** Slices 3d-3h LANDED. **12.4× wall-clock vs the 0.60 g/s
+  baseline anchor** at workers=16 (7.438 g/s, 40-game sweep, prior=uniform
+  leaf=rollout). All five slices preserve JSONL md5 `65fc72a1…`. Evidence
+  in `docs/ai-research/scoping/r12-selfplay-gate-throughput.md` §
+  "Slice 3d/3e/3f/3g/3h". Remaining: orchestrator fanout cleanup,
+  prior=policy retest, Tier 2 algorithmic (subtree reuse), Tier 4 String
+  interning.
 - **Predecessor docs (read these in order if cold):**
   - `docs/ai-research/scoping/throughput-optimization-spike.md` — Slice 1–3 (Rust ORT in-process, 4.18× wall)
   - `docs/ai-research/scoping/gpu-inference-execution-provider.md` — G5 lock-free `UnsafeCell<Session>` for `sim-eval-gate` (7.11× at workers=16)

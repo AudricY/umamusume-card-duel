@@ -197,22 +197,92 @@ the handoff doc). 5.6× is below the gate-path 7.11× ceiling at
 workers=16 (G5 measurement, value-head leaf, ORT-dominated). Selfplay's
 larger relative rollout share thins the ceiling.
 
+### Slice 3e — drop redundant `score_candidate` clones (2026-05-25, `bfb4213`)
+
+samply flamegraph at sims=800 workers=16 (`perf_event_paranoid=1` needed
+for unprivileged sampling) revealed `combat_planner::score_candidate` →
+`SideState::clone` as the dominant rollout-heuristic cost (95% of CPU in
+`rollout_heuristic`, ~50% under `build_combat_candidates`). Three of the
+four clones at the top of `score_candidate` are pure TS-port artifacts:
+`base_state` is already `&GameState`, every use of
+`before`/`acting_before`/`defending_before` is a read, and the penalty
+helpers take `&GameState` borrows. Only `simulated` needs to be owned
+(`perform_attack` mutates it in place). workers=16 went 3.546 → 5.357
+g/s (+51%); the previous w=8 vs w=16 plateau collapsed.
+
+### Slice 3f — gate AI telemetry payload assembly (2026-05-25, `bfc6514`)
+
+`flow/ai/telemetry.rs` early-exits when `__UMA_AI_TELEMETRY__` is unset
+(the default in selfplay), but callers built the full
+`Map<String, Value>` payload before discovering the sink discards it:
+
+- `emit_turn_goal_telemetry`: Map + 5 `json!` + `explain_ai_turn_goal`
+  Vec per call (attach/trainer/ability per turn)
+- combat-candidates: `candidates.clone()` + sort-by-score + top-3 Map
+- trainer-bundle-scores: per-iteration Map alloc inside the score loop
+
+Score computation for decision logic stays outside the gate; only the
+observer-side payload assembly is skipped. workers=16: 5.357 → 6.141 g/s
+(+15%).
+
+### Slice 3g — `state_fingerprint` (u128) replaces hex `state_hash` in MCTS equality (2026-05-25, `adf38ea`)
+
+Three MCTS sites compared two state hashes for equality
+(`mcts/driver.rs:470` modeled-step stall, `:494` collapse loop, `:643`
+rollout_heuristic loop). The TS-port used `state_hash -> String`
+(`format!("{:032x}", …)` over a freshly-allocated `Vec<u8>`), allocating
+two transient String + two Vec<u8> per rollout step.
+
+Added `state_fingerprint(state: &GameState) -> u128` that `pack_into`s a
+thread-local reusable buffer and returns the raw u128 fingerprint. Use
+it at every equality site. `state_hash` is now a thin format wrapper
+over `state_fingerprint`, so the one cache-key path
+(`mcts/driver.rs:325` `"{hex}:precollapse"`) no longer double-allocates.
+workers=1: 0.831 → 0.932 g/s (+12%); workers=16 +1% (near noise).
+
+### Slice 3h — `get_all_umamusume` returns inline ArrayVec (2026-05-25, `00ba1fe`)
+
+`get_all_umamusume` was called from ~25 sites across the heuristic AI,
+combat, and policy code, allocating a fresh `Vec<&UmamusumeInstance>`
+each time (11.2% inclusive in the post-3g flamegraph). Since
+`MAX_UMA_IN_PLAY_PER_SIDE = MAX_BENCH + 1 = 4`, an
+`ArrayVec<&UmamusumeInstance, 4>` fits on the stack with no heap
+involvement. The call-site interfaces (`.iter()`, `.into_iter()`,
+`.len()`, indexing, `.is_empty()`) carry over verbatim; only one caller
+needed a type-annotation update. workers=1: 0.932 → 1.033 g/s (+11%);
+workers=16: 6.199 → 7.438 g/s (+20%).
+
+### Cumulative throughput vs baseline anchor (sims=800, 40 games, prior=uniform/leaf=rollout)
+
+| Slice                              | w=1 g/s | w=16 g/s | Cumulative vs 0.60 anchor |
+|------------------------------------|---------|----------|---------------------------|
+| Pre-Tier-1 (8-process workaround)  | n/a     | n/a      | 1.0× (anchor)             |
+| 3d worker pool                     | 0.636   | 3.546    | 5.9×                      |
+| 3e score_candidate clones          | 0.743   | 5.357    | 8.9×                      |
+| 3f telemetry gating                | 0.831   | 6.141    | 10.2×                     |
+| 3g state_fingerprint               | 0.932   | 6.199    | 10.3×                     |
+| 3h get_all_umamusume ArrayVec      | 1.033   | 7.438    | **12.4×**                 |
+
+JSONL md5 `65fc72a1…` unchanged across every slice — all changes are
+provably trajectory-neutral, no parity gate required.
+
 ### Follow-ups (not yet landed)
 
 - Rip `training/r12_orchestrator._run_pool_selfplay` (`:812-962`)
   multi-process fanout once the binary `--workers` flag is the canonical
   parallel axis. The 8-process bash hack noted in the 2026-05-25 digest
   retires with it.
-- Flamegraph the workers=16 run to decide between Tier 2 (subtree reuse,
-  transposition cache) vs Tier 3 (state_hash → u128, Rng::fork_idx,
-  forced_coins clone removal). The handoff doc § "Recommended
-  sequencing" branches on this.
 - Re-run with `prior=policy` (ORT in the loop) once an ONNX checkpoint
   is staged in this worktree, to confirm the ORT-path speedup matches
   the gate-side 7.11× at workers=16.
-
-Implementation: `engine-rs/crates/sim-cli/src/bin/mcts_selfplay.rs`
-(commit `f75e556`).
+- Tier 2 algorithmic: subtree reuse across moves (`mcts/driver.rs`),
+  transposition cache on `state_fingerprint`. Estimated 1.5-2×
+  sims-equivalent at fixed wall; doesn't help wall directly but lifts
+  policy strength per second.
+- Tier 4 String → interned IDs (`SideState.title`,
+  `UmamusumeInstance.species`, `used_ability_names_*`). Reaches the
+  "GameState::clone is close to a memcpy" ceiling but is multi-day and
+  invasive; defer until the easy wins are exhausted.
 
 ## Cross-references
 
