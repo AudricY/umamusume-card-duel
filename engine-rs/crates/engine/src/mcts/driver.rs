@@ -22,7 +22,9 @@ use crate::dispatcher::{
     advance_modeled_turn_step, advance_opponent_turn_step, advance_player_ai_turn_step,
     get_forced_attack_coin_results, state_fingerprint, state_hash,
 };
-use crate::mcts::config::{MctsConfig, MctsDiagnostics, MctsLeaf, MctsPrior, MctsResult};
+use crate::mcts::config::{
+    MctsConfig, MctsDiagnostics, MctsLeaf, MctsLeafSample, MctsPrior, MctsResult,
+};
 use crate::mcts::math::{argmax, entropy, mcts_terminal_value, puct_select};
 use crate::mcts::node::MctsNode;
 use crate::mcts::sample::sample_dirichlet;
@@ -40,7 +42,8 @@ pub fn run_mcts(
     seed: &str,
 ) -> MctsResult {
     let mut root_rng = Rng::from_seed(seed, "mcts-root");
-    let mut root = build_model_decision_node(root_state, model_side, model_url, config, &mut root_rng);
+    let mut root =
+        build_model_decision_node(root_state, model_side, model_url, config, &mut root_rng);
     let mut diagnostics = MctsDiagnostics {
         root_value: 0.0,
         root_visit_distribution: Vec::new(),
@@ -62,6 +65,7 @@ pub fn run_mcts(
             selected_index: 0,
             visits: Vec::new(),
             diagnostics,
+            rollout_leaf_samples: Vec::new(),
         };
     }
 
@@ -72,7 +76,11 @@ pub fn run_mcts(
 
     if config.add_root_dirichlet && root.legal_actions.len() > 1 {
         let mut dirichlet_rng = root_rng.fork("dirichlet");
-        let noise = sample_dirichlet(root.legal_actions.len(), config.dirichlet_alpha, &mut dirichlet_rng);
+        let noise = sample_dirichlet(
+            root.legal_actions.len(),
+            config.dirichlet_alpha,
+            &mut dirichlet_rng,
+        );
         let eps = config.dirichlet_epsilon;
         for (i, p) in root.priors.iter_mut().enumerate() {
             let n = noise.get(i).copied().unwrap_or(0.0);
@@ -81,6 +89,8 @@ pub fn run_mcts(
     }
 
     // Cache root value.
+    let mut rollout_leaf_samples: Vec<MctsLeafSample> = Vec::new();
+
     if matches!(config.leaf, MctsLeaf::ValueHead)
         && config.value_head_rollout_blend <= 0.0
         && root.cached_leaf_value.is_some()
@@ -94,6 +104,7 @@ pub fn run_mcts(
             model_url,
             config,
             &mut leaf_rng,
+            &mut rollout_leaf_samples,
         );
         diagnostics.leaf_evaluations += 1;
     }
@@ -142,13 +153,15 @@ pub fn run_mcts(
             diagnostics.terminal_leafs += 1;
         } else {
             // Expand the deepest unexpanded child.
-            let last = path.last().copied().expect("non-terminal selection produced an empty path");
+            let last = path
+                .last()
+                .copied()
+                .expect("non-terminal selection produced an empty path");
             let parent: &MctsNode = unsafe { &*last.node_ptr };
             let action = parent.legal_actions[last.action_index].clone();
             let parent_state = parent.state.clone();
             let parent_model_side = parent.model_side;
-            let mut expand_rng =
-                sim_rng.fork(&format!("expand:a{}", last.action_index));
+            let mut expand_rng = sim_rng.fork(&format!("expand:a{}", last.action_index));
             let next_state_opt = step_from_model_decision(
                 &parent_state,
                 parent_model_side,
@@ -173,6 +186,7 @@ pub fn run_mcts(
                             model_url,
                             config,
                             &mut leaf_rng,
+                            &mut rollout_leaf_samples,
                         );
                         diagnostics.leaf_evaluations += 1;
                     }
@@ -211,6 +225,7 @@ pub fn run_mcts(
                             model_url,
                             config,
                             &mut leaf_rng,
+                            &mut rollout_leaf_samples,
                         );
                         diagnostics.leaf_evaluations += 1;
                     }
@@ -286,6 +301,10 @@ pub fn run_mcts(
         selected_index: best_index,
         visits,
         diagnostics,
+        rollout_leaf_samples: downsample_rollout_leaf_samples(
+            rollout_leaf_samples,
+            config.record_rollout_leaf_samples,
+        ),
     }
 }
 
@@ -437,7 +456,13 @@ fn predict_policy_and_value(
         .iter()
         .take(legal_actions.len())
         .copied()
-        .map(|p| if p.is_finite() { p.max(0.0) as f64 } else { 0.0 })
+        .map(|p| {
+            if p.is_finite() {
+                p.max(0.0) as f64
+            } else {
+                0.0
+            }
+        })
         .collect();
     let sum: f64 = probs.iter().sum();
     if sum > 0.0 {
@@ -531,12 +556,23 @@ fn leaf_value(
     model_url: &str,
     config: &MctsConfig,
     rng: &mut Rng,
+    rollout_leaf_samples: &mut Vec<MctsLeafSample>,
 ) -> f64 {
     if state.game_over {
         return mcts_terminal_value(state, model_side);
     }
     match config.leaf {
-        MctsLeaf::Rollout => rollout_leaf_value(state, model_side, config, rng),
+        MctsLeaf::Rollout => {
+            let value = rollout_leaf_value(state, model_side, config, rng);
+            maybe_record_rollout_leaf_sample(
+                rollout_leaf_samples,
+                state,
+                model_side,
+                value,
+                config.record_rollout_leaf_samples,
+            );
+            value
+        }
         MctsLeaf::ValueHead => {
             let value = value_head_leaf_value(state, model_side, model_url);
             let blend = config.value_head_rollout_blend.clamp(0.0, 1.0);
@@ -548,6 +584,64 @@ fn leaf_value(
             }
         }
     }
+}
+
+fn maybe_record_rollout_leaf_sample(
+    samples: &mut Vec<MctsLeafSample>,
+    state: &GameState,
+    model_side: SideId,
+    rollout_value: f64,
+    max_samples: u32,
+) {
+    if max_samples == 0 || state.game_over {
+        return;
+    }
+    let legal_actions = enumerate_legal_ai_actions(state, model_side);
+    if legal_actions.len() < 2 {
+        return;
+    }
+    samples.push(MctsLeafSample {
+        model_side,
+        turn_number: state.turn_number,
+        state: state.clone(),
+        observation: build_public_observation(state, model_side),
+        legal_actions,
+        rollout_value,
+    });
+}
+
+fn downsample_rollout_leaf_samples(
+    samples: Vec<MctsLeafSample>,
+    max_samples: u32,
+) -> Vec<MctsLeafSample> {
+    let max_samples = max_samples as usize;
+    if max_samples == 0 || samples.len() <= max_samples {
+        return samples;
+    }
+    spread_sample_indices(samples.len(), max_samples)
+        .into_iter()
+        .map(|idx| samples[idx].clone())
+        .collect()
+}
+
+fn spread_sample_indices(total: usize, max_samples: usize) -> Vec<usize> {
+    if max_samples == 0 || total == 0 {
+        return Vec::new();
+    }
+    if total <= max_samples {
+        return (0..total).collect();
+    }
+    if max_samples == 1 {
+        return vec![total / 2];
+    }
+    let last = total - 1;
+    let denom = max_samples - 1;
+    (0..max_samples)
+        .map(|i| {
+            // Integer-rounded linspace over [0, last].
+            (i * last + denom / 2) / denom
+        })
+        .collect()
 }
 
 fn value_head_leaf_value(state: &GameState, model_side: SideId, _model_url: &str) -> f64 {
@@ -751,10 +845,8 @@ mod tests {
             "matikanetannhauserBasic",
             "matikanetannhauserStage1",
         ];
-        let ids_a: Vec<crate::core::card_id::CardId> = deck_a
-            .iter()
-            .filter_map(|n| cat.id_for(n))
-            .collect();
+        let ids_a: Vec<crate::core::card_id::CardId> =
+            deck_a.iter().filter_map(|n| cat.id_for(n)).collect();
         let ids_b = ids_a.clone();
         // Run construction inside a with_rng scope so opening hands draw.
         let (state, _) = with_rng(Rng::from_seed(1234u32, "test-root"), || {
@@ -794,14 +886,20 @@ mod tests {
 
         let (_state_after, used_a) = with_rng(rng_a, || {
             let mut s = state_before.clone();
-            crate::dispatcher::choose_opening_coin(&mut s, crate::core::constants::CoinFlipResult::Heads);
+            crate::dispatcher::choose_opening_coin(
+                &mut s,
+                crate::core::constants::CoinFlipResult::Heads,
+            );
             s
         });
         // After choose_opening_coin runs one draw, used_a's next draw
         // should equal sentinel's next draw (same starting state).
         let mut after_a = used_a.clone();
         let mut after_sentinel = sentinel.clone();
-        assert_eq!(after_a.next_f64().to_bits(), after_sentinel.next_f64().to_bits());
+        assert_eq!(
+            after_a.next_f64().to_bits(),
+            after_sentinel.next_f64().to_bits()
+        );
     }
 
     #[test]
@@ -826,6 +924,7 @@ mod tests {
             prior: MctsPrior::Uniform,
             rollout_crn_samples: 1,
             rollout_steps: 1,
+            record_rollout_leaf_samples: 0,
             value_head_rollout_blend: 0.0,
             add_root_dirichlet: false,
             dirichlet_alpha: 0.3,
@@ -857,6 +956,7 @@ mod tests {
             prior: MctsPrior::Uniform,
             rollout_crn_samples: 1,
             rollout_steps: 20,
+            record_rollout_leaf_samples: 0,
             value_head_rollout_blend: 0.0,
             add_root_dirichlet: false,
             dirichlet_alpha: 0.3,
@@ -873,7 +973,13 @@ mod tests {
         // actions only. That's enough to exercise the loop without hitting
         // /predict. We only validate that visits sum to simulations.
         let (result, _) = with_rng(Rng::from_seed(42u32, "outer"), || {
-            run_mcts(&state, SideId::Player, &cfg, "http://unused.invalid", "test-seed")
+            run_mcts(
+                &state,
+                SideId::Player,
+                &cfg,
+                "http://unused.invalid",
+                "test-seed",
+            )
         });
         // For a terminal/empty-actions root, visits is empty.
         let total: u32 = result.visits.iter().sum();
@@ -883,5 +989,14 @@ mod tests {
                 "visit count should match simulations"
             );
         }
+    }
+
+    #[test]
+    fn spread_sample_indices_cover_leaf_prefix_middle_and_tail() {
+        assert_eq!(spread_sample_indices(0, 8), Vec::<usize>::new());
+        assert_eq!(spread_sample_indices(5, 8), vec![0, 1, 2, 3, 4]);
+        assert_eq!(spread_sample_indices(10, 1), vec![5]);
+        assert_eq!(spread_sample_indices(10, 4), vec![0, 3, 6, 9]);
+        assert_eq!(spread_sample_indices(101, 5), vec![0, 25, 50, 75, 100]);
     }
 }

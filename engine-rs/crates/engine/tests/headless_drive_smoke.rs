@@ -104,11 +104,7 @@ fn drives_games_for_a_handful_of_seeds_without_stalling() {
             "seed {} hit max_steps at turn {}; expected game_over",
             o.seed, o.final_turn_number
         );
-        assert!(
-            o.final_turn_number > 0,
-            "seed {} ended at turn 0",
-            o.seed
-        );
+        assert!(o.final_turn_number > 0, "seed {} ended at turn 0", o.seed);
     }
 }
 
@@ -144,6 +140,7 @@ fn throughput_mcts_games() {
         prior: MctsPrior::Uniform,
         rollout_crn_samples: 3,
         rollout_steps: 200,
+        record_rollout_leaf_samples: 0,
         value_head_rollout_blend: 0.0,
         add_root_dirichlet: false,
         dirichlet_alpha: 0.3,
@@ -166,7 +163,9 @@ fn throughput_mcts_games() {
         let (mut state, mut step_rng) = with_rng(rng, || setup_ai_vs_ai_game());
         let mut step = 0u32;
         for _ in 0..1000 {
-            if state.game_over { break; }
+            if state.game_over {
+                break;
+            }
             let side = match state.current_side {
                 CurrentSide::Player => SideId::Player,
                 CurrentSide::Opponent => SideId::Opponent,
@@ -214,7 +213,11 @@ fn throughput_mcts_games() {
     let games_per_sec = n as f64 / elapsed.as_secs_f64();
     eprintln!(
         "MCTS throughput: {} games in {:?} = {:.2} games/s; total_advances={} (avg {:.1}/game)",
-        n, elapsed, games_per_sec, total_advances, total_advances as f64 / n as f64,
+        n,
+        elapsed,
+        games_per_sec,
+        total_advances,
+        total_advances as f64 / n as f64,
     );
 }
 
@@ -247,7 +250,11 @@ fn throughput_100_headless_games() {
         "100-game throughput: {:.1} games/s, {:.1} steps/s, avg {:.1} steps/game; player={}, opponent={}, elapsed={:?}",
         games_per_sec, steps_per_sec, avg_steps, player_wins, opponent_wins, elapsed,
     );
-    assert!(games_per_sec > 50.0, "expected >50 games/s, got {:.1}", games_per_sec);
+    assert!(
+        games_per_sec > 50.0,
+        "expected >50 games/s, got {:.1}",
+        games_per_sec
+    );
 }
 
 /// Broader sweep — first 32 seeds — to flush out any stall a single

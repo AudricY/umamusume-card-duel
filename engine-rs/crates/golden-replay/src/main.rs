@@ -36,7 +36,9 @@ use engine::core::state::{CurrentSide, GameState};
 use engine::dispatcher::{advance_modeled_turn_step, get_forced_attack_coin_results};
 use engine::headless_setup::setup_ai_vs_ai_game;
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
-use engine::mcts::driver::{reset_rollout_stats, rollout_stats, run_mcts, set_verbose_first_rollout};
+use engine::mcts::driver::{
+    reset_rollout_stats, rollout_stats, run_mcts, set_verbose_first_rollout,
+};
 use engine::policy::actions::enumerate_legal_ai_actions;
 use engine::policy::types::{AiPhase, LegalAiAction};
 use serde::Deserialize;
@@ -195,6 +197,7 @@ fn v4_replay_for_seed(
         prior: MctsPrior::Uniform,
         rollout_crn_samples: 3,
         rollout_steps: 200,
+        record_rollout_leaf_samples: 0,
         value_head_rollout_blend: 0.0,
         add_root_dirichlet: false,
         dirichlet_alpha: 0.3,
@@ -216,7 +219,10 @@ fn v4_replay_for_seed(
     for i in 0..limit {
         let step = &trace.actions[i];
         let Some(side_id) = parse_side_id(&step.side_id) else {
-            diffs.push(format!("step[{}]: unrecognized sideId {:?}", i, step.side_id));
+            diffs.push(format!(
+                "step[{}]: unrecognized sideId {:?}",
+                i, step.side_id
+            ));
             break;
         };
 
@@ -433,7 +439,10 @@ fn replay_steps_for_seed(
 
     for (i, step) in trace.actions.iter().enumerate() {
         let Some(side_id) = parse_side_id(&step.side_id) else {
-            diffs.push(format!("step[{}]: unrecognized sideId {:?}", i, step.side_id));
+            diffs.push(format!(
+                "step[{}]: unrecognized sideId {:?}",
+                i, step.side_id
+            ));
             break;
         };
 
@@ -574,8 +583,8 @@ fn main() -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let trace: Trace = serde_json::from_str(&line)
-            .with_context(|| format!("parse line {}", lineno + 1))?;
+        let trace: Trace =
+            serde_json::from_str(&line).with_context(|| format!("parse line {}", lineno + 1))?;
         if trace.trace_version != 1 {
             anyhow::bail!("unsupported traceVersion {}", trace.trace_version);
         }
@@ -631,7 +640,12 @@ fn main() -> Result<()> {
 
         // Active card ids.
         let rust_player_active = state.sides[0].active.as_ref().map(|u| resolve(u.card_id));
-        let ts_player_active = ts_fp.sides.player.active.as_ref().map(|u| u.card_id.clone());
+        let ts_player_active = ts_fp
+            .sides
+            .player
+            .active
+            .as_ref()
+            .map(|u| u.card_id.clone());
         if rust_player_active != ts_player_active {
             diffs.push(format!(
                 "player.active: rust={:?} ts={:?}",
@@ -639,7 +653,12 @@ fn main() -> Result<()> {
             ));
         }
         let rust_opp_active = state.sides[1].active.as_ref().map(|u| resolve(u.card_id));
-        let ts_opp_active = ts_fp.sides.opponent.active.as_ref().map(|u| u.card_id.clone());
+        let ts_opp_active = ts_fp
+            .sides
+            .opponent
+            .active
+            .as_ref()
+            .map(|u| u.card_id.clone());
         if rust_opp_active != ts_opp_active {
             diffs.push(format!(
                 "opponent.active: rust={:?} ts={:?}",
@@ -648,20 +667,36 @@ fn main() -> Result<()> {
         }
 
         // Bench card ids.
-        let rust_player_bench: Vec<String> =
-            state.sides[0].bench.iter().map(|u| resolve(u.card_id)).collect();
-        let ts_player_bench: Vec<String> =
-            ts_fp.sides.player.bench.iter().map(|u| u.card_id.clone()).collect();
+        let rust_player_bench: Vec<String> = state.sides[0]
+            .bench
+            .iter()
+            .map(|u| resolve(u.card_id))
+            .collect();
+        let ts_player_bench: Vec<String> = ts_fp
+            .sides
+            .player
+            .bench
+            .iter()
+            .map(|u| u.card_id.clone())
+            .collect();
         if rust_player_bench != ts_player_bench {
             diffs.push(format!(
                 "player.bench: rust={:?} ts={:?}",
                 rust_player_bench, ts_player_bench
             ));
         }
-        let rust_opp_bench: Vec<String> =
-            state.sides[1].bench.iter().map(|u| resolve(u.card_id)).collect();
-        let ts_opp_bench: Vec<String> =
-            ts_fp.sides.opponent.bench.iter().map(|u| u.card_id.clone()).collect();
+        let rust_opp_bench: Vec<String> = state.sides[1]
+            .bench
+            .iter()
+            .map(|u| resolve(u.card_id))
+            .collect();
+        let ts_opp_bench: Vec<String> = ts_fp
+            .sides
+            .opponent
+            .bench
+            .iter()
+            .map(|u| u.card_id.clone())
+            .collect();
         if rust_opp_bench != ts_opp_bench {
             diffs.push(format!(
                 "opponent.bench: rust={:?} ts={:?}",
@@ -672,10 +707,7 @@ fn main() -> Result<()> {
         // V2 step-replay (if requested): drive the sim through all
         // recorded steps and accumulate diffs.
         if args.mode == "steps" {
-            let step_rng = Rng::from_seed(
-                format!("{}:selfplay", trace.seed).as_str(),
-                "selfplay",
-            );
+            let step_rng = Rng::from_seed(format!("{}:selfplay", trace.seed).as_str(), "selfplay");
             let step_diffs = replay_steps_for_seed(&trace, step_rng, &resolve);
             diffs.extend(step_diffs);
         }
@@ -683,10 +715,7 @@ fn main() -> Result<()> {
         // V4 MCTS replay: run Rust MCTS at each step (slow but the real
         // bit-identity gate).
         if args.mode == "mcts" {
-            let mcts_rng = Rng::from_seed(
-                format!("{}:selfplay", trace.seed).as_str(),
-                "selfplay",
-            );
+            let mcts_rng = Rng::from_seed(format!("{}:selfplay", trace.seed).as_str(), "selfplay");
             let max_steps = if args.limit_steps == 0 {
                 0
             } else {

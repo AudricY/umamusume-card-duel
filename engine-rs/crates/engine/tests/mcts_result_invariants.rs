@@ -6,9 +6,9 @@
 //! `selected_index` out of bounds, can index past the end of the
 //! action list and panic — or worse, silently pick the wrong action.
 
+use engine::core::constants::SideId;
 use engine::core::random::{with_rng, Rng};
 use engine::core::state::CurrentSide;
-use engine::core::constants::SideId;
 use engine::headless_setup::setup_ai_vs_ai_game;
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior};
 use engine::mcts::driver::run_mcts;
@@ -22,6 +22,7 @@ fn default_config(sims: u32) -> MctsConfig {
         prior: MctsPrior::Uniform,
         rollout_crn_samples: 2,
         rollout_steps: 100,
+        record_rollout_leaf_samples: 0,
         value_head_rollout_blend: 0.0,
         add_root_dirichlet: false,
         dirichlet_alpha: 0.3,
@@ -40,7 +41,10 @@ fn default_config(sims: u32) -> MctsConfig {
 fn mcts_at_first_branching_decision(
     seed: &str,
     config: &MctsConfig,
-) -> (Vec<engine::policy::types::LegalAiAction>, engine::mcts::config::MctsResult) {
+) -> (
+    Vec<engine::policy::types::LegalAiAction>,
+    engine::mcts::config::MctsResult,
+) {
     let setup_rng = Rng::from_seed(format!("{}:selfplay", seed).as_str(), "selfplay");
     let (state, mut step_rng) = with_rng(setup_rng, || setup_ai_vs_ai_game());
 
@@ -57,7 +61,13 @@ fn mcts_at_first_branching_decision(
 
     // run_mcts called outside an active rng scope panics — wrap.
     let (result, _) = with_rng(step_rng.clone(), || {
-        run_mcts(&state, side, config, "", format!("{}:mcts-test", seed).as_str())
+        run_mcts(
+            &state,
+            side,
+            config,
+            "",
+            format!("{}:mcts-test", seed).as_str(),
+        )
     });
 
     (legal, result)

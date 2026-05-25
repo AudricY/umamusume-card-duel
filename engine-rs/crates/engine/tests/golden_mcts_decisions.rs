@@ -48,6 +48,7 @@ fn first_mcts_decision(seed: &str) -> (u32, usize, usize, String, u32, f64) {
         prior: MctsPrior::Uniform,
         rollout_crn_samples: 2,
         rollout_steps: 100,
+        record_rollout_leaf_samples: 0,
         value_head_rollout_blend: 0.0,
         add_root_dirichlet: false,
         dirichlet_alpha: 0.3,

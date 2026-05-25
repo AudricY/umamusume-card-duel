@@ -81,10 +81,16 @@ echo ">>> sim-eval-gate (MCTS-vs-heuristic, 4 seeds, ORCHESTRATOR FLAG SET)"
 python3 -c "
 import json
 d = json.load(open('$TMP_DIR/gate.json'))
-ov = d['overall']
+# Schema (feat/ai-era): per-side + overall stats live under summary.
+s = d['summary']
+ov = s['overall']
 print(f'  overall: {ov[\"wins\"]}/{ov[\"games\"]} = {ov[\"winRate\"]:.0%} '
       f'(Wilson 95% CI {ov[\"wilsonLower\"]:.0%}-{ov[\"wilsonUpper\"]:.0%})')
-assert d['terminalGameOver'] == d['config']['seeds'], 'some games did not reach game_over'
+# Per-side rotation runs games-per-side * 2 in model-side=both.
+expected_games = d['config']['seeds'] * 2 if d['args'].get('modelSide', 'player') == 'both' else d['config']['seeds']
+assert s['terminalGameOver'] == expected_games, (
+    f'expected {expected_games} game_over terminals, got {s[\"terminalGameOver\"]}'
+)
 "
 
 echo

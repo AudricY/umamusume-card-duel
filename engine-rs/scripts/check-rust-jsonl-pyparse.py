@@ -18,55 +18,81 @@ from collections import Counter
 
 
 def check_selfplay_rows(path: str) -> int:
+    """Validate the JSONL shape produced by `sim-mcts-selfplay`.
+
+    The binary emits one of two shapes per line:
+    * **Per-row** (when `--record-rows` or `--record-rollout-leaf-rows`
+      is on) — a flat `SelfPlayRow` matching what
+      `training/uma_ai/selfplay_dataset.py:load_mcts_selfplay_samples`
+      consumes: top-level `kind == "mcts-selfplay"`, `schemaVersion`,
+      `legalActions`, `visitDistribution`, `rootValue`, `observation`,
+      `selectedActionIndex`. The smoke harness uses this mode.
+    * **Per-game** (default, no `--record-rows` flag) — a `GameRecord`
+      wrapper with `terminalReason`, `totalSteps`, `turnNumber`, `rows`.
+
+    Detect the shape per-line and validate accordingly.
+    """
     total_rows = 0
     kinds = Counter()
     legal_lens = []
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
             d = json.loads(line)
-            # Top-level GameRecord schema (mcts_selfplay):
-            assert "seed" in d, f"line {lineno}: seed missing"
-            assert "terminalReason" in d, f"line {lineno}: terminalReason missing (must be camelCase)"
-            assert "turnNumber" in d, f"line {lineno}: turnNumber missing"
-            assert "totalSteps" in d, f"line {lineno}: totalSteps missing"
-            for r in d.get("rows", []):
-                # Per-row SelfPlayRow schema (matches TS):
-                actions = r.get("legalActions", [])
-                visits = r.get("visitDistribution", [])
-                rv = r.get("rootValue")
-                sel = r.get("selectedActionIndex")
-                schema_v = r.get("schemaVersion")
-                kind = r.get("kind", "?")
-                if not actions:
-                    raise AssertionError(f"line {lineno}: legalActions empty")
-                if len(visits) != len(actions):
-                    raise AssertionError(
-                        f"line {lineno}: visitDistribution len {len(visits)} != legalActions len {len(actions)}"
-                    )
-                if rv is None:
-                    raise AssertionError(f"line {lineno}: rootValue missing")
-                if sel is None:
-                    raise AssertionError(f"line {lineno}: selectedActionIndex missing")
-                if schema_v != 1:
-                    raise AssertionError(f"line {lineno}: unexpected schemaVersion {schema_v}")
-                obs = r.get("observation")
-                if not isinstance(obs, dict):
-                    raise AssertionError(f"line {lineno}: observation missing or wrong type")
-                # Sanity-check a few camelCase nested keys.
-                for required_obs_key in ("schemaVersion", "sideToAct", "turnNumber", "own", "opponent"):
-                    if required_obs_key not in obs:
-                        raise AssertionError(
-                            f"line {lineno}: observation.{required_obs_key} missing"
-                        )
+            # Discriminator: per-row records carry a `kind` field
+            # (always `"mcts-selfplay"` for selfplay rows) at top level.
+            # Per-game wrappers carry `terminalReason` instead.
+            if "kind" in d and "rows" not in d:
+                _check_self_play_row(d, lineno)
                 total_rows += 1
-                kinds[kind] += 1
-                legal_lens.append(len(actions))
+                kinds[d.get("kind", "?")] += 1
+                legal_lens.append(len(d.get("legalActions", [])))
+            else:
+                assert "seed" in d, f"line {lineno}: seed missing"
+                assert (
+                    "terminalReason" in d
+                ), f"line {lineno}: terminalReason missing on per-game wrapper"
+                assert "turnNumber" in d, f"line {lineno}: turnNumber missing"
+                assert "totalSteps" in d, f"line {lineno}: totalSteps missing"
+                for r in d.get("rows", []):
+                    _check_self_play_row(r, lineno)
+                    total_rows += 1
+                    kinds[r.get("kind", "?")] += 1
+                    legal_lens.append(len(r.get("legalActions", [])))
     avg_legal = sum(legal_lens) / len(legal_lens) if legal_lens else 0.0
     print(
         f"OK parsed {total_rows} rows via Python-style dict access. "
         f"kinds={dict(kinds)}, avg legal_actions/row={avg_legal:.2f}"
     )
     return total_rows
+
+
+def _check_self_play_row(r: dict, lineno: int) -> None:
+    """SelfPlayRow shape check shared by both per-row and per-game modes."""
+    actions = r.get("legalActions", [])
+    visits = r.get("visitDistribution", [])
+    rv = r.get("rootValue")
+    sel = r.get("selectedActionIndex")
+    schema_v = r.get("schemaVersion")
+    if not actions:
+        raise AssertionError(f"line {lineno}: legalActions empty")
+    if len(visits) != len(actions):
+        raise AssertionError(
+            f"line {lineno}: visitDistribution len {len(visits)} != legalActions len {len(actions)}"
+        )
+    if rv is None:
+        raise AssertionError(f"line {lineno}: rootValue missing")
+    if sel is None:
+        raise AssertionError(f"line {lineno}: selectedActionIndex missing")
+    if schema_v != 1:
+        raise AssertionError(f"line {lineno}: unexpected schemaVersion {schema_v}")
+    obs = r.get("observation")
+    if not isinstance(obs, dict):
+        raise AssertionError(f"line {lineno}: observation missing or wrong type")
+    for required_obs_key in ("schemaVersion", "sideToAct", "turnNumber", "own", "opponent"):
+        if required_obs_key not in obs:
+            raise AssertionError(
+                f"line {lineno}: observation.{required_obs_key} missing"
+            )
 
 
 def main() -> int:

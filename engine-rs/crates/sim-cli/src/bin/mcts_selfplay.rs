@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use engine::core::constants::SideId;
 use engine::core::random::{with_rng, Rng};
-use engine::core::state::CurrentSide;
+use engine::core::state::{CurrentSide, GameState};
 use engine::deck_sampling::{manifest_pair_for, DeckSampling};
 use engine::dispatcher::{
     advance_modeled_turn_step, advance_opponent_turn_step, advance_player_ai_turn_step,
@@ -62,13 +62,9 @@ struct Args {
     /// Leaf mode. Orchestrator alias: --mcts-leaf.
     #[arg(long, alias = "mcts-leaf", default_value = "rollout")]
     leaf: String,
-    /// Worker fan-out. `0` ⇒ `std::thread::available_parallelism()` (matches
-    /// `sim-eval-gate`). Slice 3d ported the `eval_gate.rs` work-stealing
-    /// pool here: a single shared `OnceLock<InferenceSession>` is reused by
-    /// all workers (G5 lock-free `UnsafeCell<Session>` contract), per-task
-    /// outcomes are stored by `task_index` and concatenated in order after
-    /// the scope so JSONL output stays bit-identical to `--workers 1`.
-    #[arg(long, default_value_t = 0)]
+    /// Worker fan-out (ignored — Rust runs single-process; orchestrator
+    /// parallelises by spawning multiple Rust binaries).
+    #[arg(long, default_value_t = 1)]
     workers: u32,
     /// Modeled side: "player", "opponent", or "both". Default "player"
     /// preserves the historical TS/Rust self-play row distribution.
@@ -111,6 +107,16 @@ struct Args {
     /// since rows can be large.
     #[arg(long, default_value_t = false)]
     record_rows: bool,
+    /// Record rollout-leaf states from inside each MCTS search as flat
+    /// selfplay rows with `rootValue` set to the rollout leaf label.
+    /// Intended for value-head retraining on the leaf-state distribution.
+    #[arg(long, default_value_t = false)]
+    record_rollout_leaf_rows: bool,
+    /// Cap rollout leaf rows recorded per MCTS decision. The engine keeps an
+    /// evenly-spaced deterministic sample from all eligible rollout leaves,
+    /// not just the first N leaves reached by selection.
+    #[arg(long, default_value_t = 8)]
+    rollout_leaf_rows_per_decision: u32,
     /// LEGACY: `/predict` server URL. R16-P3 spike Option A landed
     /// in-process ORT (see `engine::inference`); this flag is accepted
     /// for one release so orchestrators can transition without a
@@ -161,6 +167,8 @@ impl Args {
             "maxSteps": self.max_steps,
             "out": self.out,
             "recordRows": self.record_rows,
+            "recordRolloutLeafRows": self.record_rollout_leaf_rows,
+            "rolloutLeafRowsPerDecision": self.rollout_leaf_rows_per_decision,
             "modelUrl": self.model_url,
             "onnxPath": self.onnx_path,
             "deckSampling": self.deck_sampling,
@@ -261,6 +269,11 @@ struct SelfPlayRow {
     /// "mandatory, sampling-independent".
     player_deck_id: String,
     opponent_deck_id: String,
+    /// Optional exact hidden-state snapshot for rollout-leaf rows. Kept
+    /// absent on normal root selfplay rows so the TS-flat schema lock stays
+    /// byte-stable; downstream value-target loaders ignore this extra field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leaf_state: Option<GameState>,
 }
 
 const ROW_SCHEMA_VERSION: u32 = 1;
@@ -323,6 +336,7 @@ fn drive_one_game(
     opponent_deck: Option<&[engine::core::card_id::CardId]>,
     player_deck_id: &str,
     opponent_deck_id: &str,
+    record_rollout_leaf_rows: bool,
 ) -> GameRecord {
     let seed_str = seed.to_string();
     let rng = Rng::from_seed(format!("{}:selfplay", seed_str).as_str(), "selfplay");
@@ -422,7 +436,42 @@ fn drive_one_game(
                     result: None,
                     player_deck_id: player_deck_id.to_string(),
                     opponent_deck_id: opponent_deck_id.to_string(),
+                    leaf_state: None,
                 });
+            }
+            if record_rollout_leaf_rows {
+                for (leaf_idx, sample) in mcts_result.rollout_leaf_samples.iter().enumerate() {
+                    let n = sample.legal_actions.len().max(1);
+                    let uniform = vec![1.0 / n as f64; n];
+                    rows.push(SelfPlayRow {
+                        schema_version: ROW_SCHEMA_VERSION,
+                        kind: "mcts-selfplay",
+                        seed: format!("{}:leaf:{}:{}", seed_str, s, leaf_idx),
+                        side_id: match sample.model_side {
+                            SideId::Player => "player".into(),
+                            SideId::Opponent => "opponent".into(),
+                        },
+                        step: s,
+                        turn_number: sample.turn_number,
+                        observation: sample.observation.clone(),
+                        legal_actions: sample.legal_actions.clone(),
+                        selected_action_index: 0,
+                        visit_distribution: uniform.clone(),
+                        root_priors: uniform,
+                        root_mean_q: vec![sample.rollout_value; n],
+                        root_value: sample.rollout_value,
+                        root_prior_entropy: (n as f64).ln(),
+                        root_prior_argmax: 0,
+                        visited_hashes: mcts_result.diagnostics.visited_hashes,
+                        expansions: mcts_result.diagnostics.expansions,
+                        leaf_evaluations: mcts_result.diagnostics.leaf_evaluations,
+                        value_target: None,
+                        result: None,
+                        player_deck_id: player_deck_id.to_string(),
+                        opponent_deck_id: opponent_deck_id.to_string(),
+                        leaf_state: Some(sample.state.clone()),
+                    });
+                }
             }
 
             let (ns, used_rng) = with_rng(step_rng.clone(), || {
@@ -532,6 +581,11 @@ fn main() -> Result<()> {
         prior,
         rollout_crn_samples: args.k,
         rollout_steps: args.rollout_steps,
+        record_rollout_leaf_samples: if args.record_rollout_leaf_rows {
+            args.rollout_leaf_rows_per_decision
+        } else {
+            0
+        },
         value_head_rollout_blend: 0.0,
         add_root_dirichlet,
         dirichlet_alpha: args.dirichlet_alpha,
@@ -543,10 +597,18 @@ fn main() -> Result<()> {
         model_url: args.model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
     };
+    // Slice 3d: honor `--workers N` by running games concurrently in
+    // N OS threads within one process, sharing the OnceLock
+    // `InferenceSession`. `--workers 0` resolves via
+    // `available_parallelism()` so a single binary saturates the host
+    // without needing the orchestrator to spawn N processes. Mirrors
+    // `eval_gate.rs` worker-pool fan-out exactly so the two binaries
+    // agree on default thread budgeting.
     let workers: usize = if args.workers == 0 {
         std::thread::available_parallelism()
-            .map(|n| n.get())
+            .map(|n| n.get() / 2)
             .unwrap_or(1)
+            .max(1)
     } else {
         args.workers as usize
     };
@@ -567,10 +629,12 @@ fn main() -> Result<()> {
         .flat_map(|&side| (0..args.seeds).map(move |i| (args.seed_base + i, side)))
         .collect();
     let total_tasks = tasks.len();
+    // Effective worker count: never more than tasks (extras would just
+    // contend on the cursor). Matches the cap in `eval_gate.rs`.
     let effective_workers = workers.max(1).min(total_tasks.max(1));
     eprintln!(
         "sim-mcts-selfplay: sims={} K={} rollout_steps={} prior={} leaf={} seeds-per-side={} model-side={} (=> {} total games) base={} workers={} (requested {})",
-        args.sims, args.k, args.rollout_steps, args.prior, args.leaf, args.seeds, args.model_side, tasks.len(), args.seed_base, effective_workers, args.workers,
+        args.sims, args.k, args.rollout_steps, args.prior, args.leaf, args.seeds, args.model_side, total_tasks, args.seed_base, effective_workers, args.workers,
     );
 
     let mut writer: Option<fs::File> = match args.out.as_ref() {
@@ -591,17 +655,22 @@ fn main() -> Result<()> {
     let mut draws = 0u32;
     let mut terminal_reasons = TerminalReasons::default();
 
-    // Per-task GameRecord slots, populated by worker threads and walked in
-    // task-index order after the scope to preserve bit-identical JSONL
-    // output vs. `--workers 1`. Slice 3d: prior code ran a sequential
-    // `for (task_index, (seed, model_side)) in tasks.iter()` loop here
-    // because the CLI's `--workers` flag was a no-op (the 50k-row corpus
-    // was produced by 8 hand-launched processes per `docs/ai-agent-state/
-    // digests/2026-05-25.md`). Mirror of `eval_gate.rs:540-620` work-stealing
-    // pool — single shared `OnceLock<InferenceSession>` reused by all
-    // workers (G5 lock-free `UnsafeCell<Session>` contract verified at
-    // workers=16 → 7.11× for the gate path).
-    let outcomes: Arc<Mutex<Vec<Option<GameRecord>>>> =
+    // Per-task slot — populated in worker threads, drained in
+    // task-index order by the main thread for aggregation and JSONL
+    // writes. Pre-serializing the JSONL lines inside each worker
+    // (rather than shipping the borrow-laden `GameRecord` across the
+    // boundary) keeps the slot trivially `Send` and pushes the
+    // serialization cost off the single-threaded drain path.
+    struct Outcome {
+        terminal_reason: String,
+        winner: Option<String>,
+        /// One pre-serialized JSONL line per emitted record (no
+        /// trailing newline). For `--record-rows` this is one entry
+        /// per MCTS decision row; otherwise it is a single entry
+        /// holding the per-game wrapper.
+        lines: Vec<String>,
+    }
+    let outcomes: Arc<Mutex<Vec<Option<Outcome>>>> =
         Arc::new(Mutex::new((0..total_tasks).map(|_| None).collect()));
     let task_cursor = Arc::new(AtomicUsize::new(0));
     let tasks_arc: Arc<Vec<(u32, SideId)>> = Arc::new(tasks);
@@ -610,6 +679,7 @@ fn main() -> Result<()> {
     let seed_base = args.seed_base;
     let max_steps = args.max_steps;
     let record_rows = args.record_rows;
+    let record_rollout_leaf_rows = args.record_rollout_leaf_rows;
 
     std::thread::scope(|s| -> Result<()> {
         let mut handles = Vec::with_capacity(effective_workers);
@@ -626,16 +696,18 @@ fn main() -> Result<()> {
                         break;
                     }
                     let (seed, model_side) = tasks_arc[task_index];
-                    // Slice 1: deck-pair resolution per game. `task_index`
-                    // is the game-relative index used both by the sampler
-                    // (uniform mod n_pairs) and by the manifest tag.
-                    let resolved = sampling_arc.resolve(seed_base, task_index as u32);
+                    let task_index_u32 = task_index as u32;
+                    // Slice 1: deck-pair resolution per game.
+                    // `task_index` is the game-relative index used
+                    // both by the sampler (uniform mod n_pairs) and
+                    // by the manifest tag.
+                    let resolved = sampling_arc.resolve(seed_base, task_index_u32);
                     let (player_deck_opt, opponent_deck_opt) = resolved
                         .as_ref()
                         .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
                         .unwrap_or((None, None));
                     let (player_deck_id, opponent_deck_id) =
-                        manifest_pair_for(&sampling_arc, seed_base, task_index as u32);
+                        manifest_pair_for(&sampling_arc, seed_base, task_index_u32);
                     let record = drive_one_game(
                         seed,
                         max_steps,
@@ -648,9 +720,27 @@ fn main() -> Result<()> {
                         opponent_deck_opt,
                         player_deck_id,
                         opponent_deck_id,
+                        record_rollout_leaf_rows,
                     );
+                    // TS-flat shape emits one line per decision/leaf row;
+                    // otherwise one line per game wrapper. Serialize here
+                    // so the drain loop is pure I/O.
+                    let lines = if record_rows || record_rollout_leaf_rows {
+                        let mut out = Vec::with_capacity(record.rows.len());
+                        for row in record.rows.iter() {
+                            out.push(serde_json::to_string(row)?);
+                        }
+                        out
+                    } else {
+                        vec![serde_json::to_string(&record)?]
+                    };
+                    let outcome = Outcome {
+                        terminal_reason: record.terminal_reason,
+                        winner: record.winner,
+                        lines,
+                    };
                     let mut guard = outcomes.lock().expect("outcomes mutex poisoned");
-                    guard[task_index] = Some(record);
+                    guard[task_index] = Some(outcome);
                 }
                 Ok(())
             }));
@@ -661,46 +751,32 @@ fn main() -> Result<()> {
         Ok(())
     })?;
 
-    // Walk outcomes in task-index order for deterministic aggregation +
-    // JSONL emission. Worker completion order is non-deterministic, but
-    // output ordering is — single-worker and multi-worker runs must
-    // produce byte-identical `--out` files for the parity smoke to pass.
-    let outcomes_vec = Arc::try_unwrap(outcomes)
-        .map_err(|_| anyhow::anyhow!("outcomes Arc still has outstanding references"))?
-        .into_inner()
-        .map_err(|e| anyhow::anyhow!("outcomes mutex poisoned: {}", e))?;
-    for record in outcomes_vec.into_iter() {
-        let record = record.expect("worker did not fill outcome slot");
-        match record.terminal_reason.as_str() {
+    // Drain outcomes in task-index order so aggregation and JSONL
+    // writes are byte-identical to the sequential (`--workers 1`)
+    // baseline, regardless of worker completion order. The
+    // single-process worker pool only changes scheduling, not the
+    // per-game RNG (each game's RNG is seeded from `seed_base + i`
+    // independently), so deterministic re-ordering here is enough.
+    let mut guard = outcomes.lock().expect("outcomes mutex poisoned");
+    for slot in guard.iter_mut() {
+        let o = slot.take().expect("worker did not fill outcome slot");
+        match o.terminal_reason.as_str() {
             "game_over" => terminal_reasons.game_over += 1,
             "stalled" => terminal_reasons.stalled += 1,
             _ => terminal_reasons.max_steps += 1,
         }
-        match record.winner.as_deref() {
+        match o.winner.as_deref() {
             Some("player") => player_wins += 1,
             Some("opponent") => opponent_wins += 1,
             _ => draws += 1,
         }
         if let Some(w) = writer.as_mut() {
-            if record_rows {
-                // TS-flat shape: one line per decision row. This is what
-                // `training/uma_ai/selfplay_dataset.py:load_mcts_selfplay_samples`
-                // expects (Slice 2 schema gap — `kind`/`schemaVersion`/
-                // `sideId`/`observation`/`legalActions`/`visitDistribution`/
-                // `rootPriors`/`rootValue`/`valueTarget`/`result` per row).
-                for row in record.rows.iter() {
-                    let line = serde_json::to_string(row)?;
-                    writeln!(w, "{}", line)?;
-                }
-            } else {
-                // Per-game wrapper retained for callers that opted out of
-                // `--record-rows` (e.g., wall-clock probe runs that just
-                // want game summaries).
-                let line = serde_json::to_string(&record)?;
+            for line in o.lines.iter() {
                 writeln!(w, "{}", line)?;
             }
         }
     }
+    drop(guard);
 
     let elapsed = start.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
@@ -780,6 +856,7 @@ mod tests {
             }),
             player_deck_id: "matikanetannhauser".to_string(),
             opponent_deck_id: "matikanetannhauser".to_string(),
+            leaf_state: None,
         };
         let value = serde_json::to_value(&row).expect("serialize row");
         let object = value.as_object().expect("row is a JSON object");
@@ -860,6 +937,7 @@ mod tests {
             result: None,
             player_deck_id: "matikanetannhauser".to_string(),
             opponent_deck_id: "matikanetannhauser".to_string(),
+            leaf_state: None,
         };
         let mut rows = vec![make("player"), make("opponent"), make("player")];
         fill_terminal_result(&mut rows, Some("opponent"), 1, 3);
