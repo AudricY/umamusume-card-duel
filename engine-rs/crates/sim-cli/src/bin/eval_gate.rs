@@ -160,6 +160,22 @@ struct Args {
     /// CUDA device id (only honored under `--device cuda`).
     #[arg(long, default_value_t = 0)]
     cuda_device_id: i32,
+    /// Slice B2 of `docs/ai-research/scoping/gpu-batched-inference-throughput.md`.
+    /// Max in-flight batch size for the `BatchedDispatcher`. `1` (default)
+    /// is bit-identical to the pre-B2 path — no dispatcher thread, no
+    /// channel overhead. `>1` spawns a per-session dispatcher that
+    /// gathers up to this many concurrent `predict_v3` calls into a
+    /// single `Session::run`. B1 evidence: CUDA crosses CPU at B≈32 on
+    /// bare ONNX dispatch.
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
+    /// Micro-deadline (us) the dispatcher waits for additional requests
+    /// before flushing a partial batch. Only honored when `--batch-size
+    /// > 1`. Tuned per recipe — small enough that a lone worker after
+    /// a dead period doesn't stall; large enough that 16+ workers can
+    /// fill the batch under typical game-step jitter.
+    #[arg(long, default_value_t = 200)]
+    batch_wait_us: u64,
     /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`.
     /// Deck-pair sampling mode:
     ///   - `fixed` (default) — every game uses the registry defaults
@@ -445,12 +461,17 @@ fn main() -> Result<()> {
                     "sim-eval-gate: --onnx-path is required when --prior policy or --leaf value-head is set"
                 )
             })?;
-        let session = InferenceSession::load_on(std::path::Path::new(onnx), device)
-            .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
+        let session = InferenceSession::load_on_with_batching(
+            std::path::Path::new(onnx),
+            device,
+            args.batch_size,
+            args.batch_wait_us,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
         inference::set_global(session);
         eprintln!(
-            "sim-eval-gate: loaded inference session from {} (device={:?})",
-            onnx, device
+            "sim-eval-gate: loaded inference session from {} (device={:?}, batch_size={}, batch_wait_us={})",
+            onnx, device, args.batch_size, args.batch_wait_us
         );
     } else if !model_url.is_empty() {
         eprintln!(
@@ -874,6 +895,22 @@ fn main() -> Result<()> {
     }
     let json = serde_json::to_string_pretty(&value)?;
     println!("{}", json);
+
+    // Slice B2: log batched-dispatcher mean fill. Only meaningful when
+    // `--batch-size > 1`; if the dispatcher served zero batches (B=1
+    // fast-path or model not actually used), skip the line.
+    if let Some(sess) = inference::global() {
+        if let Some(disp) = sess.dispatcher() {
+            let (batches, requests) = disp.stats();
+            if batches > 0 {
+                let mean_fill = requests as f64 / batches as f64;
+                eprintln!(
+                    "sim-eval-gate: batched_inference batches={} requests={} mean_fill={:.2}",
+                    batches, requests, mean_fill
+                );
+            }
+        }
+    }
 
     if let Some(path) = args.manifest_out.as_ref() {
         let p = PathBuf::from(path);
