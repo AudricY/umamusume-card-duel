@@ -225,6 +225,13 @@ _SCHEMA_TABLE: tuple[tuple[int, bool, bool, str, str], ...] = (
         "v3.3",
         "167-d v3.3 additive opp-flag tail (embedding inputs, no slot tokens; v3.1 head + 3 opp-side used* bits)",
     ),
+    (
+        STATE_DIM_V3_3,
+        True,
+        True,
+        "v3.4",
+        "167-d v3.4 compound axis (embedding + slot inputs; v3.3 state vector + v3.2 per-Uma slot tokens)",
+    ),
 )
 _PLACEHOLDER_DIMS: dict[int, str] = {}
 
@@ -246,7 +253,7 @@ def _lookup_schema(
     return None
 
 
-_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2", "v3.3"}
+_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2", "v3.3", "v3.4"}
 
 
 def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:

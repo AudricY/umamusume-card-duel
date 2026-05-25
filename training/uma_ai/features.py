@@ -76,6 +76,12 @@ STATE_FEATURE_SCHEMA_VERSION_V3_1 = 3.1
 # without bumping state_dim; v3.3 stacks on top of v3.2).
 STATE_DIM_V3_3 = 167  # v33-additive-tail: v3.1 head + 3-bit opp-side flag tail
 STATE_FEATURE_SCHEMA_VERSION_V3_3 = 3.3
+# v34-compound-axis: v3.3 state vector (state_dim=167) PLUS v3.2 per-Uma
+# slot tokens (`uses_uma_slot_tokens=True`). The state-vector dim itself
+# is unchanged from v3.3; v3.4 differs only by the slot-token ONNX input
+# pair. Labeled 3.4 in meta.json when both axes are active so downstream
+# tooling can distinguish the compound ckpt from a plain v3.3 ckpt.
+STATE_FEATURE_SCHEMA_VERSION_V3_4 = 3.4
 assert STATE_DIM == STATE_DIM_V3, (
     f"STATE_DIM ({STATE_DIM}) must equal the frozen v3.0 dim "
     f"STATE_DIM_V3 ({STATE_DIM_V3}). The 110-d v3.0 builder is frozen for "
