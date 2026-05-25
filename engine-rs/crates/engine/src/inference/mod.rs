@@ -488,6 +488,72 @@ impl InferenceSession {
     pub fn onnx_path(&self) -> &Path {
         &self.onnx_path
     }
+
+    /// B6 direct batched API for intra-tree wave-batching (see
+    /// `docs/ai-research/scoping/gpu-batched-inference-throughput.md`).
+    /// Packs `batch.len()` `(observation, legal_actions)` rows with the
+    /// same `max_n_actions`-padding scheme the cross-thread
+    /// `BatchedDispatcher` uses, issues a single `Session::run` with
+    /// `B = batch.len()`, slices the outputs per row, and runs the same
+    /// `greedy_masked_softmax` on each row's `logits[..n_actions]` slice.
+    ///
+    /// This is a synchronous direct call on the inline session — it
+    /// bypasses the cross-thread dispatcher entirely. The wave caller
+    /// already has B requests in hand from one tree's leaf-selection
+    /// phase, so paying the per-request mpsc + condvar overhead is
+    /// pointless when one batched `Session::run` covers the whole wave.
+    ///
+    /// **Constraint:** the session must be in the `Inline` storage
+    /// variant. `load_on_with_batching(_, _, max_batch > 1, _)` moves the
+    /// `Session` into the dispatcher thread (single-threaded ownership
+    /// invariant), so wave mode is incompatible with the cross-thread
+    /// dispatcher; the caller (`sim-eval-gate`) is expected to reject the
+    /// `--wave-size > 1` AND `--batch-size > 1` combination at flag-parse
+    /// time. If `predict_v3_batch` is called against a `Dispatched`
+    /// session, it returns `InferenceError::OutputShape` describing the
+    /// constraint.
+    ///
+    /// Output order mirrors input order: `predictions[i]` corresponds to
+    /// `batch[i]`.
+    pub fn predict_v3_batch(
+        &self,
+        batch: &[(&PublicObservation, &[LegalAiAction])],
+    ) -> Result<Vec<PredictionV3>, InferenceError> {
+        if batch.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Single-row fast path keeps the inline call shape (avoids the
+        // n_actions-padding allocator pressure for the trivial wave-size-1
+        // case; matters because the wave loop's own bit-identical-at-
+        // wave_size=1 guarantee already calls the serial path, but a
+        // caller building B6 follow-ons may still poke single rows here).
+        if batch.len() == 1 {
+            let (obs, legal) = batch[0];
+            return Ok(vec![self.predict_v3(obs, legal)?]);
+        }
+        let guard = match &self.session {
+            SessionStorage::Inline(g) => g,
+            SessionStorage::Dispatched => {
+                return Err(InferenceError::OutputShape(
+                    "predict_v3_batch requires inline session storage; this session was \
+                     constructed with load_on_with_batching(max_batch>1) which moves the \
+                     Session into a dispatcher thread. The wave-batching caller and the \
+                     cross-thread dispatcher are mutually exclusive — pick one."
+                        .to_string(),
+                ));
+            }
+        };
+        let mut rows: Vec<PackedRow> = Vec::with_capacity(batch.len());
+        for (obs, legal) in batch.iter() {
+            if legal.is_empty() {
+                return Err(InferenceError::SchemaMismatch(
+                    "legalActions must not be empty".into(),
+                ));
+            }
+            rows.push(pack_row(self.schema, obs, legal)?);
+        }
+        run_inline_batch(guard, self.schema, rows)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -650,6 +716,196 @@ fn run_inline_row(
         probs,
         value: value_scalar,
     })
+}
+
+/// Run a stacked-B batch through the inline session and return per-row
+/// `PredictionV3`s in input order. Shared between the public
+/// `predict_v3_batch` API (B6 intra-tree wave batching) and the
+/// cross-thread dispatcher's `run_batch` (B2). Behaviour is identical to
+/// the dispatcher path: same n_actions-padding, same `Session::run`
+/// shape, same per-row `greedy_masked_softmax`. The only difference is
+/// the `Session` access pattern — inline uses the `UnsafeCell`
+/// punch-through (ORT's `Session::run` is documented thread-safe), the
+/// dispatcher path owns the Session single-threadedly.
+fn run_inline_batch(
+    guard: &SessionGuard,
+    schema: GraphSchema,
+    rows: Vec<PackedRow>,
+) -> Result<Vec<PredictionV3>, InferenceError> {
+    let n_batch = rows.len();
+    if n_batch == 0 {
+        return Ok(Vec::new());
+    }
+    let state_dim = rows[0].state_dim;
+    let max_n = rows.iter().map(|r| r.n_actions).max().unwrap_or(0);
+    if max_n == 0 {
+        return Err(InferenceError::SchemaMismatch(
+            "predict_v3_batch: every row has empty legal_actions".into(),
+        ));
+    }
+    let needs_slots = matches!(schema, GraphSchema::V3_2 | GraphSchema::V3_4);
+
+    let mut state_buf: Vec<f32> = Vec::with_capacity(n_batch * state_dim);
+    let mut action_features_buf: Vec<f32> = vec![0.0; n_batch * max_n * ACTION_DIM];
+    let mut action_mask_buf: Vec<bool> = vec![false; n_batch * max_n];
+    let mut card_ids_buf: Vec<i64> = Vec::with_capacity(n_batch * NUM_ZONES * MAX_CARDS_PER_ZONE);
+    let mut action_card_idx_buf: Vec<i64> = vec![0; n_batch * max_n * 2];
+    let mut slot_card_ids_buf: Vec<i64> = if needs_slots {
+        Vec::with_capacity(n_batch * UMA_SLOT_COUNT)
+    } else {
+        Vec::new()
+    };
+    let mut slot_features_buf: Vec<f32> = if needs_slots {
+        Vec::with_capacity(n_batch * UMA_SLOT_COUNT * UMA_SLOT_FEATURE_DIM)
+    } else {
+        Vec::new()
+    };
+
+    for (row_idx, r) in rows.iter().enumerate() {
+        if r.state_dim != state_dim {
+            return Err(InferenceError::SchemaMismatch(format!(
+                "predict_v3_batch: state_dim {} != {} on row {}",
+                r.state_dim, state_dim, row_idx
+            )));
+        }
+        state_buf.extend_from_slice(&r.state);
+        let af_dst_off = row_idx * max_n * ACTION_DIM;
+        let af_src_len = r.n_actions * ACTION_DIM;
+        action_features_buf[af_dst_off..af_dst_off + af_src_len]
+            .copy_from_slice(&r.action_features);
+        let am_dst_off = row_idx * max_n;
+        for i in 0..r.n_actions {
+            action_mask_buf[am_dst_off + i] = true;
+        }
+        card_ids_buf.extend_from_slice(&r.card_ids);
+        let aci_dst_off = row_idx * max_n * 2;
+        let aci_src_len = r.n_actions * 2;
+        action_card_idx_buf[aci_dst_off..aci_dst_off + aci_src_len]
+            .copy_from_slice(&r.action_card_idx);
+        if needs_slots {
+            let slot_ids = r.slot_card_ids.as_ref().ok_or_else(|| {
+                InferenceError::SchemaMismatch(
+                    "predict_v3_batch: slot tensors missing on v3.2/v3.4 row".into(),
+                )
+            })?;
+            let slot_feats = r.slot_features.as_ref().ok_or_else(|| {
+                InferenceError::SchemaMismatch(
+                    "predict_v3_batch: slot features missing on v3.2/v3.4 row".into(),
+                )
+            })?;
+            slot_card_ids_buf.extend_from_slice(slot_ids);
+            slot_features_buf.extend_from_slice(slot_feats);
+        }
+    }
+
+    let state_arr = Array::from_shape_vec((n_batch, state_dim), state_buf)
+        .map_err(|e| InferenceError::OutputShape(format!("state reshape: {e}")))?;
+    let action_features_arr =
+        Array::from_shape_vec((n_batch, max_n, ACTION_DIM), action_features_buf)
+            .map_err(|e| InferenceError::OutputShape(format!("action_features reshape: {e}")))?;
+    let action_mask_arr = Array::from_shape_vec((n_batch, max_n), action_mask_buf)
+        .map_err(|e| InferenceError::OutputShape(format!("action_mask reshape: {e}")))?;
+    let card_ids_arr =
+        Array::from_shape_vec((n_batch, NUM_ZONES, MAX_CARDS_PER_ZONE), card_ids_buf)
+            .map_err(|e| InferenceError::OutputShape(format!("card_ids reshape: {e}")))?;
+    let action_card_idx_arr =
+        Array::from_shape_vec((n_batch, max_n, 2), action_card_idx_buf)
+            .map_err(|e| InferenceError::OutputShape(format!("action_card_idx reshape: {e}")))?;
+    let slot_card_ids_arr = if needs_slots {
+        Some(
+            Array::from_shape_vec((n_batch, UMA_SLOT_COUNT), slot_card_ids_buf).map_err(
+                |e| InferenceError::OutputShape(format!("uma_slot_card_ids reshape: {e}")),
+            )?,
+        )
+    } else {
+        None
+    };
+    let slot_features_arr = if needs_slots {
+        Some(
+            Array::from_shape_vec(
+                (n_batch, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM),
+                slot_features_buf,
+            )
+            .map_err(|e| InferenceError::OutputShape(format!("uma_slot_features reshape: {e}")))?,
+        )
+    } else {
+        None
+    };
+
+    let inputs = match schema {
+        GraphSchema::V3_0
+        | GraphSchema::V3_1
+        | GraphSchema::V3_3
+        | GraphSchema::V3_5 => ort::inputs![
+            "state_features" => TensorRef::from_array_view(&state_arr)?,
+            "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+            "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+            "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+            "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+        ],
+        GraphSchema::V3_2 | GraphSchema::V3_4 => {
+            let slot_ids = slot_card_ids_arr
+                .as_ref()
+                .expect("slot tensors built above for v3.2/v3.4");
+            let slot_feats = slot_features_arr
+                .as_ref()
+                .expect("slot tensors built above for v3.2/v3.4");
+            ort::inputs![
+                "state_features" => TensorRef::from_array_view(&state_arr)?,
+                "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+                "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
+                "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
+            ]
+        }
+    };
+
+    let (logits_flat, value_flat) = match guard {
+        SessionGuard::Cpu(cell) | SessionGuard::Cuda(cell) => {
+            // Safety: see `unsafe impl Sync for SessionGuard`. ORT's
+            // `Session::run` is documented thread-safe for concurrent
+            // calls on a single session for both CPU and CUDA EPs; the
+            // `&mut self` is a Rust-API artifact.
+            let sess: &mut Session = unsafe { &mut *cell.get() };
+            let outputs = sess.run(inputs)?;
+            let (_, l) = outputs[0]
+                .try_extract_tensor::<f32>()
+                .map_err(InferenceError::from)?;
+            let (_, v) = outputs[1]
+                .try_extract_tensor::<f32>()
+                .map_err(InferenceError::from)?;
+            (l.to_vec(), v.to_vec())
+        }
+    };
+
+    if logits_flat.len() != n_batch * max_n {
+        return Err(InferenceError::OutputShape(format!(
+            "logits has {} elements, expected {} ({} x {})",
+            logits_flat.len(),
+            n_batch * max_n,
+            n_batch,
+            max_n
+        )));
+    }
+    if value_flat.len() != n_batch {
+        return Err(InferenceError::OutputShape(format!(
+            "value has {} elements, expected {}",
+            value_flat.len(),
+            n_batch
+        )));
+    }
+
+    let mut out: Vec<PredictionV3> = Vec::with_capacity(n_batch);
+    for (row_idx, r) in rows.iter().enumerate() {
+        let row_start = row_idx * max_n;
+        let row_logits = &logits_flat[row_start..row_start + r.n_actions];
+        let probs = greedy_masked_softmax(row_logits);
+        let value = value_flat[row_idx];
+        out.push(PredictionV3 { probs, value });
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,5 +1755,130 @@ mod tests {
         drop(batched_arc);
         drop(samples_arc);
         drop(inline);
+    }
+
+    /// B6 acceptance: `predict_v3_batch` on a CPU `InferenceSession`
+    /// produces bit-identical outputs vs the same N rows driven
+    /// individually through `predict_v3`.
+    ///
+    /// Why bit-identical on CPU: same B1 invariant as the dispatcher
+    /// test — single-threaded ORT (intra=inter=1) is reduction-order-
+    /// stable across batch sizes. Same `< 1e-5` gate.
+    ///
+    /// `#[ignore]`d because it requires `ORT_DYLIB_PATH` + the R110
+    /// ckpt; orchestrator opts in explicitly. Same SIGSEGV-at-exit
+    /// caveat as the dispatcher test (two Session instances in one
+    /// process — though here only one session ever lives at a time,
+    /// so the caveat is theoretical).
+    #[test]
+    #[ignore]
+    fn predict_v3_batch_matches_individual_predict_v3_on_cpu() {
+        use crate::core::constants::SideId;
+        use crate::core::random::{with_rng, Rng};
+        use crate::headless_setup::setup_ai_vs_ai_game;
+        use crate::policy::actions::enumerate_legal_ai_actions;
+        use crate::policy::observation::build_public_observation;
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let onnx_path_buf = PathBuf::from(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("runs/R110-W6-repro/iter-0/policy.onnx");
+        let onnx_path = onnx_path_buf.as_path();
+        if !onnx_path.exists() {
+            eprintln!(
+                "predict_v3_batch_matches_individual_predict_v3_on_cpu: skipping (missing {})",
+                onnx_path.display()
+            );
+            return;
+        }
+
+        // Collect 4 distinct (PublicObservation, Vec<LegalAiAction>)
+        // pairs the same way the dispatcher parity test does.
+        let mut samples: Vec<(PublicObservation, Vec<LegalAiAction>)> = Vec::new();
+        for seed in &[1u32, 2, 3, 4] {
+            let seed_str = format!("{}:test", seed);
+            let rng = Rng::from_seed(seed_str.as_str(), "test");
+            let (state, _used) = with_rng(rng, || setup_ai_vs_ai_game());
+            let side = if seed % 2 == 0 {
+                SideId::Player
+            } else {
+                SideId::Opponent
+            };
+            let legal_seed = format!("{}:legal", seed);
+            let (legal, _used) = with_rng(
+                Rng::from_seed(legal_seed.as_str(), "legal"),
+                || enumerate_legal_ai_actions(&state, side),
+            );
+            if legal.is_empty() {
+                continue;
+            }
+            let obs = build_public_observation(&state, side);
+            samples.push((obs, legal));
+        }
+        assert!(
+            samples.len() >= 4,
+            "need at least 4 distinct samples, got {}",
+            samples.len()
+        );
+
+        let session = InferenceSession::load_on(onnx_path, Device::Cpu)
+            .expect("load inline CPU session");
+
+        let individual_outputs: Vec<PredictionV3> = samples
+            .iter()
+            .map(|(obs, legal)| {
+                session
+                    .predict_v3(obs, legal)
+                    .expect("individual predict_v3")
+            })
+            .collect();
+
+        let batch_refs: Vec<(&PublicObservation, &[LegalAiAction])> = samples
+            .iter()
+            .map(|(obs, legal)| (obs, legal.as_slice()))
+            .collect();
+        let batched_outputs = session
+            .predict_v3_batch(&batch_refs)
+            .expect("predict_v3_batch");
+
+        assert_eq!(batched_outputs.len(), individual_outputs.len());
+        let mut worst_dprob: f32 = 0.0;
+        let mut worst_dvalue: f32 = 0.0;
+        for (i, (ind, bat)) in individual_outputs.iter().zip(batched_outputs.iter()).enumerate() {
+            assert_eq!(
+                ind.probs.len(),
+                bat.probs.len(),
+                "sample {} probs len mismatch",
+                i
+            );
+            for (a, b) in ind.probs.iter().zip(bat.probs.iter()) {
+                let d = (a - b).abs();
+                if d > worst_dprob {
+                    worst_dprob = d;
+                }
+            }
+            let dv = (ind.value - bat.value).abs();
+            if dv > worst_dvalue {
+                worst_dvalue = dv;
+            }
+        }
+        eprintln!(
+            "predict_v3_batch_matches_individual_predict_v3_on_cpu: worst dprob={:e} dvalue={:e}",
+            worst_dprob, worst_dvalue
+        );
+        assert!(
+            worst_dprob < 1e-5,
+            "max|Δprob| {:e} exceeds 1e-5 on CPU — n_actions padding may be wrong",
+            worst_dprob
+        );
+        assert!(
+            worst_dvalue < 1e-5,
+            "max|Δvalue| {:e} exceeds 1e-5 on CPU",
+            worst_dvalue
+        );
+
+        drop(session);
     }
 }

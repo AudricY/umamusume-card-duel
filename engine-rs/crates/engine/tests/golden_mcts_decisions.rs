@@ -60,6 +60,8 @@ fn first_mcts_decision(seed: &str) -> (u32, usize, usize, String, u32, f64) {
         root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: String::new(),
         onnx_path: None,
+        wave_size: 1,
+        virtual_loss: 1.0,
     };
 
     let rng = Rng::from_seed(format!("{}:selfplay", seed).as_str(), "selfplay");

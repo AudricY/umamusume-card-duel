@@ -73,6 +73,29 @@ pub struct MctsConfig {
     /// remove in the follow-up r12_orchestrator-wiring slice.
     #[serde(default)]
     pub model_url: String,
+    /// B6 intra-tree wave-batching (see
+    /// `docs/ai-research/scoping/gpu-batched-inference-throughput.md`).
+    /// `1` (default) keeps the historical serial MCTS loop bit-identical.
+    /// `>1` selects `wave_size` leaves per cycle using virtual loss,
+    /// batches the per-leaf inference calls into a single
+    /// `predict_v3_batch`, then backs them all up. Intended to sustain
+    /// higher dispatcher fill than inter-game-only batching can hit
+    /// (B5 showed fill capped at ~46-48 because each game's MCTS is
+    /// serial-per-tree). Mutually exclusive with the cross-thread
+    /// batched dispatcher (`InferenceSession::load_on_with_batching`
+    /// with `max_batch > 1`); `sim-eval-gate` rejects the combination
+    /// at flag-parse time.
+    #[serde(default = "default_wave_size")]
+    pub wave_size: u32,
+    /// B6 virtual-loss pessimization applied during wave-member
+    /// selection. AlphaGo-standard `1.0`. Wave member k adds
+    /// `virtual_loss` to `visits[a]` and subtracts `virtual_loss` from
+    /// `wsum[a]` along its selected path; backup of wave member k undoes
+    /// the virtual loss first, then applies the real `visits[a] += 1` /
+    /// `wsum[a] += leaf_scalar`. Net effect at wave-end is identical to
+    /// serial backup. Only consulted when `wave_size > 1`.
+    #[serde(default = "default_virtual_loss")]
+    pub virtual_loss: f64,
     /// R16-P3 spike Option A: path to the ONNX policy file. When set,
     /// `crate::inference::set_global` should have been invoked with a
     /// session loaded from this path before MCTS launches (typically by
@@ -105,12 +128,22 @@ impl Default for MctsConfig {
             root_action_selection: MctsRootActionSelection::MaxVisits,
             model_url: String::new(),
             onnx_path: None,
+            wave_size: 1,
+            virtual_loss: 1.0,
         }
     }
 }
 
 fn default_root_action_selection() -> MctsRootActionSelection {
     MctsRootActionSelection::MaxVisits
+}
+
+fn default_wave_size() -> u32 {
+    1
+}
+
+fn default_virtual_loss() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

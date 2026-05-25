@@ -597,6 +597,11 @@ fn main() -> Result<()> {
         root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: args.model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
+        // B6 wave-batching opt-in is wired through `sim-eval-gate` only
+        // for now; selfplay keeps the serial loop until the strength
+        // axis lands a recipe that needs intra-tree waves.
+        wave_size: 1,
+        virtual_loss: 1.0,
     };
     // Slice 3d: honor `--workers N` by running games concurrently in
     // N OS threads within one process, sharing the OnceLock

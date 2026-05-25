@@ -34,6 +34,8 @@ fn default_config(sims: u32) -> MctsConfig {
         root_action_selection: MctsRootActionSelection::MaxVisits,
         model_url: String::new(),
         onnx_path: None,
+        wave_size: 1,
+        virtual_loss: 1.0,
     }
 }
 

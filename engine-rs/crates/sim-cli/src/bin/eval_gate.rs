@@ -176,6 +176,27 @@ struct Args {
     /// fill the batch under typical game-step jitter.
     #[arg(long, default_value_t = 200)]
     batch_wait_us: u64,
+    /// Slice B6 of `docs/ai-research/scoping/gpu-batched-inference-throughput.md`.
+    /// Intra-tree wave size for MCTS. `1` (default) keeps the historical
+    /// serial loop bit-identical. `>1` selects this many leaves per
+    /// wave (with virtual loss along each path so wave members diverge),
+    /// batches their `predict_v3` calls into a single
+    /// `InferenceSession::predict_v3_batch`, then backs them all up.
+    /// Pushes dispatcher fill from the workload-imposed ~46/64 ceiling
+    /// (B5 finding) up toward `wave_size` regardless of the cross-game
+    /// worker count. Mutually exclusive with `--batch-size > 1` (the
+    /// cross-thread batched dispatcher); the two mechanisms target the
+    /// same lever and combining them just adds the dispatcher's mpsc +
+    /// per-request channel cost on top of the wave's intent.
+    #[arg(long, default_value_t = 1)]
+    wave_size: u32,
+    /// AlphaGo-standard virtual loss applied during wave-member
+    /// selection. Only consulted when `--wave-size > 1`. `1.0` (default)
+    /// matches AlphaGo Zero / Lc0; lower values pessimize less and let
+    /// wave members converge on the same path more often, higher values
+    /// over-spread exploration.
+    #[arg(long, default_value_t = 1.0)]
+    virtual_loss: f64,
     /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`.
     /// Deck-pair sampling mode:
     ///   - `fixed` (default) — every game uses the registry defaults
@@ -427,6 +448,8 @@ fn main() -> Result<()> {
         root_action_selection,
         model_url: model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
+        wave_size: args.wave_size,
+        virtual_loss: args.virtual_loss,
     };
     let selection = args.selection.clone();
     let _ = args.min_ci_lower;
@@ -449,6 +472,21 @@ fn main() -> Result<()> {
         },
         other => anyhow::bail!("--device must be one of 'cpu' or 'cuda' (got {})", other),
     };
+    // B6 mutual-exclusion: intra-tree wave batching and cross-thread
+    // batched dispatcher target the same throughput lever. Combining
+    // them adds the dispatcher's mpsc + per-request channel cost on top
+    // of the wave's intent (and the wave caller expects an Inline
+    // session — `predict_v3_batch` rejects Dispatched storage with an
+    // explicit error, but rejecting at flag-parse time is louder).
+    if args.wave_size > 1 && args.batch_size > 1 {
+        anyhow::bail!(
+            "--wave-size > 1 and --batch-size > 1 are mutually exclusive: \
+             wave-batching runs synchronously on the inline session and \
+             does not benefit from the cross-thread dispatcher. Pick one: \
+             use --wave-size for intra-tree batching (single-game waves), \
+             --batch-size for cross-game inter-thread batching."
+        );
+    }
     let needs_inference = selection != "random"
         && (matches!(prior, MctsPrior::Policy) || matches!(leaf, MctsLeaf::ValueHead));
     if needs_inference {
@@ -509,8 +547,8 @@ fn main() -> Result<()> {
     }
 
     eprintln!(
-        "sim-eval-gate: sims={} K={} rollout_steps={} games-per-side={} model-side={} (=> {} total tasks) base={} deck-sampling={} challenger={:?} baseline={:?}",
-        args.sims, args.k, args.rollout_steps, args.seeds, args.model_side, tasks.len(), args.seed_base, args.deck_sampling, args.challenger, args.baseline,
+        "sim-eval-gate: sims={} K={} rollout_steps={} games-per-side={} model-side={} (=> {} total tasks) base={} deck-sampling={} wave_size={} virtual_loss={} challenger={:?} baseline={:?}",
+        args.sims, args.k, args.rollout_steps, args.seeds, args.model_side, tasks.len(), args.seed_base, args.deck_sampling, args.wave_size, args.virtual_loss, args.challenger, args.baseline,
     );
 
     let start = Instant::now();
@@ -816,6 +854,11 @@ fn main() -> Result<()> {
         "progressOut": args.progress_out,
         "workers": args.workers,
         "deckSampling": args.deck_sampling,
+        "waveSize": args.wave_size,
+        "virtualLoss": args.virtual_loss,
+        "batchSize": args.batch_size,
+        "batchWaitUs": args.batch_wait_us,
+        "device": args.device,
     });
     let status = if passed { "PASS" } else { "FAIL" };
     let inner = GateInnerSummary {

@@ -355,6 +355,11 @@ fn build_config(args: &McTsArgs) -> MctsConfig {
         // through a sibling FFI export. Left None here so the existing
         // NAPI smokes (uniform/rollout-only) keep building.
         onnx_path: None,
+        // NAPI consumer keeps the serial loop; B6 wave-batching is only
+        // wired through the sim-cli surface for now (see
+        // `docs/ai-research/scoping/gpu-batched-inference-throughput.md`).
+        wave_size: 1,
+        virtual_loss: 1.0,
     }
 }
 
