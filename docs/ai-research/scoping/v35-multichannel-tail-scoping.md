@@ -1,7 +1,7 @@
 # v3.5 Multichannel Additive Tail — Orthogonal-Bundle Scoping
 
 - **Date:** 2026-05-25
-- **Status:** IMPLEMENTED — pre-registered scope LANDED 2026-05-25. Python builder + Rust mirror (commit `99a9ba1`), inference dispatch (commit `de4f13a`), ckpt expander + smokes (commit `66b709c`). A1 training arm USER-GATED. Init parity verified empirically: Δlogits=7.15e-07 against v3.3 lineage best (`runs/R16-P1-v33-ablation/loop/iter-1/checkpoint.pt`).
+- **Status:** **LANDED-CAP-CONFIRMED 2026-05-25** — A1 fired user-approved 2026-05-25; result `runs/R16-P1-v35-iter1-tight-gate/gate.manifest.json` wl=0.5856 [0.5856, 0.6049] at n=10k, **SOFT SHIP band (non-regression) but BELOW v3.3 0.5910 by −0.0054**. Pre-registered H1 (channel-orthogonal direct sum) FALSIFIED — same pattern as v3.4 (slots). v3.5 RETIRED as production candidate. Canonical writeup: `docs/ai-research/progress/r110.md §4i`. Implementation chain: commits `99a9ba1` / `de4f13a` / `66b709c` / `1362130` (scope + builder + dispatch + init + smokes + queue). Init parity verified empirically: Δlogits=7.15e-07.
 - **Parent:** `v33-feature-gap-brainstorm-handoff.md` §5 step 3 (further additive tail) + lesson from `progress/r110.md §4h` (v3.4 compound-axis falsified).
 - **Predecessor schema:** v3.3 (167-d, no slots, v3-action) — `runs/R16-P1-v33-iter1-tight-gate/gate.manifest.json` wl=0.5910 (confirmatory 0.5863, avg ≈0.5887). Highest of any schema tested.
 - **Scope:** A single thick additive tail bundling **five signal-channel-orthogonal** items onto v3.3. Replaces the "one slice per bump" cadence with a deliberately wider bump now that v3.3 is the production candidate and v3.4 has proven the failure mode of compounding overlapping channels.
@@ -240,7 +240,15 @@ Per handoff §6 "Constraints / what's off-limits":
 
 ## 11. Status line
 
-`IMPLEMENTED — A1 USER-GATED`. Code surface complete (Python builder + Rust mirror + dispatch + ckpt expander + smokes; all parity tests PASS). Flips to IN-FLIGHT at A1-fire (user-gated); flips to LANDED when the progress writeup lands at `docs/ai-research/progress/v35-multichannel-tail.md` or as an r110.md §4i section.
+**`LANDED-CAP-CONFIRMED 2026-05-25`** — A1 fired user-approved 2026-05-25; tight-gate manifest at `runs/R16-P1-v35-iter1-tight-gate/gate.manifest.json` lands wl_lower=0.5856 at n=10k. Falls into SOFT SHIP band (non-regression vs v3.3 0.5910 noise band) but below the LIFT-band gate of 0.6040. H1 (channel-orthogonal direct sum) FALSIFIED. v3.5 RETIRED as production candidate. Canonical writeup at `docs/ai-research/progress/r110.md §4i`.
+
+**Outcome summary:**
+
+- v3.5 = 0.5856 [0.5856, 0.6049]; player 0.5578, opp 0.6055.
+- vs v3.3 0.5910: −0.0054 (both sides slightly lower).
+- vs v3.0 0.5811: +0.0045 (within noise band of v3.0).
+- Same pattern as v3.4 — additive structure on top of v3.3 fails to compound at this recipe scale.
+- Working hypothesis: trunk is **distill-data-limited at the R16-P1 4-iter cadence**, not representational-bandwidth-limited. See `r110.md §4i` "Why H1 falsified despite channel-orthogonality" for the mechanism.
 
 ### Implementation chain (2026-05-25)
 
