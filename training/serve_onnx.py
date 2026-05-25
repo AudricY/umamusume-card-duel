@@ -18,6 +18,7 @@ from uma_ai.features import (
     STATE_DIM_V2,
     STATE_DIM_V3,
     STATE_DIM_V3_1,
+    STATE_DIM_V3_3,
     UMA_SLOT_COUNT,
     UMA_SLOT_FEATURE_DIM,
     ZONE_ORDER,
@@ -217,6 +218,13 @@ _SCHEMA_TABLE: tuple[tuple[int, bool, bool, str, str], ...] = (
         "v3.1",
         "164-d v3.1 temporal/turn-state (embedding inputs; v3.0 head)",
     ),
+    (
+        STATE_DIM_V3_3,
+        True,
+        True,
+        "v3.3",
+        "167-d v3.3 additive opp-flag tail (embedding + slot inputs; v3.1 head + 3 opp-side used* bits)",
+    ),
 )
 _PLACEHOLDER_DIMS: dict[int, str] = {}
 
@@ -238,7 +246,7 @@ def _lookup_schema(
     return None
 
 
-_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2"}
+_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2", "v3.3"}
 
 
 def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:

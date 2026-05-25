@@ -68,6 +68,14 @@ STATE_FEATURE_SCHEMA_VERSION_V3 = 3.0
 # serve_onnx, or by an explicit builder choice in training).
 STATE_DIM_V3_1 = 164  # R16-P1: real v3.1 temporal/turn-state builder
 STATE_FEATURE_SCHEMA_VERSION_V3_1 = 3.1
+# v33-additive-tail (`v33-additive-tail-scoping.md`): v3.3 extends v3.1's
+# 164-d head with 3 opp-side flag bits at slots [164:167]. The slots mirror
+# the own-side bits already emitted at slots 114-120's
+# usedSupporter/Retreat/Stadium positions. v3.3 inherits v3.2's slot-token
+# 7-input ONNX contract (v3.2 set `uses_uma_slot_tokens=True` orthogonally
+# without bumping state_dim; v3.3 stacks on top of v3.2).
+STATE_DIM_V3_3 = 167  # v33-additive-tail: v3.1 head + 3-bit opp-side flag tail
+STATE_FEATURE_SCHEMA_VERSION_V3_3 = 3.3
 assert STATE_DIM == STATE_DIM_V3, (
     f"STATE_DIM ({STATE_DIM}) must equal the frozen v3.0 dim "
     f"STATE_DIM_V3 ({STATE_DIM_V3}). The 110-d v3.0 builder is frozen for "
@@ -396,15 +404,60 @@ def observation_to_features_v3_1(
     return features
 
 
+# v33-additive-tail: v3.3 = v3.1 head + 3 opp-side flag bits at slots
+# [164:167]. The flags are the opponent-side mirror of own slots 29/30/31
+# (usedSupporterThisTurn / usedRetreatThisTurn / usedStadiumThisTurn). The
+# own-side booleans are emitted in the FROZEN v2 head at slots 29/30/31
+# (carried verbatim into v3.0/v3.1). The opp-side mirror is GENUINELY
+# MISSING from v3.0/v3.1/v3.2 — the v3.1 opp turnState block (slots
+# 121-127) covers resource state (energy attachments, retreat reduction,
+# damage bonus, ability counts, coin flips) but NOT the used* booleans.
+# So v3.3 is the first time opponent's "have they already burned a
+# supporter / retreat / stadium this turn" signal is surfaced to the
+# model. Per the v33-feature-gap-brainstorm-handoff.md §2.A item 2
+# hypothesis, this gives the policy head threat-window awareness.
+_OPP_USED_SUPPORTER_SLOT = 164
+_OPP_USED_RETREAT_SLOT = 165
+_OPP_USED_STADIUM_SLOT = 166
+
+
+def observation_to_features_v3_3(
+    observation: dict[str, Any], ablations: set[FeatureAblation] | None = None
+) -> np.ndarray:
+    """v33-additive-tail: 167-d. Slots 0–163 are byte-identical to v3.1
+    (produced by calling `observation_to_features_v3_1` directly, NOT
+    re-derived); slots [164:167] are the opp-side used* flag tail."""
+
+    base = observation_to_features_v3_1(observation, ablations=ablations)
+    assert base.shape == (STATE_DIM_V3_1,), (
+        f"v3.3 base reuse expected ({STATE_DIM_V3_1},), got {base.shape}"
+    )
+
+    features = np.zeros(STATE_DIM_V3_3, dtype=np.float32)
+    features[0:STATE_DIM_V3_1] = base
+
+    opp = observation.get("opponent", {}) or {}
+    features[_OPP_USED_SUPPORTER_SLOT] = 1.0 if opp.get("usedSupporterThisTurn") else 0.0
+    features[_OPP_USED_RETREAT_SLOT] = 1.0 if opp.get("usedRetreatThisTurn") else 0.0
+    features[_OPP_USED_STADIUM_SLOT] = 1.0 if opp.get("usedStadiumThisTurn") else 0.0
+
+    assert features.shape == (STATE_DIM_V3_3,), (
+        f"observation_to_features_v3_3 emitted {features.shape}, "
+        f"expected ({STATE_DIM_V3_3},)."
+    )
+    return features
+
+
 # Builder selector keyed off the state dim. Mirrors the existing serve_onnx
 # `_SCHEMA_BY_STATE_DIM` discrimination (graph dim -> builder) so training /
-# dataset code can opt into v3.1 without a new framework: pass the state dim
-# and get the matching frozen builder. v3.0 (110) stays the default
-# everywhere `STATE_DIM` is referenced.
+# dataset code can opt into v3.1/v3.3 without a new framework: pass the
+# state dim and get the matching frozen builder. v3.0 (110) stays the
+# default everywhere `STATE_DIM` is referenced.
 _BUILDER_BY_STATE_DIM = {
     STATE_DIM_V2: observation_to_features_v2,
     STATE_DIM_V3: observation_to_features,
     STATE_DIM_V3_1: observation_to_features_v3_1,
+    STATE_DIM_V3_3: observation_to_features_v3_3,
 }
 
 
@@ -412,6 +465,7 @@ _SCHEMA_VERSION_BY_STATE_DIM = {
     STATE_DIM_V2: STATE_FEATURE_SCHEMA_VERSION_V2,
     STATE_DIM_V3: STATE_FEATURE_SCHEMA_VERSION_V3,
     STATE_DIM_V3_1: STATE_FEATURE_SCHEMA_VERSION_V3_1,
+    STATE_DIM_V3_3: STATE_FEATURE_SCHEMA_VERSION_V3_3,
 }
 
 
