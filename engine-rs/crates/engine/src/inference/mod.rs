@@ -48,6 +48,7 @@ use ort::value::TensorRef;
 use crate::policy::card_vocab::card_vocab;
 use crate::policy::featurize::{
     self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3,
+    STATE_DIM_V3_5,
     UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM,
 };
 use crate::policy::types::{LegalAiAction, PublicObservation};
@@ -89,6 +90,13 @@ enum GraphSchema {
     /// v3.2's per-Uma slot tokens to test whether the two axes
     /// compound additively (slot +0.0066, opp-flag +0.0100) or cap.
     V3_4,
+    /// v35-multichannel-tail: 212-d state-features + 5-input contract
+    /// (no slot tokens). Layered on v3.3 (167-d) with a 45-bit
+    /// channel-orthogonal tail (phase one-hot, per-condition one-hot,
+    /// energy-zone front typed, opp discard buckets, bench-refill
+    /// catastrophe). See
+    /// `docs/ai-research/scoping/v35-multichannel-tail-scoping.md`.
+    V3_5,
 }
 
 /// Errors surfaced by the inference layer. We hide ORT's `Error` behind
@@ -386,6 +394,10 @@ impl InferenceSession {
                 featurize::observation_state_features_v3_3(observation),
                 STATE_DIM_V3_3,
             ),
+            GraphSchema::V3_5 => (
+                featurize::observation_state_features_v3_5(observation),
+                STATE_DIM_V3_5,
+            ),
             GraphSchema::V3_0 | GraphSchema::V3_2 => (
                 featurize::observation_state_features(observation),
                 STATE_DIM_V3,
@@ -427,7 +439,7 @@ impl InferenceSession {
             GraphSchema::V3_2 | GraphSchema::V3_4 => {
                 featurize::observation_uma_slots(observation)
             }
-            GraphSchema::V3_0 | GraphSchema::V3_1 | GraphSchema::V3_3 => {
+            GraphSchema::V3_0 | GraphSchema::V3_1 | GraphSchema::V3_3 | GraphSchema::V3_5 => {
                 (Vec::new(), Vec::new())
             }
         };
@@ -465,7 +477,10 @@ impl InferenceSession {
         // same 5-input shape (only the `state_features` tensor's last
         // dim differs: 110 vs 164).
         let inputs = match self.schema {
-            GraphSchema::V3_0 | GraphSchema::V3_1 | GraphSchema::V3_3 => ort::inputs![
+            GraphSchema::V3_0
+            | GraphSchema::V3_1
+            | GraphSchema::V3_3
+            | GraphSchema::V3_5 => ort::inputs![
                 "state_features" => TensorRef::from_array_view(&state_arr)?,
                 "action_features" => TensorRef::from_array_view(&action_features_arr)?,
                 "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
@@ -714,10 +729,11 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
         Some(d) if d as usize == STATE_DIM_V3 => Ok(GraphSchema::V3_0),
         Some(d) if d as usize == STATE_DIM_V3_1 => Ok(GraphSchema::V3_1),
         Some(d) if d as usize == STATE_DIM_V3_3 => Ok(GraphSchema::V3_3),
+        Some(d) if d as usize == STATE_DIM_V3_5 => Ok(GraphSchema::V3_5),
         Some(d) => Err(InferenceError::SchemaMismatch(format!(
             "graph state_features last dim {} does not match v3.0 ({}), \
-             v3.1 ({}), or v3.3 ({}); inputs {:?}",
-            d, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3, inputs
+             v3.1 ({}), v3.3 ({}), or v3.5 ({}); inputs {:?}",
+            d, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3, STATE_DIM_V3_5, inputs
         ))),
         None => {
             // No concrete state_features shape — fall back to v3.0 for
