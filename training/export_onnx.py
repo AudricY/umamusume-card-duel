@@ -11,7 +11,9 @@ from uma_ai.features import (
     ACTION_DIM,
     ACTION_FEATURE_SCHEMA_VERSION,
     CARD_ID_SHAPES,
+    STATE_DIM_V3_3,
     STATE_FEATURE_SCHEMA_VERSION_V3_2,
+    STATE_FEATURE_SCHEMA_VERSION_V3_4,
     UMA_SLOT_COUNT,
     UMA_SLOT_FEATURE_DIM,
     card_vocab_metadata,
@@ -189,8 +191,13 @@ def main() -> None:
         # sidecar (in addition to the ONNX input-set). The
         # `schema_version_for_state_dim(110)` table returns 3.0 by default
         # — override to 3.2 only when the slot-token branch is active.
+        # v3.4-compound: state_dim=167 + slot tokens both → tag 3.4.
+        # v3.2: state_dim=110 + slot tokens → tag 3.2 (preserves legacy).
+        # Otherwise: schema_version_for_state_dim handles 96/110/164/167.
         "state_feature_schema_version": (
-            STATE_FEATURE_SCHEMA_VERSION_V3_2
+            STATE_FEATURE_SCHEMA_VERSION_V3_4
+            if config.uses_uma_slot_tokens and graph_state_dim == STATE_DIM_V3_3
+            else STATE_FEATURE_SCHEMA_VERSION_V3_2
             if config.uses_uma_slot_tokens
             else schema_version_for_state_dim(graph_state_dim)
         ),

@@ -5,7 +5,7 @@
 //! cloned `Vec`s so the caller can mutate them freely.
 
 use crate::core::card_id::CardId;
-use crate::core::constants::SideId;
+use crate::core::constants::{EnergyType, SideId};
 use crate::core::state::{GameState, SideState, UmamusumeInstance};
 use crate::flow::board::get_opposing_side;
 
@@ -17,6 +17,14 @@ pub struct PublicSideView {
     pub discard: Vec<CardId>,
     pub points: u8,
     pub stadium_card_id: Option<CardId>,
+    /// Per-game-setup energy pool (≤3 colors). Public from setup onward
+    /// (`flow/setup.rs:143`). Added in v3.6 obs-contract extension so the
+    /// upcoming featurizer can encode the future-roll color distribution
+    /// (v3.5 dead-bit replacement, see
+    /// `docs/ai-research/scoping/v36-priors-and-arithmetic-scoping.md`
+    /// §3.4). Heuristic AI consumers can ignore this; it is here for
+    /// parity with `PublicSideObservation.energy_pool`.
+    pub energy_pool: Vec<EnergyType>,
 }
 
 pub fn get_public_opponent_view(state: &GameState, side_id: SideId) -> PublicSideView {
@@ -32,5 +40,6 @@ pub fn to_public_side_view(state: &GameState, side: &SideState) -> PublicSideVie
         discard: side.discard.iter().copied().collect(),
         points: side.points,
         stadium_card_id: state.stadium.as_ref().map(|s| s.card_id),
+        energy_pool: side.energy_pool.iter().copied().collect(),
     }
 }

@@ -51,6 +51,22 @@ pub const STATE_DIM_V3_1: usize = 164;
 /// graph produces bit-identical iter-0 outputs (new Linear columns are
 /// zero-init in `make_v33_tail_init.py`).
 pub const STATE_DIM_V3_3: usize = 167;
+/// Mirrors `STATE_DIM_V3_5` in Python — 212-d v3.5 multichannel-tail
+/// builder (`v35-multichannel-tail-scoping.md`). Layout is the frozen
+/// v3.3 167-d head + 45-bit channel-orthogonal tail. Tail-init is
+/// zero-init residual: a v3.3 ckpt loaded into the v3.5 graph produces
+/// bit-identical iter-0 outputs (new Linear columns are zero-init in
+/// `make_v35_tail_init.py`).
+pub const STATE_DIM_V3_5: usize = 212;
+/// Mirrors `STATE_DIM_V3_6` in Python — 246-d v3.6 priors-and-arithmetic
+/// builder (`v36-priors-and-arithmetic-scoping.md`). Layout is the frozen
+/// v3.5 212-d head with band [197:207] REPURPOSED in-place from the dead
+/// opp.energy_zone.front to own.energy_pool typed multihot, plus 34 bits
+/// appended at [212:246]. Tail-init under `make_v36_priors_init.py` drops
+/// columns 197-206 of the v3.5 ckpt (dead band) and zero-inits the 34
+/// new columns; iter-0 drift contract is Δlogits ≤ 1e-3 (looser than
+/// v3.5's 1e-5 because the column-drop is not strictly bit-identical).
+pub const STATE_DIM_V3_6: usize = 246;
 /// Mirrors `ACTION_DIM` (48-d action feature vector — pre-computed
 /// TS-side and carried verbatim on `LegalAiAction.features`).
 pub const ACTION_DIM: usize = 48;
@@ -108,6 +124,21 @@ fn side_to_str(side: crate::core::constants::SideId) -> &'static str {
 // `PENDING_CHOICE_KINDS` (Python) — order is load-bearing for the one-hot
 // at slots [97, 98, 99] (slot 97 is "none").
 const PENDING_CHOICE_KINDS: [&str; 2] = ["promoteAfterKnockout", "switchAfterGust"];
+
+// v35-multichannel-tail special-condition vocab. FROZEN. Mirrors Python
+// `_V35_CONDITION_VOCAB`. Sourced from
+// `frontend/src/game/engine/flow/specialConditions.ts` / `flow/turn.ts` /
+// `flow/eligibility.ts` — these five tokens are the complete set the
+// engine emits into `special_conditions: Vec<String>`. Adding a new
+// arm requires bumping the schema (additive v3.6 tail), never editing
+// this vocab.
+const V35_CONDITION_VOCAB: [&str; 5] = [
+    "paralysed",
+    "burned",
+    "poisoned",
+    "asleep",
+    "frozen",
+];
 
 // Energy-type label order MUST match Python `_energy_vector` and the
 // JSON keys emitted by the observation builder (`energy_label_camel`).
@@ -360,6 +391,341 @@ pub fn observation_state_features_v3_3(obs: &PublicObservation) -> Vec<f32> {
     f[164] = if obs.opponent.used_supporter_this_turn { 1.0 } else { 0.0 };
     f[165] = if obs.opponent.used_retreat_this_turn { 1.0 } else { 0.0 };
     f[166] = if obs.opponent.used_stadium_this_turn { 1.0 } else { 0.0 };
+
+    f
+}
+
+fn v35_condition_one_hot(uma: Option<&PublicUmaObservation>, out: &mut [f32]) {
+    // 5-bit one-hot over `V35_CONDITION_VOCAB`. Multiple conditions set
+    // multiple bits. Missing Uma → all zeros (`out` is presumed
+    // zero-init). Unknown tokens → silently dropped (mirrors Python
+    // `_v35_condition_one_hot`).
+    debug_assert_eq!(out.len(), V35_CONDITION_VOCAB.len());
+    let Some(uma) = uma else { return; };
+    for cond in &uma.special_conditions {
+        if let Some(idx) = V35_CONDITION_VOCAB.iter().position(|v| *v == cond.as_str()) {
+            out[idx] = 1.0;
+        }
+    }
+}
+
+fn v35_energy_front_one_hot(side: &PublicSideObservation, out: &mut [f32]) {
+    // 10-bit one-hot over `ENERGY_TYPES_ORDER` for the front-of-queue
+    // entry of this side's `energy_zone`. Empty zone or unknown type →
+    // all zeros. Mirrors Python `_v35_energy_front_one_hot`.
+    debug_assert_eq!(out.len(), ENERGY_TYPES_ORDER.len());
+    let zone = &side.energy_zone;
+    let Some(front) = zone.first() else { return; };
+    if let Some(idx) = ENERGY_TYPES_ORDER.iter().position(|t| *t == front.as_str()) {
+        out[idx] = 1.0;
+    }
+}
+
+fn v35_bench_refill_catastrophe(side: &PublicSideObservation) -> f32 {
+    // 1.0 if no non-null bench Uma to promote on active KO. Minimum-
+    // viable terminal-state predicate (scoping doc §4.5). Mirrors
+    // Python `_v35_bench_refill_catastrophe`.
+    if side.bench.iter().any(|b| b.is_some()) {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+/// v35-multichannel-tail: 212-d builder. Slots 0–166 are byte-identical
+/// to v3.3 (produced by calling `observation_state_features_v3_3`
+/// directly, NOT re-derived); slots [167:212] are the 45-bit channel-
+/// orthogonal tail. Mirrors `observation_to_features_v3_5` in Python.
+///
+/// Tail layout (absolute):
+///   [167:177] phase one-hot (10) — temporal-cadence channel
+///   [177:182] own active per-condition one-hot (5)
+///   [182:187] opp active per-condition one-hot (5)
+///   [187:197] own energy-zone front-of-queue typed one-hot (10)
+///   [197:207] opp energy-zone front-of-queue typed one-hot (10)
+///   [207:210] opp discard role buckets (3)
+///   [210]     own would_lose_on_active_KO (bench empty)
+///   [211]     opp would_lose_on_active_KO (bench empty)
+pub fn observation_state_features_v3_5(obs: &PublicObservation) -> Vec<f32> {
+    let mut f = vec![0.0f32; STATE_DIM_V3_5];
+    let head = observation_state_features_v3_3(obs);
+    debug_assert_eq!(head.len(), STATE_DIM_V3_3);
+    f[..STATE_DIM_V3_3].copy_from_slice(&head);
+
+    // [167:177] phase one-hot — unknown phase → all zeros.
+    if let Some(idx) = PHASES.iter().position(|&p| p == obs.phase) {
+        f[167 + idx] = 1.0;
+    }
+
+    // [177:182] own active per-condition; [182:187] opp active.
+    v35_condition_one_hot(obs.own.active.as_ref(), &mut f[177..182]);
+    v35_condition_one_hot(obs.opponent.active.as_ref(), &mut f[182..187]);
+
+    // [187:197] own energy-zone front; [197:207] opp energy-zone front.
+    v35_energy_front_one_hot(&obs.own, &mut f[187..197]);
+    v35_energy_front_one_hot(&obs.opponent, &mut f[197..207]);
+
+    // [207:210] opp discard role buckets — mirror of own slots 84-86
+    // inside the v3.0 head's `_card_awareness_features` block (own
+    // discard at values[16:19] of that 28-d block). REUSES
+    // `discard_role_features` for bit-exactness with Python.
+    let opp_buckets = discard_role_features(&obs.opponent.discard);
+    f[207..210].copy_from_slice(&opp_buckets);
+
+    // [210] own would_lose_on_active_KO; [211] opp.
+    f[210] = v35_bench_refill_catastrophe(&obs.own);
+    f[211] = v35_bench_refill_catastrophe(&obs.opponent);
+
+    f
+}
+
+// ---------------------------------------------------------------------------
+// v3.6 priors-and-arithmetic builder
+// (`docs/ai-research/scoping/v36-priors-and-arithmetic-scoping.md`).
+//
+// Layout (FROZEN, mirrors Python `_V36_*` slot offsets):
+//   [0:197]     v3.5 head (byte-identical via `observation_state_features_v3_5`)
+//   [197:207]   own energy_pool typed multihot (REPURPOSED in-place from
+//               the dead v3.5 opp.energy_zone.front band)
+//   [207:212]   v3.5 tail (opp discard role buckets + bench-refill bits)
+//   [212:222]   opp energy_pool typed multihot
+//   [222:226]   own prize one-hot {3,2,1,0}
+//   [226:230]   opp prize one-hot {3,2,1,0}
+//   [230:240]   opp bench typed energy aggregate (own bench DROPPED at
+//               impl-phase reconciliation; see scoping §4 step 2)
+//   [240]       own_lethal_next_turn (face-value)
+//   [241]       opp_lethal_next_turn (face-value)
+//   [242]       own_secondary_attack_usable
+//   [243]       own_secondary_attack_would_KO
+//   [244]       opp_secondary_attack_usable
+//   [245]       opp_secondary_attack_would_KO
+// ---------------------------------------------------------------------------
+
+// v3.6 tail slot offsets — absolute in the 246-d vector. The [197:207]
+// band is REPURPOSED in-place from the dead v3.5 opp.energy_zone.front
+// to own.energy_pool typed multihot. The [212:246] band is the new tail.
+const _V36_OWN_ENERGY_POOL_START: usize = 197; // [197:207] REPURPOSED IN-BAND
+const _V36_OWN_ENERGY_POOL_END: usize = 207;
+const _V36_OPP_ENERGY_POOL_START: usize = 212; // [212:222]
+const _V36_OPP_ENERGY_POOL_END: usize = 222;
+const _V36_OWN_PRIZE_START: usize = 222; // [222:226]
+const _V36_OWN_PRIZE_END: usize = 226;
+const _V36_OPP_PRIZE_START: usize = 226; // [226:230]
+const _V36_OPP_PRIZE_END: usize = 230;
+const _V36_OPP_BENCH_TYPED_START: usize = 230; // [230:240] (opp-only)
+const _V36_OPP_BENCH_TYPED_END: usize = 240;
+const _V36_OWN_LETHAL_NEXT_TURN_SLOT: usize = 240;
+const _V36_OPP_LETHAL_NEXT_TURN_SLOT: usize = 241;
+const _V36_OWN_SECONDARY_USABLE_SLOT: usize = 242;
+const _V36_OWN_SECONDARY_WOULD_KO_SLOT: usize = 243;
+const _V36_OPP_SECONDARY_USABLE_SLOT: usize = 244;
+const _V36_OPP_SECONDARY_WOULD_KO_SLOT: usize = 245;
+
+/// 10-bit multihot over `ENERGY_TYPES_ORDER` for the side's typed
+/// `energy_pool` (v3.6 obs-contract extension). Bag semantics: duplicates
+/// collapse (`[fire, fire, water]` → only fire+water bits). Unknown
+/// energy types silently dropped. Mirrors Python
+/// `_v36_energy_pool_multihot`.
+fn v36_energy_pool_multihot(side: &PublicSideObservation, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), ENERGY_TYPES_ORDER.len());
+    for token in &side.energy_pool {
+        if let Some(idx) = ENERGY_TYPES_ORDER.iter().position(|t| *t == token.as_str()) {
+            out[idx] = 1.0;
+        }
+    }
+}
+
+/// 4-bit one-hot over remaining-prize counts {3, 2, 1, 0}. `remaining =
+/// clamp(3 - points, 0, 3)`; bit index = 3 - remaining. Mirrors Python
+/// `_v36_prize_one_hot`.
+fn v36_prize_one_hot(side: &PublicSideObservation, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), 4);
+    let points = side.points as i32;
+    let remaining = (3 - points).clamp(0, 3);
+    let bit = (3 - remaining) as usize;
+    out[bit] = 1.0;
+}
+
+/// 10-bit multihot over `ENERGY_TYPES_ORDER` for the side's BENCH (active
+/// EXCLUDED). Bit `i` set iff any bench Uma has ≥1 attached energy of
+/// type `ENERGY_TYPES_ORDER[i]`. Padded `None` bench slots silently
+/// skipped. Mirrors Python `_v36_bench_typed_aggregate`.
+fn v36_bench_typed_aggregate(side: &PublicSideObservation, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), ENERGY_TYPES_ORDER.len());
+    for uma in side.bench.iter().flatten() {
+        for (i, &energy_type) in ENERGY_TYPES_ORDER.iter().enumerate() {
+            let amount = uma.energies.get(energy_type).copied().unwrap_or(0);
+            if amount > 0 {
+                out[i] = 1.0;
+            }
+        }
+    }
+}
+
+/// Mirror of engine attack-legality (multiset matching): typed costs
+/// satisfied per-color AND total attached ≥ total cost (colorless absorbs
+/// any leftover). Re-uses the v3.5 `typed_energy_deficit` + `cost_total`
+/// pair so primary-attack and secondary-attack share one matcher. Mirrors
+/// Python `_v36_attack_cost_covered`.
+fn v36_attack_cost_covered(
+    attached: &indexmap::IndexMap<String, u16>,
+    cost: &crate::core::effects::EnergyCost,
+) -> bool {
+    if typed_energy_deficit(attached, cost) > 0.0 {
+        return false;
+    }
+    let total_attached: f32 = attached.values().map(|&v| v as f32).sum();
+    let total_cost = cost_total(cost);
+    total_attached >= total_cost
+}
+
+/// Resolve the catalog `UmamusumeCard` for an active Uma observation.
+/// Returns `None` for absent / non-Uma / unknown card ids. Centralised so
+/// both the lethal-next-turn and secondary-attack predicates share one
+/// catalog-access path; mirrors Python `_v36_active_attacks` (Python
+/// returns the attack list directly; Rust returns the card so callers
+/// also see `attacks[1]`).
+fn v36_uma_card_for_active(active: Option<&PublicUmaObservation>) -> Option<&'static UmamusumeCard> {
+    let entry = active?;
+    let card = get_card(&entry.card_id)?;
+    match card {
+        Card::Umamusume(u) => Some(u),
+        Card::Trainer(_) => None,
+    }
+}
+
+/// Effective HP for the lethal predicate. The public observation's `hp`
+/// field already reflects damage taken (engine sets `umamusume.hp =
+/// max_hp - damage_taken`), so we use `hp` directly. Mirrors Python
+/// `_v36_remaining_hp` (Python falls back to `max_hp - damageCounters`
+/// when `hp` is missing — Rust's struct guarantees the field).
+fn v36_remaining_hp(active: Option<&PublicUmaObservation>) -> f32 {
+    match active {
+        Some(u) => (u.hp as f32).max(0.0),
+        None => 0.0,
+    }
+}
+
+/// 1.0 iff `attacker.active` has any attack with `base_damage ≥
+/// defender.remaining_hp`. Face-value only (scoping §4.5 Channel 4): no
+/// weakness multiplier, no coin-flip expectation, no energy-availability
+/// check. Returns 0.0 if attacker active is absent / non-Uma / has no
+/// attacks, or if defender active is absent. Mirrors Python
+/// `_v36_lethal_face_value`.
+fn v36_lethal_face_value(
+    attacker_active: Option<&PublicUmaObservation>,
+    defender_active: Option<&PublicUmaObservation>,
+) -> f32 {
+    let Some(uma) = v36_uma_card_for_active(attacker_active) else {
+        return 0.0;
+    };
+    if uma.attacks.is_empty() || defender_active.is_none() {
+        return 0.0;
+    }
+    let defender_hp = v36_remaining_hp(defender_active);
+    let max_dmg = uma
+        .attacks
+        .iter()
+        .map(|a| a.damage as f32)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if max_dmg >= defender_hp { 1.0 } else { 0.0 }
+}
+
+/// (usable, would_KO) for the attacker's `attacks[1]`. Both 0.0 if no
+/// secondary attack exists. `usable` requires energy coverage per
+/// `v36_attack_cost_covered`; `would_KO` additionally requires
+/// `attacks[1].damage ≥ defender.remaining_hp`. Face-value per scoping
+/// §4.5 Channel 5. Mirrors Python `_v36_secondary_attack_bits`.
+fn v36_secondary_attack_bits(
+    attacker_active: Option<&PublicUmaObservation>,
+    defender_active: Option<&PublicUmaObservation>,
+) -> (f32, f32) {
+    let Some(uma) = v36_uma_card_for_active(attacker_active) else {
+        return (0.0, 0.0);
+    };
+    if uma.attacks.len() < 2 {
+        return (0.0, 0.0);
+    }
+    let secondary = &uma.attacks[1];
+    // attacker_active is Some(...) because v36_uma_card_for_active returned
+    // a card (it short-circuits on None).
+    let attached = &attacker_active.unwrap().energies;
+    if !v36_attack_cost_covered(attached, &secondary.cost) {
+        return (0.0, 0.0);
+    }
+    if defender_active.is_none() {
+        return (1.0, 0.0);
+    }
+    let defender_hp = v36_remaining_hp(defender_active);
+    let base_damage = secondary.damage as f32;
+    let would_ko = if base_damage >= defender_hp { 1.0 } else { 0.0 };
+    (1.0, would_ko)
+}
+
+/// v36-priors-arithmetic: 246-d builder. Slots 0–196 are byte-identical
+/// to v3.5; slots [197:207] are REPURPOSED in-place from the dead v3.5
+/// opp.energy_zone.front band to own.energy_pool typed multihot; the
+/// v3.5 tail at [207:212] is preserved; new bits are appended at
+/// [212:246]. Mirrors `observation_to_features_v3_6` in Python.
+///
+/// Reconciliation note (impl-phase): the §4.5 channel breakdown sums to
+/// 54 bits across both sides; the TL;DR locks STATE_DIM at 246 (net +34
+/// bits). Own bench typed energy aggregate dropped as the lowest-priority
+/// cut (own.active typed energies already in v3.5 head). Opp bench kept
+/// since opp-threat-by-color is the stated rationale.
+pub fn observation_state_features_v3_6(obs: &PublicObservation) -> Vec<f32> {
+    let mut f = vec![0.0f32; STATE_DIM_V3_6];
+    let head = observation_state_features_v3_5(obs);
+    debug_assert_eq!(head.len(), STATE_DIM_V3_5);
+    f[..STATE_DIM_V3_5].copy_from_slice(&head);
+
+    // Zero-overwrite the dead v3.5 opp.energy_zone.front band [197:207]
+    // and repurpose in-place for own.energy_pool typed multihot. This is
+    // the only v3.5 slot v3.6 touches; [0:197] stays byte-stable, and
+    // [207:212] (the rest of the v3.5 tail) is left untouched.
+    for v in &mut f[_V36_OWN_ENERGY_POOL_START.._V36_OWN_ENERGY_POOL_END] {
+        *v = 0.0;
+    }
+
+    // Channel 1 — energy_pool typed multihot. Own in-band at [197:207];
+    // opp at appended-tail [212:222].
+    v36_energy_pool_multihot(
+        &obs.own,
+        &mut f[_V36_OWN_ENERGY_POOL_START.._V36_OWN_ENERGY_POOL_END],
+    );
+    v36_energy_pool_multihot(
+        &obs.opponent,
+        &mut f[_V36_OPP_ENERGY_POOL_START.._V36_OPP_ENERGY_POOL_END],
+    );
+
+    // Channel 2 — prize one-hot ×4 over remaining-prize {3,2,1,0}.
+    v36_prize_one_hot(&obs.own, &mut f[_V36_OWN_PRIZE_START.._V36_OWN_PRIZE_END]);
+    v36_prize_one_hot(
+        &obs.opponent,
+        &mut f[_V36_OPP_PRIZE_START.._V36_OPP_PRIZE_END],
+    );
+
+    // Channel 3 — opp bench typed energy aggregate (multihot). Own
+    // dropped at reconciliation (see header).
+    v36_bench_typed_aggregate(
+        &obs.opponent,
+        &mut f[_V36_OPP_BENCH_TYPED_START.._V36_OPP_BENCH_TYPED_END],
+    );
+
+    // Channel 4 — lethal-next-turn face-value. `own_lethal` means OPP can
+    // KO OWN's active at face value.
+    let own_active = obs.own.active.as_ref();
+    let opp_active = obs.opponent.active.as_ref();
+    f[_V36_OWN_LETHAL_NEXT_TURN_SLOT] = v36_lethal_face_value(opp_active, own_active);
+    f[_V36_OPP_LETHAL_NEXT_TURN_SLOT] = v36_lethal_face_value(own_active, opp_active);
+
+    // Channel 5 — secondary attack readiness + would-KO.
+    let (own_sec_usable, own_sec_ko) = v36_secondary_attack_bits(own_active, opp_active);
+    f[_V36_OWN_SECONDARY_USABLE_SLOT] = own_sec_usable;
+    f[_V36_OWN_SECONDARY_WOULD_KO_SLOT] = own_sec_ko;
+    let (opp_sec_usable, opp_sec_ko) = v36_secondary_attack_bits(opp_active, own_active);
+    f[_V36_OPP_SECONDARY_USABLE_SLOT] = opp_sec_usable;
+    f[_V36_OPP_SECONDARY_WOULD_KO_SLOT] = opp_sec_ko;
 
     f
 }
@@ -1573,6 +1939,112 @@ mod tests {
         assert_eq!(v33b[31], 0.0);
     }
 
+    // ----------------------------------------------------------------
+    // v3.5 multichannel-tail (v35-multichannel-tail-scoping.md)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn v3_5_state_vector_dimension_is_212() {
+        let obs = fixture();
+        let v = observation_state_features_v3_5(&obs);
+        assert_eq!(v.len(), STATE_DIM_V3_5);
+        assert_eq!(STATE_DIM_V3_5, 212);
+    }
+
+    #[test]
+    fn v3_5_head_is_byte_identical_to_v3_3() {
+        // The first 167 slots MUST be byte-equal to the standalone v3.3
+        // builder — this is the core layering contract that lets a v3.3
+        // ckpt warm-start a v3.5 graph via zero-init residual.
+        let obs = fixture();
+        let v33 = observation_state_features_v3_3(&obs);
+        let v35 = observation_state_features_v3_5(&obs);
+        assert_eq!(&v35[..STATE_DIM_V3_3], &v33[..]);
+    }
+
+    #[test]
+    fn v3_5_tail_emits_phase_one_hot() {
+        // Fresh fixture phase should land on exactly one of the 10 bits.
+        let obs = fixture();
+        let v35 = observation_state_features_v3_5(&obs);
+        let phase_one_hot = &v35[167..177];
+        let set: f32 = phase_one_hot.iter().sum();
+        assert!(set <= 1.0, "phase one-hot is non-exclusive");
+        // Mutate the phase; the one-hot moves accordingly.
+        let mut obs2 = obs.clone();
+        obs2.phase = AiPhase::Combat;
+        let v35b = observation_state_features_v3_5(&obs2);
+        let combat_idx = PHASES.iter().position(|&p| p == AiPhase::Combat).unwrap();
+        assert_eq!(v35b[167 + combat_idx], 1.0);
+        // Every other phase bit is zero.
+        for i in 0..10 {
+            if i != combat_idx {
+                assert_eq!(v35b[167 + i], 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn v3_5_tail_emits_condition_one_hot() {
+        let mut obs = fixture();
+        // Stamp the own active with two conditions; opp active with one.
+        if let Some(active) = obs.own.active.as_mut() {
+            active.special_conditions = vec!["paralysed".to_string(), "burned".to_string()];
+        }
+        if let Some(active) = obs.opponent.active.as_mut() {
+            active.special_conditions = vec!["frozen".to_string()];
+        }
+        let v35 = observation_state_features_v3_5(&obs);
+        // own [177:182] — paralysed=0, burned=1.
+        assert_eq!(v35[177], 1.0);
+        assert_eq!(v35[178], 1.0);
+        assert_eq!(v35[179], 0.0);
+        assert_eq!(v35[180], 0.0);
+        assert_eq!(v35[181], 0.0);
+        // opp [182:187] — frozen=4.
+        assert_eq!(v35[182], 0.0);
+        assert_eq!(v35[183], 0.0);
+        assert_eq!(v35[184], 0.0);
+        assert_eq!(v35[185], 0.0);
+        assert_eq!(v35[186], 1.0);
+    }
+
+    #[test]
+    fn v3_5_tail_emits_energy_zone_front() {
+        let mut obs = fixture();
+        obs.own.energy_zone = vec!["fire".to_string(), "water".to_string()];
+        obs.opponent.energy_zone = vec!["psychic".to_string()];
+        let v35 = observation_state_features_v3_5(&obs);
+        // own [187:197] — front="fire" at index 1.
+        let own_front: Vec<f32> = v35[187..197].to_vec();
+        assert_eq!(own_front[1], 1.0, "fire should be set at index 1");
+        assert_eq!(own_front.iter().sum::<f32>(), 1.0, "exactly one own-front bit");
+        // opp [197:207] — front="psychic" at index 4.
+        let opp_front: Vec<f32> = v35[197..207].to_vec();
+        assert_eq!(opp_front[4], 1.0, "psychic should be set at index 4");
+        assert_eq!(opp_front.iter().sum::<f32>(), 1.0, "exactly one opp-front bit");
+    }
+
+    #[test]
+    fn v3_5_tail_emits_bench_refill_catastrophe() {
+        let mut obs = fixture();
+        // Empty both benches. Fresh fixture has populated benches, so
+        // wipe them.
+        obs.own.bench = vec![None, None, None];
+        obs.opponent.bench = vec![None, None, None];
+        let v35 = observation_state_features_v3_5(&obs);
+        assert_eq!(v35[210], 1.0, "own bench-refill bit = 1.0 when no bench");
+        assert_eq!(v35[211], 1.0, "opp bench-refill bit = 1.0 when no bench");
+
+        // Put one Uma on own bench; own bit flips to 0.
+        let mut obs2 = obs.clone();
+        let proto = obs2.opponent.active.clone().or_else(|| obs2.own.active.clone());
+        obs2.own.bench[0] = proto;
+        let v35b = observation_state_features_v3_5(&obs2);
+        assert_eq!(v35b[210], 0.0, "own bench-refill flips when bench has a Uma");
+        assert_eq!(v35b[211], 1.0, "opp still no bench → still 1.0");
+    }
+
     #[test]
     fn can_ko_zero_damage_does_not_apply_weakness() {
         // Mirror of simulator rule: weakness only applies when damage > 0.
@@ -1585,5 +2057,264 @@ mod tests {
         let r = uma_readiness_features(Some(&attacker));
         assert_eq!(r[3], 0.0);
         assert_eq!(can_ko(Some(&attacker), Some(&defender)), 0.0);
+    }
+
+    // ----------------------------------------------------------------
+    // v3.6 priors-and-arithmetic (v36-priors-and-arithmetic-scoping.md)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn v3_6_state_dim_is_246() {
+        let obs = fixture();
+        let v = observation_state_features_v3_6(&obs);
+        assert_eq!(v.len(), STATE_DIM_V3_6);
+        assert_eq!(STATE_DIM_V3_6, 246);
+    }
+
+    #[test]
+    fn v3_6_head_is_byte_identical_to_v3_5_excluding_opp_energy_zone_band() {
+        // Construct a fixture with a non-empty opp.energy_zone so the
+        // v3.5 [197:207] band would carry a 1-bit; v3.6 must overwrite
+        // that band with own.energy_pool typed multihot.
+        let mut obs = fixture();
+        // Opp energy_zone front = "psychic" → v3.5 sets bit at [197+4].
+        obs.opponent.energy_zone = vec!["psychic".to_string()];
+        // Own energy_pool = ["fire"] → v3.6 sets bit at [197+1] (own
+        // in-band repurpose).
+        obs.own.energy_pool = vec!["fire".to_string()];
+        // Clear opp.energy_pool so the appended-tail opp slot doesn't
+        // perturb other assertions.
+        obs.opponent.energy_pool = Vec::new();
+
+        let v35 = observation_state_features_v3_5(&obs);
+        let v36 = observation_state_features_v3_6(&obs);
+
+        // [0:197] byte-stable.
+        assert_eq!(&v36[..197], &v35[..197]);
+        // [197:207] differs: v3.5 had psychic-bit at offset 4; v3.6 has
+        // fire-bit at offset 1.
+        assert_eq!(v35[197 + 4], 1.0, "v3.5 opp.energy_zone.front bit");
+        assert_eq!(v36[197 + 4], 0.0, "v3.6 must zero the v3.5 bit");
+        assert_eq!(v36[197 + 1], 1.0, "v3.6 own.energy_pool typed bit");
+        assert_eq!(
+            v36[197..207].iter().sum::<f32>(),
+            1.0,
+            "exactly one own.energy_pool bit"
+        );
+        // [207:212] (rest of v3.5 tail) preserved byte-identically.
+        assert_eq!(&v36[207..212], &v35[207..212]);
+    }
+
+    #[test]
+    fn v3_6_energy_pool_multihot_both_sides() {
+        let mut obs = fixture();
+        obs.own.energy_pool = vec!["fire".to_string(), "water".to_string()];
+        obs.opponent.energy_pool = vec!["lightning".to_string()];
+        let v = observation_state_features_v3_6(&obs);
+        // own at [197:207] — fire (idx 1) + water (idx 2).
+        let own_band = &v[197..207];
+        assert_eq!(own_band[1], 1.0, "own fire bit");
+        assert_eq!(own_band[2], 1.0, "own water bit");
+        assert_eq!(own_band.iter().sum::<f32>(), 2.0, "exactly 2 own bits");
+        // opp at [212:222] — lightning (idx 3).
+        let opp_band = &v[212..222];
+        assert_eq!(opp_band[3], 1.0, "opp lightning bit");
+        assert_eq!(opp_band.iter().sum::<f32>(), 1.0, "exactly 1 opp bit");
+    }
+
+    #[test]
+    fn v3_6_energy_pool_collapses_duplicates() {
+        // Bag semantics: duplicates collapse.
+        let mut obs = fixture();
+        obs.own.energy_pool = vec![
+            "fire".to_string(),
+            "fire".to_string(),
+            "water".to_string(),
+        ];
+        let v = observation_state_features_v3_6(&obs);
+        let own_band = &v[197..207];
+        assert_eq!(own_band[1], 1.0, "fire bit set");
+        assert_eq!(own_band[2], 1.0, "water bit set");
+        assert_eq!(own_band.iter().sum::<f32>(), 2.0, "duplicates collapse");
+    }
+
+    #[test]
+    fn v3_6_prize_one_hot_both_sides() {
+        // Iterate own.points ∈ {0,1,2,3} and assert the correct slot fires.
+        // Bit index = 3 - remaining where remaining = clamp(3 - points, 0, 3).
+        for (points, expected_bit) in [(0u8, 0usize), (1, 1), (2, 2), (3, 3)] {
+            let mut obs = fixture();
+            obs.own.points = points;
+            // Pin opp side at points=0 so its one-hot is at index 0.
+            obs.opponent.points = 0;
+            let v = observation_state_features_v3_6(&obs);
+            // Own prize at [222:226].
+            let own_prize = &v[222..226];
+            assert_eq!(
+                own_prize[expected_bit], 1.0,
+                "own.points={} → own prize bit {} should be 1",
+                points, expected_bit
+            );
+            assert_eq!(
+                own_prize.iter().sum::<f32>(),
+                1.0,
+                "exactly one own-prize bit for points={}", points
+            );
+            // Opp prize at [226:230] — points=0 → bit 0.
+            let opp_prize = &v[226..230];
+            assert_eq!(opp_prize[0], 1.0, "opp prize bit 0 (points=0)");
+            assert_eq!(opp_prize.iter().sum::<f32>(), 1.0);
+        }
+    }
+
+    #[test]
+    fn v3_6_bench_typed_aggregate_opp_only() {
+        // Construct opp bench with mixed typed energies; assert the
+        // opp-bench typed multihot at [230:240]. Own bench is NOT
+        // featurized (impl-phase reconciliation dropped it).
+        let mut obs = fixture();
+        // Inject two opp bench Umas with typed energies. Use the fresh
+        // fixture's bench-shape (3-slot Vec) and overwrite slot 0 + 1.
+        let mut a = make_uma_obs(
+            "matikanetannhauserBasic",
+            60,
+            60,
+            2,
+            &[("fire", 1), ("water", 1)],
+        );
+        a.uid = 100;
+        let mut b = make_uma_obs(
+            "matikanetannhauserBasic",
+            60,
+            60,
+            1,
+            &[("darkness", 1)],
+        );
+        b.uid = 101;
+        obs.opponent.bench = vec![Some(a), Some(b), None];
+        // Inject own bench with typed energies — these MUST NOT appear
+        // in any v3.6 slot (own bench was dropped at reconciliation).
+        let mut own_bench = make_uma_obs(
+            "matikanetannhauserBasic",
+            60,
+            60,
+            1,
+            &[("steel", 1)],
+        );
+        own_bench.uid = 200;
+        obs.own.bench = vec![Some(own_bench), None, None];
+
+        let v = observation_state_features_v3_6(&obs);
+        let opp_bench_band = &v[230..240];
+        // ENERGY_TYPES_ORDER: grass(0), fire(1), water(2), lightning(3),
+        // psychic(4), fighting(5), darkness(6), steel(7), colorless(8),
+        // dragon(9).
+        assert_eq!(opp_bench_band[1], 1.0, "opp bench fire bit");
+        assert_eq!(opp_bench_band[2], 1.0, "opp bench water bit");
+        assert_eq!(opp_bench_band[6], 1.0, "opp bench darkness bit");
+        assert_eq!(opp_bench_band[7], 0.0, "opp bench steel bit not set (only own had steel)");
+        assert_eq!(
+            opp_bench_band.iter().sum::<f32>(),
+            3.0,
+            "exactly 3 opp-bench typed bits set"
+        );
+        // No own-bench typed slot exists; the only slot own bench could
+        // bleed into is the opp typed band — verify the steel bit (idx 7)
+        // stayed clear, proving own bench did NOT contaminate.
+    }
+
+    #[test]
+    fn v3_6_lethal_face_value_truth_table() {
+        // matikanetannhauserStage2: 60 damage @ {psychic:2, colorless:1}.
+        // niceNatureBasic: 40 damage. (Faceshot: energy NOT checked.)
+        // (a) opp.active = 60-dmg attacker, own.active hp=60 → own_lethal=1.
+        let mut obs = fixture();
+        let attacker = make_uma_obs("matikanetannhauserStage2", 120, 120, 0, &[]);
+        let weak_defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        obs.opponent.active = Some(attacker.clone());
+        obs.own.active = Some(weak_defender.clone());
+        let v = observation_state_features_v3_6(&obs);
+        assert_eq!(v[240], 1.0, "own_lethal: opp 60-dmg ≥ own.hp=60");
+
+        // (b) flip damage direction: weak defender hp=60 with own
+        // attacker = 60-dmg → opp_lethal=1; while opp_active is the
+        // weak defender → own_lethal=0 (attacker only 20 dmg vs hp=60).
+        let mut obs2 = fixture();
+        obs2.own.active = Some(attacker.clone());
+        obs2.opponent.active = Some(weak_defender.clone());
+        let v2 = observation_state_features_v3_6(&obs2);
+        assert_eq!(v2[241], 1.0, "opp_lethal: own 60-dmg ≥ opp.hp=60");
+        // own_lethal: opp.active (matikanetannhauserBasic, 20 dmg) vs
+        // own.hp=120 → 20 < 120 → 0.
+        assert_eq!(v2[240], 0.0, "own_lethal: opp 20-dmg < own.hp=120");
+
+        // (c) attacker has no card (unknown id) → both lethal bits 0.
+        let mut obs3 = fixture();
+        let mut null_attacker = make_uma_obs("__unknown_card__", 60, 60, 0, &[]);
+        null_attacker.uid = 999;
+        obs3.opponent.active = Some(null_attacker.clone());
+        obs3.own.active = Some(weak_defender.clone());
+        let v3 = observation_state_features_v3_6(&obs3);
+        assert_eq!(v3[240], 0.0, "no-card attacker → own_lethal=0");
+
+        // (d) defender absent → lethal=0 (Python rule: "nothing to KO").
+        let mut obs4 = fixture();
+        obs4.opponent.active = Some(attacker.clone());
+        obs4.own.active = None;
+        let v4 = observation_state_features_v3_6(&obs4);
+        assert_eq!(v4[240], 0.0, "absent defender → own_lethal=0");
+    }
+
+    #[test]
+    fn v3_6_secondary_attack_bits_two_attack_card() {
+        // matikanefukukitaruStage1: 2 attacks — primary 20 dmg @{psychic:1},
+        // secondary 0 dmg @ {psychic:1, colorless:1}.
+        let mut obs = fixture();
+        // Energy covers BOTH costs (2 psychic ≥ {psychic:1} for primary,
+        // 2 psychic ≥ {psychic:1, colorless:1} since colorless absorbs).
+        let attacker = make_uma_obs(
+            "matikanefukukitaruStage1",
+            100,
+            100,
+            2,
+            &[("psychic", 2)],
+        );
+        let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        obs.own.active = Some(attacker.clone());
+        obs.opponent.active = Some(defender.clone());
+        let v = observation_state_features_v3_6(&obs);
+        assert_eq!(v[242], 1.0, "own_secondary_usable: energy covers cost");
+        // secondary damage is 0 → would_KO = (0 >= 60) = 0.
+        assert_eq!(v[243], 0.0, "own_secondary_would_KO: 0 dmg can't KO 60hp");
+
+        // Insufficient energy: 1 psychic covers primary {psychic:1} but
+        // not secondary {psychic:1, colorless:1} (total cost 2 > attached 1).
+        let mut attacker2 = make_uma_obs(
+            "matikanefukukitaruStage1",
+            100,
+            100,
+            1,
+            &[("psychic", 1)],
+        );
+        attacker2.uid = 101;
+        let mut obs2 = fixture();
+        obs2.own.active = Some(attacker2);
+        obs2.opponent.active = Some(defender.clone());
+        let v2 = observation_state_features_v3_6(&obs2);
+        assert_eq!(v2[242], 0.0, "own_secondary_usable: cost not covered");
+        assert_eq!(v2[243], 0.0, "would_KO requires usable");
+    }
+
+    #[test]
+    fn v3_6_secondary_attack_bits_single_attack_card() {
+        // matikanetannhauserBasic has exactly 1 attack → both bits 0.
+        let mut obs = fixture();
+        let attacker = make_uma_obs("matikanetannhauserBasic", 60, 60, 1, &[("psychic", 1)]);
+        let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        obs.own.active = Some(attacker);
+        obs.opponent.active = Some(defender);
+        let v = observation_state_features_v3_6(&obs);
+        assert_eq!(v[242], 0.0, "own_secondary_usable: only 1 attack");
+        assert_eq!(v[243], 0.0, "own_secondary_would_KO: only 1 attack");
     }
 }

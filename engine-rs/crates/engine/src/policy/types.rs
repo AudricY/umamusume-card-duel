@@ -150,6 +150,16 @@ pub struct PublicSideObservation {
     pub active: Option<PublicUmaObservation>,
     pub bench: Vec<Option<PublicUmaObservation>>,
     pub energy_zone: Vec<String>,
+    /// v3.6 obs-contract extension (per
+    /// `docs/ai-research/scoping/v36-priors-and-arithmetic-scoping.md`
+    /// §3.4). Per-game-setup energy pool (≤3 colors), public from setup
+    /// onward (`flow/setup.rs:143`). Serialized as `energyPool` (camelCase
+    /// strings matching `EnergyType` rename_all="lowercase"), mirroring the
+    /// `energy_zone: Vec<String>` precedent. `#[serde(default)]` so legacy
+    /// v3.5 traces (no field) still deserialize — empty vec → v3.6
+    /// builder reads no pool bits (safe additive default).
+    #[serde(default)]
+    pub energy_pool: Vec<String>,
     pub used_supporter_this_turn: bool,
     pub used_retreat_this_turn: bool,
     pub used_stadium_this_turn: bool,
