@@ -47,14 +47,16 @@ def parse_args() -> argparse.Namespace:
                         help="Feature width for the value-target corpus. Default 110 (v3.0).")
     parser.add_argument("--uma-slot-tokens", action="store_true",
                         help="Emit v3.2 per-Uma slot tensors while retraining the value head.")
-    parser.add_argument("--train-scope", choices=["value-head", "all"], default="value-head",
-                        help="Train only value_head.* (default) or all model parameters for fit diagnostics.")
+    parser.add_argument("--train-scope", choices=["value-head", "value-adapter", "all"], default="value-head",
+                        help="Train value_head.* (default), value_adapter.* + value_head.*, or all model parameters.")
     parser.add_argument("--policy-anchor-weight", type=float, default=0.0,
                         help="When >0, add KL(anchor_policy || model_policy) on legal actions.")
     parser.add_argument("--policy-anchor-checkpoint", default=None,
                         help="Checkpoint to use as the policy anchor. Defaults to --init-checkpoint.")
     parser.add_argument("--model-variant", choices=["mlp", "set_attention"], default=None,
                         help="Optionally override model_config.model_variant before loading weights.")
+    parser.add_argument("--value-adapter", choices=["none", "mlp"], default=None,
+                        help="Optionally enable a value-only residual adapter before loading weights.")
     return parser.parse_args()
 
 
@@ -74,9 +76,24 @@ def freeze_trunk_and_policy(model: CandidatePolicyNet) -> None:
         module.train()
 
 
+def freeze_for_value_adapter(model: CandidatePolicyNet) -> None:
+    if model.value_adapter is None:
+        raise ValueError("--train-scope value-adapter requires --value-adapter mlp")
+    for name, param in model.named_parameters():
+        param.requires_grad = name.startswith("value_head.") or name.startswith("value_adapter.")
+    model.eval()
+    for module in model.value_head.modules():
+        module.train()
+    for module in model.value_adapter.modules():
+        module.train()
+
+
 def configure_train_scope(model: CandidatePolicyNet, train_scope: str) -> None:
     if train_scope == "value-head":
         freeze_trunk_and_policy(model)
+        return
+    if train_scope == "value-adapter":
+        freeze_for_value_adapter(model)
         return
     if train_scope == "all":
         for param in model.parameters():
@@ -147,6 +164,7 @@ def main() -> None:
         "policy_anchor_weight": args.policy_anchor_weight,
         "policy_anchor_checkpoint": args.policy_anchor_checkpoint or args.init_checkpoint,
         "model_variant": args.model_variant,
+        "value_adapter": args.value_adapter,
     })
 
     dataset = ValueTargetDataset(
@@ -180,12 +198,17 @@ def main() -> None:
     source_model_variant = str(cfg_dict.get("model_variant", "mlp"))
     if args.model_variant is not None:
         cfg_dict["model_variant"] = args.model_variant
+    source_value_adapter = str(cfg_dict.get("value_adapter", "none"))
+    if args.value_adapter is not None:
+        cfg_dict["value_adapter"] = args.value_adapter
     config = ModelConfig.from_dict(cfg_dict)
     model = CandidatePolicyNet(config)
-    new_prefixes: tuple[str, ...] = ()
+    new_prefixes: list[str] = []
     if args.model_variant is not None and args.model_variant != source_model_variant:
-        new_prefixes = ("set_attention_encoder.",)
-    load_init_state(model, payload["model_state"], allow_new_prefixes=new_prefixes)
+        new_prefixes.append("set_attention_encoder.")
+    if args.value_adapter is not None and args.value_adapter != source_value_adapter:
+        new_prefixes.append("value_adapter.")
+    load_init_state(model, payload["model_state"], allow_new_prefixes=tuple(new_prefixes))
     model.to(device)
     configure_train_scope(model, args.train_scope)
 
@@ -217,6 +240,12 @@ def main() -> None:
             if args.train_scope == "value-head":
                 for module in model.value_head.modules():
                     module.train()
+            elif args.train_scope == "value-adapter":
+                for module in model.value_head.modules():
+                    module.train()
+                if model.value_adapter is not None:
+                    for module in model.value_adapter.modules():
+                        module.train()
             else:
                 model.train()
         else:
@@ -327,12 +356,20 @@ def main() -> None:
             "data": args.data,
             "init_checkpoint": args.init_checkpoint,
             "device": str(device),
-            "frozen": "trunk+policy_head" if args.train_scope == "value-head" else "none",
+            "frozen": (
+                "trunk+policy_head"
+                if args.train_scope == "value-head"
+                else "trunk+policy_head+set_attention_encoder"
+                if args.train_scope == "value-adapter"
+                else "none"
+            ),
             "train_scope": args.train_scope,
             "policy_anchor_weight": args.policy_anchor_weight,
             "policy_anchor_checkpoint": args.policy_anchor_checkpoint or args.init_checkpoint,
             "source_model_variant": source_model_variant,
+            "source_value_adapter": source_value_adapter,
             "model_variant": config.model_variant,
+            "value_adapter": config.value_adapter,
             "state_dim": args.state_dim,
             "uma_slot_tokens": bool(args.uma_slot_tokens),
             "history": history,

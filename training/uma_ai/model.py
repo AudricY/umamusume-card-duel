@@ -47,6 +47,7 @@ SET_ATTN_NUM_CARD_TOKENS = NUM_ZONES * SET_ATTN_MAX_CARDS_PER_ZONE
 SET_ATTN_NUM_TOKENS = 1 + SET_ATTN_NUM_CARD_TOKENS + UMA_SLOT_COUNT  # 1 + 240 + 10 = 251
 
 _VALID_MODEL_VARIANTS = ("mlp", "set_attention")
+_VALID_VALUE_ADAPTERS = ("none", "mlp")
 
 # R16-P2 C2: board-zone lane indices into `card_ids_by_zone` (axis=1). When the
 # per-Uma slot-token branch is active (`uses_uma_slot_tokens=True`), the
@@ -116,6 +117,12 @@ class ModelConfig:
     # existing Q-head graph behavior.
     q_value_scalar_scale: float = 1.0
     q_value_scalar_bias: float = 0.0
+    # Pure-leaf value-capacity probe: optional value-only residual adapter
+    # applied before `value_head` but NOT before the policy/action trunk. The
+    # adapter's final Linear is zero-initialized, so enabling it preserves
+    # checkpoint outputs at construction/load time while giving value retrain
+    # a policy-preserving capacity path.
+    value_adapter: str = "none"
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -364,6 +371,11 @@ class CandidatePolicyNet(nn.Module):
                 "model_variant='set_attention' requires uses_uma_slot_tokens=True; "
                 "the attention encoder consumes the v3.2 slot-token tensors."
             )
+        if self.config.value_adapter not in _VALID_VALUE_ADAPTERS:
+            raise ValueError(
+                f"unknown value_adapter {self.config.value_adapter!r}; "
+                f"expected one of {_VALID_VALUE_ADAPTERS}"
+            )
         hidden = self.config.hidden_dim
         # R7.b.3 set-attention probe: the "mlp" variant is the legacy
         # additive state_encoder / zone_projection / uma_slot_encoder trunk.
@@ -426,6 +438,17 @@ class CandidatePolicyNet(nn.Module):
             nn.Linear(hidden // 2, 1),
             nn.Tanh(),
         )
+        if self.config.value_adapter == "mlp":
+            self.value_adapter = nn.Sequential(
+                nn.LayerNorm(hidden),
+                nn.Linear(hidden, hidden * 2),
+                nn.GELU(),
+                nn.Dropout(self.config.dropout),
+                nn.Linear(hidden * 2, hidden, bias=False),
+            )
+            nn.init.zeros_(self.value_adapter[-1].weight)
+        else:
+            self.value_adapter = None
         if self.config.uses_q_value_head:
             self.q_value_head = nn.Sequential(
                 nn.LayerNorm(hidden),
@@ -696,7 +719,10 @@ class CandidatePolicyNet(nn.Module):
                     + float(self.config.q_value_scalar_bias)
                 ).clamp(-1.0, 1.0)
         else:
-            value = self.value_head(state_encoded).squeeze(-1)
+            value_state_encoded = state_encoded
+            if self.value_adapter is not None:
+                value_state_encoded = value_state_encoded + self.value_adapter(value_state_encoded)
+            value = self.value_head(value_state_encoded).squeeze(-1)
         if return_q_values:
             return logits, value, q_values
         return logits, value

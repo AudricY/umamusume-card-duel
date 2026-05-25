@@ -225,6 +225,8 @@ def main() -> None:
     # sidecars stay byte-identical (no spurious key churn under re-export).
     if config.model_variant != "mlp":
         sidecar_payload["model_variant"] = config.model_variant
+    if config.value_adapter != "none":
+        sidecar_payload["value_adapter"] = config.value_adapter
     if config.uses_q_value_head:
         sidecar_payload["uses_q_value_head"] = True
         sidecar_payload["q_value_scalar"] = config.q_value_scalar
