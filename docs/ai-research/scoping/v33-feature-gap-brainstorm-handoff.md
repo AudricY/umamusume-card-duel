@@ -1,18 +1,19 @@
 # v3.3 Feature-Gap Brainstorm — Agent Handoff
 
-**Status:** Brainstorm-stage. No code changes proposed. No verdict reached.
-**Date:** 2026-05-25
+**Status:** Brainstorm-stage. Section 7 open questions RESOLVED 2026-05-25 (see §7). Spawning a correctness-fix scoping doc (see `v33-correctness-fix-scoping.md`).
+**Date:** 2026-05-25 (refreshed 2026-05-25 — same day; speedup landed concurrently).
 **Purpose:** Pick this up to continue a feature-schema review for the AI policy.
-**Routing:** This doc is the synthesis of a four-investigator gap audit + a strategic discussion about *revamp vs additive growth*. It is **not** a scoping doc for a specific bump — it is the input a scoping doc would draw from.
+**Routing:** This doc is the synthesis of a four-investigator gap audit + a strategic discussion about *revamp vs additive growth*. It is **not** a scoping doc for a specific bump — it is the input a scoping doc would draw from. The correctness-fix scoping doc (referenced above) is the first concrete spinoff.
 
 ---
 
 ## TL;DR
 
 - v3.2's feature contract has real gaps, but most are **additively fixable** under the existing freeze-and-zero-init-residual pattern.
-- The "schema axis is closed" verdict from R16 is **conditional on the pre-speedup compute regime**. A ≥10x MCTS speedup re-opens it because (a) v3.2's own n=10k ceiling is officially UNKNOWN, (b) deeper rollouts produce crisper Q targets that richer schemas need to express their asymptote.
-- Recommended sequencing: correctness fixes first → additive v3.3 tail for high-conviction structural fixes → re-run schema-axis and set-attention verdicts at the new compute scale → only then consider a token-first v4 revamp.
-- A clean-slate revamp is **not** recommended today. It only becomes attractive if set-attention crosses its 0.40 gate (currently MARGINAL at Slice 2 wl=0.3205).
+- The "schema axis is closed" verdict from R16 was **conditional on the pre-speedup compute regime**. The 12.4× MCTS speedup landed 2026-05-25 (`f75b347`), and re-verdict #3 was fired the same day per user approval. **Result: v3.2 wl=0.5877 at n=10k vs v3.0 0.5811 and v3.1 0.5810 — directional positive, +0.0066, intervals overlap.** The schema axis is no longer closed; canonical writeup at `progress/r110.md § 4f`.
+- Recommended sequencing (state-advanced): **correctness fixes first DONE** (commits `8141772`, `5ea1758`) → **re-verdict #3 FIRED, MARGINAL-POSITIVE** → **additive v3.3 tail UNGATED** (opp-side flags become the first tail item) → token-first v4 revamp still contingent on set-attention crossing 0.40.
+- A clean-slate revamp is **not** recommended today. It only becomes attractive if set-attention crosses its 0.40 gate (currently MARGINAL at Slice 2 wl=0.3205, Slice 3 never run).
+- **Next concrete actions:** (a) v33-correctness-fix ablation arms (A0–A3) — user-approved, training-heavy; (b) opp-side flags additive-tail scoping doc — now justified per re-verdict #3 outcome.
 
 ---
 
@@ -87,11 +88,11 @@ Source: `frontend/src/game/engine/ai-policy/actions.ts:487-551`.
 4. **Retreat cost + swap-in readiness** — retreat candidates differ only in slot 0 (the heuristic).
 5. **Evolution Δhp / Δdamage / Δability** — slots 14-17 describe the evolve card in isolation, not the upgrade delta.
 
-**Free cleanup wins (no width growth):**
-- Slot 8 and slot 26 are exact duplicates.
-- Slot 28 compares a uid to a slot index (different ID spaces) — near-always 0; dead bit.
-- Slot 10 is polysemic (energy count for attach, targetValue for combat, unused for trainer) — disambiguate or split.
-- Slots 11/29-31/12 partially re-encode the kind index (slot 2). Redundant.
+**Free cleanup wins (no width growth):** **LANDED 2026-05-25 commit `5ea1758` (ACTION_FEATURE_SCHEMA_VERSION 2 → 3).**
+- Slot 8 and slot 26 are exact duplicates. **Resolved: slot 26 repurposed to combat `lethalTarget` flag (a previously-hidden combat-planner output).**
+- Slot 28 compares a uid to a slot index (different ID spaces) — near-always 0; dead bit. **Resolved: repurposed to trainer `effect.heal` magnitude / 100.**
+- Slot 10 is polysemic (energy count for attach, targetValue for combat, unused for trainer) — disambiguate or split. **Resolved: now exclusively combat `targetValue / 200`. Attach `amount` semantic dropped (already in slot 8); setup `amount` dropped (already in `score`).**
+- Slots 11/29-31/12 partially re-encode the kind index (slot 2). Redundant. **Deferred — not a correctness bug, left for a future action-schema audit.**
 
 ### C. Game-mechanic-driven synthesised features (forward arithmetic)
 
@@ -99,7 +100,7 @@ These require synthesis across observation fields, not just plucking.
 
 1. **Lethal-in-N / clock differential** — turns-to-KO own & opp active given current energy + realised attach budget. The dominant race-vs-stabilise decision.
 2. **Net point swing if opp gusts my weakest bencher** — single-feature explanation for a whole class of catastrophic losses (`gust_opponent` trainers).
-3. **Weakness-adjusted effective damage** — `can_ko` (slot 84) and `damage/150` ignore `weakness_bonus` when defender type matches attacker's weakness. Systematic bias on ~30% of matchups. **Cheapest "free win" candidate — single multiply.**
+3. **Weakness-adjusted effective damage** — `can_ko` (slots 91/92 in the 110-d head; `_card_awareness_features` intra-block indices 23/24) and `damage/150` ignore `weakness_bonus` when defender type matches attacker's weakness. Systematic bias on ~30% of matchups. **Cheapest "free win" candidate — single multiply.** **LANDED 2026-05-25 commit `8141772`.**
 4. **Energy ETA per Uma** — turns-to-attack-ready accounting for energy-zone color mismatch.
 5. **Searchable targets remaining in deck** — own deck composition is fully known (decklist − hand − discard − in-play). A search trainer with zero valid targets is dead, but the model can't tell.
 6. **Bench-refill safety** — `would_lose_on_active_KO` (last Uma + no promote available). Binary catastrophe the policy should never blunder.
@@ -140,42 +141,50 @@ But set-attention is **MARGINAL at Slice 2 (wl=0.3205 < 0.40 gate)**. Redesignin
 
 ---
 
-## 4. Compute-conditional update (KEY UPDATE)
+## 4. Compute-conditional update — RESOLVED 2026-05-25
 
-A ≥10x MCTS speedup landing soon **partially overturns the "schema axis closed" verdict**.
+**Status:** The "≥10x soon" framing this section was written under is now **landed**. Section retained for historical reasoning trace; current state inlined below.
 
-### Why it changes things
+### What landed
 
-1. **v3.2's own n=10k ceiling is officially UNKNOWN** (`docs/ai-research-backlog.md:30`). The re-verdict is queued and user-gated. Cheaper compute means that re-verdict actually gets run. If v3.2 at the new scale beats v3.0's 0.5811, the "schema closed" claim collapses to "v3.0 vs v3.1 didn't move at the *old* scale."
-2. **Deeper MCTS → crisper Q targets.** Slot tokens, weakness correction, and energy-zone typing all want clean per-state value differences. They show as noise at shallow rollouts and as lift at deep rollouts. The richer the schema, the more rollouts needed to find its asymptote.
-3. **Set-attention Slice 2 verdict re-opens** at the new scale too. If it crosses 0.40, the trunk that wants tokenized inputs becomes live, and a token-first revamp acquires a real consumer.
+- **12.4× cumulative wall-clock speedup** on the sim-mcts-selfplay path vs the 0.60 g/s baseline (closeout commit `f75b347`, table at `mcts-selfplay-throughput-handoff.md:283`, scoping `docs/ai-research/scoping/r12-selfplay-gate-throughput.md:5`).
+- Path was R7.b throughput-spike Slices 1-3i: Rust in-process ort, orchestrator wiring, v3.2/v3.1 Rust featurizer fast path, real `--workers` game-level parallelism via `std::thread::scope`, GPU EP G5 lock-free dispatch, work-stealing worker pool, plus hot-path micro-opts.
+- 12.4× comfortably exceeds the ≥10× framing the original gap audit assumed.
+
+### What the post-landing picture actually is
+
+1. **v3.2 n=10k re-verdict is no longer compute-gated — it's user-gated.** Queue id `tight-gate-reverdict-program` (`docs/ai-agent-state/queue.json:55+`) holds re-verdict #3 (v3.2 at n=10k, projected ~11 min wall at workers=16) explicitly user-gated. Re-verdicts #1 (v3.0) and #2 (v3.1) at n=10k are DONE — both PARTIAL, identical to 4 decimals (wl ≈ 0.5810/0.5811). The v3.2 ceiling claim "officially UNKNOWN" remains literally true until the user fires #3.
+2. **Set-attention Slice 2 verdict — still MARGINAL.** `set-attention-architecture-probe.md:5-13,203-209` reports wl=0.3205 (n=1000, side-balanced raw-policy gate, landed 2026-05-22). Slice 3 NEVER run, gated on Slice 2 ≥ 0.40 AND re-verdict #3 reporting. Schema-revamp justification has not moved.
+3. **Weakness-bonus correction — still wide open.** Zero touches: no `"weakness"` hits in `training/uma_ai/` or `engine-rs/crates/engine/src/policy/`. `_can_ko` (`features.py:1066-1073`) reads `damage = readiness[2] * 150.0` with no weakness lookup; Rust mirror matches. Simulator core (`engine-rs/.../flow/combat.rs:130-146`) uses weakness — so featurizer and simulator disagree on ~30% of matchups. Cheapest free win remains untaken.
 
 ### What does NOT change
 
-- **Correctness bugs first** gets *stronger*, not weaker. Weakness-bonus correction is a single multiply; EV is compute-independent on the downside and scales with compute on the upside.
-- **Additive growth as default** still wins because of the freeze contract — even if compute opens the schema axis, additive tails are still the cheap way to ride it.
-- **Hidden-info regression guards, vocab-drift guards** — orthogonal, don't move.
+- **Correctness bugs first** gets *stronger*, not weaker. Weakness-bonus correction is still a single multiply; EV is compute-independent on the downside and scales with compute on the upside.
+- **Additive growth as default** still wins because of the freeze contract — even with compute open, additive tails are still the cheap way to ride the schema axis.
+- **Hidden-info / vocab-drift guards** — orthogonal, don't move.
 
-### The honest framing
+### The honest framing (updated)
 
-The R16 verdict was "schema closed *at the compute scale we trained at*." A 10x speedup doesn't automatically reopen it — it makes the experiments that would reopen it cheap enough to run. The revamp question is downstream of those re-verdicts.
+The R16 verdict was "schema closed *at the compute scale we trained at*." The 12.4× speedup didn't automatically reopen it — it made the experiments that *would* reopen it cheap. Those experiments are now waiting on **user permission** (re-verdict #3), not throughput. The revamp question is downstream of those re-verdicts; in the meantime, correctness fixes ship at any scale.
 
 ---
 
 ## 5. Recommended sequencing
 
 1. **Land correctness fixes** (no compute risk, gains compound at any scale):
-   - Weakness-bonus adjustment in `_card_awareness_features` (`can_ko`, damage features).
-   - Dedupe action slots 8/26, repurpose slot 28, disambiguate slot 10.
-   - Add opp-side `usedSupporter/Retreat/Stadium` flags (3 bits).
+   - Weakness-bonus adjustment in `_card_awareness_features` (`can_ko`, damage features). **LANDED 2026-05-25 commit `8141772`.**
+   - Dedupe action slots 8/26, repurpose slot 28, disambiguate slot 10. **LANDED 2026-05-25 commit `5ea1758` (ACTION_FEATURE_SCHEMA_VERSION 2 → 3).**
+   - Add opp-side `usedSupporter/Retreat/Stadium` flags (3 bits). **DEFERRED to v3.3 additive tail (step 3) per scoping doc `v33-correctness-fix-scoping.md` §6** — width bump requires re-verdict #3 movement to justify.
+   - Combined ablation A0/A1/A2/A3 queued and user-approved 2026-05-25; see queue id `v33-correctness-fix`.
 2. **Once the MCTS speedup lands, run the queued re-verdicts** before committing to anything bigger:
-   - v3.2 n=10k tight-gate re-verdict (already user-gated in the queue).
-   - Set-attention Slice 2/3 re-verdict.
+   - v3.2 n=10k tight-gate re-verdict. **FIRED 2026-05-25 (user-approved)** — manifest at `runs/v32-uniform-retrain-iter1-tight-gate/gate.manifest.json`; verdict writeup at `progress/r110.md § 4f`.
+   - Set-attention Slice 2/3 re-verdict. **Slice 2 still MARGINAL (wl=0.3205 < 0.40 gate)**; Slice 3 not run, gated on Slice 2 ≥ 0.40 AND re-verdict #3 outcome.
 3. **If schema axis shows movement** at the new scale → land an **additive v3.3 tail** with the high-conviction structural fixes:
    - Phase one-hot (10 bits) supplementing slot 0.
    - Energy-zone typed contents (~80 bits for both sides, depth 2-3).
    - Per-condition one-hot (5 bits) replacing/supplementing paralysed+count.
    - Bench temporal moved into widened slot tokens (drop the mean aggregate).
+   - **Opp-side flags (3 bits)** — deferred from step 1, lands as part of the additive tail with a new `_SCHEMA_BY_STATE_DIM[167]` dispatch entry.
 4. **Only if set-attention crosses 0.40** → seriously scope a token-first v4 revamp. Until then, hold it as a contingency.
 
 ---
@@ -191,13 +200,22 @@ The R16 verdict was "schema closed *at the compute scale we trained at*." A 10x 
 
 ---
 
-## 7. Open questions for the next agent
+## 7. Open questions — RESOLVED 2026-05-25
 
-1. **Has the MCTS speedup landed yet?** Check `git log --since="2026-05-25" --oneline -- engine-rs/crates/engine/src/mcts/` and recent digests under `docs/ai-agent-state/digests/`. The strategic verdict here is conditional on that.
-2. **What's the actual speedup ratio?** "≥10x" is the framing the user used in conversation; the realised ratio matters for whether the schema-axis re-verdicts are likely to find anything.
-3. **Has v3.2's n=10k re-verdict been re-queued or run?** Check `docs/ai-agent-state/queue.json` for `tight-gate-reverdict-program` status.
-4. **Is the weakness-bonus correction already on someone's plate?** A quick `rg "weakness" docs/ai-research training/uma_ai engine-rs/crates/engine/src/policy/` before scoping. If absent, it's the cheapest first slice.
-5. **Has set-attention Slice 3 been gated open?** Check `docs/ai-research/scoping/set-attention-architecture-probe.md` and recent progress logs.
+All five resolved by investigator pass; original questions retained below for traceability, with answers inlined.
+
+1. **Has the MCTS speedup landed yet?** **YES.** Closeout commit `f75b347` (2026-05-25). Slices 1-3i landed under R7.b throughput-spike. See `docs/ai-research/scoping/r12-selfplay-gate-throughput.md` and untracked `mcts-selfplay-throughput-handoff.md`.
+2. **What's the actual speedup ratio?** **12.4× cumulative** vs the 0.60 g/s baseline. Sub-figures along the way: 4.18× (Slice 2 orchestrator wiring), 5.6× at workers=8 (Slice 3d worker pool), 7.11× at workers=16 (GPU EP G5).
+3. **Has v3.2's n=10k re-verdict been re-queued or run?** **Re-verdicts #1 and #2 DONE — both PARTIAL** (v3.0 wl=0.5811, v3.1 wl=0.5810 — identical to 4 decimals at n=10k). **Re-verdict #3 (v3.2) USER-GATED**, "fire only on user request," ~11 min projected wall at workers=16 (`docs/ai-agent-state/queue.json:55-73`).
+4. **Is the weakness-bonus correction already on someone's plate?** **NO.** Zero hits for `"weakness"` in `training/uma_ai/` or `engine-rs/crates/engine/src/policy/`. `_can_ko` and damage features in `features.py:1066-1073` and Rust mirror ignore `weakness_bonus`; simulator core (`engine-rs/.../flow/combat.rs:130-146`) uses it. **Cheapest first slice confirmed open.**
+5. **Has set-attention Slice 3 been gated open?** **NO.** Slice 2 MARGINAL at wl=0.3205 (run `runs/r7b3-set-attention-slice2/gate.manifest.json`, landed 2026-05-22). 0.40 acceptance gate not crossed. Slice 3 never run; explicitly "DO NOT proceed without user gate."
+
+### What these answers imply
+
+- **Compute is no longer the gate** for re-verdicts; user permission is. Anything in §5 step 2 ("once the speedup lands") is now in "run them" state, not "wait."
+- **§5 step 1 (correctness fixes) is the only step actionable without user gating.** Weakness-bonus correction is the cheapest, most leveraged slice (compute-independent EV downside, scales upward with compute).
+- **§5 step 3 (additive v3.3 tail) requires re-verdict #3 movement to justify.** Holding until that ships.
+- **§5 step 4 (token-first v4 revamp) requires Slice 3 set-attention crossing 0.40.** Holding until Slice 2 is re-baselined and crosses the gate.
 
 ---
 

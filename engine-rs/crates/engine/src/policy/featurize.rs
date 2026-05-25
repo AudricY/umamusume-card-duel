@@ -44,6 +44,13 @@ pub const STATE_DIM_V3: usize = 110;
 /// Mirrors `STATE_DIM_V3_1` in Python — 164-d v3.1 temporal/turn-state
 /// builder. Layout is the frozen v3.0 110-d head + 54-d temporal block.
 pub const STATE_DIM_V3_1: usize = 164;
+/// Mirrors `STATE_DIM_V3_3` in Python — 167-d v3.3 additive-tail builder
+/// (`v33-additive-tail-scoping.md`). Layout is the frozen v3.1 164-d head
+/// + 3 opp-side flag bits (usedSupporter / usedRetreat / usedStadium).
+/// Tail-init is zero-init residual: a v3.2 ckpt loaded into the v3.3
+/// graph produces bit-identical iter-0 outputs (new Linear columns are
+/// zero-init in `make_v33_tail_init.py`).
+pub const STATE_DIM_V3_3: usize = 167;
 /// Mirrors `ACTION_DIM` (48-d action feature vector — pre-computed
 /// TS-side and carried verbatim on `LegalAiAction.features`).
 pub const ACTION_DIM: usize = 48;
@@ -333,6 +340,26 @@ pub fn observation_state_features_v3_1(obs: &PublicObservation) -> Vec<f32> {
     // 146–154: opp active per-Uma; 155–163: opp bench aggregate.
     f[146..155].copy_from_slice(&uma_turn_state_vec(obs.opponent.active.as_ref()));
     f[155..164].copy_from_slice(&bench_turn_state_aggregate(&obs.opponent));
+
+    f
+}
+
+/// v33-additive-tail: 167-d builder. Slots 0–163 are byte-identical to
+/// v3.1 (produced by calling `observation_state_features_v3_1` directly,
+/// NOT re-derived); slots [164:167] are the opp-side used* flag tail.
+/// Mirrors `observation_to_features_v3_3` in Python.
+pub fn observation_state_features_v3_3(obs: &PublicObservation) -> Vec<f32> {
+    let mut f = vec![0.0f32; STATE_DIM_V3_3];
+    let head = observation_state_features_v3_1(obs);
+    debug_assert_eq!(head.len(), STATE_DIM_V3_1);
+    f[..STATE_DIM_V3_1].copy_from_slice(&head);
+
+    // Opp-side flag tail (mirror of own-side at slots 29/30/31, which
+    // are emitted by the frozen v3.0/v2 head). v3.0/v3.1/v3.2 had no
+    // opponent-side equivalent — v3.3 is the first surfacing.
+    f[164] = if obs.opponent.used_supporter_this_turn { 1.0 } else { 0.0 };
+    f[165] = if obs.opponent.used_retreat_this_turn { 1.0 } else { 0.0 };
+    f[166] = if obs.opponent.used_stadium_this_turn { 1.0 } else { 0.0 };
 
     f
 }
@@ -784,7 +811,21 @@ fn can_ko(attacker: Option<&PublicUmaObservation>, defender: Option<&PublicUmaOb
     if r[3] <= 0.0 {
         return 0.0;
     }
-    let damage = r[2] * 150.0;
+    let mut damage = r[2] * 150.0;
+    // Weakness bonus: simulator applies `damage += defender.weakness.amount`
+    // when damage > 0 and defender's printed weakness type matches the
+    // attacker's primary type (`flow/combat.rs:303-305`). Featurizer
+    // previously ignored this — bit-exact mirror with the Python fix in
+    // `features.py::_can_ko`.
+    if damage > 0.0 {
+        if let (Some(Card::Umamusume(attacker_uma)), Some(Card::Umamusume(defender_uma))) =
+            (get_card(&a.card_id), get_card(&d.card_id))
+        {
+            if attacker_uma.r#type == defender_uma.weakness.r#type {
+                damage += defender_uma.weakness.amount as f32;
+            }
+        }
+    }
     if damage >= d.hp as f32 {
         1.0
     } else {
@@ -1103,6 +1144,7 @@ mod tests {
     use crate::core::random::{with_rng, Rng};
     use crate::headless_setup::setup_ai_vs_ai_game;
     use crate::policy::observation::build_public_observation;
+    use crate::policy::types::PublicUmaTurnState;
 
     fn fixture() -> PublicObservation {
         let rng = Rng::from_seed("featurize-fixture:selfplay", "selfplay");
@@ -1405,5 +1447,143 @@ mod tests {
         // Opp side still has its actives — slot 5 (opp active) should
         // remain populated to confirm we did NOT zero everything.
         assert!(card_ids[5] > 0);
+    }
+
+    // ----------------------------------------------------------------
+    // can_ko weakness-bonus correction (v33-correctness-fix slice)
+    // ----------------------------------------------------------------
+
+    fn make_uma_obs(
+        card_id: &str,
+        hp: i32,
+        max_hp: i32,
+        energy_total: u32,
+        energies: &[(&str, u16)],
+    ) -> PublicUmaObservation {
+        let mut e = indexmap::IndexMap::new();
+        for (k, v) in energies {
+            e.insert((*k).to_string(), *v);
+        }
+        PublicUmaObservation {
+            uid: 1,
+            card_id: card_id.to_string(),
+            species: String::new(),
+            stage: 0,
+            hp,
+            max_hp,
+            energy_total,
+            energies: e,
+            special_conditions: Vec::new(),
+            tool_card_id: None,
+            used_ability_this_turn: false,
+            turn_state: PublicUmaTurnState {
+                turns_in_play: 1,
+                entered_this_turn: false,
+                evolved_this_turn: false,
+                evolved_last_turn: false,
+                took_damage_last_turn: false,
+                took_damage_this_turn: false,
+                next_turn_damage_reduction: 0,
+                attack_blocked_this_turn: false,
+                paralysis_recovery_pending: false,
+            },
+        }
+    }
+
+    #[test]
+    fn can_ko_applies_weakness_bonus_at_threshold() {
+        // Darkness attacker (`manhattanCafeStage1`, 40 damage, cost
+        // darkness+colorless) vs Psychic defender (`matikanetannhauserBasic`,
+        // hp 60, weakness Darkness +20). Without weakness: 40 < 60 → no KO.
+        // With weakness: 40 + 20 = 60 >= 60 → KO. This is the canonical
+        // ~30% featurizer/simulator disagreement case the slice targets.
+        let attacker = make_uma_obs(
+            "manhattanCafeStage1",
+            90,
+            90,
+            2,
+            &[("darkness", 1), ("colorless", 1)],
+        );
+        let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        // Sanity: readiness should be ready (energy_total >= total_cost,
+        // typed_deficit == 0).
+        let r = uma_readiness_features(Some(&attacker));
+        assert_eq!(r[3], 1.0, "attacker must be attack-ready in fixture");
+        // can_ko returns 1.0 because 40 + 20 weakness == 60 hp.
+        assert_eq!(can_ko(Some(&attacker), Some(&defender)), 1.0);
+    }
+
+    #[test]
+    fn can_ko_no_weakness_when_types_dont_match() {
+        // Psychic attacker (`matikanetannhauserBasic`, 20 damage) vs
+        // Psychic defender (`haruUraraBasic`, hp 90). Defender weakness
+        // is Darkness, not Psychic, so no bonus applies. 20 < 90 → no KO.
+        let attacker = make_uma_obs("matikanetannhauserBasic", 60, 60, 1, &[("psychic", 1)]);
+        let defender = make_uma_obs("haruUraraBasic", 90, 90, 0, &[]);
+        let r = uma_readiness_features(Some(&attacker));
+        assert_eq!(r[3], 1.0);
+        assert_eq!(can_ko(Some(&attacker), Some(&defender)), 0.0);
+    }
+
+    // ----------------------------------------------------------------
+    // v3.3 additive-tail (v33-additive-tail-scoping.md)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn v3_3_state_vector_dimension_is_167() {
+        let obs = fixture();
+        let v = observation_state_features_v3_3(&obs);
+        assert_eq!(v.len(), STATE_DIM_V3_3);
+        assert_eq!(STATE_DIM_V3_3, 167);
+    }
+
+    #[test]
+    fn v3_3_head_is_byte_identical_to_v3_1() {
+        // The first 164 slots MUST be byte-equal to the standalone v3.1
+        // builder — this is the core layering contract that lets a v3.2
+        // ckpt warm-start a v3.3 graph via zero-init residual.
+        let obs = fixture();
+        let v31 = observation_state_features_v3_1(&obs);
+        let v33 = observation_state_features_v3_3(&obs);
+        assert_eq!(&v33[..STATE_DIM_V3_1], &v31[..]);
+    }
+
+    #[test]
+    fn v3_3_tail_emits_opp_used_flags() {
+        // With a fresh fixture, no actions have been taken on either
+        // side, so all used* flags are false → tail slots are 0.0.
+        let obs = fixture();
+        let v33 = observation_state_features_v3_3(&obs);
+        assert_eq!(v33[164], 0.0, "fresh fixture has opp.used_supporter=false");
+        assert_eq!(v33[165], 0.0, "fresh fixture has opp.used_retreat=false");
+        assert_eq!(v33[166], 0.0, "fresh fixture has opp.used_stadium=false");
+
+        // Mutate the opp side; the tail flips.
+        let mut obs2 = obs.clone();
+        obs2.opponent.used_supporter_this_turn = true;
+        obs2.opponent.used_stadium_this_turn = true;
+        let v33b = observation_state_features_v3_3(&obs2);
+        assert_eq!(v33b[164], 1.0);
+        assert_eq!(v33b[165], 0.0);
+        assert_eq!(v33b[166], 1.0);
+        // Own-side flags unchanged → slots 29/30/31 still zero from the
+        // fresh fixture.
+        assert_eq!(v33b[29], 0.0);
+        assert_eq!(v33b[30], 0.0);
+        assert_eq!(v33b[31], 0.0);
+    }
+
+    #[test]
+    fn can_ko_zero_damage_does_not_apply_weakness() {
+        // Mirror of simulator rule: weakness only applies when damage > 0.
+        // We synthesise this by reducing the attacker's energy below the
+        // attack cost — readiness[3] = 0, damage = 0, can_ko returns 0
+        // without ever entering the weakness branch.
+        let attacker = make_uma_obs("manhattanCafeStage1", 90, 90, 0, &[]);
+        let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        // Readiness fail (energy_total 0 < total_cost 2).
+        let r = uma_readiness_features(Some(&attacker));
+        assert_eq!(r[3], 0.0);
+        assert_eq!(can_ko(Some(&attacker), Some(&defender)), 0.0);
     }
 }

@@ -9,6 +9,7 @@ import torch
 
 from uma_ai.features import (
     ACTION_DIM,
+    ACTION_FEATURE_SCHEMA_VERSION,
     CARD_ID_SHAPES,
     STATE_FEATURE_SCHEMA_VERSION_V3_2,
     UMA_SLOT_COUNT,
@@ -194,6 +195,11 @@ def main() -> None:
             else schema_version_for_state_dim(graph_state_dim)
         ),
         "action_dim": ACTION_DIM,
+        # v33-correctness-fix Fix 2-4: stamp the action-feature schema
+        # version so the Rust inference loader (and serve_onnx) can
+        # fail-fast on train/inference layout mismatch. Bumped 2 → 3
+        # when slot 10/26/28 semantics changed.
+        "action_feature_schema_version": ACTION_FEATURE_SCHEMA_VERSION,
         "card_vocab": expected_vocab,
         "checkpoint_vocab": checkpoint_vocab,
         # R7.b.2 Phase 3: surface the embedding graph shape so
