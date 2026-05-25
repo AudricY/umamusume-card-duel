@@ -434,11 +434,20 @@ fn score_candidate(
     id: String,
     forced_coin_result: Option<Vec<CoinFlipResult>>,
 ) -> CombatCandidate {
-    let before = base_state.clone();
+    // The TS port translated `structuredClone(baseState)` into a full
+    // GameState clone here, but `score_candidate` only ever READS `before`
+    // (passes it as `&GameState` to the penalty helpers and reads
+    // `side(...)` snapshots). Drop the redundant clone — we already hold
+    // an immutable borrow. `simulated` retains its clone because
+    // `perform_attack` mutates it in-place. Removing the `before` and
+    // per-side clones eliminates ~4 SideState clones per candidate, which
+    // is the dominant heuristic-rollout cost at sims=800 (flamegraph
+    // `Slice 3e` — see r12-selfplay-gate-throughput.md).
+    let before: &GameState = base_state;
     let mut simulated = base_state.clone();
     let defending_id: SideId = acting_side_id.opposite();
-    let acting_before = before.side(acting_side_id).clone();
-    let defending_before = before.side(defending_id).clone();
+    let acting_before: &SideState = before.side(acting_side_id);
+    let defending_before: &SideState = before.side(defending_id);
 
     if let AiCombatDecision::Attack(attack_decision) = &decision {
         if let Some(retreat_uid) = attack_decision.retreat_target_uid {
