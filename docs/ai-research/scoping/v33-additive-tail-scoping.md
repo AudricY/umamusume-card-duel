@@ -1,7 +1,7 @@
 # v3.3 Additive Tail — Opp-Side Flags Slice
 
 - **Date:** 2026-05-25
-- **Status:** SCOPING — pre-registered, not yet launched. Justification gate: re-verdict #3 outcome (v3.2 wl=0.5877 at n=10k, +0.0066 over v3.0 0.5811) cleared the handoff §5 step 3 conditional ("if schema axis shows movement").
+- **Status:** **LANDED 2026-05-25** — A1 SHIP band at n=10k wl=0.5910 (+0.0100 over v3.1 A0 0.5810, +0.0033 over v3.2 RV3 0.5877, +0.0099 over v3.0 0.5811). Highest wl_lower of any 4-schema family tested. Confound: the lift could be opp-flag tail OR v33-correctness-fix Fix 2-4 action-cleanup OR both. Canonical writeup: `docs/ai-research/progress/r110.md § 4g`. Manifest: `runs/R16-P1-v33-iter1-tight-gate/gate.manifest.json`. Body retained as the pre-registered ablation recipe.
 - **Parent:** `v33-feature-gap-brainstorm-handoff.md` §5 step 3 (additive v3.3 tail). Sibling: `v33-correctness-fix-scoping.md` (Fixes 1-4 LANDED 2026-05-25). Promoted from "deferred" to "scoped" by the re-verdict #3 result.
 - **Scope:** Smallest defensible additive tail — three opp-side flags. Other §2.A candidates (phase one-hot, energy-zone typed contents, per-condition one-hot, bench-temporal slot widening) are explicitly **out of scope** for this slice; each gets its own scoping pass if v3.3 step-1 holds non-regression.
 

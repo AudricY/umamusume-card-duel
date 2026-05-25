@@ -221,9 +221,9 @@ _SCHEMA_TABLE: tuple[tuple[int, bool, bool, str, str], ...] = (
     (
         STATE_DIM_V3_3,
         True,
-        True,
+        False,
         "v3.3",
-        "167-d v3.3 additive opp-flag tail (embedding + slot inputs; v3.1 head + 3 opp-side used* bits)",
+        "167-d v3.3 additive opp-flag tail (embedding inputs, no slot tokens; v3.1 head + 3 opp-side used* bits)",
     ),
 )
 _PLACEHOLDER_DIMS: dict[int, str] = {}
