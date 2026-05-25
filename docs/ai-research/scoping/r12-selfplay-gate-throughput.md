@@ -144,6 +144,76 @@ saturate. A cheap `intra_op_num_threads`/`inter_op_num_threads` knob
 exists (`serve_onnx.py:62-63`) if it does — flagged, not changed now
 (would not affect trajectories but is out of the trusted-A/B scope).
 
+## Slice 3d — Rust `sim-mcts-selfplay` worker pool (2026-05-25)
+
+The Rust port of `mcts_selfplay.rs` shipped (Phase 1g, Slice 2 schema fix)
+but kept the `--workers` flag as a no-op (`let _ = args.workers` at
+`engine-rs/crates/sim-cli/src/bin/mcts_selfplay.rs:540`). The 50k-row
+corpus was produced by 8 hand-launched processes as a workaround
+(`docs/ai-agent-state/digests/2026-05-25.md:5`). Slice 3d ports the
+`eval_gate.rs:540-620` work-stealing pool to `mcts_selfplay.rs`: a single
+shared `OnceLock<InferenceSession>` reused by all workers (G5 lock-free
+`UnsafeCell<Session>` contract, `engine-rs/crates/engine/src/inference/
+mod.rs:186-200`), `std::thread::scope` + atomic task cursor, per-task
+`GameRecord` slots collected after the scope so JSONL output stays
+bit-identical to `--workers 1` regardless of completion order. Default
+`--workers 0` ⇒ `available_parallelism()` to match `sim-eval-gate`.
+
+### Parity smoke
+
+`--sims 50 --seeds 6 --model-side both --prior uniform --leaf rollout
+--record-rows` at workers ∈ {1, 4, 8, 16, 32}: all five outputs share
+md5 `65fc72a1…` (the small-game probe used a coarser config; the large
+run below uses the same md5 verification). Per-game RNG is seeded solely
+from `(seed, side)` (`mcts_selfplay.rs:322, 353`) — dispatch order
+cannot perturb trajectories; the gate confirms result-aggregation is
+slot-ordered, not append-ordered. Matches the TS-side guarantee proven
+in the work-stealing determinism gate above.
+
+### Throughput sweep (sims=800, K=3, rollout_steps=200, prior=uniform, leaf=rollout, 40 games)
+
+This is the "Critical pre-Tier-3 measurement" from
+`mcts-selfplay-throughput-handoff.md`: re-run the baseline manifest with
+`--prior uniform --leaf rollout` to isolate the rollout-step share of
+wall (no ORT calls). The baseline anchor at `prior=policy` was 0.60 g/s
+(`runs/qhead-v32-highsim-label-stability-probe/selfplay-s800.manifest.json`,
+single process); the uniform-prior workers=1 number here re-anchors at
+**0.636 g/s**, confirming the rollout-leaf path dominates wall.
+
+| workers | wall (s) | g/s   | speedup | CPU%   |
+|---------|----------|-------|---------|--------|
+| 1       | 62.87    | 0.636 | 1.00×   | 99%    |
+| 4       | 18.06    | 2.215 | 3.48×   | 381%   |
+| 8       | 11.20    | 3.570 | 5.62×   | 707%   |
+| 16      | 11.28    | 3.546 | 5.58×   | 1090%  |
+| 32      | 11.16    | 3.585 | 5.64×   | 1524%  |
+
+**Plateau at workers=8** despite CPU% continuing to climb through
+workers=32. Plateau is consistent with per-game wall-clock variance
+(longest game determines wall when worker count exceeds active games)
+and/or allocator/cache contention — workers=16-32 burns ~2× CPU work for
+the same wall as workers=8. Resolution belongs to flamegraph (Tier 2 in
+the handoff doc). 5.6× is below the gate-path 7.11× ceiling at
+workers=16 (G5 measurement, value-head leaf, ORT-dominated). Selfplay's
+larger relative rollout share thins the ceiling.
+
+### Follow-ups (not yet landed)
+
+- Rip `training/r12_orchestrator._run_pool_selfplay` (`:812-962`)
+  multi-process fanout once the binary `--workers` flag is the canonical
+  parallel axis. The 8-process bash hack noted in the 2026-05-25 digest
+  retires with it.
+- Flamegraph the workers=16 run to decide between Tier 2 (subtree reuse,
+  transposition cache) vs Tier 3 (state_hash → u128, Rng::fork_idx,
+  forced_coins clone removal). The handoff doc § "Recommended
+  sequencing" branches on this.
+- Re-run with `prior=policy` (ORT in the loop) once an ONNX checkpoint
+  is staged in this worktree, to confirm the ORT-path speedup matches
+  the gate-side 7.11× at workers=16.
+
+Implementation: `engine-rs/crates/sim-cli/src/bin/mcts_selfplay.rs`
+(commit `f75e556`).
+
 ## Cross-references
 
 - Mechanism + numbers + neutrality proof: `docs/ai-research/progress/r110.md` §4b.

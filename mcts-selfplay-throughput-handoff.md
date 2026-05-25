@@ -2,7 +2,12 @@
 
 - **Date:** 2026-05-25
 - **Branch:** `feat/ai`
-- **Status:** Brainstorm complete; nothing implemented. Tasks #1–#6 in the local task list correspond to the tiered plan below.
+- **Status:** Tier 1 LANDED (commit `f75e556`); 5.6× at workers=8 on the
+  prior=uniform/leaf=rollout 40-game sweep. Bit-identical JSONL across
+  workers ∈ {1,4,8,16,32} (md5 `65fc72a1…`). Evidence lives in
+  `docs/ai-research/scoping/r12-selfplay-gate-throughput.md` § "Slice 3d".
+  Tier 2 next: flamegraph at workers=16 to decide between subtree
+  reuse + transposition cache vs Tier 3 micro-opts.
 - **Predecessor docs (read these in order if cold):**
   - `docs/ai-research/scoping/throughput-optimization-spike.md` — Slice 1–3 (Rust ORT in-process, 4.18× wall)
   - `docs/ai-research/scoping/gpu-inference-execution-provider.md` — G5 lock-free `UnsafeCell<Session>` for `sim-eval-gate` (7.11× at workers=16)
@@ -33,7 +38,7 @@ The working pattern already exists in `engine-rs/crates/sim-cli/src/bin/eval_gat
 
 ## Ranked work plan
 
-### Tier 1 — Infra unlock (~7–11×, ~half day) — gates everything else
+### Tier 1 — Infra unlock — LANDED `f75e556` (5.6× at workers=8)
 
 **Port `eval_gate.rs:540-620` worker pool into `mcts_selfplay.rs:580-634`.**
 
