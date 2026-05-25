@@ -784,7 +784,21 @@ fn can_ko(attacker: Option<&PublicUmaObservation>, defender: Option<&PublicUmaOb
     if r[3] <= 0.0 {
         return 0.0;
     }
-    let damage = r[2] * 150.0;
+    let mut damage = r[2] * 150.0;
+    // Weakness bonus: simulator applies `damage += defender.weakness.amount`
+    // when damage > 0 and defender's printed weakness type matches the
+    // attacker's primary type (`flow/combat.rs:303-305`). Featurizer
+    // previously ignored this — bit-exact mirror with the Python fix in
+    // `features.py::_can_ko`.
+    if damage > 0.0 {
+        if let (Some(Card::Umamusume(attacker_uma)), Some(Card::Umamusume(defender_uma))) =
+            (get_card(&a.card_id), get_card(&d.card_id))
+        {
+            if attacker_uma.r#type == defender_uma.weakness.r#type {
+                damage += defender_uma.weakness.amount as f32;
+            }
+        }
+    }
     if damage >= d.hp as f32 {
         1.0
     } else {
@@ -1103,6 +1117,7 @@ mod tests {
     use crate::core::random::{with_rng, Rng};
     use crate::headless_setup::setup_ai_vs_ai_game;
     use crate::policy::observation::build_public_observation;
+    use crate::policy::types::PublicUmaTurnState;
 
     fn fixture() -> PublicObservation {
         let rng = Rng::from_seed("featurize-fixture:selfplay", "selfplay");
@@ -1405,5 +1420,95 @@ mod tests {
         // Opp side still has its actives — slot 5 (opp active) should
         // remain populated to confirm we did NOT zero everything.
         assert!(card_ids[5] > 0);
+    }
+
+    // ----------------------------------------------------------------
+    // can_ko weakness-bonus correction (v33-correctness-fix slice)
+    // ----------------------------------------------------------------
+
+    fn make_uma_obs(
+        card_id: &str,
+        hp: i32,
+        max_hp: i32,
+        energy_total: u32,
+        energies: &[(&str, u16)],
+    ) -> PublicUmaObservation {
+        let mut e = indexmap::IndexMap::new();
+        for (k, v) in energies {
+            e.insert((*k).to_string(), *v);
+        }
+        PublicUmaObservation {
+            uid: 1,
+            card_id: card_id.to_string(),
+            species: String::new(),
+            stage: 0,
+            hp,
+            max_hp,
+            energy_total,
+            energies: e,
+            special_conditions: Vec::new(),
+            tool_card_id: None,
+            used_ability_this_turn: false,
+            turn_state: PublicUmaTurnState {
+                turns_in_play: 1,
+                entered_this_turn: false,
+                evolved_this_turn: false,
+                evolved_last_turn: false,
+                took_damage_last_turn: false,
+                took_damage_this_turn: false,
+                next_turn_damage_reduction: 0,
+                attack_blocked_this_turn: false,
+                paralysis_recovery_pending: false,
+            },
+        }
+    }
+
+    #[test]
+    fn can_ko_applies_weakness_bonus_at_threshold() {
+        // Darkness attacker (`manhattanCafeStage1`, 40 damage, cost
+        // darkness+colorless) vs Psychic defender (`matikanetannhauserBasic`,
+        // hp 60, weakness Darkness +20). Without weakness: 40 < 60 → no KO.
+        // With weakness: 40 + 20 = 60 >= 60 → KO. This is the canonical
+        // ~30% featurizer/simulator disagreement case the slice targets.
+        let attacker = make_uma_obs(
+            "manhattanCafeStage1",
+            90,
+            90,
+            2,
+            &[("darkness", 1), ("colorless", 1)],
+        );
+        let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        // Sanity: readiness should be ready (energy_total >= total_cost,
+        // typed_deficit == 0).
+        let r = uma_readiness_features(Some(&attacker));
+        assert_eq!(r[3], 1.0, "attacker must be attack-ready in fixture");
+        // can_ko returns 1.0 because 40 + 20 weakness == 60 hp.
+        assert_eq!(can_ko(Some(&attacker), Some(&defender)), 1.0);
+    }
+
+    #[test]
+    fn can_ko_no_weakness_when_types_dont_match() {
+        // Psychic attacker (`matikanetannhauserBasic`, 20 damage) vs
+        // Psychic defender (`haruUraraBasic`, hp 90). Defender weakness
+        // is Darkness, not Psychic, so no bonus applies. 20 < 90 → no KO.
+        let attacker = make_uma_obs("matikanetannhauserBasic", 60, 60, 1, &[("psychic", 1)]);
+        let defender = make_uma_obs("haruUraraBasic", 90, 90, 0, &[]);
+        let r = uma_readiness_features(Some(&attacker));
+        assert_eq!(r[3], 1.0);
+        assert_eq!(can_ko(Some(&attacker), Some(&defender)), 0.0);
+    }
+
+    #[test]
+    fn can_ko_zero_damage_does_not_apply_weakness() {
+        // Mirror of simulator rule: weakness only applies when damage > 0.
+        // We synthesise this by reducing the attacker's energy below the
+        // attack cost — readiness[3] = 0, damage = 0, can_ko returns 0
+        // without ever entering the weakness branch.
+        let attacker = make_uma_obs("manhattanCafeStage1", 90, 90, 0, &[]);
+        let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        // Readiness fail (energy_total 0 < total_cost 2).
+        let r = uma_readiness_features(Some(&attacker));
+        assert_eq!(r[3], 0.0);
+        assert_eq!(can_ko(Some(&attacker), Some(&defender)), 0.0);
     }
 }

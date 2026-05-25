@@ -1070,6 +1070,20 @@ def _can_ko(attacker: dict[str, Any], defender: dict[str, Any]) -> float:
     if readiness[3] <= 0:
         return 0.0
     damage = readiness[2] * 150.0
+    # Weakness bonus: simulator applies `damage += defender.weakness.amount`
+    # when damage > 0 and defender's printed weakness type matches the
+    # attacker's primary type (engine-rs flow/combat.rs:303-305). The
+    # featurizer previously ignored this, causing can_ko to under-report
+    # KOs on ~30% of matchups (any type-disadvantaged defender).
+    if damage > 0:
+        attacker_card = _get_card(str(attacker.get("cardId", "")))
+        defender_card = _get_card(str(defender.get("cardId", "")))
+        if attacker_card and defender_card:
+            attacker_type = str(attacker_card.get("type", ""))
+            weakness = defender_card.get("weakness") or {}
+            weakness_type = str(weakness.get("type", ""))
+            if attacker_type and weakness_type and attacker_type == weakness_type:
+                damage += float(weakness.get("amount", 0))
     return 1.0 if damage >= float(defender.get("hp", 0)) else 0.0
 
 
