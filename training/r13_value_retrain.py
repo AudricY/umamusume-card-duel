@@ -49,6 +49,10 @@ def parse_args() -> argparse.Namespace:
                         help="Emit v3.2 per-Uma slot tensors while retraining the value head.")
     parser.add_argument("--train-scope", choices=["value-head", "all"], default="value-head",
                         help="Train only value_head.* (default) or all model parameters for fit diagnostics.")
+    parser.add_argument("--policy-anchor-weight", type=float, default=0.0,
+                        help="When >0, add KL(anchor_policy || model_policy) on legal actions.")
+    parser.add_argument("--policy-anchor-checkpoint", default=None,
+                        help="Checkpoint to use as the policy anchor. Defaults to --init-checkpoint.")
     return parser.parse_args()
 
 
@@ -80,6 +84,18 @@ def configure_train_scope(model: CandidatePolicyNet, train_scope: str) -> None:
     raise ValueError(f"unknown train_scope={train_scope!r}")
 
 
+def masked_log_softmax(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    masked = logits.masked_fill(~mask, -1e9)
+    return torch.log_softmax(masked, dim=1)
+
+
+def masked_policy_kl(anchor_logits: torch.Tensor, logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    anchor_log_probs = masked_log_softmax(anchor_logits, mask)
+    log_probs = masked_log_softmax(logits, mask)
+    anchor_probs = anchor_log_probs.exp() * mask.float()
+    return (anchor_probs * (anchor_log_probs - log_probs)).sum(dim=1)
+
+
 def emit_event(events_path: Path | None, stage: str, event_type: str, data: dict) -> None:
     if events_path is None:
         return
@@ -109,6 +125,8 @@ def main() -> None:
         "state_dim": args.state_dim,
         "uma_slot_tokens": bool(args.uma_slot_tokens),
         "train_scope": args.train_scope,
+        "policy_anchor_weight": args.policy_anchor_weight,
+        "policy_anchor_checkpoint": args.policy_anchor_checkpoint or args.init_checkpoint,
     })
 
     dataset = ValueTargetDataset(
@@ -144,6 +162,20 @@ def main() -> None:
     model.to(device)
     configure_train_scope(model, args.train_scope)
 
+    anchor_model: CandidatePolicyNet | None = None
+    if args.policy_anchor_weight > 0.0:
+        anchor_payload = torch.load(args.policy_anchor_checkpoint or args.init_checkpoint, map_location="cpu", weights_only=False)
+        anchor_raw_cfg = anchor_payload.get("model_config")
+        if anchor_raw_cfg is None:
+            anchor_raw_cfg = anchor_payload.get("metadata", {}).get("model_config")
+        anchor_config = ModelConfig.from_dict(anchor_raw_cfg or {})
+        anchor_model = CandidatePolicyNet(anchor_config)
+        anchor_model.load_state_dict(anchor_payload["model_state"])
+        anchor_model.to(device)
+        anchor_model.eval()
+        for param in anchor_model.parameters():
+            param.requires_grad = False
+
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
     mse = nn.MSELoss(reduction="none")
@@ -153,9 +185,13 @@ def main() -> None:
         loss_sum = 0.0
         abs_err_sum = 0.0
         squared_err_sum = 0.0
+        kl_sum = 0.0
         if training:
-            for module in model.value_head.modules():
-                module.train()
+            if args.train_scope == "value-head":
+                for module in model.value_head.modules():
+                    module.train()
+            else:
+                model.train()
         else:
             model.eval()
         for batch in loader:
@@ -183,7 +219,7 @@ def main() -> None:
             if uma_slot_features is not None:
                 uma_slot_features = uma_slot_features.to(device)
             with torch.set_grad_enabled(training):
-                _logits, value_pred = model(
+                logits, value_pred = model(
                     state,
                     actions,
                     mask,
@@ -196,13 +232,29 @@ def main() -> None:
                 # not a class label. tanh saturation in the head guards
                 # against overshoot; clipped targets bound the loss.
                 per_row = mse(value_pred, value_target) * sample_weights
-                loss = per_row.mean()
+                value_loss = per_row.mean()
+                kl_loss = torch.zeros((), device=device)
+                if anchor_model is not None and args.policy_anchor_weight > 0.0:
+                    with torch.no_grad():
+                        anchor_logits, _ = anchor_model(
+                            state,
+                            actions,
+                            mask,
+                            card_ids_by_zone=card_ids_by_zone,
+                            action_card_idx=action_card_idx,
+                            uma_slot_card_ids=uma_slot_card_ids,
+                            uma_slot_features=uma_slot_features,
+                        )
+                    kl_per_row = masked_policy_kl(anchor_logits, logits, mask) * sample_weights
+                    kl_loss = kl_per_row.mean()
+                loss = value_loss + float(args.policy_anchor_weight) * kl_loss
                 if training:
                     loss.backward()
                     optimizer.step()
             batch_size = state.size(0)
             total += batch_size
             loss_sum += float(loss.detach().cpu()) * batch_size
+            kl_sum += float(kl_loss.detach().cpu()) * batch_size
             err = (value_pred.detach() - value_target.detach()).cpu()
             abs_err_sum += float(err.abs().sum())
             squared_err_sum += float((err ** 2).sum())
@@ -210,6 +262,7 @@ def main() -> None:
             "loss": loss_sum / max(1, total),
             "mae": abs_err_sum / max(1, total),
             "rmse": (squared_err_sum / max(1, total)) ** 0.5,
+            "policy_kl": kl_sum / max(1, total),
             "n": total,
         }
 
@@ -226,6 +279,8 @@ def main() -> None:
             "train_mae": train_metrics["mae"],
             "val_loss": val_metrics["loss"],
             "val_mae": val_metrics["mae"],
+            "train_policy_kl": train_metrics.get("policy_kl", 0.0),
+            "val_policy_kl": val_metrics.get("policy_kl", 0.0),
             "secs": round(epoch_secs, 2),
         })
 
@@ -247,6 +302,8 @@ def main() -> None:
             "device": str(device),
             "frozen": "trunk+policy_head" if args.train_scope == "value-head" else "none",
             "train_scope": args.train_scope,
+            "policy_anchor_weight": args.policy_anchor_weight,
+            "policy_anchor_checkpoint": args.policy_anchor_checkpoint or args.init_checkpoint,
             "state_dim": args.state_dim,
             "uma_slot_tokens": bool(args.uma_slot_tokens),
             "history": history,
