@@ -1,0 +1,173 @@
+{
+  "schemaVersion": 3,
+  "sideToAct": "player",
+  "phase": "stadiumOrEnd",
+  "turnNumber": 1,
+  "firstPlayer": "opponent",
+  "pendingChoiceKind": null,
+  "temporal": {
+    "ownTurnsTaken": 0,
+    "opponentTurnsTaken": 1,
+    "ownIsFirstTurn": true,
+    "opponentIsFirstTurn": false
+  },
+  "own": {
+    "id": "player",
+    "points": 0,
+    "handCount": 4,
+    "handCardIds": [
+      "yayoiAkikawa"
+    ],
+    "deckCount": 15,
+    "discard": [],
+    "active": {
+      "uid": 1,
+      "cardId": "manhattanCafeStage1",
+      "species": "",
+      "stage": 0,
+      "hp": 90,
+      "maxHp": 90,
+      "energyTotal": 2,
+      "energies": {
+        "darkness": 1,
+        "colorless": 1
+      },
+      "specialConditions": [],
+      "toolCardId": null,
+      "usedAbilityThisTurn": false,
+      "turnState": {
+        "turnsInPlay": 1,
+        "enteredThisTurn": false,
+        "evolvedThisTurn": false,
+        "evolvedLastTurn": false,
+        "tookDamageLastTurn": false,
+        "tookDamageThisTurn": false,
+        "nextTurnDamageReduction": 0,
+        "attackBlockedThisTurn": false,
+        "paralysisRecoveryPending": false
+      }
+    },
+    "bench": [
+      null,
+      null,
+      null
+    ],
+    "energyZone": [],
+    "energyPool": [
+      "psychic"
+    ],
+    "usedSupporterThisTurn": false,
+    "usedRetreatThisTurn": false,
+    "usedStadiumThisTurn": false,
+    "turnState": {
+      "energyAttachmentsThisTurn": 0,
+      "bonusEnergyAttachments": 0,
+      "retreatCostReduction": 0,
+      "effectiveRetreatCostReduction": 0,
+      "activeAttackDamageBonus": 0,
+      "usedAbilityNameCountThisTurn": 0,
+      "usedAbilityNameCountThisGame": 0,
+      "guaranteedCoinFlipHeads": 0
+    }
+  },
+  "opponent": {
+    "id": "opponent",
+    "points": 2,
+    "handCount": 3,
+    "deckCount": 15,
+    "discard": [],
+    "active": {
+      "uid": 1,
+      "cardId": "matikanetannhauserBasic",
+      "species": "",
+      "stage": 0,
+      "hp": 60,
+      "maxHp": 60,
+      "energyTotal": 0,
+      "energies": {},
+      "specialConditions": [],
+      "toolCardId": null,
+      "usedAbilityThisTurn": false,
+      "turnState": {
+        "turnsInPlay": 1,
+        "enteredThisTurn": false,
+        "evolvedThisTurn": false,
+        "evolvedLastTurn": false,
+        "tookDamageLastTurn": false,
+        "tookDamageThisTurn": false,
+        "nextTurnDamageReduction": 0,
+        "attackBlockedThisTurn": false,
+        "paralysisRecoveryPending": false
+      }
+    },
+    "bench": [
+      {
+        "uid": 1,
+        "cardId": "haruUraraBasic",
+        "species": "",
+        "stage": 0,
+        "hp": 10,
+        "maxHp": 90,
+        "energyTotal": 0,
+        "energies": {},
+        "specialConditions": [],
+        "toolCardId": null,
+        "usedAbilityThisTurn": false,
+        "turnState": {
+          "turnsInPlay": 1,
+          "enteredThisTurn": false,
+          "evolvedThisTurn": false,
+          "evolvedLastTurn": false,
+          "tookDamageLastTurn": false,
+          "tookDamageThisTurn": false,
+          "nextTurnDamageReduction": 0,
+          "attackBlockedThisTurn": false,
+          "paralysisRecoveryPending": false
+        }
+      }
+    ],
+    "energyZone": [],
+    "energyPool": [
+      "psychic"
+    ],
+    "usedSupporterThisTurn": false,
+    "usedRetreatThisTurn": false,
+    "usedStadiumThisTurn": false,
+    "turnState": {
+      "energyAttachmentsThisTurn": 0,
+      "bonusEnergyAttachments": 0,
+      "retreatCostReduction": 0,
+      "effectiveRetreatCostReduction": 0,
+      "activeAttackDamageBonus": 0,
+      "usedAbilityNameCountThisTurn": 0,
+      "usedAbilityNameCountThisGame": 0,
+      "guaranteedCoinFlipHeads": 0
+    }
+  },
+  "shared": {
+    "stadiumCardId": null,
+    "currentSide": "opponent",
+    "gameOver": false
+  },
+  "cardIdsByZone": {
+    "ownActive": [
+      38
+    ],
+    "oppActive": [
+      38
+    ],
+    "ownBench": [],
+    "oppBench": [
+      27
+    ],
+    "ownHand": [
+      49,
+      84,
+      16,
+      1
+    ],
+    "ownDiscard": [],
+    "oppDiscard": [],
+    "stadium": []
+  }
+}
