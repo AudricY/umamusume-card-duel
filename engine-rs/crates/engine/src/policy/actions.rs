@@ -1803,7 +1803,7 @@ fn play_choices_to_value(choices: &PlayChoices) -> Value {
 mod tests {
     use super::*;
     use crate::core::constants::{AiDeckStyle, AiDifficulty, SideId};
-    use crate::core::state::{CurrentSide, Phase, SetupState, SideState, UmamusumeInstance};
+    use crate::core::state::{CurrentSide, Phase, SetupState, SideState};
     use arrayvec::ArrayVec;
 
     fn empty_side(id: SideId) -> SideState {

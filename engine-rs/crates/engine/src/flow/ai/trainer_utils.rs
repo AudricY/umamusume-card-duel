@@ -827,7 +827,6 @@ fn is_retreat_likely_beneficial(state: &GameState, side: &SideState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::card_id::CardId;
     use crate::core::constants::{AiDeckStyle, AiDifficulty, EnergyType, SideId};
     use crate::core::state::{CurrentSide, Phase, SideState, UmamusumeInstance};
     use arrayvec::ArrayVec;
