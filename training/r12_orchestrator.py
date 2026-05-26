@@ -1478,7 +1478,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mcts-rollout-steps", type=int, default=200)
     p.add_argument("--mcts-collapse-max-steps", type=int, default=64)
     p.add_argument("--mcts-max-nodes", type=int, default=5000)
-    p.add_argument("--mcts-wave-size", type=int, default=1)
+    # Default resolves leaf-conditionally after parse_args(): value-head -> 16
+    # (B6 finding: ~7x bit-identical at sims=100; docs/ai-research/scoping/
+    # gpu-batched-inference-throughput.md), rollout -> 1 (rollouts dominate
+    # wall, wave gain ~1.25x and not bit-identical at wave=32). Explicit
+    # --mcts-wave-size on the CLI wins.
+    p.add_argument("--mcts-wave-size", type=int, default=None)
     p.add_argument("--mcts-virtual-loss", type=float, default=1.0)
     p.add_argument("--dirichlet-alpha", type=float, default=0.3)
     p.add_argument("--dirichlet-epsilon", type=float, default=0.25)
@@ -1633,6 +1638,8 @@ def parse_args() -> argparse.Namespace:
         args.w6_fix_cross_iter_replay = W6_FIX_CROSS_ITER_REPLAY
     if args.w6_fix_fixed_kl_anchor is None:
         args.w6_fix_fixed_kl_anchor = W6_FIX_FIXED_KL_ANCHOR
+    if args.mcts_wave_size is None:
+        args.mcts_wave_size = 16 if args.mcts_leaf == "value-head" else 1
     return args
 
 
