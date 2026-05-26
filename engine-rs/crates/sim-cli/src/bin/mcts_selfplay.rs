@@ -23,7 +23,7 @@ use engine::dispatcher::{
     get_forced_attack_coin_results, state_hash,
 };
 use engine::headless_setup::setup_ai_vs_ai_game_with_decks;
-use engine::inference::{self, InferenceSession};
+use engine::inference::{self, Device, InferenceSession};
 use engine::mcts::config::{MctsConfig, MctsLeaf, MctsPrior, MctsRootActionSelection};
 use engine::mcts::driver::run_mcts;
 use engine::mcts::sample::pick_from_visits;
@@ -140,6 +140,19 @@ struct Args {
     /// (e.g. `training/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.22.0`).
     #[arg(long)]
     onnx_path: Option<String>,
+    /// GPU inference EP. `cpu` (default) uses the historical
+    /// single-threaded ORT CPU path (FP-deterministic with
+    /// `serve_onnx --ort-threads 1`). `cuda` loads the ONNX session on
+    /// the CUDA EP and drops the per-call inference Mutex. Mirrors the
+    /// `--device` flag on `sim-eval-gate`. See
+    /// `docs/ai-research/scoping/cuda-wave-sweep-validation.md` for the
+    /// n=10k validation that greenlit cuda-w256 (Δwl=+0.015, 7.29×
+    /// per-game on hidden=256/depth=4).
+    #[arg(long, default_value = "cpu")]
+    device: String,
+    /// CUDA device id (only honored under `--device cuda`).
+    #[arg(long, default_value_t = 0)]
+    cuda_device_id: i32,
     /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`.
     /// Deck-pair sampling mode (`fixed`, `uniform`, or
     /// `pair=<player>:<opponent>`). Default `fixed` keeps current
@@ -202,6 +215,8 @@ impl Args {
             "deckSampling": self.deck_sampling,
             "waveSize": self.wave_size,
             "virtualLoss": self.virtual_loss,
+            "device": self.device,
+            "cudaDeviceId": self.cuda_device_id,
         })
     }
 }
@@ -586,10 +601,20 @@ fn main() -> Result<()> {
                     "sim-mcts-selfplay: --onnx-path is required when --prior policy or --leaf value-head is set"
                 )
             })?;
-        let session = InferenceSession::load(std::path::Path::new(onnx))
+        let device = match args.device.as_str() {
+            "cpu" => Device::Cpu,
+            "cuda" => Device::Cuda {
+                device_id: args.cuda_device_id,
+            },
+            other => anyhow::bail!("--device must be one of 'cpu' or 'cuda' (got {})", other),
+        };
+        let session = InferenceSession::load_on(std::path::Path::new(onnx), device)
             .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
         inference::set_global(session);
-        eprintln!("sim-mcts-selfplay: loaded inference session from {}", onnx);
+        eprintln!(
+            "sim-mcts-selfplay: loaded inference session from {} on device={}",
+            onnx, args.device
+        );
     } else if args.model_url.is_empty() && args.onnx_path.is_none() {
         // pure-uniform/rollout path doesn't need a session.
     } else if !args.model_url.is_empty() {

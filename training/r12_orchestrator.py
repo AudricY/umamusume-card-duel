@@ -105,9 +105,41 @@ class R12State:
     selfplay_deck_sampling: str = "uniform"
 
 
+def _ensure_cuda_ld_library_path(repo_root: Path) -> None:
+    """Prepend the venv's bundled `nvidia/*/lib` dirs onto LD_LIBRARY_PATH so
+    ORT's CUDA EP (loaded by sim-mcts-selfplay / sim-eval-gate via the
+    `--device cuda` flag) can find `libcudnn.so.9` + cublas/curand/etc.
+    The wheels ship under `training/.venv/.../site-packages/nvidia/*/lib`;
+    they are not on the system loader path. PyTorch picks them up itself
+    when it imports; subprocesses driven from here need this prefix.
+    Idempotent: re-running with the dirs already prefixed is a no-op."""
+    nvidia_root = (
+        repo_root
+        / "training"
+        / ".venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "nvidia"
+    )
+    if not nvidia_root.is_dir():
+        return
+    lib_dirs = [str(p) for p in nvidia_root.glob("*/lib") if p.is_dir()]
+    if not lib_dirs:
+        return
+    current = os.environ.get("LD_LIBRARY_PATH", "")
+    current_parts = current.split(":") if current else []
+    if all(d in current_parts for d in lib_dirs):
+        return
+    new_parts = lib_dirs + current_parts
+    os.environ["LD_LIBRARY_PATH"] = ":".join(filter(None, new_parts))
+
+
 def main() -> None:
     args = parse_args()
     repo_root = Path(args.repo_root or Path(__file__).resolve().parents[1])
+    if args.mcts_device == "cuda":
+        _ensure_cuda_ld_library_path(repo_root)
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     # Write the orchestrator's own real PID so the harness reads the true
@@ -551,6 +583,8 @@ def run_selfplay(
         "--workers", str(args.workers),
         "--wave-size", str(args.mcts_wave_size),
         "--virtual-loss", str(args.mcts_virtual_loss),
+        "--device", args.mcts_device,
+        "--cuda-device-id", str(args.mcts_cuda_device_id),
         "--out", str(out_path),
         "--manifest-out", str(manifest_out),
         # deck-pair-sampling Slice 2 (2026-05-22): self-play widens its deck
@@ -1144,6 +1178,8 @@ def run_gate(
         "--mcts-max-nodes", str(args.mcts_max_nodes),
         "--wave-size", str(args.mcts_wave_size),
         "--virtual-loss", str(args.mcts_virtual_loss),
+        "--device", args.mcts_device,
+        "--cuda-device-id", str(args.mcts_cuda_device_id),
         "--min-ci-lower", str(args.eval_min_ci_lower),
         "--min-games", str(args.eval_games),
         "--progress-out", str(iter_dir / "gate-progress.jsonl"),
@@ -1478,13 +1514,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mcts-rollout-steps", type=int, default=200)
     p.add_argument("--mcts-collapse-max-steps", type=int, default=64)
     p.add_argument("--mcts-max-nodes", type=int, default=5000)
-    # Default resolves leaf-conditionally after parse_args(): value-head -> 16
-    # (B6 finding: ~7x bit-identical at sims=100; docs/ai-research/scoping/
-    # gpu-batched-inference-throughput.md), rollout -> 1 (rollouts dominate
-    # wall, wave gain ~1.25x and not bit-identical at wave=32). Explicit
-    # --mcts-wave-size on the CLI wins.
+    # Default resolves (leaf, device)-conditionally after parse_args():
+    #   (value-head, cpu)  -> 16  (B6: 7.30x bit-identical small-model;
+    #                              2.00x bit-identical bigger-model
+    #                              hidden=256/depth=4 per Phase A 2026-05-26)
+    #   (value-head, cuda) -> 256 (cuda-wave-sweep-validation 2026-05-26:
+    #                              n=10k Δwl=+0.015 strength-neutral,
+    #                              7.29× per-game on hidden=256/depth=4)
+    #   (rollout, *)       -> 1   (rollouts dominate wall, wave gain small
+    #                              and not bit-identical at wave>=32)
+    # Explicit --mcts-wave-size on the CLI wins.
     p.add_argument("--mcts-wave-size", type=int, default=None)
     p.add_argument("--mcts-virtual-loss", type=float, default=1.0)
+    # MCTS inference device for sim-mcts-selfplay and sim-eval-gate. Mirrors
+    # the binary's --device flag. `cpu` is the historical default and stays
+    # FP-deterministic. `cuda` requires the venv's nvidia/* lib dirs on
+    # LD_LIBRARY_PATH (set automatically by the orchestrator's subprocess env).
+    p.add_argument("--mcts-device", choices=["cpu", "cuda"], default="cpu")
+    p.add_argument("--mcts-cuda-device-id", type=int, default=0)
     p.add_argument("--dirichlet-alpha", type=float, default=0.3)
     p.add_argument("--dirichlet-epsilon", type=float, default=0.25)
     p.add_argument("--temperature-moves", type=int, default=6)
@@ -1639,7 +1686,10 @@ def parse_args() -> argparse.Namespace:
     if args.w6_fix_fixed_kl_anchor is None:
         args.w6_fix_fixed_kl_anchor = W6_FIX_FIXED_KL_ANCHOR
     if args.mcts_wave_size is None:
-        args.mcts_wave_size = 16 if args.mcts_leaf == "value-head" else 1
+        if args.mcts_leaf == "value-head":
+            args.mcts_wave_size = 256 if args.mcts_device == "cuda" else 16
+        else:
+            args.mcts_wave_size = 1
     return args
 
 
