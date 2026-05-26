@@ -52,7 +52,7 @@ use ort::value::TensorRef;
 use crate::policy::card_vocab::card_vocab;
 use crate::policy::featurize::{
     self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3,
-    STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7,
+    STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7, STATE_DIM_V3_8,
     UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM,
 };
 use crate::policy::types::{LegalAiAction, PublicObservation};
@@ -119,6 +119,14 @@ enum GraphSchema {
     /// byte-stable. See
     /// `docs/ai-research/scoping/v37-combat-arith-and-catalog-scoping.md`.
     V3_7,
+    /// v38-slim-feature-add: 304-d state-features + 5-input contract
+    /// (no slot tokens) + action schema v4 (action_dim=52). Layered on
+    /// v3.7 with an 8-bit slim tail at [296:304]: per-bench primary-
+    /// attack ETA (3 own + 3 opp) + gust-swing catastrophe (2 bits).
+    /// v3.7 head [0:296] stays byte-stable. NO trunk widening
+    /// (hidden_dim=128/depth=2 preserved). See
+    /// `docs/ai-research/scoping/v38-slim-feature-add-scoping.md`.
+    V3_8,
 }
 
 /// Errors surfaced by the inference layer. We hide ORT's `Error` behind
@@ -333,19 +341,20 @@ impl InferenceSession {
         // skip the check in that case (legacy ckpt under unknown schema —
         // operator's responsibility to ensure compatibility). Fresh
         // exports stamp the field, so any mismatch is operator error.
+        //
+        // v38-slim-feature-add bumped runtime action schema 3 → 4. v3.7-
+        // and-earlier sidecars stamp schema=3 and SHOULD continue to load
+        // (their action features are a strict prefix of the v4 builder's
+        // 52-d output — slots [48:52] are v3.8-new and zero for any v3.7
+        // call site). We discriminate by state_dim: state_dim=304 (v3.8)
+        // requires runtime schema match; state_dim<304 accepts the legacy
+        // schema (3) too. Discrimination requires the graph to be loaded
+        // first so we move this check below the session build + signature
+        // validation.
         let sidecar_action_schema = sidecar
             .get("action_feature_schema_version")
             .and_then(|v| v.as_u64())
             .map(|n| n as u32);
-        if let Some(expected) = sidecar_action_schema {
-            let runtime = crate::policy::actions::ACTION_FEATURE_SCHEMA_VERSION;
-            if expected != runtime {
-                return Err(InferenceError::ActionSchemaMismatch {
-                    expected,
-                    runtime,
-                });
-            }
-        }
 
         // Build the ORT session per device. R14.G CPU rationale: pin
         // intra/inter-op = 1 to keep FP-determinism on the policy logits
@@ -378,6 +387,22 @@ impl InferenceSession {
         // `serve_onnx._lookup_schema`. Partial v3.2 (one slot input
         // missing) is rejected explicitly.
         let schema = validate_graph_signature(&session)?;
+
+        // Apply the deferred action_feature_schema_version check. v3.8
+        // (state_dim=304) requires runtime parity; v3.7-and-earlier
+        // schemas tolerate the legacy v3 schema in addition to the
+        // current runtime.
+        if let Some(expected) = sidecar_action_schema {
+            let runtime = crate::policy::actions::ACTION_FEATURE_SCHEMA_VERSION;
+            let accepted = expected == runtime
+                || (!matches!(schema, GraphSchema::V3_8) && expected == 3);
+            if !accepted {
+                return Err(InferenceError::ActionSchemaMismatch {
+                    expected,
+                    runtime,
+                });
+            }
+        }
 
         let guard = match device {
             Device::Cpu => SessionGuard::Cpu(UnsafeCell::new(session)),
@@ -590,12 +615,29 @@ struct PackedRow {
     state_dim: usize,
     action_features: Vec<f32>, // n_actions * ACTION_DIM
     n_actions: usize,
+    /// Per-action feature width packed into `action_features`. v3.8
+    /// (state_dim=304) uses the full runtime ACTION_DIM=52; v3.7-and-
+    /// earlier schemas truncate each per-action row to 48 (v3 slots
+    /// [0:48] are BYTE-STABLE — the slim v4 tail [48:52] is sliced off
+    /// before reshape to keep legacy graphs loading without an ORT
+    /// shape error).
+    action_dim: usize,
     card_ids: Vec<i64>, // NUM_ZONES * MAX_CARDS_PER_ZONE
     action_card_idx: Vec<i64>, // n_actions * 2
     /// v3.2/v3.4 only.
     slot_card_ids: Option<Vec<i64>>,
     /// v3.2/v3.4 only.
     slot_features: Option<Vec<f32>>,
+}
+
+/// v3.8 widens the runtime per-action feature width 48 → 52. Earlier
+/// schemas (v3.0–v3.7) consume only the v3 byte-stable prefix; this
+/// helper returns the slice width to pack into the ORT input tensor.
+fn action_dim_for_schema(schema: GraphSchema) -> usize {
+    match schema {
+        GraphSchema::V3_8 => ACTION_DIM,
+        _ => 48,
+    }
 }
 
 fn pack_row(
@@ -624,13 +666,29 @@ fn pack_row(
             featurize::observation_state_features_v3_7(observation),
             STATE_DIM_V3_7,
         ),
+        GraphSchema::V3_8 => (
+            featurize::observation_state_features_v3_8(observation),
+            STATE_DIM_V3_8,
+        ),
         GraphSchema::V3_0 | GraphSchema::V3_2 => (
             featurize::observation_state_features(observation),
             STATE_DIM_V3,
         ),
     };
     let n_actions = legal_actions.len();
-    let action_features = featurize::legal_actions_features(legal_actions)?;
+    let action_dim = action_dim_for_schema(schema);
+    let full_action_features = featurize::legal_actions_features(legal_actions)?;
+    // For v3.7-and-earlier schemas, slice each action's 52-d vector
+    // down to its v3 byte-stable 48-d prefix. v3.8 keeps the full row.
+    let action_features: Vec<f32> = if action_dim == ACTION_DIM {
+        full_action_features
+    } else {
+        let mut buf: Vec<f32> = Vec::with_capacity(n_actions * action_dim);
+        for chunk in full_action_features.chunks_exact(ACTION_DIM) {
+            buf.extend_from_slice(&chunk[..action_dim]);
+        }
+        buf
+    };
     let card_ids = featurize::observation_card_ids_by_zone(observation);
     let action_card_idx = featurize::action_card_idx_pairs_flat(legal_actions);
     let (slot_card_ids, slot_features) = match schema {
@@ -643,13 +701,15 @@ fn pack_row(
         | GraphSchema::V3_3
         | GraphSchema::V3_5
         | GraphSchema::V3_6
-        | GraphSchema::V3_7 => (None, None),
+        | GraphSchema::V3_7
+        | GraphSchema::V3_8 => (None, None),
     };
     Ok(PackedRow {
         state,
         state_dim,
         action_features,
         n_actions,
+        action_dim,
         card_ids,
         action_card_idx,
         slot_card_ids,
@@ -669,7 +729,7 @@ fn run_inline_row(
     let state_arr = Array::from_shape_vec((1, row.state_dim), row.state.clone())
         .map_err(|e| InferenceError::OutputShape(format!("state reshape: {e}")))?;
     let action_features_arr = Array::from_shape_vec(
-        (1, row.n_actions, ACTION_DIM),
+        (1, row.n_actions, row.action_dim),
         row.action_features.clone(),
     )
     .map_err(|e| InferenceError::OutputShape(format!("action_features reshape: {e}")))?;
@@ -707,7 +767,8 @@ fn run_inline_row(
         | GraphSchema::V3_3
         | GraphSchema::V3_5
         | GraphSchema::V3_6
-        | GraphSchema::V3_7 => ort::inputs![
+        | GraphSchema::V3_7
+        | GraphSchema::V3_8 => ort::inputs![
             "state_features" => TensorRef::from_array_view(&state_arr)?,
             "action_features" => TensorRef::from_array_view(&action_features_arr)?,
             "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
@@ -775,9 +836,10 @@ fn run_inline_batch(
         ));
     }
     let needs_slots = matches!(schema, GraphSchema::V3_2 | GraphSchema::V3_4);
+    let action_dim = action_dim_for_schema(schema);
 
     let mut state_buf: Vec<f32> = Vec::with_capacity(n_batch * state_dim);
-    let mut action_features_buf: Vec<f32> = vec![0.0; n_batch * max_n * ACTION_DIM];
+    let mut action_features_buf: Vec<f32> = vec![0.0; n_batch * max_n * action_dim];
     let mut action_mask_buf: Vec<bool> = vec![false; n_batch * max_n];
     let mut card_ids_buf: Vec<i64> = Vec::with_capacity(n_batch * NUM_ZONES * MAX_CARDS_PER_ZONE);
     let mut action_card_idx_buf: Vec<i64> = vec![0; n_batch * max_n * 2];
@@ -799,9 +861,15 @@ fn run_inline_batch(
                 r.state_dim, state_dim, row_idx
             )));
         }
+        if r.action_dim != action_dim {
+            return Err(InferenceError::SchemaMismatch(format!(
+                "predict_v3_batch: action_dim {} != {} on row {}",
+                r.action_dim, action_dim, row_idx
+            )));
+        }
         state_buf.extend_from_slice(&r.state);
-        let af_dst_off = row_idx * max_n * ACTION_DIM;
-        let af_src_len = r.n_actions * ACTION_DIM;
+        let af_dst_off = row_idx * max_n * action_dim;
+        let af_src_len = r.n_actions * action_dim;
         action_features_buf[af_dst_off..af_dst_off + af_src_len]
             .copy_from_slice(&r.action_features);
         let am_dst_off = row_idx * max_n;
@@ -832,7 +900,7 @@ fn run_inline_batch(
     let state_arr = Array::from_shape_vec((n_batch, state_dim), state_buf)
         .map_err(|e| InferenceError::OutputShape(format!("state reshape: {e}")))?;
     let action_features_arr =
-        Array::from_shape_vec((n_batch, max_n, ACTION_DIM), action_features_buf)
+        Array::from_shape_vec((n_batch, max_n, action_dim), action_features_buf)
             .map_err(|e| InferenceError::OutputShape(format!("action_features reshape: {e}")))?;
     let action_mask_arr = Array::from_shape_vec((n_batch, max_n), action_mask_buf)
         .map_err(|e| InferenceError::OutputShape(format!("action_mask reshape: {e}")))?;
@@ -869,7 +937,8 @@ fn run_inline_batch(
         | GraphSchema::V3_3
         | GraphSchema::V3_5
         | GraphSchema::V3_6
-        | GraphSchema::V3_7 => ort::inputs![
+        | GraphSchema::V3_7
+        | GraphSchema::V3_8 => ort::inputs![
             "state_features" => TensorRef::from_array_view(&state_arr)?,
             "action_features" => TensorRef::from_array_view(&action_features_arr)?,
             "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
@@ -1123,8 +1192,9 @@ fn run_batch(
     }
 
     // Allocate stacked-B buffers and copy/pad each row in.
+    let action_dim = action_dim_for_schema(schema);
     let mut state_buf: Vec<f32> = Vec::with_capacity(n_batch * state_dim);
-    let mut action_features_buf: Vec<f32> = vec![0.0; n_batch * max_n * ACTION_DIM];
+    let mut action_features_buf: Vec<f32> = vec![0.0; n_batch * max_n * action_dim];
     let mut action_mask_buf: Vec<bool> = vec![false; n_batch * max_n];
     let mut card_ids_buf: Vec<i64> = Vec::with_capacity(n_batch * NUM_ZONES * MAX_CARDS_PER_ZONE);
     let mut action_card_idx_buf: Vec<i64> = vec![0; n_batch * max_n * 2];
@@ -1156,12 +1226,24 @@ fn run_batch(
             }
             return;
         }
+        if r.action_dim != action_dim {
+            let err = InferenceError::SchemaMismatch(format!(
+                "batched run: action_dim {} != {} on row {}",
+                r.action_dim, action_dim, row_idx
+            ));
+            for req in batch {
+                let _ = req.response.send(Err(InferenceError::SchemaMismatch(
+                    format!("{}", err),
+                )));
+            }
+            return;
+        }
         state_buf.extend_from_slice(&r.state);
-        // Pad action_features to (max_n, ACTION_DIM); leading
+        // Pad action_features to (max_n, action_dim); leading
         // r.n_actions rows are copied, trailing (max_n - r.n_actions)
         // rows are left as zeros.
-        let af_dst_off = row_idx * max_n * ACTION_DIM;
-        let af_src_len = r.n_actions * ACTION_DIM;
+        let af_dst_off = row_idx * max_n * action_dim;
+        let af_src_len = r.n_actions * action_dim;
         action_features_buf[af_dst_off..af_dst_off + af_src_len]
             .copy_from_slice(&r.action_features);
         // Pad action_mask to (max_n,); leading r.n_actions positions
@@ -1212,7 +1294,7 @@ fn run_batch(
         }
     };
     let action_features_arr =
-        match Array::from_shape_vec((n_batch, max_n, ACTION_DIM), action_features_buf) {
+        match Array::from_shape_vec((n_batch, max_n, action_dim), action_features_buf) {
             Ok(a) => a,
             Err(e) => {
                 broadcast_err(batch, format!("action_features reshape: {e}"));
@@ -1276,7 +1358,8 @@ fn run_batch(
         | GraphSchema::V3_3
         | GraphSchema::V3_5
         | GraphSchema::V3_6
-        | GraphSchema::V3_7 => (|| -> Result<_, InferenceError> {
+        | GraphSchema::V3_7
+        | GraphSchema::V3_8 => (|| -> Result<_, InferenceError> {
             Ok(ort::inputs![
                 "state_features" => TensorRef::from_array_view(&state_arr)?,
                 "action_features" => TensorRef::from_array_view(&action_features_arr)?,
@@ -1572,10 +1655,11 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
         Some(d) if d as usize == STATE_DIM_V3_5 => Ok(GraphSchema::V3_5),
         Some(d) if d as usize == STATE_DIM_V3_6 => Ok(GraphSchema::V3_6),
         Some(d) if d as usize == STATE_DIM_V3_7 => Ok(GraphSchema::V3_7),
+        Some(d) if d as usize == STATE_DIM_V3_8 => Ok(GraphSchema::V3_8),
         Some(d) => Err(InferenceError::SchemaMismatch(format!(
             "graph state_features last dim {} does not match v3.0 ({}), \
-             v3.1 ({}), v3.3 ({}), v3.5 ({}), v3.6 ({}), or v3.7 ({}); inputs {:?}",
-            d, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3, STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7, inputs
+             v3.1 ({}), v3.3 ({}), v3.5 ({}), v3.6 ({}), v3.7 ({}), or v3.8 ({}); inputs {:?}",
+            d, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3, STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7, STATE_DIM_V3_8, inputs
         ))),
         None => {
             // No concrete state_features shape — fall back to v3.0 for

@@ -28,8 +28,27 @@ import type { PlayChoices } from "../core/playTypes";
 // Rust mirror (`engine-rs/.../policy/actions.rs::build_features`) and
 // Python ACTION_FEATURE_SCHEMA_VERSION constant in
 // `training/uma_ai/features.py` bumped to match.
-export const ACTION_FEATURE_SCHEMA_VERSION = 3;
-export const ACTION_FEATURE_COUNT = 48;
+// v38-slim-feature-add bumped 3 → 4. Extends v3 with 4 new slots at
+// [48:52]:
+//   slot 48 = swap_in_attack_ready (1 iff kind∈{retreat, retreatAttack}
+//             AND swap target has enough energy for its primary attack)
+//   slot 49 = expected_damage_norm = damage / 300 where damage =
+//             attack.damage + activeAttackDamageBonus +
+//             (weakness.amount if attacker.type ==
+//             defender.weakness.type AND damage > 0 else 0). RESTRICTED
+//             — no per-attack conditional bonuses, no coin-flip, no
+//             discard-conditioned bonuses.
+//   slot 50 = attach_color_matches_typed_need (1 iff attachEnergy with
+//             side.energyZone[0] color reduces typed deficit on target)
+//   slot 51 = attach_completes_typed_threshold (1 iff post-attach
+//             target meets primary-attack typed cost; colorless still
+//             allowed unmet)
+// Rust mirror (`engine-rs/.../policy/actions.rs::build_features`),
+// Python ACTION_FEATURE_SCHEMA_VERSION, and Rust ACTION_FEATURE_COUNT
+// in `engine-rs/.../policy/featurize.rs` + `policy/actions.rs` bumped
+// to match. v3 slots [0:48] BYTE-STABLE.
+export const ACTION_FEATURE_SCHEMA_VERSION = 4;
+export const ACTION_FEATURE_COUNT = 52;
 const ENERGY_TYPES: EnergyType[] = ["grass", "fire", "water", "lightning", "psychic", "fighting", "darkness", "steel", "colorless", "dragon"];
 
 export function enumerateLegalAiActions(state: GameState, sideId: SideId): LegalAiAction[] {
@@ -215,6 +234,7 @@ function enumerateEvolutionActions(state: GameState, side: SideState): LegalAiAc
 function enumerateAttachActions(state: GameState, side: SideState): LegalAiAction[] {
   if (!canAttachEnergy(state, side)) return [];
   const turnGoal = chooseAiTurnGoal(state, side);
+  const attachColor = side.energyZone[0];
   return getAllUmamusume(side).flatMap((target, slot) => {
     if (!canAttachEnergyToUmamusume(state, side, target)) return [];
     return [{
@@ -228,6 +248,7 @@ function enumerateAttachActions(state: GameState, side: SideState): LegalAiActio
         kind: "attachEnergy",
         target,
         targetSlot: slot,
+        ...(attachColor !== undefined ? { attachColor } : {}),
       }),
       actionSourceCardIdx: null,
       actionTargetCardIdx: cardVocabIndex(target.cardId),
@@ -407,12 +428,26 @@ function enumerateCombatActions(state: GameState, side: SideState): LegalAiActio
       refreshContinuousEffects: refreshContinuousHp,
       choosePreferredActiveIndex,
     });
+    const opponent = state.sides[side.id === "player" ? "opponent" : "player"];
     candidates.forEach((candidate, index) => {
       const targetUid = candidate.decision.kind === "attack" ? candidate.decision.attackTargetUid : undefined;
       const target = targetUid !== undefined
-        ? getAllUmamusume(state.sides[side.id === "player" ? "opponent" : "player"]).find((umamusume) => umamusume.uid === targetUid)
+        ? getAllUmamusume(opponent).find((umamusume) => umamusume.uid === targetUid)
         : undefined;
       const sourceCardId = combatSourceCardId(side, candidate.decision);
+      // v3.8: pass cross-bit context for slots [48:49]. For retreatAttack
+      // the swap-in is the bench Uma referenced by `retreatTargetUid`; for
+      // plain attack the swap target is the existing active. `defenderActive`
+      // = opponent's active Uma (slot 49 expected_damage_norm computes
+      // attacker→opponent.active damage). NOTE: `kind` below preserves the
+      // v3 byte-stable semantics — TS source historically passes the RAW
+      // decision kind ("attack" or "endTurn") to `features()`, NOT the
+      // action-emit kind ("retreatAttack"). Slots that depend on action
+      // kind name (e.g. v3 slot 2 = kindIndex/16) MUST remain byte-stable.
+      const retreatTargetUid = candidate.decision.kind === "attack" ? candidate.decision.retreatTargetUid : undefined;
+      const retreatSwapTarget = retreatTargetUid !== undefined
+        ? side.bench.find((u) => u.uid === retreatTargetUid)
+        : undefined;
       const featureInput = {
         score: candidate.score + (candidate.lethalTarget ? 100 : 0) + (candidate.keepsSafe ? 20 : 0),
         phase: "combat" as const,
@@ -420,6 +455,9 @@ function enumerateCombatActions(state: GameState, side: SideState): LegalAiActio
         targetValue: candidate.targetValue,
         lethalTarget: candidate.lethalTarget,
         endsTurn: candidate.decision.kind === "attack",
+        attackerSide: side,
+        ...(opponent.active ? { defenderActive: opponent.active } : {}),
+        ...(retreatSwapTarget ? { retreatSwapTarget } : {}),
       };
       actions.push({
         id: `combat:${candidate.id}:${index}`,
@@ -493,6 +531,12 @@ function passAction(phase: AiPhase): LegalAiAction {
 // `features` array. `null` is the sentinel for "no clear source/target"
 // (endTurn / pass / useStadium / setup). Phase 2 Python collator maps
 // `null` → 0 (the shared padding_idx of the embedding table).
+//
+// v38-slim-feature-add: the `attackerSide` / `defenderActive` /
+// `attachColor` inputs supply cross-bit context for slots [48:52]. When
+// absent the new slots emit 0 (slot 48 only fires for retreat/retreatAttack;
+// slot 49 for attack/retreatAttack/useAbility; slots 50/51 for attachEnergy).
+// Call sites pass these only on the action kinds where they're meaningful.
 function features(input: {
   score: number;
   phase: AiPhase;
@@ -505,6 +549,11 @@ function features(input: {
   targetValue?: number;
   lethalTarget?: boolean;
   endsTurn?: boolean;
+  // v3.8 cross-bit context (see slot definitions in the header above).
+  attackerSide?: SideState;
+  defenderActive?: UmamusumeInstance;
+  attachColor?: EnergyType;
+  retreatSwapTarget?: UmamusumeInstance;
 }): number[] {
   const vector = Array.from({ length: ACTION_FEATURE_COUNT }, () => 0);
   vector[0] = input.score / 100;
@@ -557,7 +606,86 @@ function features(input: {
   vector[45] = choiceCard ? cardRoleUtility(choiceCard) : 0;
   vector[46] = input.target ? attackReadiness(input.target) : 0;
   vector[47] = input.target ? typedEnergyDeficit(input.target) / 4 : 0;
+  // v38-slim-feature-add slots [48:52]. See header comment for the
+  // LOCKED slot definitions. All four default to 0 when context is
+  // absent or the action kind doesn't apply.
+  vector[48] = v38SwapInAttackReady(input);
+  vector[49] = v38ExpectedDamageNorm(input);
+  vector[50] = v38AttachColorMatchesTypedNeed(input);
+  vector[51] = v38AttachCompletesTypedThreshold(input);
   return vector;
+}
+
+// v3.8 slot 48 — swap_in_attack_ready. 1 iff this action involves a
+// retreat-style swap (i.e. `retreatSwapTarget` is supplied by the
+// retreat/retreatAttack enumerator) AND the swap-in target has enough
+// energy for its primary attack. Per scoping §4.5 slot 48 def.
+// NOTE: TS combat enumerator passes `kind: candidate.decision.kind`
+// (raw "attack"/"endTurn", v3-byte-stable contract), so the predicate
+// keys off `retreatSwapTarget` presence rather than the action's emitted
+// kind name — the enumerator supplies `retreatSwapTarget` iff
+// `decision.retreatTargetUid !== undefined` (== retreatAttack semantics).
+function v38SwapInAttackReady(input: { kind: string; target?: UmamusumeInstance; retreatSwapTarget?: UmamusumeInstance }): number {
+  const swapIn = input.retreatSwapTarget;
+  if (!swapIn) return 0;
+  const card = getUmamusumeCard(swapIn);
+  const attack = getPrimaryAttack(card);
+  return hasEnoughEnergy(swapIn, attack.cost) ? 1 : 0;
+}
+
+// v3.8 slot 49 — expected_damage_norm. Fires when defender + attacker
+// are known (combat enumerator supplies both — slot fires for raw kind
+// "attack" since combat passes raw decision.kind). RESTRICTED to base +
+// activeAttackDamageBonus + weakness (no per-attack conditional bonuses,
+// no coin-flip, no discard). Returns damage / 300 (300 ≈ engine max
+// face-value damage cap with weakness). Per scoping §4.5 slot 49 def.
+function v38ExpectedDamageNorm(input: { kind: string; sourceCardId?: string; attackerSide?: SideState; defenderActive?: UmamusumeInstance }): number {
+  if (input.kind !== "attack" && input.kind !== "retreatAttack" && input.kind !== "useAbility") return 0;
+  if (!input.sourceCardId || !input.defenderActive) return 0;
+  const attackerCard = getCard(input.sourceCardId);
+  if (attackerCard.kind !== "umamusume") return 0;
+  const primary = getPrimaryAttack(attackerCard);
+  let damage = primary.damage;
+  if (input.attackerSide) damage += input.attackerSide.activeAttackDamageBonus;
+  if (damage > 0) {
+    const defenderCard = getCard(input.defenderActive.cardId);
+    if (defenderCard.kind === "umamusume" && defenderCard.weakness.type === attackerCard.type) {
+      damage += defenderCard.weakness.amount;
+    }
+  }
+  return Math.max(0, damage) / 300;
+}
+
+// v3.8 slot 50 — attach_color_matches_typed_need. 1 iff kind=attachEnergy
+// AND attachColor (= side.energyZone[0]) reduces a typed deficit on the
+// target's primary attack cost. Per scoping §4.5 slot 50 def.
+function v38AttachColorMatchesTypedNeed(input: { kind: string; target?: UmamusumeInstance; attachColor?: EnergyType }): number {
+  if (input.kind !== "attachEnergy") return 0;
+  if (!input.target || !input.attachColor) return 0;
+  if (input.attachColor === "colorless") return 0;
+  const card = getUmamusumeCard(input.target);
+  const attack = getPrimaryAttack(card);
+  const need = attack.cost[input.attachColor] ?? 0;
+  const have = input.target.energies[input.attachColor];
+  return need > have ? 1 : 0;
+}
+
+// v3.8 slot 51 — attach_completes_typed_threshold. 1 iff kind=attachEnergy
+// AND post-attach target meets primary-attack TYPED cost (colorless still
+// allowed unmet). Per scoping §4.5 slot 51 def.
+function v38AttachCompletesTypedThreshold(input: { kind: string; target?: UmamusumeInstance; attachColor?: EnergyType }): number {
+  if (input.kind !== "attachEnergy") return 0;
+  if (!input.target || !input.attachColor) return 0;
+  const card = getUmamusumeCard(input.target);
+  const attack = getPrimaryAttack(card);
+  for (const type of ENERGY_TYPES) {
+    if (type === "colorless") continue;
+    const need = attack.cost[type] ?? 0;
+    let have = input.target.energies[type];
+    if (type === input.attachColor) have += 1;
+    if (have < need) return 0;
+  }
+  return 1;
 }
 
 function scoreUmamusume(umamusume: UmamusumeInstance): number {

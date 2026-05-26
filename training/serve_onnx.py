@@ -22,6 +22,7 @@ from uma_ai.features import (
     STATE_DIM_V3_5,
     STATE_DIM_V3_6,
     STATE_DIM_V3_7,
+    STATE_DIM_V3_8,
     UMA_SLOT_COUNT,
     UMA_SLOT_FEATURE_DIM,
     ZONE_ORDER,
@@ -260,6 +261,13 @@ _SCHEMA_TABLE: tuple[tuple[int, bool, bool, str, str], ...] = (
         "v3.7",
         "296-d v3.7 combat-arith-and-catalog (embedding inputs, no slot tokens; v3.6 head + 50-bit combat-arith / catalog-lookup tail at [246:296])",
     ),
+    (
+        STATE_DIM_V3_8,
+        True,
+        False,
+        "v3.8",
+        "304-d v3.8 slim-feature-add (embedding inputs, no slot tokens; v3.7 head + 8-bit per-bench ETA + gust-swing catastrophe tail at [296:304]; action schema v4 at [48:52])",
+    ),
 )
 _PLACEHOLDER_DIMS: dict[int, str] = {}
 
@@ -281,7 +289,7 @@ def _lookup_schema(
     return None
 
 
-_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2", "v3.3", "v3.4", "v3.5", "v3.6", "v3.7"}
+_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2", "v3.3", "v3.4", "v3.5", "v3.6", "v3.7", "v3.8"}
 
 
 def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:

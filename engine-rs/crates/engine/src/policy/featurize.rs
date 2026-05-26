@@ -77,9 +77,23 @@ pub const STATE_DIM_V3_6: usize = 246;
 /// contract since no column-drop. All 50 tail bits derive from existing
 /// v3.6 obs fields + static catalog lookup; no new obs-contract fields.
 pub const STATE_DIM_V3_7: usize = 296;
-/// Mirrors `ACTION_DIM` (48-d action feature vector — pre-computed
-/// TS-side and carried verbatim on `LegalAiAction.features`).
-pub const ACTION_DIM: usize = 48;
+/// Mirrors `STATE_DIM_V3_8` in Python — 304-d v3.8 slim-feature-add
+/// builder (`v38-slim-feature-add-scoping.md`). Layout is the frozen
+/// v3.7 296-d head + 8-bit slim tail at [296:304]: per-bench primary-
+/// attack ETA (3 own + 3 opp) + gust-swing catastrophe (2 bits). Tail-
+/// init for v3.7 → v3.8 is zero-init residual; strict `Δlogits ≤ 1e-5`.
+/// All 8 tail bits derive from existing v3.7 obs fields + static
+/// catalog lookup; no new obs-contract fields. NO trunk widening
+/// (hidden_dim=128/depth=2 preserved per scoping §13.3).
+pub const STATE_DIM_V3_8: usize = 304;
+/// Mirrors `ACTION_DIM` — pre-computed TS-side and carried verbatim on
+/// `LegalAiAction.features`.
+///
+/// v38-slim-feature-add bumped 48 → 52 (action schema v3 → v4). 4 new
+/// slots at [48:52]: swap_in_attack_ready, expected_damage_norm,
+/// attach_color_matches_typed_need, attach_completes_typed_threshold.
+/// v3 slots [0:48] BYTE-STABLE.
+pub const ACTION_DIM: usize = 52;
 /// Per-zone padding widths — mirrors `CARD_ID_SHAPES`. Order is
 /// load-bearing (matches Python `ZONE_ORDER` tuple).
 pub const ZONE_NAMES: [&str; 8] = [
@@ -1110,6 +1124,254 @@ pub fn observation_state_features_v3_7(obs: &PublicObservation) -> Vec<f32> {
         opp_active,
         &mut f[_V37_ABILITY_KIND_OPP_BASE.._V37_ABILITY_KIND_OPP_BASE + 8],
     );
+
+    f
+}
+
+// ---------------------------------------------------------------------------
+// v3.8 slim-feature-add tail
+// (`docs/ai-research/scoping/v38-slim-feature-add-scoping.md`).
+//
+// Mirrors Python `_V38_*` slot offsets bit-for-bit. The v3.7 head
+// [0:296] stays byte-stable; v3.8 only writes the 8-bit tail at
+// [296:304]. See `observation_to_features_v3_8` in
+// `training/uma_ai/features.py` for the slot definitions, including the
+// adapted gust-availability proxy (scoping §13.4) used because
+// `PublicSideObservation.hand_card_ids` is None on opp side.
+//
+// Layout:
+//   [296:299] own.bench[0..2] primary-attack usable-next-turn
+//   [299:302] opp.bench[0..2] primary-attack usable-next-turn
+//   [302]     own_lose_if_opp_gusts_weakest_bench
+//   [303]     own_can_gust_win_prize_race
+// ---------------------------------------------------------------------------
+
+const _V38_TAIL_START: usize = 296;
+const _V38_OWN_BENCH_ETA_BASE: usize = 296;
+const _V38_OPP_BENCH_ETA_BASE: usize = 299;
+const _V38_OWN_LOSE_IF_OPP_GUSTS: usize = 302;
+const _V38_OWN_GUST_WIN_RACE: usize = 303;
+
+/// v3.8 per-bench ETA — reuses v3.7 Ch.4
+/// `v37_attack_usable_next_turn` applied to each `side.bench[i]`. Writes
+/// 3 bits at `out[0..3]`.
+fn v38_bench_primary_eta_bits(side: &PublicSideObservation, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), 3);
+    for i in 0..3 {
+        if i >= side.bench.len() {
+            continue;
+        }
+        let Some(entry) = side.bench[i].as_ref() else {
+            continue;
+        };
+        let Some(card) = v36_uma_card_for_active(Some(entry)) else {
+            continue;
+        };
+        let Some(primary) = card.attacks.first() else {
+            continue;
+        };
+        out[i] = v37_attack_usable_next_turn(Some(entry), Some(primary), &side.energy_pool);
+    }
+}
+
+/// True iff `card` is a trainer with `gustOpponent` or
+/// `discardRandomOpponentActiveEnergy` effect set.
+fn v38_card_is_gust_trainer(card_id: &str) -> bool {
+    let Some(card) = get_card(card_id) else {
+        return false;
+    };
+    if let Card::Trainer(t) = card {
+        if t.effect.gust_opponent == Some(true)
+            || t.effect.discard_random_opponent_active_energy == Some(true)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// v3.8 public-info proxy for "opp could play a gust this opp turn."
+/// Per scoping §13.4 adaptation (opp.hand_card_ids is private):
+///   - opp has demonstrated they hold gusts (any gust trainer in
+///     `opp.discard`) AND
+///   - opp.used_supporter_this_turn == false AND
+///   - opp.hand_count > 0.
+fn v38_opp_gust_playable_proxy(opp: &PublicSideObservation) -> bool {
+    if opp.used_supporter_this_turn {
+        return false;
+    }
+    if opp.hand_count == 0 {
+        return false;
+    }
+    for card_id in &opp.discard {
+        if v38_card_is_gust_trainer(card_id.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// v3.8 "own has gust in hand" — own.hand_card_ids IS exposed (private
+/// to own side only, but model's own perspective IS own-side).
+fn v38_own_has_gust_in_hand(own: &PublicSideObservation) -> bool {
+    let Some(hand_ids) = own.hand_card_ids.as_ref() else {
+        return false;
+    };
+    for card_id in hand_ids {
+        if v38_card_is_gust_trainer(card_id.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// v3.8 weakness-adjusted face-value damage of `attacker.active.attacks[0]`
+/// against a defender catalog card. Mirrors v3.7 Ch.1 formula:
+/// damage = attack.damage; if damage > 0 and attacker.type ==
+/// defender.weakness.type → damage += weakness.amount. Returns 0.0
+/// when data is absent.
+fn v38_weakness_adjusted_damage(
+    attacker_active: Option<&PublicUmaObservation>,
+    defender_card: Option<&UmamusumeCard>,
+) -> f32 {
+    let Some(att_card) = v36_uma_card_for_active(attacker_active) else {
+        return 0.0;
+    };
+    let Some(def_card) = defender_card else {
+        return 0.0;
+    };
+    let Some(primary) = att_card.attacks.first() else {
+        return 0.0;
+    };
+    let mut damage = primary.damage as f32;
+    if damage > 0.0 && att_card.r#type == def_card.weakness.r#type {
+        damage += def_card.weakness.amount as f32;
+    }
+    damage
+}
+
+/// Returns (min_remaining_hp, the_card) over present bench Umas.
+/// `f32::INFINITY` + None if bench is empty.
+fn v38_min_bench_remaining_hp<'a>(
+    side: &'a PublicSideObservation,
+) -> (f32, Option<&'a PublicUmaObservation>) {
+    let mut best_hp = f32::INFINITY;
+    let mut best_entry: Option<&PublicUmaObservation> = None;
+    for entry in side.bench.iter().flatten() {
+        let hp = v36_remaining_hp(Some(entry));
+        if hp < best_hp {
+            best_hp = hp;
+            best_entry = Some(entry);
+        }
+    }
+    (best_hp, best_entry)
+}
+
+/// True iff any present bench Uma on `defender_side` has remaining HP
+/// ≤ attacker.active.attacks[0] damage (weakness-adjusted per defender's
+/// own weakness type).
+fn v38_any_bench_ko_able(
+    attacker_active: Option<&PublicUmaObservation>,
+    defender_side: &PublicSideObservation,
+) -> bool {
+    let Some(_att) = attacker_active else {
+        return false;
+    };
+    for entry in defender_side.bench.iter().flatten() {
+        let def_card = v36_uma_card_for_active(Some(entry));
+        let damage = v38_weakness_adjusted_damage(attacker_active, def_card);
+        if damage <= 0.0 {
+            continue;
+        }
+        let hp = v36_remaining_hp(Some(entry));
+        if hp <= damage {
+            return true;
+        }
+    }
+    false
+}
+
+fn v38_remaining_prizes(side: &PublicSideObservation) -> i32 {
+    let points = side.points as i32;
+    (3 - points).clamp(0, 3)
+}
+
+/// v3.8 slot [302] — own_lose_if_opp_gusts_weakest_bench. See scoping
+/// §4.5 and §13.4 (public-info adapted predicate).
+fn v38_lose_if_opp_gusts_weakest_bench(
+    own: &PublicSideObservation,
+    opp: &PublicSideObservation,
+) -> f32 {
+    if v38_remaining_prizes(own) > 1 {
+        return 0.0;
+    }
+    if !v38_opp_gust_playable_proxy(opp) {
+        return 0.0;
+    }
+    let Some(opp_active) = opp.active.as_ref() else {
+        return 0.0;
+    };
+    let (weakest_hp, weakest_entry) = v38_min_bench_remaining_hp(own);
+    let Some(weakest) = weakest_entry else {
+        return 0.0;
+    };
+    let weakest_card = v36_uma_card_for_active(Some(weakest));
+    let damage = v38_weakness_adjusted_damage(Some(opp_active), weakest_card);
+    if damage <= 0.0 {
+        return 0.0;
+    }
+    if weakest_hp <= damage {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// v3.8 slot [303] — own_can_gust_win_prize_race. Symmetric.
+fn v38_can_gust_win_prize_race(
+    own: &PublicSideObservation,
+    opp: &PublicSideObservation,
+) -> f32 {
+    if v38_remaining_prizes(opp) > 1 {
+        return 0.0;
+    }
+    if !v38_own_has_gust_in_hand(own) {
+        return 0.0;
+    }
+    let Some(own_active) = own.active.as_ref() else {
+        return 0.0;
+    };
+    if v38_any_bench_ko_able(Some(own_active), opp) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// v38-slim-feature-add: 304-d builder. Slots 0–295 are byte-identical
+/// to v3.7; the 8-bit tail at [296:304] adds per-bench ETA + gust-swing
+/// catastrophe bits. Mirrors `observation_to_features_v3_8` in Python.
+pub fn observation_state_features_v3_8(obs: &PublicObservation) -> Vec<f32> {
+    let mut f = vec![0.0f32; STATE_DIM_V3_8];
+    let head = observation_state_features_v3_7(obs);
+    debug_assert_eq!(head.len(), STATE_DIM_V3_7);
+    f[..STATE_DIM_V3_7].copy_from_slice(&head);
+
+    // [296:299] own bench ETA.
+    v38_bench_primary_eta_bits(
+        &obs.own,
+        &mut f[_V38_OWN_BENCH_ETA_BASE.._V38_OWN_BENCH_ETA_BASE + 3],
+    );
+    // [299:302] opp bench ETA.
+    v38_bench_primary_eta_bits(
+        &obs.opponent,
+        &mut f[_V38_OPP_BENCH_ETA_BASE.._V38_OPP_BENCH_ETA_BASE + 3],
+    );
+    // [302] own_lose_if_opp_gusts_weakest_bench.
+    f[_V38_OWN_LOSE_IF_OPP_GUSTS] =
+        v38_lose_if_opp_gusts_weakest_bench(&obs.own, &obs.opponent);
+    // [303] own_can_gust_win_prize_race.
+    f[_V38_OWN_GUST_WIN_RACE] = v38_can_gust_win_prize_race(&obs.own, &obs.opponent);
 
     f
 }

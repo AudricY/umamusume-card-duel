@@ -39,7 +39,15 @@ STATE_FEATURE_SCHEMA_VERSION = 3.1
 # and `engine-rs/crates/engine/src/policy/actions.rs:46-58`. This
 # constant is metadata only — Python does not compute action features;
 # it's consumed by `train_bc.py` / `train_ppo.py` manifest writers.
-ACTION_FEATURE_SCHEMA_VERSION = 3
+# v38-slim-feature-add bumped 3 → 4. v4 extends v3 with 4 new slots at
+# [48:52]: swap_in_attack_ready (slot 48, retreat/retreatAttack),
+# expected_damage_norm (slot 49, base+activeAttackDamageBonus+weakness,
+# RESTRICTED — no conditional bonuses, no coin-flip, no discard),
+# attach_color_matches_typed_need (slot 50, attachEnergy cross-bit),
+# attach_completes_typed_threshold (slot 51, attachEnergy threshold-cross
+# predicate). v3 slots [0:48] BYTE-STABLE. See
+# `docs/ai-research/scoping/v38-slim-feature-add-scoping.md` §4.5.
+ACTION_FEATURE_SCHEMA_VERSION = 4
 
 # --- Serving-schema 96/110/164 freeze contract (r16 P1 prerequisite) -------
 # `serve_onnx` resolves the feature builder from the loaded ONNX graph's
@@ -148,6 +156,23 @@ STATE_FEATURE_SCHEMA_VERSION_V3_6 = 3.6
 # typed, vocab tightened to 4-tool / 8-ability).
 STATE_DIM_V3_7 = 296
 STATE_FEATURE_SCHEMA_VERSION_V3_7 = 3.7
+# v38-slim-feature-add (`v38-slim-feature-add-scoping.md`): v3.8 extends
+# v3.7's 296-d state vector with 8 bits at [296:304] — per-bench primary-
+# attack ETA (3 own + 3 opp = 6 bits) + gust-swing catastrophe (2 bits).
+# Net +8 bits, v3.7 head [0:296] BYTE-STABLE. NO trunk widening.
+#   [296:299] own.bench[0..2] primary-attack usable-next-turn (3 bits)
+#   [299:302] opp.bench[0..2] primary-attack usable-next-turn (3 bits)
+#   [302]     own_lose_if_opp_gusts_weakest_bench
+#   [303]     own_can_gust_win_prize_race
+# Per-bench bits reuse the v3.7 Ch.4 ETA structural-feasibility helper
+# (`_v37_attack_usable_next_turn`) applied to `side.bench[i]` (with
+# `side.energyPool` as the +1 attach budget pool). Gust-swing predicates
+# are pure-function cross-bits over public state — see scoping doc §4.5
+# and §13.4 for the adapted opp-side predicate (opp's hand_card_ids are
+# private, so we use public proxies: opp gust appears in opp.discard +
+# opp.usedSupporterThisTurn=False + opp.hand_count>0).
+STATE_DIM_V3_8 = 304
+STATE_FEATURE_SCHEMA_VERSION_V3_8 = 3.8
 assert STATE_DIM == STATE_DIM_V3, (
     f"STATE_DIM ({STATE_DIM}) must equal the frozen v3.0 dim "
     f"STATE_DIM_V3 ({STATE_DIM_V3}). The 110-d v3.0 builder is frozen for "
@@ -1408,6 +1433,310 @@ def observation_to_features_v3_7(
     return features
 
 
+# ---------------------------------------------------------------------------
+# v3.8 slim-feature-add tail
+# (`docs/ai-research/scoping/v38-slim-feature-add-scoping.md`).
+#
+# Layout (FROZEN; mirrored bit-for-bit in
+# `engine-rs/crates/engine/src/policy/featurize.rs`):
+#   [296:299] own.bench[0..2] primary-attack usable-next-turn (3 bits).
+#             Same structural-feasibility predicate as v3.7 Ch.4 ETA
+#             (`_v37_attack_usable_next_turn`) applied to `bench[i]` with
+#             `side.energyPool` as the +1 attach budget pool. 0 if bench
+#             slot is absent / non-Uma / has no attack.
+#   [299:302] opp.bench[0..2] primary-attack usable-next-turn (3 bits).
+#             Symmetric.
+#   [302]     own_lose_if_opp_gusts_weakest_bench.
+#             1 iff ALL of:
+#               (a) opp could play a gust this opp turn — proxied by
+#                   public state: gust-trainer appears in opp.discard
+#                   (i.e. opp has demonstrated they hold/play gusts) AND
+#                   opp.usedSupporterThisTurn == False AND
+#                   opp.handCount > 0 (per scoping §13.4 adapted
+#                   predicate — opp.handCardIds are private, so the
+#                   "opp has gust in hand" check uses public proxies).
+#               (b) min(bench HP - damage) ≤ opp.active.attacks[0]
+#                   damage, weakness-adjusted via v3.7 Ch.1 formula
+#                   (additive bonus when attacker.type ==
+#                   defender.weakness.type AND damage > 0).
+#               (c) own.points >= 2  (taking one more prize loses;
+#                   `remaining = clamp(3 - points, 0, 3) ≤ 1`).
+#   [303]     own_can_gust_win_prize_race.
+#             Symmetric: 1 iff ALL of (a') own has gust in own.hand
+#             (own.handCardIds IS public — slot uses the existing
+#             `_hand_role_features` gust-count derivation directly),
+#             (b') ANY opp.bench[i] has hp - damage ≤ own.active
+#             attacks[0] damage weakness-adjusted, (c') opp.points >= 2.
+#
+# Defaults: all 8 bits = 0 when the predicate's prerequisite state is
+# absent (e.g. bench slot empty, opp.active absent, no gust signal,
+# prize state not in winning range).
+# ---------------------------------------------------------------------------
+
+_V38_TAIL_START = 296
+_V38_OWN_BENCH_ETA_BASE = 296   # +0 own.bench[0], +1 bench[1], +2 bench[2]
+_V38_OPP_BENCH_ETA_BASE = 299   # +0 opp.bench[0], +1 bench[1], +2 bench[2]
+_V38_OWN_LOSE_IF_OPP_GUSTS = 302
+_V38_OWN_GUST_WIN_RACE = 303
+
+
+def _v38_bench_primary_eta_bits(side: dict[str, Any]) -> np.ndarray:
+    """3-bit vector: per-bench primary-attack usable-next-turn for the
+    first 3 bench slots. Reuses the v3.7 Ch.4 structural-feasibility
+    helper (`_v37_attack_usable_next_turn`) applied to each bench[i].
+
+    The next-turn attach budget pool is `side.energyPool` (same source
+    the v3.7 active-side ETA uses)."""
+
+    out = np.zeros(3, dtype=np.float32)
+    bench = side.get("bench") or []
+    pool = side.get("energyPool") or []
+    for i in range(3):
+        if i >= len(bench):
+            continue
+        entry = bench[i]
+        if not entry:
+            continue
+        attacks = _v36_active_attacks(entry)
+        primary = attacks[0] if attacks else None
+        if primary is None:
+            continue
+        out[i] = _v37_attack_usable_next_turn(entry, primary, pool)
+    return out
+
+
+def _v38_opp_gust_playable_proxy(opponent: dict[str, Any]) -> bool:
+    """Public-info proxy for "opp could play a gust this opp turn."
+
+    Adapted per scoping §13.4: opp.handCardIds is PRIVATE, so we can't
+    read the opp hand-role gust bit directly. Instead we require:
+      - opp has demonstrated gust play historically — any gust-trainer
+        appears in opp.discard (catalog flags `gustOpponent` or
+        `discardRandomOpponentActiveEnergy`); AND
+      - opp.usedSupporterThisTurn == False (supporter slot still open
+        for opp's next turn-start, gust trainers are typically
+        supporters); AND
+      - opp.handCount > 0 (opp has SOMETHING in hand — necessary but
+        not sufficient).
+
+    Strictly weaker than "opp has gust in hand right now" — this is
+    public-info-only fallback per scoping §13.4 documentation. Returns
+    bool (False if any prereq fails)."""
+
+    if bool(opponent.get("usedSupporterThisTurn", False)):
+        return False
+    if int(opponent.get("handCount", 0) or 0) <= 0:
+        return False
+    for raw_id in opponent.get("discard") or []:
+        card = _get_card(str(raw_id))
+        if not card:
+            continue
+        if card.get("kind") != "trainer":
+            continue
+        effect = card.get("effect") or {}
+        if effect.get("gustOpponent") or effect.get(
+            "discardRandomOpponentActiveEnergy"
+        ):
+            return True
+    return False
+
+
+def _v38_own_has_gust_in_hand(own: dict[str, Any]) -> bool:
+    """True iff `own.handCardIds` contains any trainer with `gustOpponent`
+    or `discardRandomOpponentActiveEnergy`. Reads the public own hand
+    (handCardIds is exposed only for own side, mirroring the v3.7
+    `_hand_role_features` gust-bit semantics at slot [75])."""
+
+    for raw_id in own.get("handCardIds") or []:
+        card = _get_card(str(raw_id))
+        if not card:
+            continue
+        if card.get("kind") != "trainer":
+            continue
+        effect = card.get("effect") or {}
+        if effect.get("gustOpponent") or effect.get(
+            "discardRandomOpponentActiveEnergy"
+        ):
+            return True
+    return False
+
+
+def _v38_weakness_adjusted_damage(
+    attacker_active: dict[str, Any] | None,
+    defender_card: dict[str, Any] | None,
+) -> float:
+    """Weakness-adjusted face-value damage of `attacker.active.attacks[0]`
+    against `defender_card`. Mirrors v3.7 Ch.1 formula:
+      damage = attack.damage
+      if damage > 0 and attacker.type == defender.weakness.type:
+        damage += defender.weakness.amount
+    Returns 0.0 if attacker / attack / defender data is absent."""
+
+    if not attacker_active or not defender_card:
+        return 0.0
+    attacks = _v36_active_attacks(attacker_active)
+    if not attacks:
+        return 0.0
+    primary = attacks[0]
+    damage = _v36_attack_base_damage(primary)
+    if damage > 0:
+        attacker_card = _get_card(str(attacker_active.get("cardId", "") or ""))
+        attacker_type = _v37_card_type(attacker_card)
+        weakness = (defender_card or {}).get("weakness") or {}
+        weakness_type = str(weakness.get("type", "") or "")
+        if attacker_type and weakness_type and attacker_type == weakness_type:
+            try:
+                damage += float(weakness.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    return damage
+
+
+def _v38_min_bench_remaining_hp(side: dict[str, Any]) -> tuple[float, dict[str, Any] | None]:
+    """Returns (min_hp_among_present_bench, the_card_entry). If no bench
+    is present, returns (inf, None). Uses `_v36_remaining_hp` so the
+    semantics match every other v3.x HP read."""
+
+    best_hp = float("inf")
+    best_entry: dict[str, Any] | None = None
+    for entry in side.get("bench") or []:
+        if not entry:
+            continue
+        hp = _v36_remaining_hp(entry)
+        if hp < best_hp:
+            best_hp = hp
+            best_entry = entry
+    return best_hp, best_entry
+
+
+def _v38_any_bench_ko_able(
+    attacker_active: dict[str, Any] | None,
+    defender_side: dict[str, Any],
+) -> bool:
+    """True iff any present bench on `defender_side` has remaining HP
+    ≤ attacker.active.attacks[0] damage (weakness-adjusted per bench
+    card's weakness type). Used by [303] own_can_gust_win_prize_race."""
+
+    if not attacker_active:
+        return False
+    for entry in defender_side.get("bench") or []:
+        if not entry:
+            continue
+        card = _get_card(str(entry.get("cardId", "") or ""))
+        damage = _v38_weakness_adjusted_damage(attacker_active, card)
+        if damage <= 0.0:
+            continue
+        hp = _v36_remaining_hp(entry)
+        if hp <= damage:
+            return True
+    return False
+
+
+def _v38_remaining_prizes(side: dict[str, Any]) -> int:
+    """`remaining = clamp(3 - points, 0, 3)` mirror of v3.6 prize one-hot."""
+
+    points = int(side.get("points", 0) or 0)
+    return max(0, min(3, 3 - points))
+
+
+def _v38_lose_if_opp_gusts_weakest_bench(
+    own: dict[str, Any],
+    opponent: dict[str, Any],
+) -> float:
+    """[302] predicate. Adapted per scoping §13.4 because opp.handCardIds
+    is private — we substitute a public-info proxy for "opp has gust"."""
+
+    # (c) own.points >= 2 → remaining prize ≤ 1 → losing one more prize
+    # ends the game.
+    if _v38_remaining_prizes(own) > 1:
+        return 0.0
+    # (a) Public proxy for "opp could play a gust this opp turn."
+    if not _v38_opp_gust_playable_proxy(opponent):
+        return 0.0
+    # (b) Weakest own bench KO-able by opp.active primary, weakness-
+    # adjusted per the weakest-bencher's own weakness type.
+    opp_active = opponent.get("active") if isinstance(opponent, dict) else None
+    if not opp_active:
+        return 0.0
+    weakest_hp, weakest_entry = _v38_min_bench_remaining_hp(own)
+    if weakest_entry is None:
+        return 0.0
+    weakest_card = _get_card(str(weakest_entry.get("cardId", "") or ""))
+    damage = _v38_weakness_adjusted_damage(opp_active, weakest_card)
+    if damage <= 0.0:
+        return 0.0
+    return 1.0 if weakest_hp <= damage else 0.0
+
+
+def _v38_can_gust_win_prize_race(
+    own: dict[str, Any],
+    opponent: dict[str, Any],
+) -> float:
+    """[303] predicate. Symmetric to [302] but on the WINNING side: own
+    has gust in hand (own.handCardIds is PUBLIC — direct lookup), any
+    opp bench is KO-able by own.active primary, and opp is at one
+    prize from losing."""
+
+    # (c') opp.points >= 2 → remaining prize ≤ 1.
+    if _v38_remaining_prizes(opponent) > 1:
+        return 0.0
+    # (a') Direct read of own.handCardIds for gust trainers.
+    if not _v38_own_has_gust_in_hand(own):
+        return 0.0
+    # (b') Any opp bench KO-able by own active primary.
+    own_active = own.get("active") if isinstance(own, dict) else None
+    if not own_active:
+        return 0.0
+    if not _v38_any_bench_ko_able(own_active, opponent):
+        return 0.0
+    return 1.0
+
+
+def observation_to_features_v3_8(
+    observation: dict[str, Any], ablations: set[FeatureAblation] | None = None
+) -> np.ndarray:
+    """v38-slim-feature-add: 304-d. Layered on top of v3.7 — calls
+    `observation_to_features_v3_7(...)` to seed slots [0:296]
+    (byte-stable), then writes the 8-bit slim tail at [296:304] per the
+    LOCKED layout in scoping §4.5.
+
+    All v3.8 bits derive from existing v3.7 obs fields + static catalog
+    lookup. NO new obs-contract fields. Gust-swing catastrophe uses a
+    public-info-only proxy for opp's gust availability (scoping §13.4)
+    because opp.handCardIds is private."""
+
+    base = observation_to_features_v3_7(observation, ablations=ablations)
+    assert base.shape == (STATE_DIM_V3_7,), (
+        f"v3.8 base reuse expected ({STATE_DIM_V3_7},), got {base.shape}"
+    )
+
+    features = np.zeros(STATE_DIM_V3_8, dtype=np.float32)
+    features[0:STATE_DIM_V3_7] = base
+
+    own = observation.get("own", {}) or {}
+    opponent = observation.get("opponent", {}) or {}
+
+    # [296:299] own bench primary ETA bits.
+    own_bench_eta = _v38_bench_primary_eta_bits(own)
+    features[_V38_OWN_BENCH_ETA_BASE : _V38_OWN_BENCH_ETA_BASE + 3] = own_bench_eta
+    # [299:302] opp bench primary ETA bits.
+    opp_bench_eta = _v38_bench_primary_eta_bits(opponent)
+    features[_V38_OPP_BENCH_ETA_BASE : _V38_OPP_BENCH_ETA_BASE + 3] = opp_bench_eta
+
+    # [302] own_lose_if_opp_gusts_weakest_bench.
+    features[_V38_OWN_LOSE_IF_OPP_GUSTS] = _v38_lose_if_opp_gusts_weakest_bench(
+        own, opponent
+    )
+    # [303] own_can_gust_win_prize_race.
+    features[_V38_OWN_GUST_WIN_RACE] = _v38_can_gust_win_prize_race(own, opponent)
+
+    assert features.shape == (STATE_DIM_V3_8,), (
+        f"observation_to_features_v3_8 emitted {features.shape}, "
+        f"expected ({STATE_DIM_V3_8},)."
+    )
+    return features
+
+
 # Builder selector keyed off the state dim. Mirrors the existing serve_onnx
 # `_SCHEMA_BY_STATE_DIM` discrimination (graph dim -> builder) so training /
 # dataset code can opt into v3.1/v3.3/v3.5/v3.6/v3.7 without a new framework:
@@ -1421,6 +1750,7 @@ _BUILDER_BY_STATE_DIM = {
     STATE_DIM_V3_5: observation_to_features_v3_5,
     STATE_DIM_V3_6: observation_to_features_v3_6,
     STATE_DIM_V3_7: observation_to_features_v3_7,
+    STATE_DIM_V3_8: observation_to_features_v3_8,
 }
 
 
@@ -1432,6 +1762,7 @@ _SCHEMA_VERSION_BY_STATE_DIM = {
     STATE_DIM_V3_5: STATE_FEATURE_SCHEMA_VERSION_V3_5,
     STATE_DIM_V3_6: STATE_FEATURE_SCHEMA_VERSION_V3_6,
     STATE_DIM_V3_7: STATE_FEATURE_SCHEMA_VERSION_V3_7,
+    STATE_DIM_V3_8: STATE_FEATURE_SCHEMA_VERSION_V3_8,
 }
 
 
@@ -1439,8 +1770,9 @@ def feature_builder_for_state_dim(state_dim: int):
     """Return the frozen observation->features builder for a state dim.
 
     96 -> v2, 110 -> v3.0, 164 -> v3.1, 167 -> v3.3, 212 -> v3.5,
-    246 -> v3.6, 296 -> v3.7. Unknown dims raise (never silently fall
-    back) — same fail-loud contract the serve_onnx guard enforces."""
+    246 -> v3.6, 296 -> v3.7, 304 -> v3.8. Unknown dims raise (never
+    silently fall back) — same fail-loud contract the serve_onnx guard
+    enforces."""
 
     try:
         return _BUILDER_BY_STATE_DIM[state_dim]
