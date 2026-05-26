@@ -1,7 +1,7 @@
 # Async AlphaZero Pipelining — Scoping
 
 - **Date:** 2026-05-26
-- **Status:** **P0-GREEN-2026-05-26** — CUDA coexistence smoke cleared. Concurrent sim-mcts-selfplay (workers=24 wave=256 cuda) + train_bc.py (b=256 amp dl=4) on RTX 5000 Ada: distill epoch wall unchanged (4.84-5.32s during overlap vs ~5.4s baseline = ~0% degradation), selfplay 28ms/game (~31ms solo baseline = ~slight noise speedup). GPU util 47-74% during overlap vs ~40% solo. No OOM. **P1 proceed.**
+- **Status:** **LANDED-OPT-IN-NO-DEFAULT-FLIP-2026-05-26** — Code landed behind `--async-pipeline` flag, default OFF. P2 verdict: **mechanism works** (Δwl_final = −0.015 at n=2000 vs heuristic = strength-neutral per rubric), **but wall benefit is only 1.06×** (504s vs 533s baseline at K=10 iters, --selfplay-games 480). Reason: the distill-throughput-spike landed earlier the same day cut distill from ~62s to ~13s/iter, which collapsed the theoretical pipelining ceiling from 1.42× to 1.10×. Our measured 1.06× under realistic contention sits right at that post-distill-spike ceiling. Async and distill spike are substitutes, not complements. NO default flip. Patch stays in repo as opt-in scaffolding for future re-investigation if model size shifts back toward distill-dominant iter-wall.
 - **Predecessors:**
   - `cross-game-dispatcher-selfplay.md` (KILLSHOT-FALSIFIED 2026-05-26: intra-process cross-game batching gave only 1.10× at hidden=256/depth=4 because GPU is compute-bound. MCTS-side throughput ceiling reached.)
   - `distill-throughput-spike.md` (LANDED-SHIP 2026-05-26: distill 2.19× via b=256+sqrt-LR+amp+dl. Distill is now ~62 s/iter vs selfplay ~155 s/iter.)
@@ -128,6 +128,45 @@ Compute budget: 10 iters × (155 + 62 + 3) ≈ 2200 s sequential per run × 2 ru
 Flip `--async-pipeline` default ON in `r12_orchestrator.py` argparse. Add a one-line warning when the orchestrator detects a multi-iter run with `--async-pipeline=False` (mirroring the `distill-throughput-spike` legacy-recipe warning pattern).
 
 Update the canonical launch.sh template in CLAUDE.md (or scoping README) to note that async pipelining is now default and `--no-async-pipeline` opts out.
+
+### Phase 2 Results — 2026-05-26
+
+**A/B recipe.** K=10 iters, `--selfplay-games 480 --mcts-simulations 400 --mcts-wave-size 256 --hidden-dim 256 --depth 4 --epochs 25` (orchestrator's new b=256+lr=6e-4+amp+dl=4 defaults). Initial ckpt: `runs/R16-P3-v36-az-bigtrunk-cold-cuda/init-cold/checkpoint.pt`. Cells:
+- **baseline** (sequential, default `--async-pipeline=False`)
+- **challenger** (`--async-pipeline`)
+
+Both cells ran back-to-back during a window when the in-flight `R16-P3-v36-az-15k-shallow-cuda` orchestrator was running iter-4+ selfplay (workers=24 cuda-w128 sims=100). Both cells experienced the same external contention so the A/B ratio is fair.
+
+**Wall:**
+
+| cell | total wall (10 iters) | mean per-iter | wall ratio vs baseline |
+| :-- | --: | --: | --: |
+| baseline (sequential) | 533 s | 53 s | 1.00× |
+| challenger (--async-pipeline) | 504 s | 50 s | **1.06×** |
+
+Overlap evidence in `challenger/events.jsonl`: iter-(N+1) selfplay starts coincident with iter-N distill start; observed 29-80s of in-flight overlap per pair. Mechanism IS overlapping; the magnitude of gain is small.
+
+**Strength (final iter-9 ckpts vs heuristic AI at n=2000 per side, sims=400):**
+
+| ckpt | wins/2000 | wilsonLower | wilsonUpper | win_rate |
+| :-- | --: | --: | --: | --: |
+| baseline iter-9 | 890 | 0.4233 | 0.4669 | 0.4450 |
+| challenger iter-9 | 859 | 0.4080 | 0.4513 | 0.4295 |
+| **Δ** | | **−0.0153** | | **−1.55pp** |
+
+At n=2000, 95% Wilson noise floor ≈ ±0.022. Δwl = −0.015 is within ~0.7σ — **strength-neutral per the scoping rubric `|Δwl| < 0.02 → SHIP-strength-neutral` band**.
+
+**Verdict:** mechanism works (strength neutral, overlap real). But wall delta 1.06× is **below the 1.30× ship-default threshold**. Reason:
+
+**The distill-throughput-spike that landed earlier the same day cut distill from ~62s/iter to ~13s/iter.** This collapses the theoretical async-pipeline ceiling:
+- **Pre-spike math:** 220s sequential (155 SP + 62 D + 3 G) → 155s async → **1.42× (what we scoped)**
+- **Post-spike math:** 171s sequential (155 SP + 13 D + 3 G) → 155s async → **1.10× (what's actually available)**
+
+Our measured 1.06× under realistic 3-CUDA-workload contention sits right at the post-spike theoretical 1.10× ceiling, modulo contention overhead.
+
+**Async pipelining and distill-throughput-spike are substitutes, not complements.** The distill spike captured the iter-wall reduction that async would have provided. Stacking them adds only ~6% on top of the spike's ~20%.
+
+**Decision: NO default flip.** The 1.06× marginal benefit doesn't justify the 469 LOC of orchestrator complexity. Keep `--async-pipeline` as opt-in scaffolding in case future shifts re-expand the distill phase (e.g. much larger model where distill dominates again).
 
 ## Out of scope (deferred)
 
