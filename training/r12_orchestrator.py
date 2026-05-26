@@ -1527,10 +1527,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mcts-wave-size", type=int, default=None)
     p.add_argument("--mcts-virtual-loss", type=float, default=1.0)
     # MCTS inference device for sim-mcts-selfplay and sim-eval-gate. Mirrors
-    # the binary's --device flag. `cpu` is the historical default and stays
-    # FP-deterministic. `cuda` requires the venv's nvidia/* lib dirs on
-    # LD_LIBRARY_PATH (set automatically by the orchestrator's subprocess env).
-    p.add_argument("--mcts-device", choices=["cpu", "cuda"], default="cpu")
+    # the binary's --device flag. Default resolves leaf-conditionally after
+    # parse_args(): value-head -> cuda (7.29× per-game lift validated
+    # 2026-05-26 at n=10k, Δwl=+0.015 strength-neutral; see
+    # docs/ai-research/scoping/cuda-wave-sweep-validation.md); rollout -> cpu
+    # (rollouts dominate wall, cuda dispatch overhead doesn't pay).
+    # Explicit --mcts-device on the CLI wins. `cuda` requires the venv's
+    # nvidia/* lib dirs on LD_LIBRARY_PATH (set automatically by the
+    # orchestrator's subprocess env).
+    p.add_argument("--mcts-device", choices=["cpu", "cuda"], default=None)
     p.add_argument("--mcts-cuda-device-id", type=int, default=0)
     p.add_argument("--dirichlet-alpha", type=float, default=0.3)
     p.add_argument("--dirichlet-epsilon", type=float, default=0.25)
@@ -1685,6 +1690,10 @@ def parse_args() -> argparse.Namespace:
         args.w6_fix_cross_iter_replay = W6_FIX_CROSS_ITER_REPLAY
     if args.w6_fix_fixed_kl_anchor is None:
         args.w6_fix_fixed_kl_anchor = W6_FIX_FIXED_KL_ANCHOR
+    # mcts_device must resolve before mcts_wave_size — the wave default
+    # depends on device.
+    if args.mcts_device is None:
+        args.mcts_device = "cuda" if args.mcts_leaf == "value-head" else "cpu"
     if args.mcts_wave_size is None:
         if args.mcts_leaf == "value-head":
             args.mcts_wave_size = 256 if args.mcts_device == "cuda" else 16
