@@ -1,7 +1,7 @@
 # v3.6 Trimmed-Priors + Minimal-Arithmetic Additive Tail — Scoping
 
 - **Date:** 2026-05-25
-- **Status:** **PROPOSED 2026-05-25** — user-gated. Awaiting approval to land code + smoke + init-parity ckpt; A1 fire then queued for separate user approval per v3.5 cadence.
+- **Status:** **LANDED-SOFT-SHIP-2026-05-25** — v3.6 accepted as new schema baseline (state_dim=246). A1 (cap128 8-iter + 10-iter continuation) tight-gated at n=10k: cont-iter2 wl_lower=0.5880 vs v3.5-cap128 A0 0.5912 (Δ=−0.0032, within Wilson noise). SOFT-SHIP band per §5 rule 2; LIFT band (≥0.6040) NOT crossed. **Info-density-per-bit bet FLAT** — the §9 hypothesis that trimming dead bits and substituting prior-rich bits would crack the ~0.59 ceiling was falsified: per-side asymmetry (opp ~0.62, player ~0.55) matches v3.5-cap128 exactly, indicating the trunk is capacity-bound at hidden=128/depth=2, not bit-density-bound. Schema-axis exhaustion from §4k generalises. v3.5-cap128 retires as prior candidate-of-record; v3.6 is the new schema baseline for any future scoping. Verdict writeup: `progress/r110.md §4l`. Implementation chain at §12.
 - **Parent:** `v35-multichannel-tail-scoping.md` (LANDED-EXTENDED-OUTPERFORMS-CONTROL) + `v33-feature-gap-brainstorm-handoff.md` §2.A/§2.C (gap inventory) + `progress/r110.md §4j` (column-norm + activation-rate diagnostics on v3.5 tail).
 - **Predecessor schema:** v3.5 (212-d, no slots, v3-action). At extended training (8 iters × 240 selfplay-games) wl=0.5908 vs v3.3 0.5812 at same budget. Single seed, Wilson intervals overlap; replication pending.
 - **Scope:** A single thick additive tail that (a) TRIMS the v3.5 bits §4j confirmed dead, (b) ADDS three structural-prior channels v3.5 cannot express, (c) ADDS two minimal-parity-surface arithmetic predicates. Six channels total, each pre-registered against the v3.5 channel-orthogonality rule.
@@ -274,11 +274,12 @@ Per `v33-feature-gap-brainstorm-handoff.md` §6 + `v35-multichannel-tail-scoping
 User-stated framing: "im betting that the features will be needed even though we haven't proved that previous thick addition provides value."
 
 What this scoping doc commits to:
-1. v3.5 has soft single-seed evidence at extended training. Replication is still pending and is NOT a prerequisite for v3.6. The bet on v3.6 is **on top of an unreplicated v3.5 lift** by deliberate choice.
-2. v3.6 is designed so that even if v3.5's lift is noise (the replication fails), v3.6 still tests a coherent feature-design hypothesis: trim what diagnostics proved dead, add what gap analysis proved unencoded. The result is interpretable independently of whether v3.5 stands.
-3. If v3.6 also fails the lift band, the case for further additive-tail iteration on the v3.3 trunk becomes weak. Next pivot is to a different axis (history/sequence, or back to the synthesised-arithmetic axis with stricter per-bit scoping, or set-attention architecture).
+1. v3.5's queue entry has hardened to **`LANDED-CEILING-CONFIRMED-AT-RECIPE-SCALE`** — phase 3 (12×480 + 6-iter continuation) plateaued at n=120 wl=0.5527 with no lift past v3.5-extended (0.5908). The official verdict is that the **schema axis is EXHAUSTED at hidden_dim=64 / depth=2 / KL=0.05**, and the next productive axis is RECIPE or ARCHITECTURE — not more schema bits.
+2. v3.6 is a deliberate schema-axis push *against* that verdict. The bet is **not** "more bits will help"; v3.5 falsified that. The bet is **"info-density-per-bit is the unmeasured lever"** — that trimming 10 dead bits and substituting them with the actually-prior-rich form of the same channel class (energy_pool typed) plus 34 prior-rich and synthesised bits will move winrate where 45 dilute bits did not.
+3. v3.6 is designed so that even if v3.5 turns out to be ceiling-bound for unrelated reasons, v3.6's result is interpretable: it tests a coherent feature-design hypothesis (trim what diagnostics proved dead, add what gap analysis proved unencoded). If v3.6 fails AT THE SAME hidden_dim/depth, the verdict generalises — the schema axis is genuinely exhausted at this recipe scale, regardless of bit density. That is itself useful evidence.
+4. If v3.6 also fails the lift band, the case for further additive-tail iteration at this recipe scale closes definitively. Next pivot is RECIPE (hidden_dim 64→128, depth 2→4 per `§4k` forward candidates) or ARCHITECTURE (set-attention Slice 3) — both off-axis.
 
-The implementer should land code + smoke + init-parity ckpt and queue A1, then **wait for user approval before firing A1**. Same cadence as v3.5.
+The implementer landed code + smoke + init-parity ckpt + Python↔Rust parity smoke. A1 fire is queued; **awaits user approval before firing A1**. Same cadence as v3.5.
 
 ---
 
@@ -312,6 +313,42 @@ The implementer should land code + smoke + init-parity ckpt and queue A1, then *
 ## 11. What this doc is NOT
 
 - Not a verdict on any v3.6 channel. The six channels are pre-registered hypotheses with falsifiable bands.
-- Not authorization to fire A1. User-gated. Implementer lands code + smoke + init-parity ckpt, then queues A1 and waits for user approval.
-- Not a replication of v3.5 single-seed result. v3.5 replication is a separate concern, parallel to v3.6.
-- Not a defense of the additive-tail strategy. If v3.6 also fails the lift band, the next pivot is off-axis (history, architecture, or arithmetic with stricter scoping).
+- Not authorization to fire A1. User-gated. Implementation is complete; A1 awaits user approval.
+- Not a contradiction of the v3.5 ceiling-confirmed verdict — see §9 for the explicit bet framing.
+- Not a defense of the additive-tail strategy. If v3.6 also fails the lift band, the next pivot is off-axis (RECIPE per `§4k` or set-attention Slice 3).
+
+---
+
+## 12. Status line
+
+**`IMPLEMENTED-AWAITING-A1 2026-05-25`** — Phases 1-6 complete. A1 queued, user-gated.
+
+### Implementation chain (2026-05-25)
+
+| Commit | Files | Notes |
+|---|---|---|
+| `3016e51` | `flow/ai/public_info.rs`, `policy/observation.rs`, `policy/types.rs`, this scoping doc | Phase 1: obs-contract extension. Adds `energy_pool: Vec<EnergyType>` to `PublicSideView` and `energy_pool: Vec<String>` to `PublicSideObservation` (with `#[serde(default)]` for v3.5 trace backward-compat). Populated from `SideState.energy_pool` via existing `energy_label_camel` helper. No featurizer touched. v3.5 byte-identity preserved. 150+ cargo tests green; v3.5 smoke PASS. |
+| `6f8ada2` | `features.py`, `v36_priors_arithmetic_smoke.py`, this scoping doc | Phase 2: Python `observation_to_features_v3_6` + dispatch. Layered on v3.5, zero-overwrites [197:207], appends 34 bits at [212:246]. Helpers `_v36_*` for energy_pool / prize / bench / lethal / secondary. Reconciliation: own bench typed dropped (lowest priority redundancy); opp-only retained. Scoping TL;DR / §1 / §4 updated to match as-built. `_BUILDER_BY_STATE_DIM[246]` + `_SCHEMA_VERSION_BY_STATE_DIM[246]` wired. 4/4 v3.5 + new v3.6 smoke PASS. |
+| `51b779b` | `policy/featurize.rs` | Phase 3: Rust mirror `observation_state_features_v3_6`. Calls `observation_state_features_v3_5` for [0:212], zero-overwrites [197:207], writes six channels at offsets matching Python. Helpers `v36_energy_pool_multihot`, `v36_prize_one_hot`, `v36_bench_typed_aggregate`, `v36_attack_cost_covered`, `v36_uma_card_for_active`, `v36_remaining_hp`, `v36_lethal_face_value`, `v36_secondary_attack_bits`. 9 new `v3_6_*` unit tests; v3.5 7/7 still pass; full engine suite green. |
+| `b28c3f0` | `inference/mod.rs`, `serve_onnx.py` | Phase 4: schema dispatch. Rust `GraphSchema::V3_6` enum variant + 5-input contract dispatch (state_dim=246 → V3_6). `serve_onnx` schema-table row + valid-tokens + encoder selector. `export_onnx.py` routes generically via `feature_builder_for_state_dim` — no extra wiring needed. New `state_dim_dispatch_covers_v3_0_through_v3_6` test; 129 cargo lib + all integration tests pass. |
+| `111ecde` | `make_v36_priors_init.py`, `v36_tail_init_smoke.py` | Phase 5: ckpt expander. Drops `state_encoder.0.weight` columns [197:207] (dead opp.energy_zone band), zero-inits new [197:207] for own.energy_pool, zero-init-appends 34 columns at [212:246]. Bumps `model_config.state_dim → 246` and `feature_schema.state_feature_schema_version → 3.6`. Refuses non-v3.5 sources, slot-token ckpts, action_schema_version != 3. Δlogits=0.000e+00 on real `runs/R16-P1-v35-extended-ablation/loop/iter-0/checkpoint.pt` fixture (tolerance 1e-3 has comfortable headroom). |
+| `5168bf2` | `tests/v36_python_parity_fixtures.rs`, `tests/fixtures/v36_parity/*`, `v36_python_rust_parity_smoke.py` | Phase 6: Python↔Rust byte-parity smoke. 10 fixtures generated from `setup_ai_vs_ai_game()` + targeted mutations (empty/1-type/3-type/dup pools; mid-game prizes; lethal-true/false; secondary attack with energy coverage; mixed opp bench). Gate A: STRICT bit-identity on slots [197:207] + [212:246] — 10/10 PASS. Gate B: head [0:197]+[207:212] within 4-ULP — 10/10 PASS (1 known pre-existing 1-ULP drift on slot 42 = v3.0 `hash_average(handCardIds)` Python-f64 vs Rust-f32, max 2.98e-08, NOT a v3.6 regression). |
+
+### Verification status
+
+| Surface | Status | Evidence |
+|---|---|---|
+| Obs-contract `energy_pool` (Rust + JSON) | PASS | Phase 1 commit; v3.5 byte-identity preserved (`cargo test -p engine v3_5`: 7/7) |
+| Python builder shape, byte-identity vs v3.5 head | PASS | `training/v36_priors_arithmetic_smoke.py`: PASS |
+| Rust mirror parity (Python ↔ Rust on contract bits) | PASS | `training/v36_python_rust_parity_smoke.py`: 10/10 Gate A STRICT bit-identical on [197:207]+[212:246]; Gate B 4-ULP-bounded on head |
+| Schema dispatch (Python + Rust) | PASS | `state_dim=246 → V3_6` end-to-end; cargo test `state_dim_dispatch_covers_v3_0_through_v3_6` |
+| Ckpt expander + iter-0 parity | PASS | Δlogits=0.000e+00 on real v3.5-extended iter-0 ckpt (tolerance 1e-3) |
+| ONNX export end-to-end | PRESUMED PASS | Generic dispatch via `feature_builder_for_state_dim` already routes 246 correctly; not exercised end-to-end here |
+| Rust binary rebuild | NEEDED BEFORE A1 | sim-cli / orchestrator binaries built pre-v3.6 don't know about state_dim=246; rebuild via `cargo build --release -p sim-cli` (or equivalent) at A1 fire time |
+| Full self-play loop at state_dim=246 | NOT FIRED | USER-GATED A1 |
+
+### What's NOT verified (out of scope for this slice)
+
+- Full A1 self-play loop at state_dim=246 (requires A1 fire — USER-GATED).
+- Mid-game observation diversity in parity fixtures (current 10 fixtures use a single base setup state + targeted mutations; if belt-and-suspenders desired, extend with recorded selfplay-trace observations — not blocking for A1).
+- Slot-42 pre-existing 1-ULP head drift (Python-f64 vs Rust-f32 in `hash_average(handCardIds)`); independent backlog candidate, not v3.6's concern.

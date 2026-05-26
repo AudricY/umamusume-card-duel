@@ -90,6 +90,14 @@ struct Args {
     /// a separate flag lives on the `sim-eval-gate` binary.
     #[arg(long, default_value_t = false)]
     no_root_dirichlet: bool,
+    /// AlphaZero-style two-sided MCTS. Default false (single-sided). When
+    /// set, opponent decision points become real tree nodes and backup
+    /// uses sign-flips per ply. See
+    /// `docs/ai-research/scoping/two-sided-mcts-scoping.md`. Plumbed for
+    /// symmetry with `sim-eval-gate`; the two-sided probe runs there
+    /// first — selfplay corpora under two-sided are a follow-up.
+    #[arg(long, alias = "mcts-two-sided", default_value_t = false)]
+    mcts_two_sided: bool,
     /// Temperature-sampling cutoff in moves (per side).
     #[arg(long, default_value_t = 6)]
     temperature_moves: u32,
@@ -617,6 +625,7 @@ fn main() -> Result<()> {
         adaptive_ratio: 0.0,
         adaptive_min_sims: 100,
         root_action_selection: MctsRootActionSelection::MaxVisits,
+        two_sided: args.mcts_two_sided,
         model_url: args.model_url.clone(),
         onnx_path: args.onnx_path.clone().map(PathBuf::from),
         // B6 wave-batching: `--wave-size 1` (default) keeps the historical

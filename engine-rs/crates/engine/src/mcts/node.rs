@@ -14,6 +14,14 @@ use crate::policy::types::LegalAiAction;
 pub struct MctsNode {
     pub state: GameState,
     pub model_side: SideId,
+    /// Two-sided MCTS: the side whose decision this node represents. In
+    /// single-sided mode (`config.two_sided=false`) this is always ==
+    /// `model_side` by construction. In two-sided mode it can be either
+    /// side. `priors` and `cached_leaf_value` are in `side_to_move`
+    /// frame; `terminal_value` is ALWAYS stored in `model_side` frame
+    /// so the root diagnostic stays consistent — backup converts as
+    /// needed.
+    pub side_to_move: SideId,
     pub legal_actions: Vec<LegalAiAction>,
     pub priors: Vec<f64>,
     pub visits: Vec<u32>,
@@ -26,7 +34,8 @@ pub struct MctsNode {
     pub terminal_value: Option<f64>,
     /// Cached leaf value from the value-head `/predict` response, so
     /// backup doesn't need a second round trip. Mirrors
-    /// `cachedLeafValue` in TS.
+    /// `cachedLeafValue` in TS. In two-sided mode this is in
+    /// `side_to_move` frame.
     pub cached_leaf_value: Option<f64>,
 }
 
@@ -37,6 +46,7 @@ impl MctsNode {
         MctsNode {
             state,
             model_side,
+            side_to_move: model_side,
             legal_actions: Vec::new(),
             priors: Vec::new(),
             visits: Vec::new(),

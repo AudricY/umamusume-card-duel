@@ -65,6 +65,15 @@ pub struct MctsConfig {
     /// the leaf scalar may carry the better action ranking.
     #[serde(default = "default_root_action_selection")]
     pub root_action_selection: MctsRootActionSelection,
+    /// AlphaZero-style two-sided search (default false). When true,
+    /// opponent decision points become real tree nodes, the policy/value
+    /// net is queried for whoever is to move, and backup uses sign-flips
+    /// per ply. Root is still constructed as a modelSide decision node so
+    /// `root_value` / `root_mean_q` / `root_visit_distribution` stay in
+    /// modelSide frame and the downstream JSONL schema is unaffected.
+    /// See `docs/ai-research/scoping/two-sided-mcts-scoping.md`.
+    #[serde(default)]
+    pub two_sided: bool,
     /// LEGACY: was the `/predict` HTTP server URL when the engine called
     /// out to `serve_onnx.py`. R16-P3 spike Option A landed in-process
     /// ORT (see `crate::inference`); this field is retained for one
@@ -126,6 +135,7 @@ impl Default for MctsConfig {
             adaptive_ratio: 0.0,
             adaptive_min_sims: 20,
             root_action_selection: MctsRootActionSelection::MaxVisits,
+            two_sided: false,
             model_url: String::new(),
             onnx_path: None,
             wave_size: 1,

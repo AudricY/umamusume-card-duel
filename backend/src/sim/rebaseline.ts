@@ -140,6 +140,7 @@ async function runMethodAsModel(args: RebaselineArgs, method: MethodKey) {
     opponentMctsPrior: "uniform",
     mctsAdaptiveRatio: 0,
     mctsAdaptiveMinSims: 20,
+    mctsTwoSided: false,
     opponentMctsAdaptiveRatio: 0,
     opponentMctsAdaptiveMinSims: 20,
   };

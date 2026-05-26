@@ -58,6 +58,7 @@ fn first_mcts_decision(seed: &str) -> (u32, usize, usize, String, u32, f64) {
         adaptive_ratio: 0.0,
         adaptive_min_sims: 50,
         root_action_selection: MctsRootActionSelection::MaxVisits,
+        two_sided: false,
         model_url: String::new(),
         onnx_path: None,
         wave_size: 1,

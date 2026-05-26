@@ -94,6 +94,16 @@ export type MctsConfig = {
   // visits (which would otherwise force an early halt after sim 1).
   adaptiveRatio: number;
   adaptiveMinSims: number;
+  // AlphaZero-style two-sided search. When false (default), opponent turns
+  // are collapsed via the rule-bot between expansions and every node is in
+  // modelSide frame (backup adds unmodified). When true, opponent decision
+  // points become real tree nodes, the policy/value net is queried for
+  // whoever is to move, and backup uses sign-flips per ply. The root is
+  // still constructed as a modelSide decision node, so `rootValue` /
+  // `rootMeanQ` / `visitDistribution` stay in modelSide frame and the
+  // downstream JSONL schema is unaffected. See
+  // `docs/ai-research/scoping/two-sided-mcts-scoping.md`.
+  twoSided: boolean;
 };
 
 export type MctsDiagnostics = {
@@ -126,6 +136,13 @@ export type MctsResult = {
 type MctsNode = {
   state: GameState;
   modelSide: SideId;
+  // Two-sided MCTS: the side whose decision this node represents. In
+  // single-sided mode (config.twoSided=false) this is always === modelSide
+  // by construction. In two-sided mode it can be either side. `priors`
+  // and `cachedLeafValue` are in `sideToMove` frame; `terminalValue` is
+  // ALWAYS stored in modelSide frame so the root's diagnostic stays
+  // consistent — backup converts as needed.
+  sideToMove: SideId;
   legalActions: LegalAiAction[];
   priors: number[];
   visits: number[];
@@ -136,7 +153,8 @@ type MctsNode = {
   terminalValue: number | null;
   // Phase A: when buildModelDecisionNode calls /predict to fetch the
   // policy prior, it harvests `value[0]` from the same response and caches
-  // it here so backup doesn't need a second /predict round trip.
+  // it here so backup doesn't need a second /predict round trip. In
+  // two-sided mode this is in `sideToMove` frame.
   cachedLeafValue: number | null;
 };
 
@@ -155,6 +173,7 @@ export function defaultMctsConfig(overrides?: Partial<MctsConfig>): MctsConfig {
     collapseMaxSteps: 64,
     adaptiveRatio: 0,
     adaptiveMinSims: 20,
+    twoSided: false,
     ...overrides,
   };
 }
@@ -175,7 +194,15 @@ export async function runMcts(
   seed: string,
 ): Promise<MctsResult> {
   const rootRng = createSeededRng(seed, "mcts-root");
-  const root = await buildModelDecisionNode(rootState, modelSide, modelUrl, config);
+  // Root is constructed as a modelSide decision node in both modes — this
+  // preserves the rootValue / rootMeanQ / visitDistribution schema for
+  // downstream consumers (value_target_dataset.py, selfplay_dataset.py).
+  // In two-sided mode the precollapse branch in `buildModelDecisionNode`
+  // is irrelevant because the root state is always a modelSide-turn state
+  // by caller contract.
+  const root = config.twoSided
+    ? await buildDecisionNodeTwoSided(rootState, modelSide, modelSide, modelUrl, config)
+    : await buildModelDecisionNode(rootState, modelSide, modelUrl, config);
   const diagnostics: MctsDiagnostics = {
     rootValue: 0,
     rootVisitDistribution: [],
@@ -242,10 +269,20 @@ export async function runMcts(
       node = child;
     }
 
+    // `leafValueScalar` is in `leafFrame` (the side at the leaf). In
+    // single-sided mode that's always modelSide, so backup adds unmodified.
+    // In two-sided mode we sign-flip per ply during backup so each node's
+    // Q is in its own `sideToMove` frame.
     let leafValueScalar: number;
+    let leafFrame: SideId = modelSide;
     if (node.terminalValue !== null) {
       // Leaf is terminal — back up the deterministic value directly.
-      leafValueScalar = node.terminalValue;
+      // `terminalValue` is stored in modelSide frame; in two-sided mode
+      // convert to leaf's sideToMove frame.
+      leafFrame = node.sideToMove;
+      leafValueScalar = config.twoSided && node.sideToMove !== modelSide
+        ? -node.terminalValue
+        : node.terminalValue;
       diagnostics.terminalLeafs += 1;
     } else {
       // Leaf is the deepest node we got to without finding a child for
@@ -254,54 +291,78 @@ export async function runMcts(
       const parent = last.node;
       const actionIndex = last.actionIndex;
       const action = parent.legalActions[actionIndex]!;
-      const nextState = stepFromModelDecision(
-        parent.state,
-        parent.modelSide,
-        action,
-        config,
-        simRng.fork(`expand:a${actionIndex}`),
-      );
+      const nextState = config.twoSided
+        ? stepFromDecisionTwoSided(parent.state, parent.sideToMove, action, simRng.fork(`expand:a${actionIndex}`))
+        : stepFromModelDecision(parent.state, parent.modelSide, action, config, simRng.fork(`expand:a${actionIndex}`));
       if (nextState === null) {
         // Action didn't change state — treat as a terminal value of 0
         // and discourage re-selection by recording a visit with neutral Q.
         leafValueScalar = 0;
+        leafFrame = parent.sideToMove;
       } else if (totalNodes >= config.maxNodes) {
         // Memory cap reached — evaluate the leaf without storing a node.
-        leafValueScalar = nextState.gameOver
-          ? mctsTerminalValue(nextState, parent.modelSide)
-          : await leafValue(nextState, parent.modelSide, modelUrl, config, simRng.fork(`leaf:cap:a${actionIndex}`));
-        diagnostics.leafEvaluations += nextState.gameOver ? 0 : 1;
-        diagnostics.terminalLeafs += nextState.gameOver ? 1 : 0;
+        // In two-sided mode the leaf frame is the side to move at the
+        // post-step state (could be either side); leafValue is queried
+        // against that side so the scalar is already in the right frame.
+        // For terminal/done states fall back to the parent's sideToMove
+        // (the action that just resolved was made by parent.sideToMove).
+        if (config.twoSided) {
+          const cs = nextState.currentSide;
+          leafFrame = (cs === "player" || cs === "opponent") ? cs : parent.sideToMove;
+        } else {
+          leafFrame = parent.modelSide;
+        }
+        if (nextState.gameOver) {
+          // mctsTerminalValue returns +1/-1/0 in `leafFrame` frame.
+          leafValueScalar = mctsTerminalValue(nextState, leafFrame);
+          diagnostics.terminalLeafs += 1;
+        } else {
+          leafValueScalar = await leafValue(nextState, leafFrame, modelUrl, config, simRng.fork(`leaf:cap:a${actionIndex}`));
+          diagnostics.leafEvaluations += 1;
+        }
       } else {
-        const newChild = await buildModelDecisionNode(
-          nextState,
-          parent.modelSide,
-          modelUrl,
-          config,
-        );
+        let childSideToMove: SideId = parent.sideToMove;
+        if (config.twoSided) {
+          const cs = nextState.currentSide;
+          childSideToMove = (cs === "player" || cs === "opponent") ? cs : parent.sideToMove;
+        }
+        const newChild = config.twoSided
+          ? await buildDecisionNodeTwoSided(nextState, parent.modelSide, childSideToMove, modelUrl, config)
+          : await buildModelDecisionNode(nextState, parent.modelSide, modelUrl, config);
         parent.children[actionIndex] = newChild;
         totalNodes += 1;
         diagnostics.expansions += 1;
+        leafFrame = newChild.sideToMove;
         if (newChild.terminalValue !== null) {
-          leafValueScalar = newChild.terminalValue;
+          // `terminalValue` is in modelSide frame; convert to leaf frame.
+          leafValueScalar = config.twoSided && newChild.sideToMove !== modelSide
+            ? -newChild.terminalValue
+            : newChild.terminalValue;
           diagnostics.terminalLeafs += 1;
         } else if (config.leaf === "value-head" && newChild.cachedLeafValue !== null) {
           // Policy-prior mode: value was harvested from the same /predict
           // call that produced the priors; no extra fetch needed.
+          // `cachedLeafValue` is already in `sideToMove` (=leaf) frame.
           leafValueScalar = newChild.cachedLeafValue;
         } else {
-          leafValueScalar = await leafValue(newChild.state, newChild.modelSide, modelUrl, config, simRng.fork(`leaf:expand:a${actionIndex}`));
+          leafValueScalar = await leafValue(newChild.state, newChild.sideToMove, modelUrl, config, simRng.fork(`leaf:expand:a${actionIndex}`));
           diagnostics.leafEvaluations += 1;
         }
       }
     }
 
-    // Backup: every node in the path is a modelSide-decision state, so
-    // the leaf value (in modelSide frame) is added unmodified.
+    // Backup. Single-sided: every node is in modelSide frame, add
+    // unmodified (the pre-twoSided contract — byte-identical when
+    // `config.twoSided=false`). Two-sided: each node holds Q in its own
+    // `sideToMove` frame, so we add `+leafValueScalar` when the node's
+    // side matches the leaf frame and `-leafValueScalar` otherwise (AZ).
     for (const step of path) {
       const i = step.actionIndex;
       step.node.visits[i] = (step.node.visits[i] ?? 0) + 1;
-      step.node.wsum[i] = (step.node.wsum[i] ?? 0) + leafValueScalar;
+      const signed = config.twoSided && step.node.sideToMove !== leafFrame
+        ? -leafValueScalar
+        : leafValueScalar;
+      step.node.wsum[i] = (step.node.wsum[i] ?? 0) + signed;
     }
 
     diagnostics.simulationsRun = sim + 1;
@@ -371,6 +432,92 @@ function puctSelect(node: MctsNode, cPuct: number): number {
   return bestIndex;
 }
 
+// Two-sided variant of buildModelDecisionNode. Does NOT precollapse opponent
+// turns; the caller passes the side currently to move and we treat that as
+// the decision side. `terminalValue` (when set) stays in modelSide frame —
+// the root diagnostic relies on this — while `cachedLeafValue` is in
+// `sideToMove` frame because the policy/value head was queried as that side.
+async function buildDecisionNodeTwoSided(
+  state: GameState,
+  modelSide: SideId,
+  sideToMove: SideId,
+  modelUrl: string,
+  config: MctsConfig,
+): Promise<MctsNode> {
+  if (state.gameOver) {
+    const term = mctsTerminalValue(state, modelSide);
+    return {
+      state,
+      modelSide,
+      sideToMove,
+      legalActions: [],
+      priors: [],
+      visits: [],
+      wsum: [],
+      children: [],
+      terminalValue: term,
+      cachedLeafValue: sideToMove === modelSide ? term : -term,
+    };
+  }
+
+  const legalActions = enumerateLegalAiActions(state, sideToMove);
+  if (legalActions.length === 0) {
+    return {
+      state,
+      modelSide,
+      sideToMove,
+      legalActions: [],
+      priors: [],
+      visits: [],
+      wsum: [],
+      children: [],
+      terminalValue: 0,
+      cachedLeafValue: 0,
+    };
+  }
+
+  let priors: number[];
+  let cachedLeafValue: number | null = null;
+  if (config.prior === "policy") {
+    const { actionProbs, value } = await predictPolicyAndValue(modelUrl, state, sideToMove, legalActions);
+    priors = legalActions.map((_, i) => Math.max(1e-8, actionProbs[i] ?? 0));
+    cachedLeafValue = value;
+  } else {
+    const uniform = 1 / legalActions.length;
+    priors = legalActions.map(() => uniform);
+  }
+
+  return {
+    state,
+    modelSide,
+    sideToMove,
+    legalActions,
+    priors,
+    visits: legalActions.map(() => 0),
+    wsum: legalActions.map(() => 0),
+    children: legalActions.map(() => null),
+    terminalValue: null,
+    cachedLeafValue,
+  };
+}
+
+function stepFromDecisionTwoSided(
+  state: GameState,
+  sideToMove: SideId,
+  action: LegalAiAction,
+  rng: Rng,
+): GameState | null {
+  // Apply ONE ply for whoever's currently to move. No heuristic collapse.
+  // advanceModeledTurnStep is side-agnostic — it dispatches on the passed
+  // sideId, not on modelSide. The resulting child's `sideToMove` is
+  // whatever `nextState.currentSide` ends up as (could be the same side
+  // when the action doesn't end the turn, or could flip).
+  const forcedCoins = getForcedAttackCoinResults(state, rng);
+  const next = advanceModeledTurnStep(state, sideToMove, action, forcedCoins, rng);
+  if (stateHash(next) === stateHash(state)) return null;
+  return next;
+}
+
 async function buildModelDecisionNode(
   state: GameState,
   modelSide: SideId,
@@ -383,6 +530,7 @@ async function buildModelDecisionNode(
     return {
       state,
       modelSide,
+      sideToMove: modelSide,
       legalActions: [],
       priors: [],
       visits: [],
@@ -403,6 +551,7 @@ async function buildModelDecisionNode(
       return {
         state: collapsedState,
         modelSide,
+        sideToMove: modelSide,
         legalActions: [],
         priors: [],
         visits: [],
@@ -419,6 +568,7 @@ async function buildModelDecisionNode(
     return {
       state: collapsedState,
       modelSide,
+      sideToMove: modelSide,
       legalActions: [],
       priors: [],
       visits: [],
@@ -443,6 +593,7 @@ async function buildModelDecisionNode(
   return {
     state: collapsedState,
     modelSide,
+    sideToMove: modelSide,
     legalActions,
     priors,
     visits: legalActions.map(() => 0),

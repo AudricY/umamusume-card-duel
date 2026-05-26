@@ -43,8 +43,23 @@ pub fn run_mcts(
     seed: &str,
 ) -> MctsResult {
     let mut root_rng = Rng::from_seed(seed, "mcts-root");
-    let mut root =
-        build_model_decision_node(root_state, model_side, model_url, config, &mut root_rng);
+    // Root is constructed as a modelSide decision node in both modes —
+    // preserves rootValue / rootMeanQ / visitDistribution schema for
+    // downstream consumers. In two-sided mode the precollapse branch in
+    // `build_model_decision_node` is irrelevant because the root state is
+    // a modelSide-turn state by caller contract.
+    let mut root = if config.two_sided {
+        build_decision_node_two_sided(
+            root_state,
+            model_side,
+            model_side,
+            model_url,
+            config,
+            &mut root_rng,
+        )
+    } else {
+        build_model_decision_node(root_state, model_side, model_url, config, &mut root_rng)
+    };
     let mut diagnostics = MctsDiagnostics {
         root_value: 0.0,
         root_visit_distribution: Vec::new(),
@@ -115,6 +130,7 @@ pub fn run_mcts(
     if config.wave_size <= 1 {
         run_serial_loop(
             &mut root,
+            model_side,
             &mut root_rng,
             config,
             model_url,
@@ -227,6 +243,7 @@ fn select_root_action(visits: &[u32], mean_q: &[f64], config: &MctsConfig) -> us
 #[allow(clippy::too_many_arguments)]
 fn run_serial_loop(
     root: &mut MctsNode,
+    model_side: SideId,
     root_rng: &mut Rng,
     config: &MctsConfig,
     model_url: &str,
@@ -270,10 +287,23 @@ fn run_serial_loop(
                 .unwrap();
         }
 
+        // `leaf_scalar` is in `leaf_frame` (the side at the leaf). In
+        // single-sided mode that is always `model_side`, so backup adds
+        // unmodified (byte-identical to the pre-two_sided contract). In
+        // two-sided mode we sign-flip per ply during backup so each
+        // node's Q is in its own `side_to_move` frame.
         let leaf_scalar: f64;
+        let leaf_frame: SideId;
         let leaf_node: &MctsNode = unsafe { &*node_ptr };
         if let Some(v) = leaf_node.terminal_value {
-            leaf_scalar = v;
+            // `terminal_value` is stored in model_side frame; in
+            // two-sided mode convert to leaf's side_to_move frame.
+            leaf_frame = leaf_node.side_to_move;
+            leaf_scalar = if config.two_sided && leaf_frame != model_side {
+                -v
+            } else {
+                v
+            };
             diagnostics.terminal_leafs += 1;
         } else {
             // Expand the deepest unexpanded child.
@@ -285,28 +315,45 @@ fn run_serial_loop(
             let action = parent.legal_actions[last.action_index].clone();
             let parent_state = parent.state.clone();
             let parent_model_side = parent.model_side;
+            let parent_side_to_move = parent.side_to_move;
             let mut expand_rng = sim_rng.fork(&format!("expand:a{}", last.action_index));
-            let next_state_opt = step_from_model_decision(
-                &parent_state,
-                parent_model_side,
-                &action,
-                config,
-                &mut expand_rng,
-            );
+            let next_state_opt = if config.two_sided {
+                step_from_decision_two_sided(
+                    &parent_state,
+                    parent_side_to_move,
+                    &action,
+                    &mut expand_rng,
+                )
+            } else {
+                step_from_model_decision(
+                    &parent_state,
+                    parent_model_side,
+                    &action,
+                    config,
+                    &mut expand_rng,
+                )
+            };
             match next_state_opt {
                 None => {
                     leaf_scalar = 0.0;
+                    leaf_frame = parent_side_to_move;
                 }
                 Some(next_state) if *total_nodes >= config.max_nodes => {
+                    let next_side = if config.two_sided {
+                        next_side_to_move_or(&next_state, parent_side_to_move)
+                    } else {
+                        parent_model_side
+                    };
+                    leaf_frame = next_side;
                     if next_state.game_over {
-                        leaf_scalar = mcts_terminal_value(&next_state, parent_model_side);
+                        leaf_scalar = mcts_terminal_value(&next_state, next_side);
                         diagnostics.terminal_leafs += 1;
                     } else {
                         let mut leaf_rng =
                             sim_rng.fork(&format!("leaf:cap:a{}", last.action_index));
                         leaf_scalar = leaf_value(
                             &next_state,
-                            parent_model_side,
+                            next_side,
                             model_url,
                             config,
                             &mut leaf_rng,
@@ -316,36 +363,60 @@ fn run_serial_loop(
                     }
                 }
                 Some(next_state) => {
-                    let new_child = build_model_decision_node(
-                        &next_state,
-                        parent_model_side,
-                        model_url,
-                        config,
-                        &mut sim_rng,
-                    );
+                    let child_side_to_move = if config.two_sided {
+                        next_side_to_move_or(&next_state, parent_side_to_move)
+                    } else {
+                        parent_model_side
+                    };
+                    let new_child = if config.two_sided {
+                        build_decision_node_two_sided(
+                            &next_state,
+                            parent_model_side,
+                            child_side_to_move,
+                            model_url,
+                            config,
+                            &mut sim_rng,
+                        )
+                    } else {
+                        build_model_decision_node(
+                            &next_state,
+                            parent_model_side,
+                            model_url,
+                            config,
+                            &mut sim_rng,
+                        )
+                    };
                     let cached = new_child.cached_leaf_value;
                     let term = new_child.terminal_value;
-                    let model_side_for_leaf = new_child.model_side;
+                    let leaf_side_for_eval = new_child.side_to_move;
                     let leaf_state_for_eval = new_child.state.clone();
                     // Insert.
                     let parent_mut: &mut MctsNode = unsafe { &mut *last.node_ptr };
                     parent_mut.children[last.action_index] = Some(Box::new(new_child));
                     *total_nodes += 1;
                     diagnostics.expansions += 1;
+                    leaf_frame = leaf_side_for_eval;
                     if let Some(v) = term {
-                        leaf_scalar = v;
+                        // `terminal_value` is in model_side frame; convert.
+                        leaf_scalar = if config.two_sided && leaf_frame != model_side {
+                            -v
+                        } else {
+                            v
+                        };
                         diagnostics.terminal_leafs += 1;
                     } else if matches!(config.leaf, MctsLeaf::ValueHead)
                         && config.value_head_rollout_blend <= 0.0
                         && cached.is_some()
                     {
+                        // `cached_leaf_value` is already in `side_to_move`
+                        // (= leaf_frame) frame.
                         leaf_scalar = cached.unwrap();
                     } else {
                         let mut leaf_rng =
                             sim_rng.fork(&format!("leaf:expand:a{}", last.action_index));
                         leaf_scalar = leaf_value(
                             &leaf_state_for_eval,
-                            model_side_for_leaf,
+                            leaf_side_for_eval,
                             model_url,
                             config,
                             &mut leaf_rng,
@@ -357,12 +428,21 @@ fn run_serial_loop(
             }
         }
 
-        // Backup.
+        // Backup. Single-sided: every node is in model_side frame, add
+        // unmodified (byte-identical to pre-two_sided behavior).
+        // Two-sided: each node holds Q in its own `side_to_move` frame,
+        // so we add `+leaf_scalar` when the node's side matches the leaf
+        // frame and `-leaf_scalar` otherwise (AZ formulation).
         for step in &path {
             let node_mut: &mut MctsNode = unsafe { &mut *step.node_ptr };
             let i = step.action_index;
             node_mut.visits[i] += 1;
-            node_mut.wsum[i] += leaf_scalar;
+            let signed = if config.two_sided && node_mut.side_to_move != leaf_frame {
+                -leaf_scalar
+            } else {
+                leaf_scalar
+            };
+            node_mut.wsum[i] += signed;
         }
 
         diagnostics.simulations_run = sim + 1;
@@ -937,6 +1017,7 @@ fn wave_complete_member(
                 let child = MctsNode {
                     state: next_state.clone(),
                     model_side: parent_model_side,
+                    side_to_move: parent_model_side,
                     legal_actions: Vec::new(),
                     priors: Vec::new(),
                     visits: Vec::new(),
@@ -972,6 +1053,7 @@ fn wave_complete_member(
                 let child = MctsNode {
                     state: next_state.clone(),
                     model_side: parent_model_side,
+                    side_to_move: parent_model_side,
                     legal_actions: legal_actions.clone(),
                     priors,
                     visits,
@@ -1043,6 +1125,7 @@ fn build_model_decision_node(
         return MctsNode {
             state: state.clone(),
             model_side,
+            side_to_move: model_side,
             legal_actions: Vec::new(),
             priors: Vec::new(),
             visits: Vec::new(),
@@ -1072,6 +1155,7 @@ fn build_model_decision_node(
             return MctsNode {
                 state: collapsed,
                 model_side,
+                side_to_move: model_side,
                 legal_actions: Vec::new(),
                 priors: Vec::new(),
                 visits: Vec::new(),
@@ -1088,6 +1172,7 @@ fn build_model_decision_node(
         return MctsNode {
             state: collapsed,
             model_side,
+            side_to_move: model_side,
             legal_actions: Vec::new(),
             priors: Vec::new(),
             visits: Vec::new(),
@@ -1138,6 +1223,7 @@ fn build_model_decision_node(
     MctsNode {
         state: collapsed,
         model_side,
+        side_to_move: model_side,
         legal_actions,
         priors,
         visits,
@@ -1224,6 +1310,131 @@ fn step_from_model_decision(
         config.collapse_max_steps,
         rng,
     ))
+}
+
+/// Two-sided variant of `build_model_decision_node`. Does NOT precollapse
+/// opponent turns; the caller passes the side currently to move and we
+/// treat that as the decision side. `terminal_value` (when set) stays in
+/// `model_side` frame so the root diagnostic is unchanged;
+/// `cached_leaf_value` is in `side_to_move` frame because the policy/value
+/// head was queried as that side.
+fn build_decision_node_two_sided(
+    state: &GameState,
+    model_side: SideId,
+    side_to_move: SideId,
+    model_url: &str,
+    config: &MctsConfig,
+    rng: &mut Rng,
+) -> MctsNode {
+    if state.game_over {
+        let v = mcts_terminal_value(state, model_side);
+        let cached = if side_to_move == model_side { v } else { -v };
+        return MctsNode {
+            state: state.clone(),
+            model_side,
+            side_to_move,
+            legal_actions: Vec::new(),
+            priors: Vec::new(),
+            visits: Vec::new(),
+            wsum: Vec::new(),
+            children: Vec::new(),
+            terminal_value: Some(v),
+            cached_leaf_value: Some(cached),
+        };
+    }
+
+    let legal_actions = enumerate_legal_ai_actions(state, side_to_move);
+    if legal_actions.is_empty() {
+        return MctsNode {
+            state: state.clone(),
+            model_side,
+            side_to_move,
+            legal_actions: Vec::new(),
+            priors: Vec::new(),
+            visits: Vec::new(),
+            wsum: Vec::new(),
+            children: Vec::new(),
+            terminal_value: Some(0.0),
+            cached_leaf_value: Some(0.0),
+        };
+    }
+
+    let mut priors: Vec<f64>;
+    let mut cached_leaf_value: Option<f64> = None;
+    if matches!(config.prior, MctsPrior::Policy) {
+        let (action_probs, value) =
+            predict_policy_and_value(model_url, state, side_to_move, &legal_actions, rng);
+        priors = legal_actions
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let p = action_probs.get(i).copied().unwrap_or(0.0);
+                p.max(1e-8)
+            })
+            .collect();
+        cached_leaf_value = Some(value);
+    } else {
+        let uniform = 1.0 / legal_actions.len() as f64;
+        priors = vec![uniform; legal_actions.len()];
+    }
+
+    if matches!(config.prior, MctsPrior::Policy) {
+        let s: f64 = priors.iter().sum();
+        if s > 0.0 {
+            for p in priors.iter_mut() {
+                *p /= s;
+            }
+        }
+    }
+
+    let visits = vec![0u32; legal_actions.len()];
+    let wsum = vec![0.0f64; legal_actions.len()];
+    let mut children: Vec<Option<Box<MctsNode>>> = Vec::with_capacity(legal_actions.len());
+    for _ in 0..legal_actions.len() {
+        children.push(None);
+    }
+
+    MctsNode {
+        state: state.clone(),
+        model_side,
+        side_to_move,
+        legal_actions,
+        priors,
+        visits,
+        wsum,
+        children,
+        terminal_value: None,
+        cached_leaf_value,
+    }
+}
+
+/// Two-sided variant of `step_from_model_decision`. Applies one ply for
+/// whoever is currently to move; NO heuristic collapse. The child node's
+/// `side_to_move` is whatever `next_state.current_side` ends up as
+/// (could be the same side mid-turn, or could flip).
+fn step_from_decision_two_sided(
+    state: &GameState,
+    side_to_move: SideId,
+    action: &LegalAiAction,
+    rng: &mut Rng,
+) -> Option<GameState> {
+    let forced_coins = with_rng_borrow(rng, || get_forced_attack_coin_results(state));
+    let next_state = advance_modeled_turn_step(state, side_to_move, action, forced_coins);
+    if state_fingerprint(&next_state) == state_fingerprint(state) {
+        return None;
+    }
+    Some(next_state)
+}
+
+/// Helper: resolve `next_state.current_side` to a `SideId`, falling back
+/// to `parent_side` for terminal/done states (where there's no
+/// "next side" to move).
+fn next_side_to_move_or(state: &GameState, parent_side: SideId) -> SideId {
+    match state.current_side {
+        CurrentSide::Player => SideId::Player,
+        CurrentSide::Opponent => SideId::Opponent,
+        CurrentSide::Done => parent_side,
+    }
 }
 
 fn collapse_until_model_or_terminal(
@@ -1676,6 +1887,7 @@ mod tests {
             adaptive_ratio: 0.0,
             adaptive_min_sims: 100,
             root_action_selection: MctsRootActionSelection::MaxVisits,
+            two_sided: false,
             model_url: String::new(),
             onnx_path: None,
             wave_size: 1,
@@ -1711,6 +1923,7 @@ mod tests {
             adaptive_ratio: 0.0,
             adaptive_min_sims: 100,
             root_action_selection: MctsRootActionSelection::MaxVisits,
+            two_sided: false,
             model_url: String::new(),
             onnx_path: None,
             wave_size: 1,

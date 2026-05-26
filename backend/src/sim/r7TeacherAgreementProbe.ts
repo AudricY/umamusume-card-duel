@@ -103,6 +103,7 @@ function buildSelectorArgs(): EvaluateModelArgs {
     mctsDirichletEpsilon: 0.25,
     mctsAdaptiveRatio: 0,
     mctsAdaptiveMinSims: 20,
+    mctsTwoSided: false,
     progressOut: null,
     cycleWindow: 8,
     cycleMinVisits: 3,

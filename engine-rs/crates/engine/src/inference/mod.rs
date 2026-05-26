@@ -52,7 +52,7 @@ use ort::value::TensorRef;
 use crate::policy::card_vocab::card_vocab;
 use crate::policy::featurize::{
     self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3,
-    STATE_DIM_V3_5,
+    STATE_DIM_V3_5, STATE_DIM_V3_6,
     UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM,
 };
 use crate::policy::types::{LegalAiAction, PublicObservation};
@@ -101,6 +101,15 @@ enum GraphSchema {
     /// catastrophe). See
     /// `docs/ai-research/scoping/v35-multichannel-tail-scoping.md`.
     V3_5,
+    /// v36-priors-and-arithmetic: 246-d state-features + 5-input
+    /// contract (no slot tokens). Layered on v3.5: the v3.5 [197:207]
+    /// band is repurposed in-place for own.energy_pool typed multihot
+    /// and a new 34-bit tail appended at [212:246] adds opp pool,
+    /// own/opp prize-card one-hot, opp bench typed aggregate,
+    /// lethal-next-turn face values, and secondary-attack usable/KO
+    /// bits. See
+    /// `docs/ai-research/scoping/v36-priors-and-arithmetic-scoping.md`.
+    V3_6,
 }
 
 /// Errors surfaced by the inference layer. We hide ORT's `Error` behind
@@ -598,6 +607,10 @@ fn pack_row(
             featurize::observation_state_features_v3_5(observation),
             STATE_DIM_V3_5,
         ),
+        GraphSchema::V3_6 => (
+            featurize::observation_state_features_v3_6(observation),
+            STATE_DIM_V3_6,
+        ),
         GraphSchema::V3_0 | GraphSchema::V3_2 => (
             featurize::observation_state_features(observation),
             STATE_DIM_V3,
@@ -612,9 +625,11 @@ fn pack_row(
             let (ids, feats) = featurize::observation_uma_slots(observation);
             (Some(ids), Some(feats))
         }
-        GraphSchema::V3_0 | GraphSchema::V3_1 | GraphSchema::V3_3 | GraphSchema::V3_5 => {
-            (None, None)
-        }
+        GraphSchema::V3_0
+        | GraphSchema::V3_1
+        | GraphSchema::V3_3
+        | GraphSchema::V3_5
+        | GraphSchema::V3_6 => (None, None),
     };
     Ok(PackedRow {
         state,
@@ -676,7 +691,8 @@ fn run_inline_row(
         GraphSchema::V3_0
         | GraphSchema::V3_1
         | GraphSchema::V3_3
-        | GraphSchema::V3_5 => ort::inputs![
+        | GraphSchema::V3_5
+        | GraphSchema::V3_6 => ort::inputs![
             "state_features" => TensorRef::from_array_view(&state_arr)?,
             "action_features" => TensorRef::from_array_view(&action_features_arr)?,
             "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
@@ -836,7 +852,8 @@ fn run_inline_batch(
         GraphSchema::V3_0
         | GraphSchema::V3_1
         | GraphSchema::V3_3
-        | GraphSchema::V3_5 => ort::inputs![
+        | GraphSchema::V3_5
+        | GraphSchema::V3_6 => ort::inputs![
             "state_features" => TensorRef::from_array_view(&state_arr)?,
             "action_features" => TensorRef::from_array_view(&action_features_arr)?,
             "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
@@ -1241,7 +1258,8 @@ fn run_batch(
         GraphSchema::V3_0
         | GraphSchema::V3_1
         | GraphSchema::V3_3
-        | GraphSchema::V3_5 => (|| -> Result<_, InferenceError> {
+        | GraphSchema::V3_5
+        | GraphSchema::V3_6 => (|| -> Result<_, InferenceError> {
             Ok(ort::inputs![
                 "state_features" => TensorRef::from_array_view(&state_arr)?,
                 "action_features" => TensorRef::from_array_view(&action_features_arr)?,
@@ -1535,10 +1553,11 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
         Some(d) if d as usize == STATE_DIM_V3_1 => Ok(GraphSchema::V3_1),
         Some(d) if d as usize == STATE_DIM_V3_3 => Ok(GraphSchema::V3_3),
         Some(d) if d as usize == STATE_DIM_V3_5 => Ok(GraphSchema::V3_5),
+        Some(d) if d as usize == STATE_DIM_V3_6 => Ok(GraphSchema::V3_6),
         Some(d) => Err(InferenceError::SchemaMismatch(format!(
             "graph state_features last dim {} does not match v3.0 ({}), \
-             v3.1 ({}), v3.3 ({}), or v3.5 ({}); inputs {:?}",
-            d, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3, STATE_DIM_V3_5, inputs
+             v3.1 ({}), v3.3 ({}), v3.5 ({}), or v3.6 ({}); inputs {:?}",
+            d, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3, STATE_DIM_V3_5, STATE_DIM_V3_6, inputs
         ))),
         None => {
             // No concrete state_features shape — fall back to v3.0 for
@@ -1880,5 +1899,38 @@ mod tests {
         );
 
         drop(session);
+    }
+
+    /// Pure-Rust dispatch parity: every supported state_features last
+    /// dim maps to the expected `GraphSchema` variant via the same
+    /// match arms `validate_graph_signature` uses on the 5-input
+    /// branch. Keeps the v3.6 (246-d) wiring covered without standing
+    /// up an ORT session in unit-test scope.
+    #[test]
+    fn state_dim_dispatch_covers_v3_0_through_v3_6() {
+        fn schema_for(state_dim: usize) -> Option<GraphSchema> {
+            // Mirror of the 5-input dispatch arms in
+            // `validate_graph_signature`.
+            if state_dim == STATE_DIM_V3 {
+                Some(GraphSchema::V3_0)
+            } else if state_dim == STATE_DIM_V3_1 {
+                Some(GraphSchema::V3_1)
+            } else if state_dim == STATE_DIM_V3_3 {
+                Some(GraphSchema::V3_3)
+            } else if state_dim == STATE_DIM_V3_5 {
+                Some(GraphSchema::V3_5)
+            } else if state_dim == STATE_DIM_V3_6 {
+                Some(GraphSchema::V3_6)
+            } else {
+                None
+            }
+        }
+        assert_eq!(schema_for(STATE_DIM_V3), Some(GraphSchema::V3_0));
+        assert_eq!(schema_for(STATE_DIM_V3_1), Some(GraphSchema::V3_1));
+        assert_eq!(schema_for(STATE_DIM_V3_3), Some(GraphSchema::V3_3));
+        assert_eq!(schema_for(STATE_DIM_V3_5), Some(GraphSchema::V3_5));
+        assert_eq!(schema_for(STATE_DIM_V3_6), Some(GraphSchema::V3_6));
+        // Sanity: STATE_DIM_V3_6 is the documented 246-d v3.6 contract.
+        assert_eq!(STATE_DIM_V3_6, 246);
     }
 }
