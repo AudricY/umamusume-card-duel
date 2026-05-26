@@ -540,18 +540,8 @@ impl InferenceSession {
             let (obs, legal) = batch[0];
             return Ok(vec![self.predict_v3(obs, legal)?]);
         }
-        let guard = match &self.session {
-            SessionStorage::Inline(g) => g,
-            SessionStorage::Dispatched => {
-                return Err(InferenceError::OutputShape(
-                    "predict_v3_batch requires inline session storage; this session was \
-                     constructed with load_on_with_batching(max_batch>1) which moves the \
-                     Session into a dispatcher thread. The wave-batching caller and the \
-                     cross-thread dispatcher are mutually exclusive — pick one."
-                        .to_string(),
-                ));
-            }
-        };
+        // Pack rows up-front; both the inline batch and the dispatcher
+        // fan-out path consume `PackedRow`s.
         let mut rows: Vec<PackedRow> = Vec::with_capacity(batch.len());
         for (obs, legal) in batch.iter() {
             if legal.is_empty() {
@@ -561,7 +551,27 @@ impl InferenceSession {
             }
             rows.push(pack_row(self.schema, obs, legal)?);
         }
-        run_inline_batch(guard, self.schema, rows)
+        match &self.session {
+            SessionStorage::Inline(g) => run_inline_batch(g, self.schema, rows),
+            SessionStorage::Dispatched => {
+                // cross-game-dispatcher-selfplay Phase 1 killshot path.
+                // The wave caller has B rows in hand; instead of erroring
+                // because the Session lives on the dispatcher thread, we
+                // submit each row through the dispatcher. The dispatcher's
+                // leader-on-first-recv pattern will coalesce these B rows
+                // with rows arriving concurrently from other workers'
+                // waves — that cross-game coalescing is the entire point
+                // of the killshot. Output order matches input order
+                // because `predict_many` collects responses in submission
+                // order.
+                let dispatcher = self.dispatcher.as_ref().ok_or_else(|| {
+                    InferenceError::OutputShape(
+                        "Dispatched storage without dispatcher handle".into(),
+                    )
+                })?;
+                dispatcher.predict_many(rows)
+            }
+        }
     }
 }
 
@@ -1122,6 +1132,50 @@ impl BatchedDispatcher {
         resp_rx
             .recv()
             .map_err(|e| InferenceError::Ort(format!("dispatcher recv: {e}")))?
+    }
+
+    /// cross-game-dispatcher-selfplay Phase 1 killshot. Submit all `rows`
+    /// to the dispatcher at once (each gets its own response channel),
+    /// then collect responses in submission order. This is the wave's
+    /// many-row entrypoint when the session is in `Dispatched` storage:
+    /// the per-row sends interleave with sends from other concurrent
+    /// waves on other workers, so the dispatcher's leader-on-first-recv
+    /// pattern can coalesce across games into a single (or a small number
+    /// of) `Session::run` calls.
+    ///
+    /// The first send blocks if the bounded `tx` channel is full
+    /// (`sync_channel(4 * max_batch)`); under normal selfplay the
+    /// dispatcher drains fast enough that the queue never fills, but
+    /// the bound exists as a fail-loud guard against a wedged dispatcher.
+    /// Each `resp_rx.recv()` then blocks until the dispatcher has run the
+    /// batch containing that row. Output order matches input order.
+    fn predict_many(
+        &self,
+        rows: Vec<PackedRow>,
+    ) -> Result<Vec<PredictionV3>, InferenceError> {
+        let tx = self
+            .tx
+            .as_ref()
+            .expect("dispatcher tx alive while session alive");
+        let mut receivers: Vec<Receiver<Result<PredictionV3, InferenceError>>> =
+            Vec::with_capacity(rows.len());
+        for row in rows.into_iter() {
+            let (resp_tx, resp_rx) = sync_channel::<Result<PredictionV3, InferenceError>>(1);
+            tx.send(BatchedRequest {
+                row,
+                response: resp_tx,
+            })
+            .map_err(|e| InferenceError::Ort(format!("dispatcher send: {e}")))?;
+            receivers.push(resp_rx);
+        }
+        let mut out: Vec<PredictionV3> = Vec::with_capacity(receivers.len());
+        for resp_rx in receivers.into_iter() {
+            let pred = resp_rx
+                .recv()
+                .map_err(|e| InferenceError::Ort(format!("dispatcher recv: {e}")))??;
+            out.push(pred);
+        }
+        Ok(out)
     }
 
     /// `(total_batches, total_requests)` since session start. Diagnostic

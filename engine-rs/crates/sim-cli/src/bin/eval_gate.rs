@@ -205,6 +205,31 @@ struct Args {
     /// over-spread exploration.
     #[arg(long, default_value_t = 1.0)]
     virtual_loss: f64,
+    /// cross-game-dispatcher-selfplay Phase 1 killshot flag. When set
+    /// AND `--device cuda`, swap `load_on` → `load_on_with_batching` with
+    /// `batch_size = --killshot-batch-size` and `max_wait_us =
+    /// --killshot-wait-us`, and relax the historical "--wave-size > 1 AND
+    /// --batch-size > 1 mutually exclusive" guard so wave-batched
+    /// `predict_v3_batch` submits each row through the cross-thread
+    /// `BatchedDispatcher`. Goal: measure whether routing wave rows
+    /// through cross-game coalescing lifts GPU utilization at workers=24.
+    /// When unset, the binary is byte-identical to the pre-killshot
+    /// path. See
+    /// `docs/ai-research/scoping/cross-game-dispatcher-selfplay.md`.
+    #[arg(long, default_value_t = false)]
+    killshot_dispatch: bool,
+    /// Max in-flight batch size for the killshot dispatcher. Only honored
+    /// when `--killshot-dispatch` is set. Default 1024 (large enough to
+    /// soak up 24 workers * wave_size 256 = 6144 row burst at production
+    /// recipe, capped to avoid pathological GPU-memory tails).
+    #[arg(long, default_value_t = 1024)]
+    killshot_batch_size: usize,
+    /// Micro-deadline (us) the killshot dispatcher waits for additional
+    /// requests before flushing a partial batch. Only honored when
+    /// `--killshot-dispatch` is set. Default 200us mirrors the existing
+    /// `--batch-wait-us` default.
+    #[arg(long, default_value_t = 200)]
+    killshot_wait_us: u64,
     /// Slice 1 of `docs/ai-research/scoping/deck-pair-sampling.md`.
     /// Deck-pair sampling mode:
     ///   - `fixed` (default) — every game uses the registry defaults
@@ -487,13 +512,22 @@ fn main() -> Result<()> {
     // of the wave's intent (and the wave caller expects an Inline
     // session — `predict_v3_batch` rejects Dispatched storage with an
     // explicit error, but rejecting at flag-parse time is louder).
-    if args.wave_size > 1 && args.batch_size > 1 {
+    //
+    // cross-game-dispatcher-selfplay Phase 1 killshot RELAXES this guard
+    // when `--killshot-dispatch` is set: the killshot specifically wants
+    // wave-batching AND cross-game dispatching combined so wave rows fan
+    // out through the dispatcher and coalesce across games. The relaxed
+    // guard only fires for the legacy combo (the user explicitly opting
+    // into both flags without the killshot).
+    if args.wave_size > 1 && args.batch_size > 1 && !args.killshot_dispatch {
         anyhow::bail!(
             "--wave-size > 1 and --batch-size > 1 are mutually exclusive: \
              wave-batching runs synchronously on the inline session and \
              does not benefit from the cross-thread dispatcher. Pick one: \
              use --wave-size for intra-tree batching (single-game waves), \
-             --batch-size for cross-game inter-thread batching."
+             --batch-size for cross-game inter-thread batching. \
+             (To opt in to the cross-game-dispatcher-selfplay killshot \
+             that combines both, pass --killshot-dispatch.)"
         );
     }
     let needs_inference = selection != "random"
@@ -508,17 +542,28 @@ fn main() -> Result<()> {
                     "sim-eval-gate: --onnx-path is required when --prior policy or --leaf value-head is set"
                 )
             })?;
+        // cross-game-dispatcher-selfplay Phase 1 killshot: when the flag
+        // is set, override the dispatcher params with the killshot values
+        // and force the Dispatched storage path so wave rows fan out
+        // through the cross-thread dispatcher. The relaxation in
+        // `predict_v3_batch` handles routing each wave row through the
+        // dispatcher's leader-on-first-recv coalescer.
+        let (effective_batch_size, effective_wait_us) = if args.killshot_dispatch {
+            (args.killshot_batch_size, args.killshot_wait_us)
+        } else {
+            (args.batch_size, args.batch_wait_us)
+        };
         let session = InferenceSession::load_on_with_batching(
             std::path::Path::new(onnx),
             device,
-            args.batch_size,
-            args.batch_wait_us,
+            effective_batch_size,
+            effective_wait_us,
         )
         .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
         inference::set_global(session);
         eprintln!(
-            "sim-eval-gate: loaded inference session from {} (device={:?}, batch_size={}, batch_wait_us={})",
-            onnx, device, args.batch_size, args.batch_wait_us
+            "sim-eval-gate: loaded inference session from {} (device={:?}, batch_size={}, batch_wait_us={}, killshot_dispatch={})",
+            onnx, device, effective_batch_size, effective_wait_us, args.killshot_dispatch
         );
     } else if !model_url.is_empty() {
         eprintln!(
@@ -869,6 +914,9 @@ fn main() -> Result<()> {
         "batchWaitUs": args.batch_wait_us,
         "device": args.device,
         "mctsTwoSided": args.mcts_two_sided,
+        "killshotDispatch": args.killshot_dispatch,
+        "killshotBatchSize": args.killshot_batch_size,
+        "killshotWaitUs": args.killshot_wait_us,
     });
     let status = if passed { "PASS" } else { "FAIL" };
     let inner = GateInnerSummary {

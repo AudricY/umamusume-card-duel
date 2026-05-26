@@ -1,7 +1,7 @@
 # Cross-Game Dispatcher for Selfplay — Scoping
 
 - **Date:** 2026-05-26
-- **Status:** **IN-FLIGHT** — P0 instrumentation LANDED + measured 2026-05-26; original mechanism falsified (see "Phase 0 Results" below) but hypothesis re-framed and still warrants P1 killshot.
+- **Status:** **CLOSED-FALSIFIED-2026-05-26** — P0 falsified original mechanism (CPU is only 17% of wave wall, not the assumed dominant ~25 ms floor). P1 killshot confirms the dispatcher *implementation* works correctly (mean fill ~878 rows/call, per-call inference latency drops 2.5× under contention) but **wall throughput only improves 1.10×** — within rubric's STOP band (<1.2×). Bottleneck is GPU compute at hidden=256/depth=4, not coordination overhead. Patch left in repo behind `--killshot-dispatch` flag for future re-investigation; not wired to production. See "Phase 1 Results" below.
 - **Predecessors:**
   - `cuda-wave-sweep-validation.md` (LANDED: cuda-w256 shipped, 7.29× per-game wall at sims=400 vhleaf hidden=256/depth=4; production run at 41% GPU util — `cuda-wave-sweep-validation.md:114`).
   - `gpu-batched-inference-throughput.md` (CLOSED B6: per-game wave-batching landed; `BatchedDispatcher` kept for cross-thread coalescing but never wired into `sim-mcts-selfplay`; explicit "for sims >> 1000 or model-size shift, cross-game dispatcher may re-open" at `gpu-batched-inference-throughput.md:636-644`).
@@ -119,7 +119,56 @@ sim-eval-gate --leaf value-head --mcts-two-sided \
 
 **Effort.** `implementer`, ~1 hour patch + 10 min run.
 
+### Phase 1 Results — 2026-05-26
+
+Patch landed in `engine-rs/crates/engine/src/inference/mod.rs` (new `BatchedDispatcher::predict_many` helper + `predict_v3_batch` now routes through dispatcher when `SessionStorage::Dispatched`) and `engine-rs/crates/sim-cli/src/bin/eval_gate.rs` (three new flags: `--killshot-dispatch`, `--killshot-batch-size 1024`, `--killshot-wait-us 200`). Zero behaviour change when flag unset; bit-identical wilson_lower confirmed at n=8 smoke. `sim-mcts-selfplay` and `r12_orchestrator.py` untouched — orchestrator was running iter-9/10/11/12 selfplay live during measurement.
+
+**A/B at workers=24 wave=256 --games 60 --model-side both (120 games per cell, contention with orchestrator distill window):**
+
+| cell | wall (s) | games/sec | mean GPU util | dispatcher engagement |
+| :-- | --: | --: | --: | :-- |
+| **baseline** (no `--killshot-dispatch`) | 4.40 | 27.3 | 43.9% mean / 38% median | n/a (inline path) |
+| **challenger** (with `--killshot-dispatch`) | 3.99 | 30.1 | 39.6% mean / 39% median | `batches=314 requests=275804 mean_fill=878.36` |
+| **ratio** | **0.91×** wall | **1.10×** throughput | ~ flat | ~3.4× coalescing |
+
+**Per-wave instrumentation (post-warmup B=256, first 100 waves per process):**
+
+| phase | baseline µs (p50) | challenger µs (p50) | ratio |
+| :-- | --: | --: | --: |
+| p12 (CPU select+expand) | 1,748 | 1,771 | 1.01× |
+| **p3 (inference wall)** | **94,901** | **37,318** | **0.39× (2.5× faster)** |
+| p4 (CPU backup) | 933 | 838 | 0.90× |
+
+Raw: `runs/cross-game-dispatcher-selfplay/phase1-{baseline,killshot}-{stderr.log,gpu.csv,manifest.json}`.
+
+**Verdict: STOP. Hypothesis FALSIFIED.**
+
+Per the rubric in "Phase 1 — Killshot cell" above:
+- Mean GPU util: ~39% (baseline) vs ~40% (challenger) — flat. Below the `41-55% pivot` band, well below `≥70% ship`.
+- Throughput: **1.10× wall improvement** — below the `1.2× tempered ship` floor.
+
+The dispatcher *implementation* is sound (cross-row coalescing reaches mean fill ~878, ~3.4× of the underlying wave_size=256). The dispatcher *hypothesis* — that cross-game batching meaningfully improves throughput at this model size — is wrong. Theory matches data: at hidden=256/depth=4 with B=256→878, kernel-launch overhead is ~10% of compute time, so amortizing it saves ~10% — exactly what we measured.
+
+**Interpretation note.** The per-wave p3 dropping 2.5× while wall only changes 1.10× is reconciled by the wave_timing cap (100 lines per process captures only the first ~4 waves per worker, when CUDA streams are deepest-queue contended). After steady state, both paths converge to compute-bound latency. The dispatcher reduces *peak* per-call wait under bursty arrival but doesn't change *average* throughput.
+
+**Caveats.**
+- All measurements ran with the in-flight orchestrator (`R16-P3-v36-az-5k-nobuffer-cuda`) occupying GPU device 0. Both cells had identical contention since they ran back-to-back, so the A/B is fair, but absolute throughput numbers are not the production ceiling.
+- Two follow-up runs (`phase1b`, `phase1c`) at longer game counts hung at ONNX init when iter-11/12 selfplay started mid-cell, suggesting a CUDA memory contention pathology worth investigating separately (not blocking this verdict).
+- The killshot patch is left in the repo behind opt-in flags. Risk: orphan code path in `inference/mod.rs` (`BatchedDispatcher::predict_many` + relaxed `predict_v3_batch` mutex). If no future re-investigation materializes within ~2 sprints, recommend cleanup.
+
+**What this rules out and what it doesn't.**
+
+- **Ruled out:** wiring `BatchedDispatcher` into `sim-mcts-selfplay` for the value-head leaf at hidden=256/depth=4, wave=256, workers=24. Throughput payoff is in the 1.10× range, not the 1.6-2.0× scoping hypothesis.
+- **Not ruled out:** future model-size shifts that change compute/launch ratio (much smaller model → launch overhead matters more; much larger model → won't matter). The patch is preserved as a re-test entrypoint.
+- **Not ruled out:** wave-pipeline-overlap as the next throughput lever (deferred-sibling). Now that cross-game dispatcher is killed, pipeline-overlap is the highest-priority remaining MCTS-side throughput candidate — though its strength-envelope cost is real (see "Deferred lever" section below).
+- **Not ruled out:** distill-side throughput, which `cuda-wave-sweep-validation.md:110` already flagged as the post-CUDA-upgrade dominant iter-wall component.
+
+**Decision on Phase 2-4.** Skip. Production wire-up, n=10k wilson gate, and r12 default flip are unnecessary given the negative killshot.
+
 ## Phase 2 — Production wire-up (conditional on Phase 1 verdict ≥55% GPU util)
+
+> **SKIPPED 2026-05-26.** Phase 1 verdict was STOP (1.10× throughput, <1.2× rubric floor). The Phase 2-4 bodies below remain as the pre-registered recipe — historical record of what we planned, not what we shipped.
+
 
 **Code surface.** Bounded to four sites:
 
