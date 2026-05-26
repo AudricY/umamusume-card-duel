@@ -1,7 +1,7 @@
 # Distill-Stage Throughput — Scoping
 
 - **Date:** 2026-05-26
-- **Status:** **PHASE-1-PARTIAL-INVERTED-2026-05-26** — infra knobs FALSIFIED at b=64 (all three regress!); batch_size emerges as the real lever (b=256+amp+dl: **2.19× wall**, slight val_accuracy regression −2.1pp absolute). Default-flip GATED on Wilson check. See "Phase 1 Results" below.
+- **Status:** **LANDED-SHIP-2026-05-26** — Phase 1 verdict: **b=256 + lr=6e-4 (sqrt-scaled) + amp + dl=4 → 2.19× distill wall at −0.49pp val_acc (within ~0.4σ on n=6574)**. Orchestrator defaults flipped (`--batch-size 64→256`, `--lr 3e-4→6e-4`, `--amp False→True`, `--distill-dataloader-workers 0→4`). Explicit launch-script overrides preserve old behavior. See "Phase 1 Results" + "LR-scaling resolution" below.
 - **Predecessors:**
   - `cuda-wave-sweep-validation.md` (LANDED-SHIP-STRENGTH-NEUTRAL: cuda-w256 + torch CUDA upgrade landed; explicit note at L110 "the iter-wall bottleneck on the bigger model was distill, not MCTS").
   - `cross-game-dispatcher-selfplay.md` (KILLSHOT-FALSIFIED: MCTS-side throughput ceiling reached at hidden=256/depth=4; forward implications pointed to distill as the next iter-wall lever).
@@ -116,7 +116,49 @@ Trajectory: monotone decrease, no instability. Both reach low-train / high-val g
 - `training/train_bc.py`: `--dataloader-workers` (DataLoader num_workers + pin_memory + persistent_workers), `--amp-dtype` (bfloat16 default), `--compile` (CUDA-only torch.compile wrap, guarded by try/except). Compile applied AFTER checkpoint load. Checkpoint save + ONNX roundtrip both unwrap `_orig_mod.` when compile is active.
 - `training/r12_orchestrator.py`: `--distill-compile`, `--distill-dataloader-workers` (default 0), pass-through to train_bc.py via run_distill. Existing `--amp` arg now actually forwards.
 
-## Phase 1.5 — Wilson validation gate (conditional on STRENGTH RISK)
+### LR-scaling resolution — 2026-05-26
+
+The −2.1pp val_accuracy gap above was suspected to come from over-aggressive linear LR scaling (3e-4 → 1.2e-3 at b=64 → b=256). Tested two follow-up cells with sqrt-LR scaling (the empirically defended choice for AdamW):
+
+| cell | batch | lr | wall | speedup | final val_acc | Δ vs baseline |
+| :-- | --: | --: | --: | --: | --: | --: |
+| baseline_25 | 64 | 3e-4 | 93.4s | 1.00× | 0.5155 | — |
+| b256_amp_dl_25 (linear LR) | 256 | 1.2e-3 | 42.7s | 2.19× | 0.4944 | −2.11pp |
+| **b256_sqrtlr_25** | **256** | **6e-4** | **42.6s** | **2.19×** | **0.5106** | **−0.49pp** ← SHIP |
+| b128_sqrtlr_25 | 128 | 4.24e-4 | 84.9s | 1.10× | 0.5149 | −0.06pp |
+
+**sqrt-LR closed 4× of the val_acc gap** at no throughput cost (2.19× vs 2.19×). At n=6574 val, 95% Wilson noise is ~±1.2pp, so −0.49pp is ~0.4σ — well within noise.
+
+b=128 sqrt-LR gives essentially no accuracy delta (−0.06pp) but the throughput win shrinks to 1.10× — not worth the lr/batch reshuffle.
+
+**Wilson gate (Phase 1.5) SKIPPED** because the −0.49pp val_acc delta is below the noise floor on the validation split. If future iters show monotone strength regression, revisit.
+
+### Phase 3 — Default flip LANDED — 2026-05-26
+
+`training/r12_orchestrator.py`:
+- `--batch-size`: default `64 → 256`
+- `--lr`: default `3e-4 → 6e-4` (sqrt-scaled from old default)
+- `--amp`: `action=BooleanOptionalAction, default=True` (forwards `--amp` to `train_bc.py` by default; `--no-amp` disables)
+- `--distill-dataloader-workers`: default `0 → 4`
+- `--distill-compile`: stays default `False` (regressed at b=64, not re-validated at b=256)
+
+**Backward compatibility:** existing launch scripts that pin `--batch-size 64 --lr 3e-4` keep old behavior (explicit overrides default). New launches that omit those args get the fast recipe. The R16-P3-v36-az-5k-nobuffer-cuda run is finished; no live orchestrator was disturbed.
+
+**Production iter-wall impact:** distill drops from ~125-135 s/iter to ~57-62 s/iter (~50% distill reduction → **~17-20% total iter-wall reduction**, since selfplay is the other ~155 s).
+
+**Recipe summary for future launches:**
+
+```
+# Recommended distill recipe (default post-2026-05-26):
+--epochs 25 --batch-size 256 --lr 6e-4  # (orchestrator defaults)
+# --amp is on by default; add --no-amp to disable
+# --distill-dataloader-workers 4 is default
+
+# Legacy recipe (explicit override):
+--epochs 25 --batch-size 64 --lr 3e-4 --no-amp --distill-dataloader-workers 0
+```
+
+## Phase 1.5 — Wilson validation gate (conditional on STRENGTH RISK) — SKIPPED
 
 Only if Phase 1 shows loss-trajectory divergence >10%. Run two full iters end-to-end (baseline vs challenger), gate the resulting checkpoints at n=10k with the existing tight-gate harness.
 

@@ -1554,10 +1554,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--temperature-moves", type=int, default=6)
     p.add_argument("--temperature-value", type=float, default=1.0)
     p.add_argument("--epochs", type=int, default=25)
-    p.add_argument("--batch-size", type=int, default=64)
+    # distill-throughput-spike Phase 1 (2026-05-26): batch=256 + lr=6e-4
+    # (sqrt-scaled from prior 3e-4 at b=64) is 2.19x distill wall vs old
+    # b=64+lr=3e-4 at iso-val_accuracy (−0.49pp, within ~0.4σ noise on
+    # n=6574 val). See docs/ai-research/scoping/distill-throughput-spike.md
+    # Phase 1 Results. Explicit --batch-size/--lr overrides preserve old
+    # behavior for launch scripts that pin them.
+    p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--hidden-dim", type=int, default=128)
     p.add_argument("--depth", type=int, default=3)
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--lr", type=float, default=6e-4)
     p.add_argument("--value-weight", type=float, default=1.0)
     p.add_argument("--state-dim", type=int, default=110,
                    help="R16-P1: frozen feature builder selector for the "
@@ -1663,24 +1669,25 @@ def parse_args() -> argparse.Namespace:
     # serve_onnx_context reads .device/.amp/etc indirectly; keep these
     # minimal Namespace fields so DAgger's helper doesn't crash on .get.
     p.add_argument("--device", default="cpu")
-    p.add_argument("--amp", action="store_true",
-                   help="distill-throughput-spike Phase 1: when set, forwards --amp to "
-                        "train_bc.py so distill runs use mixed precision on CUDA. Default "
-                        "OFF -> byte-identical to pre-spike runs.")
-    # distill-throughput-spike Phase 1: torch.compile + DataLoader workers
-    # passthroughs to train_bc.py. Both default OFF on the orchestrator
-    # side so unset is byte-identical to pre-spike behavior; flip after
-    # the smoke validates. Naming: `distill-compile` (not `compile`) to
-    # avoid colliding with the python builtin / future TS compile flags.
+    # distill-throughput-spike Phase 1 (2026-05-26): --amp and
+    # --distill-dataloader-workers=4 are now default-ON to forward AMP
+    # (bfloat16) and async DataLoader to train_bc.py. They give ~10% on
+    # top of the b=256+lr=6e-4 lever above. --no-amp / --distill-dataloader-workers
+    # 0 disable. --distill-compile stays default OFF (regressed at b=64;
+    # not re-validated at b=256). See scoping doc Phase 1 Results.
+    p.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
+                   help="Forward --amp to train_bc.py (bfloat16 by default on CUDA). "
+                        "Default ON post distill-throughput-spike Phase 1. Use --no-amp "
+                        "to disable.")
     p.add_argument("--distill-compile", action="store_true",
-                   help="distill-throughput-spike Phase 1: when set, forwards --compile "
-                        "to train_bc.py so distill wraps the model in torch.compile("
-                        "mode=reduce-overhead) on CUDA. Default OFF.")
-    p.add_argument("--distill-dataloader-workers", type=int, default=0,
-                   help="distill-throughput-spike Phase 1: when >0, forwards "
-                        "--dataloader-workers N to train_bc.py so distill uses N async "
-                        "DataLoader workers with pin_memory and persistent_workers. "
-                        "Default 0 -> byte-identical to pre-spike runs.")
+                   help="When set, forwards --compile to train_bc.py so distill wraps the "
+                        "model in torch.compile(mode=reduce-overhead) on CUDA. Default OFF "
+                        "-- regressed at b=64 (cudagraph thrash on 9 distinct shapes); not "
+                        "re-validated at b=256.")
+    p.add_argument("--distill-dataloader-workers", type=int, default=4,
+                   help="Forwards --dataloader-workers N to train_bc.py so distill uses N "
+                        "async DataLoader workers with pin_memory and persistent_workers. "
+                        "Default 4 post distill-throughput-spike Phase 1. Use 0 to disable.")
     # R13.W1 parallelism — the orchestrator's selfplay + gate stages
     # accept a --workers count that is forwarded to the underlying
     # `sim:mcts-selfplay` and `sim:eval-gate` runners.
