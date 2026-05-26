@@ -21,6 +21,7 @@ from uma_ai.features import (
     STATE_DIM_V3_3,
     STATE_DIM_V3_5,
     STATE_DIM_V3_6,
+    STATE_DIM_V3_7,
     UMA_SLOT_COUNT,
     UMA_SLOT_FEATURE_DIM,
     ZONE_ORDER,
@@ -34,6 +35,7 @@ from uma_ai.features import (
     observation_to_features_v3_3,
     observation_to_features_v3_5,
     observation_to_features_v3_6,
+    observation_to_features_v3_7,
     observation_to_uma_slots,
 )
 
@@ -251,6 +253,13 @@ _SCHEMA_TABLE: tuple[tuple[int, bool, bool, str, str], ...] = (
         "v3.6",
         "246-d v3.6 priors-and-arithmetic (embedding inputs, no slot tokens; v3.5 head with [197:207] band repurposed + 34-bit appended tail)",
     ),
+    (
+        STATE_DIM_V3_7,
+        True,
+        False,
+        "v3.7",
+        "296-d v3.7 combat-arith-and-catalog (embedding inputs, no slot tokens; v3.6 head + 50-bit combat-arith / catalog-lookup tail at [246:296])",
+    ),
 )
 _PLACEHOLDER_DIMS: dict[int, str] = {}
 
@@ -272,7 +281,7 @@ def _lookup_schema(
     return None
 
 
-_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2", "v3.3", "v3.4", "v3.5", "v3.6"}
+_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2", "v3.3", "v3.4", "v3.5", "v3.6", "v3.7"}
 
 
 def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:
@@ -555,6 +564,7 @@ def request_to_arrays(
     is_v3_4 = feature_schema == "v3.4"
     is_v3_5 = feature_schema == "v3.5"
     is_v3_6 = feature_schema == "v3.6"
+    is_v3_7 = feature_schema == "v3.7"
     if is_v2:
         expected_state_dim = STATE_DIM_V2
         encode_state = observation_to_features_v2
@@ -577,6 +587,12 @@ def request_to_arrays(
         # [212:246] appended priors-and-arithmetic tail.
         expected_state_dim = STATE_DIM_V3_6
         encode_state = observation_to_features_v3_6
+    elif is_v3_7:
+        # v3.7 = 296-d state vector, no slot tokens (5-input contract).
+        # Layered on v3.6 with a 50-bit combat-arith / catalog-lookup
+        # tail at [246:296]. v3.6 head stays byte-stable.
+        expected_state_dim = STATE_DIM_V3_7
+        encode_state = observation_to_features_v3_7
     else:
         # Both v3 (110-d v3.0) and v3.2 (110-d v3.0 head + slot tokens) use
         # the SAME 110-d state builder. The v3.2 lift lives entirely in the

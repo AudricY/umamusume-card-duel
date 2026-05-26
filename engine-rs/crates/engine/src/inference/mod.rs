@@ -52,7 +52,7 @@ use ort::value::TensorRef;
 use crate::policy::card_vocab::card_vocab;
 use crate::policy::featurize::{
     self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3,
-    STATE_DIM_V3_5, STATE_DIM_V3_6,
+    STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7,
     UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM,
 };
 use crate::policy::types::{LegalAiAction, PublicObservation};
@@ -110,6 +110,15 @@ enum GraphSchema {
     /// bits. See
     /// `docs/ai-research/scoping/v36-priors-and-arithmetic-scoping.md`.
     V3_6,
+    /// v37-combat-arith-and-catalog: 296-d state-features + 5-input
+    /// contract (no slot tokens). Layered on v3.6 with a 50-bit
+    /// combat-arith + catalog-lookup tail at [246:296]: weakness-
+    /// adjusted lethal, coin-flip expected damage, conditional damage
+    /// bonus indicators, energy ETA + paralysis windows, and frozen
+    /// tool / ability effect-kind one-hots. v3.6 head [0:246] stays
+    /// byte-stable. See
+    /// `docs/ai-research/scoping/v37-combat-arith-and-catalog-scoping.md`.
+    V3_7,
 }
 
 /// Errors surfaced by the inference layer. We hide ORT's `Error` behind
@@ -611,6 +620,10 @@ fn pack_row(
             featurize::observation_state_features_v3_6(observation),
             STATE_DIM_V3_6,
         ),
+        GraphSchema::V3_7 => (
+            featurize::observation_state_features_v3_7(observation),
+            STATE_DIM_V3_7,
+        ),
         GraphSchema::V3_0 | GraphSchema::V3_2 => (
             featurize::observation_state_features(observation),
             STATE_DIM_V3,
@@ -629,7 +642,8 @@ fn pack_row(
         | GraphSchema::V3_1
         | GraphSchema::V3_3
         | GraphSchema::V3_5
-        | GraphSchema::V3_6 => (None, None),
+        | GraphSchema::V3_6
+        | GraphSchema::V3_7 => (None, None),
     };
     Ok(PackedRow {
         state,
@@ -692,7 +706,8 @@ fn run_inline_row(
         | GraphSchema::V3_1
         | GraphSchema::V3_3
         | GraphSchema::V3_5
-        | GraphSchema::V3_6 => ort::inputs![
+        | GraphSchema::V3_6
+        | GraphSchema::V3_7 => ort::inputs![
             "state_features" => TensorRef::from_array_view(&state_arr)?,
             "action_features" => TensorRef::from_array_view(&action_features_arr)?,
             "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
@@ -853,7 +868,8 @@ fn run_inline_batch(
         | GraphSchema::V3_1
         | GraphSchema::V3_3
         | GraphSchema::V3_5
-        | GraphSchema::V3_6 => ort::inputs![
+        | GraphSchema::V3_6
+        | GraphSchema::V3_7 => ort::inputs![
             "state_features" => TensorRef::from_array_view(&state_arr)?,
             "action_features" => TensorRef::from_array_view(&action_features_arr)?,
             "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
@@ -1259,7 +1275,8 @@ fn run_batch(
         | GraphSchema::V3_1
         | GraphSchema::V3_3
         | GraphSchema::V3_5
-        | GraphSchema::V3_6 => (|| -> Result<_, InferenceError> {
+        | GraphSchema::V3_6
+        | GraphSchema::V3_7 => (|| -> Result<_, InferenceError> {
             Ok(ort::inputs![
                 "state_features" => TensorRef::from_array_view(&state_arr)?,
                 "action_features" => TensorRef::from_array_view(&action_features_arr)?,
@@ -1554,10 +1571,11 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
         Some(d) if d as usize == STATE_DIM_V3_3 => Ok(GraphSchema::V3_3),
         Some(d) if d as usize == STATE_DIM_V3_5 => Ok(GraphSchema::V3_5),
         Some(d) if d as usize == STATE_DIM_V3_6 => Ok(GraphSchema::V3_6),
+        Some(d) if d as usize == STATE_DIM_V3_7 => Ok(GraphSchema::V3_7),
         Some(d) => Err(InferenceError::SchemaMismatch(format!(
             "graph state_features last dim {} does not match v3.0 ({}), \
-             v3.1 ({}), v3.3 ({}), v3.5 ({}), or v3.6 ({}); inputs {:?}",
-            d, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3, STATE_DIM_V3_5, STATE_DIM_V3_6, inputs
+             v3.1 ({}), v3.3 ({}), v3.5 ({}), v3.6 ({}), or v3.7 ({}); inputs {:?}",
+            d, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3, STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7, inputs
         ))),
         None => {
             // No concrete state_features shape — fall back to v3.0 for
@@ -1904,10 +1922,10 @@ mod tests {
     /// Pure-Rust dispatch parity: every supported state_features last
     /// dim maps to the expected `GraphSchema` variant via the same
     /// match arms `validate_graph_signature` uses on the 5-input
-    /// branch. Keeps the v3.6 (246-d) wiring covered without standing
+    /// branch. Keeps the v3.7 (296-d) wiring covered without standing
     /// up an ORT session in unit-test scope.
     #[test]
-    fn state_dim_dispatch_covers_v3_0_through_v3_6() {
+    fn state_dim_dispatch_covers_v3_0_through_v3_7() {
         fn schema_for(state_dim: usize) -> Option<GraphSchema> {
             // Mirror of the 5-input dispatch arms in
             // `validate_graph_signature`.
@@ -1921,6 +1939,8 @@ mod tests {
                 Some(GraphSchema::V3_5)
             } else if state_dim == STATE_DIM_V3_6 {
                 Some(GraphSchema::V3_6)
+            } else if state_dim == STATE_DIM_V3_7 {
+                Some(GraphSchema::V3_7)
             } else {
                 None
             }
@@ -1930,7 +1950,8 @@ mod tests {
         assert_eq!(schema_for(STATE_DIM_V3_3), Some(GraphSchema::V3_3));
         assert_eq!(schema_for(STATE_DIM_V3_5), Some(GraphSchema::V3_5));
         assert_eq!(schema_for(STATE_DIM_V3_6), Some(GraphSchema::V3_6));
-        // Sanity: STATE_DIM_V3_6 is the documented 246-d v3.6 contract.
-        assert_eq!(STATE_DIM_V3_6, 246);
+        assert_eq!(schema_for(STATE_DIM_V3_7), Some(GraphSchema::V3_7));
+        // Sanity: STATE_DIM_V3_7 is the documented 296-d v3.7 contract.
+        assert_eq!(STATE_DIM_V3_7, 296);
     }
 }

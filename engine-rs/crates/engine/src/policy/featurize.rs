@@ -36,6 +36,8 @@
 
 use crate::core::catalog::{catalog, Card, UmamusumeCard};
 use crate::core::constants::{EnergyType, TrainerType};
+use crate::core::effect_kinds::{classify_active_ability, classify_tool_effect};
+use crate::core::effects::Attack;
 use crate::policy::card_vocab::{card_vocab, card_vocab_index};
 use crate::policy::types::{AiPhase, LegalAiAction, PublicObservation, PublicSideObservation, PublicUmaObservation};
 
@@ -67,6 +69,14 @@ pub const STATE_DIM_V3_5: usize = 212;
 /// new columns; iter-0 drift contract is Δlogits ≤ 1e-3 (looser than
 /// v3.5's 1e-5 because the column-drop is not strictly bit-identical).
 pub const STATE_DIM_V3_6: usize = 246;
+/// Mirrors `STATE_DIM_V3_7` in Python — 296-d v3.7 combat-arith-and-catalog
+/// builder (`v37-combat-arith-and-catalog-scoping.md`). Layout is the
+/// frozen v3.6 246-d head + 50-bit combat-arith / catalog-lookup tail
+/// appended at [246:296]. Tail-init for v3.6 → v3.7 is zero-init residual
+/// (new Linear columns at [246:296] are zero-init); strict `Δlogits ≤ 1e-5`
+/// contract since no column-drop. All 50 tail bits derive from existing
+/// v3.6 obs fields + static catalog lookup; no new obs-contract fields.
+pub const STATE_DIM_V3_7: usize = 296;
 /// Mirrors `ACTION_DIM` (48-d action feature vector — pre-computed
 /// TS-side and carried verbatim on `LegalAiAction.features`).
 pub const ACTION_DIM: usize = 48;
@@ -726,6 +736,380 @@ pub fn observation_state_features_v3_6(obs: &PublicObservation) -> Vec<f32> {
     let (opp_sec_usable, opp_sec_ko) = v36_secondary_attack_bits(opp_active, own_active);
     f[_V36_OPP_SECONDARY_USABLE_SLOT] = opp_sec_usable;
     f[_V36_OPP_SECONDARY_WOULD_KO_SLOT] = opp_sec_ko;
+
+    f
+}
+
+// ---------------------------------------------------------------------------
+// v3.7 combat-arith-and-catalog tail
+// (`docs/ai-research/scoping/v37-combat-arith-and-catalog-scoping.md`).
+//
+// Mirrors Python `_V37_*` slot offsets bit-for-bit. The v3.6 head [0:246]
+// stays byte-stable; v3.7 only writes the 50-bit tail at [246:296].
+//
+// Layout (FROZEN):
+//   [246:248] own/opp weakness-adjusted lethal (Channel 1)
+//   [248:250] own/opp weakness-adjusted secondary KO (Channel 1)
+//   [250:254] own primary has_cf/cf_eko, opp primary has_cf/cf_eko (Ch2)
+//   [254:258] own sec has_cf/cf_eko, opp sec has_cf/cf_eko (Ch2)
+//   [258:262] own primary per_energy/per_bench, opp primary per_energy/per_bench (Ch3)
+//   [262:266] own sec per_energy/per_bench, opp sec per_energy/per_bench (Ch3)
+//   [266:270] own primary ETA, own sec ETA, opp primary ETA, opp sec ETA (Ch4)
+//   [270:272] own / opp paralysis_window_open (Ch4)
+//   [272:276] own tool effect-kind one-hot (4 classes) (Ch5)
+//   [276:280] opp tool effect-kind one-hot (4 classes) (Ch5)
+//   [280:288] own ability effect-kind one-hot (8 classes) (Ch6)
+//   [288:296] opp ability effect-kind one-hot (8 classes) (Ch6)
+// ---------------------------------------------------------------------------
+
+const _V37_TAIL_START: usize = 246;
+const _V37_OWN_WEAKNESS_LETHAL: usize = 246;
+const _V37_OPP_WEAKNESS_LETHAL: usize = 247;
+const _V37_OWN_WEAKNESS_SECONDARY_KO: usize = 248;
+const _V37_OPP_WEAKNESS_SECONDARY_KO: usize = 249;
+const _V37_COIN_FLIP_BASE: usize = 250;
+const _V37_COND_BONUS_BASE: usize = 258;
+const _V37_ETA_BASE: usize = 266;
+const _V37_PARALYSIS_BASE: usize = 270;
+const _V37_TOOL_KIND_OWN_BASE: usize = 272;
+const _V37_TOOL_KIND_OPP_BASE: usize = 276;
+const _V37_ABILITY_KIND_OWN_BASE: usize = 280;
+const _V37_ABILITY_KIND_OPP_BASE: usize = 288;
+
+/// Weakness-adjusted lethal predicate for ONE attack (`attacks[idx]`).
+/// Bit = 1.0 iff
+///   `attack.damage + (defender.weakness.amount if defender.weakness.type
+///                      == attacker_card.type else 0) >= defender_hp`,
+/// matching `flow/combat.rs:303-305` exactly (additive bonus, applied
+/// only when `damage > 0`).
+///
+/// Both Uma fields are catalog-derived. Mirrors Python
+/// `_v37_weakness_adjusted_lethal`.
+fn v37_weakness_lethal_for_attack(
+    attacker_card: &UmamusumeCard,
+    defender_card: &UmamusumeCard,
+    attack: &Attack,
+    defender_hp: f32,
+) -> f32 {
+    let mut damage = attack.damage as f32;
+    if attack.damage > 0 && attacker_card.r#type == defender_card.weakness.r#type {
+        damage += defender_card.weakness.amount as f32;
+    }
+    if damage >= defender_hp { 1.0 } else { 0.0 }
+}
+
+/// Channel 1 primary-attack predicate. Returns 0.0 on absent / non-Uma
+/// attacker, absent defender, or empty attack list. Mirrors Python
+/// `_v37_weakness_adjusted_lethal`.
+fn v37_weakness_adjusted_lethal(
+    attacker_active: Option<&PublicUmaObservation>,
+    defender_active: Option<&PublicUmaObservation>,
+) -> f32 {
+    let Some(att_card) = v36_uma_card_for_active(attacker_active) else {
+        return 0.0;
+    };
+    let Some(def_active) = defender_active else {
+        return 0.0;
+    };
+    let Some(def_card) = v36_uma_card_for_active(defender_active) else {
+        return 0.0;
+    };
+    let Some(primary) = att_card.attacks.first() else {
+        return 0.0;
+    };
+    let defender_hp = v36_remaining_hp(Some(def_active));
+    v37_weakness_lethal_for_attack(att_card, def_card, primary, defender_hp)
+}
+
+/// Channel 1 secondary-attack predicate. Predicated on the v3.6
+/// secondary-usable bit (= 0 → return 0). Mirrors Python
+/// `_v37_weakness_adjusted_secondary_ko`.
+fn v37_weakness_adjusted_secondary_ko(
+    attacker_active: Option<&PublicUmaObservation>,
+    defender_active: Option<&PublicUmaObservation>,
+    secondary_usable_bit: f32,
+) -> f32 {
+    if secondary_usable_bit <= 0.0 {
+        return 0.0;
+    }
+    let Some(att_card) = v36_uma_card_for_active(attacker_active) else {
+        return 0.0;
+    };
+    if att_card.attacks.len() < 2 {
+        return 0.0;
+    }
+    let Some(def_active) = defender_active else {
+        return 0.0;
+    };
+    let Some(def_card) = v36_uma_card_for_active(defender_active) else {
+        return 0.0;
+    };
+    let secondary = &att_card.attacks[1];
+    let defender_hp = v36_remaining_hp(Some(def_active));
+    v37_weakness_lethal_for_attack(att_card, def_card, secondary, defender_hp)
+}
+
+/// Channel 2 bits for one attack: `(has_cf, cf_eko)`. Mirrors Python
+/// `_v37_attack_coin_flip_bits`:
+///   - `has_cf` = 1 iff any of {coin_bonus, knock_out_active_if_all_coin_heads,
+///     draw_on_heads, discard_random_opponent_hand_on_heads} is set.
+///   - `cf_eko` = 1 iff `damage + 0.5 * (coin_bonus or 0) >= defender_hp`.
+fn v37_attack_coin_flip_bits(attack: Option<&Attack>, defender_hp: f32) -> (f32, f32) {
+    let Some(attack) = attack else {
+        return (0.0, 0.0);
+    };
+    let has_cf = attack.coin_bonus.is_some()
+        || attack.knock_out_active_if_all_coin_heads.is_some()
+        || attack.draw_on_heads.is_some()
+        || attack.discard_random_opponent_hand_on_heads.is_some();
+    let coin_bonus = attack.coin_bonus.unwrap_or(0) as f32;
+    let expected = attack.damage as f32 + 0.5_f32 * coin_bonus;
+    let cf_eko = if expected >= defender_hp { 1.0 } else { 0.0 };
+    (if has_cf { 1.0 } else { 0.0 }, cf_eko)
+}
+
+/// Channel 3 bits for one attack: `(per_energy, per_bench)`. Mirrors
+/// Python `_v37_attack_conditional_bonus_bits`. Structural-only flags:
+/// `per_energy` covers both `damage_per_attached_energy` and
+/// `damage_per_unique_attached_energy`; `per_bench` covers
+/// `damage_per_umamusume_in_play`.
+fn v37_attack_conditional_bonus_bits(attack: Option<&Attack>) -> (f32, f32) {
+    let Some(attack) = attack else {
+        return (0.0, 0.0);
+    };
+    let per_energy = attack.damage_per_attached_energy.is_some()
+        || attack.damage_per_unique_attached_energy.is_some();
+    let per_bench = attack.damage_per_umamusume_in_play.is_some();
+    (
+        if per_energy { 1.0 } else { 0.0 },
+        if per_bench { 1.0 } else { 0.0 },
+    )
+}
+
+/// Channel 4 energy-ETA predicate. Returns 1.0 iff the attack's cost is
+/// feasible by next turn given the attacker's currently-attached
+/// energies plus a `+1` next-turn attach budget drawn from the public
+/// `energy_pool`. Per scope §4.5 Ch.4 LOCKED DEFINITION: typed-color
+/// feasibility only (no total-cost / colorless-absorption check). The
+/// +1 attach is applied to the LARGEST shortfall color with
+/// lex-tiebreak by `ENERGY_TYPES_ORDER` index (matches Python).
+/// Returns 0.0 if `attack` is None / attacker absent. Mirrors Python
+/// `_v37_attack_usable_next_turn`.
+fn v37_attack_usable_next_turn(
+    attacker_active: Option<&PublicUmaObservation>,
+    attack: Option<&Attack>,
+    energy_pool: &[String],
+) -> f32 {
+    let Some(attack) = attack else {
+        return 0.0;
+    };
+    let Some(attacker) = attacker_active else {
+        return 0.0;
+    };
+    let attached = &attacker.energies;
+    // Per-color shortfall (excluding colorless — colorless absorbs).
+    // Use a Vec<(usize, u8)> keyed by ENERGY_TYPES_ORDER index so the
+    // tiebreak is deterministic and matches Python's lex-by-order.
+    let mut shortfall: Vec<(usize, u8)> = Vec::new();
+    for (et, amount) in attack.cost.iter_typed() {
+        if et == EnergyType::Colorless {
+            continue;
+        }
+        let name = energy_type_name(et);
+        let have = attached.get(name).copied().unwrap_or(0);
+        if (amount as i32) > (have as i32) {
+            let deficit = (amount as i32 - have as i32) as u8;
+            let order = ENERGY_TYPES_ORDER
+                .iter()
+                .position(|n| *n == name)
+                .unwrap_or(usize::MAX);
+            shortfall.push((order, deficit));
+        }
+    }
+    // Apply +1 attach to largest shortfall (lex-tiebreak by order index).
+    if !shortfall.is_empty() {
+        shortfall.sort_by(|a, b| {
+            // Largest deficit first; on ties, smaller order index first.
+            b.1.cmp(&a.1).then(a.0.cmp(&b.0))
+        });
+        let (target_order, target_amt) = shortfall[0];
+        if target_amt <= 1 {
+            shortfall.remove(0);
+        } else {
+            shortfall[0] = (target_order, target_amt - 1);
+        }
+    }
+    // After +1 attach: every remaining shortfall color must appear in
+    // the pool.
+    for (order, _amt) in &shortfall {
+        let color = ENERGY_TYPES_ORDER.get(*order).copied().unwrap_or("");
+        if !energy_pool.iter().any(|t| t.as_str() == color) {
+            return 0.0;
+        }
+    }
+    1.0
+}
+
+/// Channel 4 paralysis bit. `own_paralysis_window_open` = 1 iff OPP
+/// active is paralysis_recovery_pending. Mirrors Python
+/// `_v37_paralysis_window_open`.
+fn v37_paralysis_window_open(other_side_active: Option<&PublicUmaObservation>) -> f32 {
+    match other_side_active {
+        Some(u) if u.turn_state.paralysis_recovery_pending => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Channel 5 tool effect-kind one-hot. All zeros iff
+/// `active.tool_card_id is None` OR the tool's catalog entry is
+/// missing/non-trainer. Else writes a 1 at the
+/// `ToolEffectKind::as_u8()` offset. Mirrors Python
+/// `_v37_tool_kind_one_hot`.
+fn v37_tool_kind_one_hot(active: Option<&PublicUmaObservation>, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), 4);
+    let Some(uma) = active else {
+        return;
+    };
+    let Some(tool_id) = uma.tool_card_id.as_deref() else {
+        return;
+    };
+    let Some(card) = get_card(tool_id) else {
+        return;
+    };
+    if let Card::Trainer(t) = card {
+        let kind = classify_tool_effect(&t.effect);
+        out[kind.as_u8() as usize] = 1.0;
+    }
+}
+
+/// Channel 6 ability effect-kind one-hot. All zeros iff the active
+/// didn't actually USE its ability this turn (`used_ability_this_turn
+/// == false`) OR has no card / no `ability` payload. Else writes a 1
+/// at the `AbilityEffectKind::as_u8()` offset. Mirrors Python
+/// `_v37_ability_kind_one_hot`.
+fn v37_ability_kind_one_hot(active: Option<&PublicUmaObservation>, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), 8);
+    let Some(uma) = active else {
+        return;
+    };
+    if !uma.used_ability_this_turn {
+        return;
+    }
+    let Some(card) = v36_uma_card_for_active(Some(uma)) else {
+        return;
+    };
+    let Some(ability) = card.ability.as_ref() else {
+        return;
+    };
+    let kind = classify_active_ability(ability);
+    out[kind.as_u8() as usize] = 1.0;
+}
+
+/// v37-combat-arith-and-catalog: 296-d builder. Slots 0–245 are
+/// byte-identical to v3.6; the 50-bit tail at [246:296] holds the
+/// combat-arith + catalog channels per scoping §4 step 3 / §4.5.
+/// Mirrors `observation_to_features_v3_7` in Python.
+pub fn observation_state_features_v3_7(obs: &PublicObservation) -> Vec<f32> {
+    let mut f = vec![0.0f32; STATE_DIM_V3_7];
+    let head = observation_state_features_v3_6(obs);
+    debug_assert_eq!(head.len(), STATE_DIM_V3_6);
+    f[..STATE_DIM_V3_6].copy_from_slice(&head);
+
+    let own_active = obs.own.active.as_ref();
+    let opp_active = obs.opponent.active.as_ref();
+
+    // Channel 1 — weakness-adjusted lethal. `own_weakness_lethal` =
+    // OPP attacks OWN at face+weakness (mirrors v3.6 polarity).
+    f[_V37_OWN_WEAKNESS_LETHAL] = v37_weakness_adjusted_lethal(opp_active, own_active);
+    f[_V37_OPP_WEAKNESS_LETHAL] = v37_weakness_adjusted_lethal(own_active, opp_active);
+
+    // Channel 1 secondary — predicated on v3.6 slots [242] / [244]
+    // (own / opp secondary usable). own_weakness_secondary_KO = OPP
+    // secondary KOs OWN, so it reads v3.6 slot [244].
+    let own_weakness_sec = v37_weakness_adjusted_secondary_ko(
+        opp_active,
+        own_active,
+        head[_V36_OPP_SECONDARY_USABLE_SLOT],
+    );
+    let opp_weakness_sec = v37_weakness_adjusted_secondary_ko(
+        own_active,
+        opp_active,
+        head[_V36_OWN_SECONDARY_USABLE_SLOT],
+    );
+    f[_V37_OWN_WEAKNESS_SECONDARY_KO] = own_weakness_sec;
+    f[_V37_OPP_WEAKNESS_SECONDARY_KO] = opp_weakness_sec;
+
+    // Resolve catalog attacks once. v3.7 channels 2/3/4 read primary +
+    // secondary on each side; primary is `attacks[0]`, secondary is
+    // `attacks[1]` if present (Option<&Attack>).
+    let own_card = v36_uma_card_for_active(own_active);
+    let opp_card = v36_uma_card_for_active(opp_active);
+    let own_primary = own_card.and_then(|c| c.attacks.first());
+    let opp_primary = opp_card.and_then(|c| c.attacks.first());
+    let own_sec = own_card.and_then(|c| c.attacks.get(1));
+    let opp_sec = opp_card.and_then(|c| c.attacks.get(1));
+    let own_hp = v36_remaining_hp(own_active);
+    let opp_hp = v36_remaining_hp(opp_active);
+
+    // Channel 2 — coin-flip indicators. Layout: own primary has_cf,
+    // cf_eko; opp primary has_cf, cf_eko; own sec has_cf, cf_eko;
+    // opp sec has_cf, cf_eko.
+    let (own_p_has_cf, own_p_eko) = v37_attack_coin_flip_bits(own_primary, opp_hp);
+    let (opp_p_has_cf, opp_p_eko) = v37_attack_coin_flip_bits(opp_primary, own_hp);
+    let (own_s_has_cf, own_s_eko) = v37_attack_coin_flip_bits(own_sec, opp_hp);
+    let (opp_s_has_cf, opp_s_eko) = v37_attack_coin_flip_bits(opp_sec, own_hp);
+    f[_V37_COIN_FLIP_BASE + 0] = own_p_has_cf;
+    f[_V37_COIN_FLIP_BASE + 1] = own_p_eko;
+    f[_V37_COIN_FLIP_BASE + 2] = opp_p_has_cf;
+    f[_V37_COIN_FLIP_BASE + 3] = opp_p_eko;
+    f[_V37_COIN_FLIP_BASE + 4] = own_s_has_cf;
+    f[_V37_COIN_FLIP_BASE + 5] = own_s_eko;
+    f[_V37_COIN_FLIP_BASE + 6] = opp_s_has_cf;
+    f[_V37_COIN_FLIP_BASE + 7] = opp_s_eko;
+
+    // Channel 3 — conditional damage bonuses.
+    let (own_p_pe, own_p_pb) = v37_attack_conditional_bonus_bits(own_primary);
+    let (opp_p_pe, opp_p_pb) = v37_attack_conditional_bonus_bits(opp_primary);
+    let (own_s_pe, own_s_pb) = v37_attack_conditional_bonus_bits(own_sec);
+    let (opp_s_pe, opp_s_pb) = v37_attack_conditional_bonus_bits(opp_sec);
+    f[_V37_COND_BONUS_BASE + 0] = own_p_pe;
+    f[_V37_COND_BONUS_BASE + 1] = own_p_pb;
+    f[_V37_COND_BONUS_BASE + 2] = opp_p_pe;
+    f[_V37_COND_BONUS_BASE + 3] = opp_p_pb;
+    f[_V37_COND_BONUS_BASE + 4] = own_s_pe;
+    f[_V37_COND_BONUS_BASE + 5] = own_s_pb;
+    f[_V37_COND_BONUS_BASE + 6] = opp_s_pe;
+    f[_V37_COND_BONUS_BASE + 7] = opp_s_pb;
+
+    // Channel 4 — energy ETA.
+    f[_V37_ETA_BASE + 0] = v37_attack_usable_next_turn(own_active, own_primary, &obs.own.energy_pool);
+    f[_V37_ETA_BASE + 1] = v37_attack_usable_next_turn(own_active, own_sec, &obs.own.energy_pool);
+    f[_V37_ETA_BASE + 2] = v37_attack_usable_next_turn(opp_active, opp_primary, &obs.opponent.energy_pool);
+    f[_V37_ETA_BASE + 3] = v37_attack_usable_next_turn(opp_active, opp_sec, &obs.opponent.energy_pool);
+
+    // Channel 4 paralysis (own window open iff opp.active paralysed).
+    f[_V37_PARALYSIS_BASE + 0] = v37_paralysis_window_open(opp_active);
+    f[_V37_PARALYSIS_BASE + 1] = v37_paralysis_window_open(own_active);
+
+    // Channel 5 — tool effect-kind one-hot.
+    v37_tool_kind_one_hot(
+        own_active,
+        &mut f[_V37_TOOL_KIND_OWN_BASE.._V37_TOOL_KIND_OWN_BASE + 4],
+    );
+    v37_tool_kind_one_hot(
+        opp_active,
+        &mut f[_V37_TOOL_KIND_OPP_BASE.._V37_TOOL_KIND_OPP_BASE + 4],
+    );
+
+    // Channel 6 — ability effect-kind one-hot.
+    v37_ability_kind_one_hot(
+        own_active,
+        &mut f[_V37_ABILITY_KIND_OWN_BASE.._V37_ABILITY_KIND_OWN_BASE + 8],
+    );
+    v37_ability_kind_one_hot(
+        opp_active,
+        &mut f[_V37_ABILITY_KIND_OPP_BASE.._V37_ABILITY_KIND_OPP_BASE + 8],
+    );
 
     f
 }
@@ -2316,5 +2700,305 @@ mod tests {
         let v = observation_state_features_v3_6(&obs);
         assert_eq!(v[242], 0.0, "own_secondary_usable: only 1 attack");
         assert_eq!(v[243], 0.0, "own_secondary_would_KO: only 1 attack");
+    }
+
+    // ----------------------------------------------------------------
+    // v3.7 combat-arith-and-catalog
+    // (v37-combat-arith-and-catalog-scoping.md)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn v3_7_state_dim_is_296() {
+        let obs = fixture();
+        let v = observation_state_features_v3_7(&obs);
+        assert_eq!(v.len(), STATE_DIM_V3_7);
+        assert_eq!(STATE_DIM_V3_7, 296);
+    }
+
+    #[test]
+    fn v3_7_head_is_byte_identical_to_v3_6() {
+        // v3.7 must NEVER mutate v3.6 slots [0:246]. Build a non-trivial
+        // observation (multiple typed energies + a tool + ability) and
+        // confirm the first 246 bytes are bit-identical to the v3.6
+        // builder on the same observation.
+        let mut obs = fixture();
+        obs.own.energy_pool = vec!["fire".into(), "psychic".into()];
+        obs.opponent.energy_pool = vec!["lightning".into()];
+        // Tool + ability on own active.
+        let mut owner = make_uma_obs(
+            "matikanetannhauserStage1",
+            90,
+            90,
+            2,
+            &[("psychic", 1), ("colorless", 1)],
+        );
+        owner.tool_card_id = Some("leftoverCarrot".to_string());
+        owner.used_ability_this_turn = true;
+        obs.own.active = Some(owner);
+        let v36 = observation_state_features_v3_6(&obs);
+        let v37 = observation_state_features_v3_7(&obs);
+        assert_eq!(&v37[..STATE_DIM_V3_6], &v36[..]);
+    }
+
+    #[test]
+    fn v3_7_tail_offsets_match_python_layout() {
+        // Constant guard: catches a future drift between the Python
+        // `_V37_*` offsets and the Rust `_V37_*` consts. The byte
+        // layout is the v3.7 contract; this test is the canonical
+        // anchor.
+        assert_eq!(_V37_TAIL_START, 246);
+        assert_eq!(_V37_OWN_WEAKNESS_LETHAL, 246);
+        assert_eq!(_V37_OPP_WEAKNESS_LETHAL, 247);
+        assert_eq!(_V37_OWN_WEAKNESS_SECONDARY_KO, 248);
+        assert_eq!(_V37_OPP_WEAKNESS_SECONDARY_KO, 249);
+        assert_eq!(_V37_COIN_FLIP_BASE, 250);
+        assert_eq!(_V37_COND_BONUS_BASE, 258);
+        assert_eq!(_V37_ETA_BASE, 266);
+        assert_eq!(_V37_PARALYSIS_BASE, 270);
+        assert_eq!(_V37_TOOL_KIND_OWN_BASE, 272);
+        assert_eq!(_V37_TOOL_KIND_OPP_BASE, 276);
+        assert_eq!(_V37_ABILITY_KIND_OWN_BASE, 280);
+        assert_eq!(_V37_ABILITY_KIND_OPP_BASE, 288);
+        // Final boundary: 288 (own ability) + 8 (one-hot) = 296.
+        assert_eq!(_V37_ABILITY_KIND_OPP_BASE + 8, STATE_DIM_V3_7);
+    }
+
+    #[test]
+    fn v3_7_weakness_adjusted_lethal_fires_on_type_match() {
+        // manhattanCafeStage1 (Darkness, 40 damage) vs
+        // matikanetannhauserBasic (Psychic, hp=60, weakness Darkness +20).
+        // Without weakness: 40 < 60 → no KO; with weakness: 40+20=60 → KO.
+        let mut obs = fixture();
+        let attacker = make_uma_obs(
+            "manhattanCafeStage1",
+            90,
+            90,
+            2,
+            &[("darkness", 1), ("colorless", 1)],
+        );
+        let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        obs.own.active = Some(attacker);
+        obs.opponent.active = Some(defender);
+        let v = observation_state_features_v3_7(&obs);
+        // opp_weakness_lethal = OWN attacks OPP via weakness → 1.
+        assert_eq!(v[_V37_OPP_WEAKNESS_LETHAL], 1.0);
+        // own_weakness_lethal = OPP attacks OWN. matikanetannhauserBasic
+        // is Psychic 20dmg; manhattanCafeStage1 weakness is Grass +20
+        // → no type match → 20 < 90 → 0.
+        assert_eq!(v[_V37_OWN_WEAKNESS_LETHAL], 0.0);
+    }
+
+    #[test]
+    fn v3_7_weakness_adjusted_lethal_no_bonus_off_type() {
+        // Psychic-vs-Psychic: matikanetannhauserBasic (Psychic, 20dmg)
+        // vs haruUraraBasic (Psychic, hp=90, weakness Darkness +20).
+        // No type match → 20 < 90 → 0.
+        let mut obs = fixture();
+        let attacker = make_uma_obs("matikanetannhauserBasic", 60, 60, 1, &[("psychic", 1)]);
+        let defender = make_uma_obs("haruUraraBasic", 90, 90, 0, &[]);
+        obs.own.active = Some(attacker);
+        obs.opponent.active = Some(defender);
+        let v = observation_state_features_v3_7(&obs);
+        assert_eq!(v[_V37_OPP_WEAKNESS_LETHAL], 0.0);
+    }
+
+    #[test]
+    fn v3_7_coin_flip_has_cf_and_eko() {
+        // matikanetannhauserStage1: primary attack damage=40, coinBonus=20.
+        // Defender at hp=50 → expected = 40 + 0.5*20 = 50 ≥ 50 → cf_eko=1.
+        let mut obs = fixture();
+        let attacker = make_uma_obs(
+            "matikanetannhauserStage1",
+            90,
+            90,
+            2,
+            &[("psychic", 1), ("colorless", 1)],
+        );
+        let defender = make_uma_obs("haruUraraBasic", 50, 90, 0, &[]);
+        obs.own.active = Some(attacker);
+        obs.opponent.active = Some(defender);
+        let v = observation_state_features_v3_7(&obs);
+        // own_primary_has_cf at offset +0, cf_eko at offset +1.
+        assert_eq!(v[_V37_COIN_FLIP_BASE + 0], 1.0, "own primary has_cf");
+        assert_eq!(v[_V37_COIN_FLIP_BASE + 1], 1.0, "own primary cf_eko");
+    }
+
+    #[test]
+    fn v3_7_coin_flip_eko_does_not_fire_when_expected_below_hp() {
+        // Same attack but defender hp=90 → expected 50 < 90 → cf_eko=0.
+        let mut obs = fixture();
+        let attacker = make_uma_obs(
+            "matikanetannhauserStage1",
+            90,
+            90,
+            2,
+            &[("psychic", 1), ("colorless", 1)],
+        );
+        let defender = make_uma_obs("haruUraraBasic", 90, 90, 0, &[]);
+        obs.own.active = Some(attacker);
+        obs.opponent.active = Some(defender);
+        let v = observation_state_features_v3_7(&obs);
+        assert_eq!(v[_V37_COIN_FLIP_BASE + 0], 1.0, "own primary has_cf");
+        assert_eq!(v[_V37_COIN_FLIP_BASE + 1], 0.0, "own primary cf_eko");
+    }
+
+    #[test]
+    fn v3_7_conditional_bonus_per_energy_fires() {
+        // haruUraraBasic primary has damagePerAttachedEnergy →
+        // own_primary_per_energy at offset +0.
+        let mut obs = fixture();
+        let attacker = make_uma_obs("haruUraraBasic", 90, 90, 0, &[]);
+        let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        obs.own.active = Some(attacker);
+        obs.opponent.active = Some(defender);
+        let v = observation_state_features_v3_7(&obs);
+        assert_eq!(
+            v[_V37_COND_BONUS_BASE + 0], 1.0,
+            "own primary per_energy bit"
+        );
+        assert_eq!(
+            v[_V37_COND_BONUS_BASE + 1], 0.0,
+            "own primary per_bench bit (haruUraraBasic has no per-bench bonus)"
+        );
+    }
+
+    #[test]
+    fn v3_7_eta_fires_when_pool_covers_shortfall() {
+        // matikanetannhauserBasic cost {psychic:1}; attached={} →
+        // shortfall={psychic:1}. +1 attach reduces to 0 → no surviving
+        // shortfall → ETA=1 regardless of pool.
+        let mut obs = fixture();
+        let attacker = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        let defender = make_uma_obs("haruUraraBasic", 90, 90, 0, &[]);
+        obs.own.active = Some(attacker);
+        obs.opponent.active = Some(defender);
+        obs.own.energy_pool = vec![];
+        let v = observation_state_features_v3_7(&obs);
+        assert_eq!(v[_V37_ETA_BASE + 0], 1.0, "own primary ETA (psychic:1 from +1 attach)");
+    }
+
+    #[test]
+    fn v3_7_eta_zero_when_shortfall_survives_and_pool_misses() {
+        // Find a 2-typed-cost card so a single +1 attach can't cover both.
+        // symboliRudolfStage2 has cost {water:1, dragon:1, colorless:1}.
+        // attached={} → shortfall={water:1, dragon:1}. After +1 attach
+        // to water (lex-tiebreak first), surviving={dragon:1}. With
+        // pool=[] → dragon not in pool → ETA=0.
+        let mut obs = fixture();
+        let attacker = make_uma_obs("symboliRudolfStage2", 120, 120, 0, &[]);
+        let defender = make_uma_obs("haruUraraBasic", 90, 90, 0, &[]);
+        obs.own.active = Some(attacker);
+        obs.opponent.active = Some(defender);
+        obs.own.energy_pool = vec![];
+        let v = observation_state_features_v3_7(&obs);
+        assert_eq!(v[_V37_ETA_BASE + 0], 0.0, "own primary ETA (dragon shortfall not in pool)");
+        // With pool=[dragon] → surviving dragon covered → ETA=1.
+        obs.own.energy_pool = vec!["dragon".to_string()];
+        let v = observation_state_features_v3_7(&obs);
+        assert_eq!(v[_V37_ETA_BASE + 0], 1.0, "own primary ETA (dragon now in pool)");
+    }
+
+    #[test]
+    fn v3_7_paralysis_window_open_reads_typed_bool() {
+        let mut obs = fixture();
+        let mut own_a = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        own_a.turn_state.paralysis_recovery_pending = false;
+        let mut opp_a = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        opp_a.turn_state.paralysis_recovery_pending = true;
+        obs.own.active = Some(own_a);
+        obs.opponent.active = Some(opp_a);
+        let v = observation_state_features_v3_7(&obs);
+        // own_paralysis_window_open = OPP paralysed → 1.
+        assert_eq!(v[_V37_PARALYSIS_BASE + 0], 1.0);
+        // opp_paralysis_window_open = OWN paralysed → 0.
+        assert_eq!(v[_V37_PARALYSIS_BASE + 1], 0.0);
+    }
+
+    #[test]
+    fn v3_7_tool_kind_leftover_carrot() {
+        // leftoverCarrot is a TrainerEffect with toolEndTurnHealActive
+        // → ToolEffectKind::HealAtTurnEnd (index 0).
+        let mut obs = fixture();
+        let mut own_a = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        own_a.tool_card_id = Some("leftoverCarrot".to_string());
+        obs.own.active = Some(own_a);
+        obs.opponent.active = Some(make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]));
+        let v = observation_state_features_v3_7(&obs);
+        assert_eq!(v[_V37_TOOL_KIND_OWN_BASE + 0], 1.0, "own tool HealAtTurnEnd");
+        // Exactly one bit in the 4-bit own block.
+        let sum: f32 = v[_V37_TOOL_KIND_OWN_BASE.._V37_TOOL_KIND_OWN_BASE + 4]
+            .iter()
+            .sum();
+        assert_eq!(sum, 1.0);
+        // Opp has no tool → all zero.
+        let opp_sum: f32 = v[_V37_TOOL_KIND_OPP_BASE.._V37_TOOL_KIND_OPP_BASE + 4]
+            .iter()
+            .sum();
+        assert_eq!(opp_sum, 0.0);
+    }
+
+    #[test]
+    fn v3_7_ability_kind_nice_nature_hp_bonus() {
+        // niceNatureBasic ability has activeHpBonus → AbilityEffectKind::HpBonus
+        // (index 2). Only fires if used_ability_this_turn=true.
+        let mut obs = fixture();
+        let mut own_a = make_uma_obs("niceNatureBasic", 70, 70, 0, &[]);
+        own_a.used_ability_this_turn = true;
+        obs.own.active = Some(own_a);
+        obs.opponent.active = Some(make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]));
+        let v = observation_state_features_v3_7(&obs);
+        assert_eq!(v[_V37_ABILITY_KIND_OWN_BASE + 2], 1.0, "own ability HpBonus");
+        let sum: f32 = v[_V37_ABILITY_KIND_OWN_BASE.._V37_ABILITY_KIND_OWN_BASE + 8]
+            .iter()
+            .sum();
+        assert_eq!(sum, 1.0);
+    }
+
+    #[test]
+    fn v3_7_ability_kind_zero_when_not_used_this_turn() {
+        // Even with the ability card, the bit only fires if
+        // used_ability_this_turn=true.
+        let mut obs = fixture();
+        let mut own_a = make_uma_obs("niceNatureBasic", 70, 70, 0, &[]);
+        own_a.used_ability_this_turn = false;
+        obs.own.active = Some(own_a);
+        obs.opponent.active = Some(make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]));
+        let v = observation_state_features_v3_7(&obs);
+        let sum: f32 = v[_V37_ABILITY_KIND_OWN_BASE.._V37_ABILITY_KIND_OWN_BASE + 8]
+            .iter()
+            .sum();
+        assert_eq!(sum, 0.0);
+    }
+
+    #[test]
+    fn v3_7_secondary_weakness_ko_predicated_on_v36_usable() {
+        // matikanefukukitaruStage1 has 2 attacks; secondary cost
+        // {psychic:1, colorless:1}, damage=0. With 2 psychic attached,
+        // v3.6 says secondary usable=1. Defender Psychic-weakness-
+        // Darkness; attacker is Psychic → no weakness type match.
+        // Damage=0 → even with weakness off, 0 < hp → secondary KO=0.
+        let mut obs = fixture();
+        let attacker = make_uma_obs(
+            "matikanefukukitaruStage1",
+            100,
+            100,
+            2,
+            &[("psychic", 2)],
+        );
+        let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
+        obs.own.active = Some(attacker);
+        obs.opponent.active = Some(defender);
+        let v = observation_state_features_v3_7(&obs);
+        // v3.6 head says own secondary usable=1 (head bit 242).
+        assert_eq!(v[242], 1.0);
+        // But secondary damage is 0 → opp_weakness_sec_KO=0.
+        assert_eq!(v[_V37_OPP_WEAKNESS_SECONDARY_KO], 0.0);
+    }
+
+    #[test]
+    fn v3_7_dispatch_covers_state_dim_296() {
+        // Mirror of inference::tests::state_dim_dispatch_covers_v3_0_through_v3_6
+        // — adding the v3.7 row keeps the dispatcher honest.
+        assert_eq!(STATE_DIM_V3_7, 296);
     }
 }
