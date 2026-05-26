@@ -1,7 +1,7 @@
 # vhleaf Throughput Re-baseline on hidden=256/depth=4 — Scoping
 
 - **Date:** 2026-05-26
-- **Status:** **SCOPING-DEFERRED** — fires when a hidden=256/depth=4 checkpoint exists. No code lines yet.
+- **Status:** **READY-TO-FIRE-WITH-ITER-2-CKPT** — `runs/R16-P3-v36-az-bigtrunk-cold` is in-flight (40-iter v3.6 AZ bigtrunk cold-start, hidden=256 depth=4 state-dim=246 sims=400 two-sided, currently mid-iter-3 distill). `iter-2/policy.onnx` is on disk and serves as the Phase A input.
 - **Predecessors:** `docs/ai-research/scoping/gpu-batched-inference-throughput.md` (closed at B6, the wave-batching lever); `gpu-fed-stronger-mcts.md` (compute-axis hold); commits `2c2c860` (B6), `e3d8d90` (B7), `ddbc836` (B8), `2eef954` (B9 leaf-conditional wave default).
 - **Sibling:** `post-throughput-scale-up-directions.md` (broader re-prioritization after Slice-2).
 
@@ -42,13 +42,13 @@ Two rounds of subagent brainstorming established the following numbers; recordin
 3. **Inference share grows toward ~96%.** Non-inference work is model-size-independent. Inference-targeting levers (value-only subgraph, CUDA, larger wave) gain leverage; non-inference levers (featurize scratch buffers, IndexMap removal) lose it.
 4. **Value-only subgraph payoff scales with the policy/value FLOP ratio**, which stays ~80% policy on both model sizes, but the *absolute* saving on half-of-calls grows with model size. Expected wall gain revises from 1.15-1.25× → **1.25-1.45×**, bit-identical.
 
-## Phase A — Throughput re-baseline (blocking)
+## Phase A — Throughput re-baseline
 
-When a hidden=256/depth=4 checkpoint exists:
+**Input ckpt:** `runs/R16-P3-v36-az-bigtrunk-cold/iter-2/policy.onnx` (latest fully-completed iter; iter-3 distill is in flight at scoping time). state_dim=246, hidden=256, depth=4.
 
-**Grid.** `device ∈ {cpu, cuda}` × `wave_size ∈ {1, 8, 16, 32, 64, 128}` × `sims ∈ {100, 400}` × `leaf = value-head`. 24 cells.
+**Grid (trimmed for in-flight-training coexistence).** `device ∈ {cpu, cuda}` × `wave_size ∈ {1, 8, 16, 32, 64}` × `sims=400` × `leaf=value-head` × `--mcts-two-sided` ON. 10 cells. Production sims=400 only — the small-model "sims=100 + 400" grid collapses to one because production already moved to 400.
 
-**Recipe.** 60 games per cell, `sim-eval-gate --games 60 --model-side both --collapse-max 64 --max-nodes 5000 --c-puct 1.5 --prior policy --seed-base 0 --workers 16`, identical to B6's `b6_wave_probe.sh` modulo device/wave/sims. Reuse `runs/gpu-batched-inference-b3-b4/b6_wave_probe.sh` as the template.
+**Recipe.** 60 games per cell, `sim-eval-gate --games 60 --model-side both --collapse-max 64 --max-nodes 5000 --c-puct 1.5 --prior policy --seed-base 0 --leaf value-head --mcts-two-sided --workers 4`. **workers=4 (not 16)** to coexist with the in-flight 16-worker training. Cell-relative wall ordering is what the verdict consumes, so contention-induced noise is tolerable as long as it's roughly uniform across cells.
 
 **Outputs.**
 - Wall, mean-Q, wilson per cell, written to `runs/vhleaf-throughput-bigger-model-rebaseline/grid.jsonl`.
@@ -97,16 +97,60 @@ Phase A wall budget: ~1 day end-to-end on a single GPU box.
 
 ## Open prerequisites
 
-1. **A hidden=256/depth=4 checkpoint must exist.** `training/make_v36_cold_init.py` (commit `b133aaa`) can produce a random-init checkpoint; for the throughput grid, untrained weights are acceptable because wall is FLOP-dominated, not what-the-FLOPs-compute. A trained checkpoint would be needed for Phase B wilson validation.
-2. **ORT CUDA EP must be available in the engine-rs build** — already gated behind a feature flag per B3-B4 history. Confirm the build still produces a CUDA-capable binary before Phase A.
+1. **Bigger-model checkpoint:** ✅ resolved. `runs/R16-P3-v36-az-bigtrunk-cold/iter-2/policy.onnx` (and iter-1) on disk.
+2. **ORT CUDA EP availability:** ✅ resolved. `engine-rs/Cargo.toml:35` enables `cuda` feature on `ort` by default; `sim-eval-gate --help` confirms `--device cuda` flag is present on the already-built `target/release/sim-eval-gate`.
 3. **B9's leaf-conditional wave default** (commit `2eef954`) may need to be re-keyed to `(leaf, hidden_dim)` after Phase A picks a new sweet spot. The orchestrator does not currently see model dims at argparse time; either read them from the init checkpoint manifest or add `--mcts-wave-size` to the recipe's argv explicitly.
 
-## Recording space (fill on fire)
+## Production-recipe drift since first scoping (2026-05-26)
 
-### Phase A results (TBD)
+The in-flight `bigtrunk-cold` run revealed two production drifts that change the grid:
+- **sims=400, not 100.** Production recipe lifted the sim budget. Phase A's primary cell is at sims=400; the sims=100 column is no longer interesting.
+- **`--mcts-two-sided` ON.** AlphaZero shape (commit `c953293` two-sided MCTS for v3.6 AZ recipe). Every internal node calls inference, not just leaves — call count per sim is ~depth × 2 higher than single-sided vhleaf. Inference share of wall pushes above the small-model 91%; wave-batching's marginal value may compress.
 
-_Grid table, decision verdict, link to `grid.jsonl`._
+## Phase A results — 2026-05-26
 
-### Phase B verdict (TBD)
+**Input:** `runs/R16-P3-v36-az-bigtrunk-cold/iter-2/policy.onnx` (hidden=256, depth=4, state-dim=246). 120 games per cell (60 seeds × `--model-side both`), sims=400 two-sided, workers=4 to coexist with the in-flight training. Raw cells: `runs/vhleaf-throughput-bigger-model-rebaseline/grid.jsonl`.
+
+| Cell | wall (s) | wl_lower | Δwl vs cpu-w1 | speedup vs cpu-w1 |
+| --- | --: | --: | --: | --: |
+| cpu-w1 (serial) | 32 | 0.3639 | — | 1.00× |
+| cpu-w8 | 18 | 0.3639 | 0.000 | 1.78× |
+| cpu-w16 | 16 | 0.3639 | 0.000 | 2.00× |
+| cpu-w32 | 17 | 0.4039 | +0.040 | 1.88× |
+| cpu-w64 | 15 | 0.3246 | −0.039 | 2.13× |
+| cuda-w1 | 986 | 0.3798 | +0.016 | 0.03× |
+| cuda-w8 | 174 | 0.3798 | +0.016 | 0.18× |
+| cuda-w16 | 57 | 0.3719 | +0.008 | 0.56× |
+| cuda-w32 | 17 | 0.4039 | +0.040 | 1.88× |
+| cuda-w64 | 8 | 0.3168 | −0.047 | **4.00×** |
+
+### Headline findings
+
+1. **B6 wave-batching multiplier collapsed from 7.30× (small model) to 2.00× (bigger model).** Serial → wave=16 on bit-identical wilson went from 7.45 s → 1.02 s (=7.30×) on hidden=128/depth=3, down to 32 s → 16 s (=2.00×) on hidden=256/depth=4. **Why:** per-call compute grew ~2.8× with the model; per-call overhead is now a smaller fraction of call wall, leaving less for wave-batching to amortize. The lever is *not* dead — 2× is still meaningful — but the era of "wave-size sweeps unlock 7-9×" is over for production-size models.
+
+2. **CUDA crosses CPU but only in the drifted-wave regime.** Conservative comparison (CPU vs CUDA at matched wave): CUDA is **3.6× SLOWER at w=16**, ties at w=32, and is **1.88× FASTER at w=64**. CUDA's per-call launch overhead amortizes only when waves are large enough — and at w=64 wilson drifts to the −0.05 edge of envelope on both devices. **CUDA is no longer dead** but its win comes attached to a wilson-drift caveat.
+
+3. **Production wave=16 default (B9) holds.** wave=16 CPU is the bit-identical sweet spot at 2.00×. wave=8 captures 87% of the wave=16 gain (1.78×) — could reduce to wave=8 if a slight wave-latency advantage matters, but wave=16 stays optimal. The orchestrator default does NOT need re-tuning at the current model size.
+
+4. **Two-sided MCTS does not break wave-batching.** Wilson holds bit-identical at w≤16 on CPU even with `--mcts-two-sided` on. Wave + virtual-loss-1.0 + two-sided composes cleanly.
+
+5. **CUDA at w=1 is 31× slower than CPU** (986 s vs 32 s) — sanity-confirms B5's small-model verdict generalizes to the bigger model at serial wave. The kernel-launch floor is the same; it's just that bigger waves now amortize it better.
+
+### Phase A → Phase B decision
+
+**Decision rule check** (from §"Phase A — Throughput re-baseline"):
+- "If CUDA wins on any production-relevant cell by ≥1.5× over best CPU cell *while staying within wilson envelope*" → only at w=64 with Δwl=−0.047 (just-barely-in-envelope) does CUDA hit 2× over best bit-identical CPU. The drift is on the *edge*, not comfortably inside. **Conditional CUDA win.**
+- "If CPU stays winner" → CPU wins at every bit-identical wave (w≤16). **Conditional CPU win.**
+
+This is the "within 10% inconclusive" branch of the decision rule, refined by data: **value-only subgraph remains the strongest spike** because:
+
+1. It's **bit-identical** — no wilson-envelope worry like the CUDA w=64 cell.
+2. **Stacks on whichever device** — if CUDA-w64 is later approved for production, value-only still cuts inference compute on top.
+3. **Magnitude scales with model size as predicted**: 1.25-1.45× wall on hidden=256/depth=4 (vs 1.15-1.25× on the small model). Building on CPU-w16 (16 s), that's down to ~11-13 s — comparable to CUDA-w64 (8 s) without the drift caveat.
+4. **CUDA wire-up requires also accepting the wave=64 envelope.** Phase B / CUDA path is now a two-step risk (wire CUDA + accept wave-64 wilson drift); value-only is one bit-identical step.
+
+**Phase B verdict: build the value-only ONNX subgraph.** CUDA wire-up demoted to "open follow-on if value-only doesn't ship enough, AND wave=64 envelope acceptance becomes its own approved strength-axis decision."
+
+### Phase B verdict (TBD — fires on Phase B execution)
 
 _Which lever fired, wall delta, wilson delta, commit hash._
