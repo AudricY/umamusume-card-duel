@@ -132,6 +132,11 @@ def main() -> None:
         "iterations": args.iterations,
         "selfplay_games": args.selfplay_games,
         "mcts_simulations": args.mcts_simulations,
+        # two-sided-mcts: surface the AZ-style flag in the run_started event so
+        # downstream readers can identify AZ runs without re-parsing per-iter
+        # selfplay/gate manifests (both binaries also emit `mctsTwoSided` in
+        # their own manifests). Default False = single-sided rule-bot collapse.
+        "mcts_two_sided": bool(args.mcts_two_sided),
         "eval_games": args.eval_games,
         "uma_slot_tokens": bool(args.uma_slot_tokens),
         "model_variant": str(args.model_variant),
@@ -564,6 +569,12 @@ def run_selfplay(
     # are non-optional here — append the flag on the Rust path only.
     if args.engine == "rust":
         cmd.append("--record-rows")
+    # two-sided-mcts: AlphaZero-style real opp nodes + sign-flip backup.
+    # Off by default (single-sided rule-bot collapse). Both Rust binaries
+    # (sim-mcts-selfplay and sim-eval-gate) accept --mcts-two-sided as a
+    # boolean store_true; mirror the gate plumbing in run_gate() below.
+    if args.mcts_two_sided:
+        cmd.append("--mcts-two-sided")
     # Throughput-spike Slice 2: dispatch the inference handle.
     #   - Rust: in-process ORT, read ONNX directly (model_url here IS the
     #     onnx path from inference_context). Skip --model-url entirely
@@ -1147,6 +1158,12 @@ def run_gate(
         # at higher n. (See scoping doc § "Open questions".)
         "--deck-sampling", "fixed",
     ]
+    # two-sided-mcts: AlphaZero-style real opp nodes + sign-flip backup.
+    # Off by default. Mirror the selfplay plumbing so an AZ-style recipe
+    # runs end-to-end with a single orchestrator flag. The sim-eval-gate
+    # binary accepts --mcts-two-sided as a boolean store_true.
+    if args.mcts_two_sided:
+        cmd.append("--mcts-two-sided")
     # Throughput-spike Slice 2 (mirror run_selfplay): on the Rust path,
     # `model_url` is actually the onnx path (yielded by inference_context)
     # and we use --onnx-path + ORT_DYLIB_PATH env; on the TS path keep the
@@ -1453,6 +1470,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mcts-simulations", type=int, default=100)
     p.add_argument("--mcts-c-puct", type=float, default=1.5)
     p.add_argument("--mcts-leaf", default="value-head", choices=["value-head", "rollout"])
+    p.add_argument("--mcts-two-sided", action="store_true", default=False,
+                   help="Enable AlphaZero-style two-sided MCTS (opp nodes real, "
+                        "sign-flip backup). Default off preserves single-sided "
+                        "rule-bot-collapse behavior.")
     p.add_argument("--mcts-rollout-crn-samples", type=int, default=3)
     p.add_argument("--mcts-rollout-steps", type=int, default=200)
     p.add_argument("--mcts-collapse-max-steps", type=int, default=64)
