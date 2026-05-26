@@ -1,7 +1,7 @@
 # Async AlphaZero Pipelining — Scoping
 
 - **Date:** 2026-05-26
-- **Status:** **SCOPING** — pre-registered, not launched.
+- **Status:** **P0-GREEN-2026-05-26** — CUDA coexistence smoke cleared. Concurrent sim-mcts-selfplay (workers=24 wave=256 cuda) + train_bc.py (b=256 amp dl=4) on RTX 5000 Ada: distill epoch wall unchanged (4.84-5.32s during overlap vs ~5.4s baseline = ~0% degradation), selfplay 28ms/game (~31ms solo baseline = ~slight noise speedup). GPU util 47-74% during overlap vs ~40% solo. No OOM. **P1 proceed.**
 - **Predecessors:**
   - `cross-game-dispatcher-selfplay.md` (KILLSHOT-FALSIFIED 2026-05-26: intra-process cross-game batching gave only 1.10× at hidden=256/depth=4 because GPU is compute-bound. MCTS-side throughput ceiling reached.)
   - `distill-throughput-spike.md` (LANDED-SHIP 2026-05-26: distill 2.19× via b=256+sqrt-LR+amp+dl. Distill is now ~62 s/iter vs selfplay ~155 s/iter.)
@@ -58,6 +58,23 @@ Risk: investigator flagged that "ORT-CUDA + torch-CUDA concurrent steady-state h
 **Effort.** `implementer` or main session — ~30 min, no code change beyond launch script.
 
 **Note:** the rig is single-GPU (RTX 5000 Ada, 16 GB). If degradation forces dual-device, we'd need a 2nd GPU or CUDA MPS (multi-process service) — both out of scope for this spike.
+
+### Phase 0 Results — 2026-05-26
+
+Serendipitous: the `R16-P3-v36-az-15k-shallow-cuda` orchestrator was running iter-2 distill (b=256+amp+dl=4, new defaults) when this measurement started. Launched a sim-mcts-selfplay concurrent on the same GPU device 0; measured both phases' walls.
+
+| measurement | solo baseline | concurrent | degradation |
+| :-- | --: | --: | --: |
+| sim-mcts-selfplay per-game wall (workers=24 wave=256 cuda, sims=400) | ~31 ms/game (production extrapolation) | **28 ms/game** (500 games in 14.0 s) | ~slight speedup — within noise |
+| train_bc.py per-epoch wall (b=256 amp dl=4, hidden=256/depth=4, ~150k samples) | ~5.4 s/epoch (orchestrator pre-overlap) | **4.84-5.32 s/epoch** (4 epochs during overlap window) | ~0% |
+| GPU util (nvidia-smi dmon) | ~40% (selfplay solo) | **47-74%** during overlap | clean stream overlap |
+| VRAM | selfplay ~4 GB resident | ~5 GB during overlap | well under 16 GB cap |
+
+Raw: `runs/async-alphazero-pipelining/p0-concurrent-{gpu.csv,manifest.json,selfplay.jsonl,log}`. Orchestrator events: `runs/R16-P3-v36-az-15k-shallow-cuda/events.jsonl` epochs 19-22 (timestamps 1779786486-1779786501).
+
+**Verdict: GREEN.** Both phases sustain near-100% of their solo throughput under concurrent execution. RTX 5000 Ada handles two concurrent CUDA workloads (ORT-CUDA + torch-CUDA) cleanly. GPU util climbs above the selfplay-solo ~40% baseline, confirming there's real compute headroom that pipelining can exploit. Proceeds to P1.
+
+**Caveats.** Measurement window was short (~14 s overlap = 4 distill epochs sampled). Tail-distribution risk (e.g., periodic VRAM allocation spikes) is unmeasured but unlikely given peak VRAM was ~5/16 GB.
 
 ## Phase 1 — Pipeline refactor (~1-2 days)
 
