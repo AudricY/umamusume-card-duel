@@ -1066,6 +1066,18 @@ def run_distill(
         cmd.append("--uma-slot-tokens")
     if args.model_variant != "mlp":
         cmd.extend(["--model-variant", str(args.model_variant)])
+    # distill-throughput-spike Phase 1 passthroughs. All three default OFF
+    # on the orchestrator side (matching the train_bc.py CLI defaults) so
+    # unset is byte-identical to pre-spike behavior. Flip via explicit
+    # --amp / --distill-compile / --distill-dataloader-workers on the
+    # orchestrator CLI. See docs/ai-research/scoping/distill-throughput-spike.md.
+    if getattr(args, "amp", False):
+        cmd.append("--amp")
+    if getattr(args, "distill_compile", False):
+        cmd.append("--compile")
+    distill_workers = int(getattr(args, "distill_dataloader_workers", 0))
+    if distill_workers > 0:
+        cmd.extend(["--dataloader-workers", str(distill_workers)])
     with log_path.open("w") as logf:
         subprocess.run(cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True)
 
@@ -1651,7 +1663,24 @@ def parse_args() -> argparse.Namespace:
     # serve_onnx_context reads .device/.amp/etc indirectly; keep these
     # minimal Namespace fields so DAgger's helper doesn't crash on .get.
     p.add_argument("--device", default="cpu")
-    p.add_argument("--amp", action="store_true")
+    p.add_argument("--amp", action="store_true",
+                   help="distill-throughput-spike Phase 1: when set, forwards --amp to "
+                        "train_bc.py so distill runs use mixed precision on CUDA. Default "
+                        "OFF -> byte-identical to pre-spike runs.")
+    # distill-throughput-spike Phase 1: torch.compile + DataLoader workers
+    # passthroughs to train_bc.py. Both default OFF on the orchestrator
+    # side so unset is byte-identical to pre-spike behavior; flip after
+    # the smoke validates. Naming: `distill-compile` (not `compile`) to
+    # avoid colliding with the python builtin / future TS compile flags.
+    p.add_argument("--distill-compile", action="store_true",
+                   help="distill-throughput-spike Phase 1: when set, forwards --compile "
+                        "to train_bc.py so distill wraps the model in torch.compile("
+                        "mode=reduce-overhead) on CUDA. Default OFF.")
+    p.add_argument("--distill-dataloader-workers", type=int, default=0,
+                   help="distill-throughput-spike Phase 1: when >0, forwards "
+                        "--dataloader-workers N to train_bc.py so distill uses N async "
+                        "DataLoader workers with pin_memory and persistent_workers. "
+                        "Default 0 -> byte-identical to pre-spike runs.")
     # R13.W1 parallelism — the orchestrator's selfplay + gate stages
     # accept a --workers count that is forwarded to the underlying
     # `sim:mcts-selfplay` and `sim:eval-gate` runners.

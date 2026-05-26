@@ -78,17 +78,31 @@ def main() -> None:
         collate_fn = collate_policy_batch
     train_indices, val_indices, split_metadata = split_dataset(dataset, args.seed, args.split_by)
     dataset_summary = summarize_dataset(dataset)
+    # distill-throughput-spike Phase 1: opt-in DataLoader concurrency knobs.
+    # `--dataloader-workers` defaults to 0 (current behavior, byte-identical
+    # to pre-spike runs). When >0, enables async worker processes with
+    # pin_memory (page-locked host buffers -> faster H2D copies on CUDA)
+    # and persistent_workers (avoid re-spawning workers every epoch).
+    # See docs/ai-research/scoping/distill-throughput-spike.md.
+    dataloader_workers = max(0, int(args.dataloader_workers))
+    loader_kwargs: dict[str, Any] = {}
+    if dataloader_workers > 0:
+        loader_kwargs["num_workers"] = dataloader_workers
+        loader_kwargs["pin_memory"] = True
+        loader_kwargs["persistent_workers"] = True
     train_loader = DataLoader(
         Subset(dataset, train_indices),
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         Subset(dataset, val_indices),
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_fn,
+        **loader_kwargs,
     ) if val_indices else None
 
     # R16-P2 C6: `uses_uma_slot_tokens` is recorded in the checkpoint's
@@ -109,6 +123,11 @@ def main() -> None:
         q_value_scalar_bias=args.q_value_scalar_bias,
     )
     model = CandidatePolicyNet(config).to(device)
+    # distill-throughput-spike Phase 1: torch.compile is applied AFTER
+    # checkpoint load + optimizer construction (see further below) so the
+    # wrapped OptimizedModule's `_orig_mod.` parameter-name prefix doesn't
+    # break load_state_dict / named_parameters startswith checks.
+    compile_status: dict[str, Any] = {"requested": bool(args.compile), "applied": False}
     if args.freeze_non_q_value_head:
         if not args.q_value_head:
             raise SystemExit("--freeze-non-q-value-head requires --q-value-head")
@@ -127,7 +146,14 @@ def main() -> None:
     )
     scheduler = build_scheduler(optimizer, args, total_steps=max(1, args.epochs * max(1, len(train_loader))))
     use_amp = args.amp and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    # distill-throughput-spike Phase 1: default to bfloat16 on Ada/A100/H100;
+    # bf16 has fp32's exponent range so the masked-softmax sentinel (-1e9)
+    # doesn't overflow and no GradScaler is needed. Legacy fp16 path remains
+    # behind --amp-dtype float16 (uses GradScaler as before).
+    amp_dtype = None
+    if use_amp:
+        amp_dtype = torch.bfloat16 if args.amp_dtype == "bfloat16" else torch.float16
+    scaler = torch.cuda.amp.GradScaler() if (use_amp and amp_dtype == torch.float16) else None
     grad_accum = max(1, int(args.grad_accum))
     start_epoch = 1
     history: list[dict[str, Any]] = []
@@ -141,6 +167,30 @@ def main() -> None:
         history = list(resume_metadata.get("history", []))
     elif args.init_from_checkpoint:
         load_init_from_checkpoint(Path(args.init_from_checkpoint), model)
+
+    # distill-throughput-spike Phase 1: opt-in torch.compile wrap. Default
+    # OFF -> byte-identical to pre-spike runs. Only meaningful on CUDA
+    # (mode="reduce-overhead" targets small-graph training); CPU path is
+    # bypassed to avoid TorchDynamo overhead with no upside. Applied AFTER
+    # checkpoint load + optimizer construction so the OptimizedModule's
+    # `_orig_mod.` prefix on parameter names doesn't break load_state_dict
+    # or freeze-by-name checks. Guarded by try/except so older torch
+    # versions or TorchDynamo errors degrade gracefully to eager.
+    if args.compile and device.type == "cuda":
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            compile_status["applied"] = True
+            compile_status["mode"] = "reduce-overhead"
+        except Exception as exc:  # pragma: no cover - exercised on torch<2.0 / dynamo errors
+            compile_status["error"] = f"{type(exc).__name__}: {exc}"
+            print(
+                f"[train_bc] torch.compile(mode=reduce-overhead) failed; "
+                f"falling back to eager: {compile_status['error']}",
+                flush=True,
+            )
+    elif args.compile and device.type != "cuda":
+        compile_status["error"] = f"--compile ignored on device={device.type}"
+        print(f"[train_bc] {compile_status['error']}", flush=True)
 
     if start_epoch > args.epochs:
         raise SystemExit(
@@ -175,6 +225,7 @@ def main() -> None:
             optimizer,
             value_weight=args.value_weight,
             scaler=scaler,
+            amp_dtype=amp_dtype,
             grad_accum=grad_accum,
             scheduler=scheduler,
             anchor_model=anchor_model,
@@ -232,8 +283,13 @@ def main() -> None:
         "torch": torch.get_rng_state().tolist(),
         "cuda": [tensor.tolist() for tensor in torch.cuda.get_rng_state_all()] if torch.cuda.is_available() else [],
     }
+    # Unwrap a torch.compile()-wrapped model so the saved checkpoint has
+    # eager parameter names (no `_orig_mod.` prefix). Without this, every
+    # downstream consumer (next iter's init_from_checkpoint, ONNX export,
+    # eval-gate /predict) would need to know the model was compiled.
+    save_model = getattr(model, "_orig_mod", model)
     checkpoint = {
-        "model_state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+        "model_state": {key: value.detach().cpu() for key, value in save_model.state_dict().items()},
         "model_config": config.to_dict(),
         "feature_schema": feature_schema_metadata(config.state_dim),
         "optimizer_state": optimizer.state_dict(),
@@ -268,6 +324,8 @@ def main() -> None:
             "kl_anchor_checkpoint": str(args.kl_anchor_checkpoint) if args.kl_anchor_checkpoint else None,
             "kl_anchor_weight": float(args.kl_anchor_weight),
             "entropy_bonus": float(args.entropy_bonus),
+            "dataloader_workers": dataloader_workers,
+            "compile": compile_status,
             "device": str(device),
             "history": history,
             "final_train": final_train,
@@ -296,6 +354,8 @@ def main() -> None:
             "kl_anchor_checkpoint": str(args.kl_anchor_checkpoint) if args.kl_anchor_checkpoint else None,
             "kl_anchor_weight": float(args.kl_anchor_weight),
             "entropy_bonus": float(args.entropy_bonus),
+            "dataloader_workers": dataloader_workers,
+            "compile": compile_status,
         },
         "onnx_roundtrip_smoke": onnx_smoke,
         "metrics": {"train": final_train, "val": final_val, "diagnostics": diagnostics},
@@ -381,7 +441,11 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
 
     model.eval()
     cpu_model = CandidatePolicyNet(config).cpu()
-    cpu_model.load_state_dict({k: v.cpu() for k, v in model.state_dict().items()})
+    # When the model was wrapped by torch.compile, its state_dict keys are
+    # prefixed with `_orig_mod.`. Unwrap to the underlying eager module so
+    # the state_dict loads into a fresh eager CandidatePolicyNet.
+    source_model = getattr(model, "_orig_mod", model)
+    cpu_model.load_state_dict({k: v.cpu() for k, v in source_model.state_dict().items()})
     cpu_model.eval()
     onnx_path = out_dir / "policy.smoke.onnx"
     # R16-P1: the smoke graph width follows the trained config's state_dim
@@ -627,6 +691,7 @@ def run_epoch(
     *,
     value_weight: float,
     scaler=None,
+    amp_dtype: "torch.dtype | None" = None,
     grad_accum: int = 1,
     scheduler=None,
     anchor_model: CandidatePolicyNet | None = None,
@@ -638,11 +703,11 @@ def run_epoch(
     model.train()
     totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "q_value_loss": 0.0, "accuracy": 0.0, "count": 0.0, "kl_loss": 0.0, "entropy": 0.0}
     optimizer.zero_grad(set_to_none=True)
-    use_amp = scaler is not None
+    use_autocast = amp_dtype is not None
     accum_step = 0
     for batch_index, batch in enumerate(loader):
         batch = move_batch(batch, model)
-        autocast_ctx = torch.cuda.amp.autocast() if use_amp else _NullContext()
+        autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=amp_dtype) if use_autocast else _NullContext()
         with autocast_ctx:
             # R7.b.2 Phase 2: forward the new embedding tensors when present
             # (post-Phase-1 datasets carry them; legacy or test paths may
@@ -717,14 +782,16 @@ def run_epoch(
                 - entropy_bonus * policy_entropy
             )
         scaled = loss / max(1, grad_accum)
-        if use_amp:
+        # bf16 amp does not need grad scaling (same exponent range as fp32).
+        # The scaler is only constructed when amp_dtype == float16.
+        if scaler is not None:
             scaler.scale(scaled).backward()
         else:
             scaled.backward()
         accum_step += 1
         is_last = batch_index == len(loader) - 1
         if accum_step >= grad_accum or is_last:
-            if use_amp:
+            if scaler is not None:
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
                 scaler.step(optimizer)
@@ -1131,6 +1198,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--amp", action="store_true", help="Use mixed precision when CUDA is available.")
+    parser.add_argument(
+        "--amp-dtype",
+        choices=["bfloat16", "float16"],
+        default="bfloat16",
+        help=(
+            "AMP dtype when --amp is set. Default bfloat16 (Ada/A100/H100 — same exponent range "
+            "as fp32, no GradScaler needed, masked-softmax sentinel (-1e9) doesn't overflow). "
+            "Use float16 only on older GPUs without bf16 support; that path keeps GradScaler."
+        ),
+    )
+    # distill-throughput-spike Phase 1: opt-in DataLoader async workers.
+    # Default 0 -> byte-identical to pre-spike runs (synchronous main-thread
+    # data loading). When >0, sets num_workers, pin_memory=True, and
+    # persistent_workers=True together. Set via orchestrator when running on
+    # CUDA boxes where the DataLoader is the bottleneck during distill.
+    parser.add_argument("--dataloader-workers", type=int, default=0,
+                        help="DataLoader worker process count. 0 (default) is byte-identical "
+                             "to pre-spike behavior. When >0, also enables pin_memory and "
+                             "persistent_workers.")
+    # distill-throughput-spike Phase 1: opt-in torch.compile wrap. Default
+    # OFF -> byte-identical eager-mode forward/backward. Only applies on
+    # CUDA devices (--device cuda or auto-resolved to cuda); CPU runs ignore
+    # the flag to avoid TorchDynamo compile cost with no upside. Errors
+    # during compile degrade gracefully to eager mode (logged warning).
+    parser.add_argument("--compile", action="store_true",
+                        help="Wrap the model in torch.compile(mode=\"reduce-overhead\") after "
+                             "construction. CUDA only; CPU runs ignore. Errors degrade to eager.")
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--lr-schedule", choices=["none", "cosine", "step"], default="cosine")
     parser.add_argument("--lr-warmup-steps", type=int, default=0)

@@ -1,7 +1,7 @@
 # Distill-Stage Throughput — Scoping
 
 - **Date:** 2026-05-26
-- **Status:** **SCOPING** — pre-registered, not launched.
+- **Status:** **PHASE-1-PARTIAL-INVERTED-2026-05-26** — infra knobs FALSIFIED at b=64 (all three regress!); batch_size emerges as the real lever (b=256+amp+dl: **2.19× wall**, slight val_accuracy regression −2.1pp absolute). Default-flip GATED on Wilson check. See "Phase 1 Results" below.
 - **Predecessors:**
   - `cuda-wave-sweep-validation.md` (LANDED-SHIP-STRENGTH-NEUTRAL: cuda-w256 + torch CUDA upgrade landed; explicit note at L110 "the iter-wall bottleneck on the bigger model was distill, not MCTS").
   - `cross-game-dispatcher-selfplay.md` (KILLSHOT-FALSIFIED: MCTS-side throughput ceiling reached at hidden=256/depth=4; forward implications pointed to distill as the next iter-wall lever).
@@ -67,6 +67,54 @@ python training/train_bc.py \
 | any | >10% loss-trajectory divergence | **STRENGTH RISK** — fall back to Phase 1.5 (Wilson n=10k gate before ship) |
 
 **Effort.** `implementer`, ~2 hours code + 15 min smoke run.
+
+### Phase 1 Results — 2026-05-26
+
+Implementer landed the patches (CLI flags + DataLoader wiring + opt-in torch.compile). Main session followed with three downstream fixes needed for end-to-end correctness:
+
+1. **`torch.compile` ordering bug.** Implementer placed compile BEFORE `load_init_from_checkpoint`; the `OptimizedModule` wrapper prefixes parameter names with `_orig_mod.` so checkpoint keys didn't match. Fixed by moving the compile call to AFTER checkpoint load + optimizer construction (`train_bc.py:179`).
+2. **fp16 sentinel overflow.** Default `torch.cuda.amp.autocast()` is fp16; the masked-softmax sentinel `-1e9` (`train_bc.py:1003`) overflows fp16's ~6.55e4 range. Added `--amp-dtype {bfloat16, float16}` (default `bfloat16`) and split the autocast/scaler logic — bf16 has fp32's exponent range so no `GradScaler` needed.
+3. **Compiled-model state_dict consumers.** Saved checkpoint and `run_onnx_roundtrip_smoke` both call `model.state_dict()`; with compile applied, this returns `_orig_mod.`-prefixed keys that downstream consumers can't load. Fixed by unwrapping (`getattr(model, "_orig_mod", model)`) in both sites.
+
+**Smoke A/B at 5 epochs, 26417 train samples, iter-11 selfplay.jsonl, init iter-10/checkpoint.pt:**
+
+| cell | batch | flags | steady µs/epoch | speedup vs baseline | ep5 train_loss |
+| :-- | --: | :-- | --: | --: | --: |
+| baseline | 64 | (none) | 3.38s | 1.00× | 1.371 |
+| amp_only | 64 | `--amp` (bf16) | 4.54s | **0.74×** (regression) | 1.370 |
+| dl_only | 64 | `--dataloader-workers 4` | 5.46s | **0.62×** (regression!) | 1.368 |
+| amp_dl | 64 | both | 6.07s | **0.56×** (regression) | 1.368 |
+| challenger | 64 | all three (+`--compile`) | 4.50s | 0.75× (regression after compile warmup) | 1.376 |
+| b256 | 256 | (none) | 1.72s | **1.97×** | 1.428 |
+| b256_amp_dl | 256 | `--amp --dataloader-workers 4` | 1.55s | **2.18×** | 1.420 |
+
+**Original hypothesis INVERTED.** The scoping doc framed AMP+DataLoader+compile as low-risk "safe" knobs and batch_size as risky-deferred-to-Phase-2. Empirically:
+- **The "safe" knobs regress at b=64.** Model + batch are too small for the optimization overhead (DataLoader IPC, AMP dtype casts, torch.compile cudagraph capture with 9 distinct shapes per epoch) to pay back.
+- **batch_size IS the real lever.** Alone it gives 1.97× wall; with AMP+DL stacked on top, 2.18×.
+
+**25-epoch convergence A/B (production length, lr linearly scaled 4× to 1.2e-3 for b=256):**
+
+| metric | baseline (b=64 fp32) | challenger (b=256 bf16 dl=4 lr=1.2e-3) | delta |
+| :-- | --: | --: | --: |
+| total wall | **93.4s** | **42.7s** | **2.19× speedup** |
+| final train_loss | 1.0827 | 1.0906 | +0.73% |
+| final val_loss | 1.9405 | 1.9689 | +1.46% |
+| **final val_accuracy** | **0.5155** | **0.4944** | **−4.1% (−2.1pp absolute)** |
+
+Trajectory: monotone decrease, no instability. Both reach low-train / high-val gap (overfitting), expected at 25 epochs on iter-N data.
+
+**Verdict.** Throughput rubric CLEARS (2.19× ≥ 1.5× ship band). Loss-trajectory rubric CLEARS (train +0.7%, val +1.5% — both within ±10%). BUT **val_accuracy regression is the strength-axis yellow flag** the rubric didn't anticipate: -2.1pp absolute on the held-out validation set suggests the b=256+lr=1.2e-3 optimizer trajectory is producing a measurably weaker policy at this iter. Could be noise (single A/B, n=6574 val); could be a real but small strength gap.
+
+**Decision: SHIP THE FLAGS as opt-in, DON'T flip orchestrator defaults yet.** Wilson gate (Phase 1.5) is now mandatory because the val_accuracy delta exceeds the loss-trajectory rubric's coverage.
+
+**Open follow-ups:**
+1. Try sqrt-LR scaling (lr=6e-4) instead of linear (lr=1.2e-3) at b=256 — may close the val_accuracy gap without losing the throughput win.
+2. Try intermediate batches (b=128, b=192) — may sit at the sweet spot of throughput + accuracy.
+3. Wilson gate at n=10k on the b=256+amp+dl checkpoint vs the b=64 checkpoint, both produced from iter-10 init via the same recipe — confirms whether the val_accuracy delta translates to a real Δwl.
+
+**Code landed (opt-in, defaults preserve byte-identicality):**
+- `training/train_bc.py`: `--dataloader-workers` (DataLoader num_workers + pin_memory + persistent_workers), `--amp-dtype` (bfloat16 default), `--compile` (CUDA-only torch.compile wrap, guarded by try/except). Compile applied AFTER checkpoint load. Checkpoint save + ONNX roundtrip both unwrap `_orig_mod.` when compile is active.
+- `training/r12_orchestrator.py`: `--distill-compile`, `--distill-dataloader-workers` (default 0), pass-through to train_bc.py via run_distill. Existing `--amp` arg now actually forwards.
 
 ## Phase 1.5 — Wilson validation gate (conditional on STRENGTH RISK)
 
