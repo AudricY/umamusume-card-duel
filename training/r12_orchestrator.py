@@ -1735,6 +1735,20 @@ def parse_args() -> argparse.Namespace:
             args.mcts_wave_size = 256 if args.mcts_device == "cuda" else 16
         else:
             args.mcts_wave_size = 1
+    # distill-throughput-spike LANDED 2026-05-26: warn when the legacy
+    # distill recipe (b=64 lr=3e-4) is in use AND the model size matches
+    # the validated workload (hidden=256/depth=4). The new defaults
+    # (b=256, lr=6e-4, amp, dl=4) give ~2.19x distill wall at iso-strength
+    # on this model size; explicit --batch-size 64 --lr 3e-4 in a launch
+    # script silently opts out. See docs/ai-research/scoping/distill-throughput-spike.md.
+    if args.batch_size == 64 and args.lr == 3e-4 and args.hidden_dim == 256 and args.depth == 4:
+        print(
+            "[r12_orchestrator] WARNING: --batch-size 64 --lr 3e-4 is the legacy distill "
+            "recipe. Omit these flags (or use --batch-size 256 --lr 6e-4) to get "
+            "~2.19x distill wall at iso-strength on hidden=256/depth=4. See "
+            "docs/ai-research/scoping/distill-throughput-spike.md.",
+            flush=True,
+        )
     return args
 
 
