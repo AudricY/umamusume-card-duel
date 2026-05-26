@@ -515,12 +515,31 @@ fn run_wave_loop(
     let mut sim_index: u32 = 0;
     let total_sims = config.simulations;
 
+    // Per-wave wall-clock instrumentation, gated on `UMA_LOG_WAVE_TIMING=1`.
+    // Hoisted env-check via `OnceLock` so the hot path is a single relaxed
+    // bool load when disabled. Cap matches the `UMA_LOG_WAVE_NACTIONS`
+    // pattern at `inference/mod.rs:809` (first N waves per process).
+    // See `docs/ai-research/scoping/cross-game-dispatcher-selfplay.md`
+    // Phase 0.
+    static WAVE_TIMING_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let wave_timing_enabled = *WAVE_TIMING_ENABLED.get_or_init(|| {
+        std::env::var("UMA_LOG_WAVE_TIMING")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    });
+
     while sim_index < total_sims {
         let wave = ((total_sims - sim_index) as usize).min(wave_size);
         // Per-wave-member scratch state. We collect everything we need
         // for phase-4 backup here so we can run model inference once at
         // wave-mid and back up after.
         let mut members: Vec<WaveMember> = Vec::with_capacity(wave);
+
+        let t0 = if wave_timing_enabled {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
 
         for k in 0..wave {
             let i = sim_index + k as u32;
@@ -599,6 +618,12 @@ fn run_wave_loop(
             });
         }
 
+        let t1 = if wave_timing_enabled {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+
         // Phase 3: batched inference for any expansion that needs a
         // policy-prior call.
         //
@@ -611,6 +636,12 @@ fn run_wave_loop(
         if matches!(config.prior, MctsPrior::Policy) {
             wave_run_priors(&mut members, config);
         }
+
+        let t2 = if wave_timing_enabled {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
 
         // Phase 4: complete each wave member's expansion (insert new
         // child if any, compute leaf_scalar), then undo virtual loss
@@ -635,6 +666,25 @@ fn run_wave_loop(
                 undo_virtual_loss(node_mut, step.action_index, virtual_loss);
                 node_mut.visits[step.action_index] += 1;
                 node_mut.wsum[step.action_index] += scalar;
+            }
+        }
+
+        if wave_timing_enabled {
+            static WAVE_TIMING_COUNT: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
+            let n = WAVE_TIMING_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 100 {
+                let t3 = std::time::Instant::now();
+                let t0 = t0.expect("t0 set when wave_timing_enabled");
+                let t1 = t1.expect("t1 set when wave_timing_enabled");
+                let t2 = t2.expect("t2 set when wave_timing_enabled");
+                eprintln!(
+                    "wave_timing: B={} p12_us={} p3_us={} p4_us={}",
+                    members.len(),
+                    t1.duration_since(t0).as_micros(),
+                    t2.duration_since(t1).as_micros(),
+                    t3.duration_since(t2).as_micros(),
+                );
             }
         }
 

@@ -1,7 +1,7 @@
 # Cross-Game Dispatcher for Selfplay — Scoping
 
 - **Date:** 2026-05-26
-- **Status:** **SCOPING** — pre-registered, not launched. Body describes the planned recipe.
+- **Status:** **IN-FLIGHT** — P0 instrumentation LANDED + measured 2026-05-26; original mechanism falsified (see "Phase 0 Results" below) but hypothesis re-framed and still warrants P1 killshot.
 - **Predecessors:**
   - `cuda-wave-sweep-validation.md` (LANDED: cuda-w256 shipped, 7.29× per-game wall at sims=400 vhleaf hidden=256/depth=4; production run at 41% GPU util — `cuda-wave-sweep-validation.md:114`).
   - `gpu-batched-inference-throughput.md` (CLOSED B6: per-game wave-batching landed; `BatchedDispatcher` kept for cross-thread coalescing but never wired into `sim-mcts-selfplay`; explicit "for sims >> 1000 or model-size shift, cross-game dispatcher may re-open" at `gpu-batched-inference-throughput.md:636-644`).
@@ -49,6 +49,38 @@ UMA_LOG_WAVE_TIMING=1 sim-eval-gate --leaf value-head --mcts-two-sided \
 **Expected output.** If Phase 1+2+4 dominates Phase 3 by ≥2× wall, the cross-game-batching hypothesis is the right intervention. If Phase 3 is comparable to Phase 1+2+4 wall, GPU is already well-fed within a single game and cross-game would only help with worker count, not GPU util — re-examine.
 
 **Effort.** `implementer`, ~1 hour code + 5 min run.
+
+### Phase 0 Results — 2026-05-26
+
+Instrumentation landed in `engine-rs/crates/engine/src/mcts/driver.rs` (env-gated `UMA_LOG_WAVE_TIMING=1`, 100-line cap per process via `static AtomicU32`, `OnceLock<bool>` hot-path hoist). Recipe executed at `workers=4` (the cuda-wave-sweep-validation.md baseline; could not run at production `workers=24` without disturbing the in-flight `R16-P3-v36-az-5k-nobuffer-cuda` orchestrator). 100-wave probe took ~2 s wall.
+
+**Post-warmup B=256 median cost split (45 waves):**
+
+| phase | µs | % of wave wall |
+| :-- | --: | --: |
+| **p12** — CPU Phase 1 (PUCT × 256) + Phase 2 (`WaveAction::compute` × 256) | **1,003** | **10.5%** |
+| **p3** — GPU `Session::run` (one B=256 call) | **7,958** | **83.2%** |
+| **p4** — CPU Phase 4 (insert children + virtual-loss undo × 256) | **608** | **6.4%** |
+| **total** | **9,569** | 100% |
+
+**CPU total per wave: 1.6 ms. GPU total: 8.0 ms.** Raw log at `runs/cross-game-dispatcher-selfplay/phase0-stderr.log`.
+
+**Original hypothesis FALSIFIED.** The investigator's pre-instrumentation estimate ("each worker dispatches one big CUDA call then sits in CPU for ~25 ms") was wrong by ~15×. Within a single process, CPU is ~17% of wave wall; GPU dominates at ~83%. Cross-game batching cannot "hide CPU idle" because there's only 1.6 ms of CPU per wave to hide.
+
+**Re-framed hypothesis.** Production 41% GPU util at `workers=24` (`cuda-wave-sweep-validation.md:114`) cannot come from intra-process CPU — single-process p3/total ratio (83%) already exceeds the production GPU-util figure. The under-feeding must come from one of:
+
+1. **ORT Session serialization across worker threads.** All 24 workers share one `Session` via `UnsafeCell` (`inference/mod.rs:233-247`). If ORT internally locks during `run()`, 24 workers queueing 8 ms calls would produce a sawtooth GPU pattern (busy during a single call, idle during ORT lock-acquire / CUDA stream handoff).
+2. **CUDA stream serialization.** ORT uses a single stream per Session; 24 calls queue sequentially. Per-call kernel launch overhead (~1-2 ms) adds 24× to per-wall but per-call GPU compute does not amortize.
+3. **Memory bandwidth / PCIe contention.** Each B=256 call moves ~1 MB of activations; 24 in flight is 24 MB of inflow. Possible but smaller order.
+
+**Cross-game dispatcher still attacks #1 and #2.** Instead of 24 sequential B=256 calls (each with ORT lock + kernel launch + 8 ms compute), the dispatcher gathers into one B=6144 call. Even if the compute scales linearly (8 ms × 24 = 192 ms), the kernel-launch + ORT-lock overhead is paid once instead of 24×. If launch overhead is the bottleneck (likely at this small wall), the win could still be 2-4×.
+
+**The killshot is now MORE important, not less.** P0 invalidated the *mechanism* in the original hypothesis but the *outcome metric* (GPU util at workers=24) is what determines ship/no-ship. P1's GPU-util rubric (`≥70% confirm / 55-70% partial / 41-55% pivot / <41% stop`) measures the outcome directly regardless of mechanism — proceed.
+
+**Caveats.**
+- Measurement was at `workers=4`, not `workers=24`. The cost split is per-process-intrinsic so should hold at higher worker counts, but contention effects (mechanism #1, #2 above) are by definition only visible at worker counts ≥ ~8.
+- Mild GPU contention from the in-flight orchestrator's distill phase (35-40% baseline util) may have inflated p3 slightly; standalone clean-window probe could push GPU% even higher (i.e., CPU% even lower).
+- Warmup waves (first ~10) showed p3 ≈ 33-45 ms (cuDNN autotune). Excluded from the post-warmup median.
 
 ## Phase 1 — Killshot cell (10 min)
 
