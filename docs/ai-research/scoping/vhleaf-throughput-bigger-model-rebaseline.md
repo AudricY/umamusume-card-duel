@@ -151,6 +151,36 @@ This is the "within 10% inconclusive" branch of the decision rule, refined by da
 
 **Phase B verdict: build the value-only ONNX subgraph.** CUDA wire-up demoted to "open follow-on if value-only doesn't ship enough, AND wave=64 envelope acceptance becomes its own approved strength-axis decision."
 
-### Phase B verdict (TBD — fires on Phase B execution)
+### Phase B killshot probe — 2026-05-26 — **VALUE-ONLY SPIKE KILLED**
 
-_Which lever fired, wall delta, wilson delta, commit hash._
+Probe v2 (`runs/vhleaf-throughput-bigger-model-rebaseline/probe_value_only_v2.py`): physically extracted a value-only subgraph from `iter-2/policy.onnx` via `onnx.utils.extract_model`, timed against the full graph at B=16 across n_actions ∈ {4, 8, 16, 20}, intra=inter threads=1.
+
+| n_actions | full graph (μs/call) | value-only (μs/call) | ratio |
+| --: | --: | --: | --: |
+| 4 | 3,356 | 285 | 11.8× |
+| 8 | 4,282 | 226 | 19.0× |
+| 16 | 10,070 | 287 | 35.1× |
+| 20 | 14,797 | 342 | **43.2×** |
+
+**Per-call savings are massive** — the policy head is genuinely expensive, scaling roughly with n_actions². At wave-padded A=20 the full graph is 14.8 ms/call vs 0.34 ms value-only. Greenlight on the per-call axis cleared by 30×.
+
+**But the spike's *target call site* doesn't exist in production.** Code inspection of `engine-rs/crates/engine/src/mcts/driver.rs`:
+
+- The wave-batched production path (`wave_run_priors`, line 867+, called from line 612) does ONE batched `predict_v3_batch` call per wave that returns BOTH logits (for child priors) AND value (cached on the leaf for backup). Both outputs are consumed.
+- `value_head_leaf_value` (line 1575) is the singleton B=1 value-only call site that *would* have benefited — but it's only invoked at line 1505 in the **serial / non-wave fallback path**. In production (wave_size ≥ 8), the wave loop caches the value from `wave_run_priors` and the cache hit (line 1072-1076: `cached.is_some()` short-circuit) bypasses `value_head_leaf_value` entirely.
+- Two-sided MCTS doesn't help — opponent decisions are full tree nodes that need policy priors for PUCT descent, so opponent calls also need both outputs.
+
+**Decision: VALUE-ONLY SUBGRAPH SPIKE REJECTED on path-of-execution grounds.** The policy head is expensive (probe confirmed), but there is no production code path that discards logits — every wave call uses both outputs.
+
+### What the probe data DID reveal (silver lining)
+
+The full-graph per-call wall scales sharply with `n_actions` (3.4 ms at A=4 → 14.8 ms at A=20). Wave-batching pads all rows to `max_n_actions` across the wave (line 756: `let max_n = rows.iter().map(|r| r.n_actions).max().unwrap_or(0);`). If mean legal-action count is ~10 but wave-max is ~20, every call pays the A=20 cost when most members only needed A≤10 — a ~2-3× over-pay on inference compute. **This is a new candidate lever: action-count-bucketed wave batching** (file as separate scoping doc; not in scope of this re-baseline).
+
+### Updated Phase B verdict — 2026-05-26
+
+Value-only is killed. Two remaining throughput levers, both already documented:
+
+1. **CUDA wave=64** with explicit `wave-size envelope` acceptance — 2× wall on top of B6/B9, but requires a strength-axis decision to widen the wilson envelope from ±0.05 to ±0.06 (cuda-w64 sits at Δwl=−0.047, just barely inside). This is a *strength-axis* decision dressed as a throughput one.
+2. **Action-count-bucketed wave batching** — newly surfaced by the probe; ~2-3× per-call on under-padded members, compose with B6 wave. Effort: 2-3 days, bit-identical, no strength-axis interaction. File as separate scoping doc.
+
+**Recommended:** demote this scoping doc to closed, file action-count bucketing as the next spike. CUDA-w64 stays parked behind the envelope decision.
