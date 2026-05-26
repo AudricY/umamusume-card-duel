@@ -92,4 +92,50 @@ Total: **~1.5-2.5 hours wall for 40 iters**.
 
 ## Status
 
-**`FIRING 2026-05-26`** — cold-init synthesized; orchestrator launched in background.
+**`LANDED-NULL-WITH-INFORMATION-CEILING-DIAGNOSED 2026-05-26`** — see §10.
+
+---
+
+## 10. Results + diagnostics
+
+Three runs fired, all under the AZ recipe (value-head leaf + two-sided + no-KL) at hidden=256/depth=4 cold:
+
+| Run | games/iter | sims | replay | iters | device | wall | best wl_lower | mean | σ |
+|---|---|---|---|---|---|---|---|---|---|
+| bigtrunk CPU | 480 | 400 | 15 | 17/40 (killed) | cpu | 1h16m | 0.4773 @ iter-3 | 0.4188 | 0.0399 |
+| bigtrunk CUDA | 480 | 400 | 15 | 12/20 (killed) | cuda | 11m | 0.4363 @ iter-0 | 0.3980 | ~0.04 |
+| 5k-no-buffer CUDA | 5000 | 400 | 0 | 20/20 ✓ | cuda | 93m | 0.4281 @ iter-15 | 0.3673 | 0.0324 |
+
+None lift past the cold-init random-search noise floor (~0.44). Mean strictly below it.
+
+### Diagnostics on the 5k-no-buffer CUDA run (`runs/.../analyze.py`)
+
+**Training metrics:** val_loss flat at 1.93 across all 20 iters (Δ first-half-vs-last-half = −0.013). val_accuracy creeps 0.41→0.53. train_value_loss tiny (0.03→0.09). The model fits its targets quickly; nothing generalizes.
+
+**Policy concentration:** mean **3.4 legal actions/decision**. Top-1 prior climbs 0.42→0.48 (vs uniform 0.29) and plateaus by iter-3. Visit-distribution ENA stays 2.94. Policy is barely more concentrated than uniform — *not collapsed, but with little structure to learn either.*
+
+**Value-head calibration:** corr(rootValue, valueTarget z) jumps from 0.04 (cold) to **0.46-0.51 after iter-1 and stays there for 19 iters**. std_rv ≈ 0.86 (vs std_vt = 0.99). MSE ≈ 0.9. **One iter of training saturates value-head learnable signal.**
+
+**Weight L2 drift:** per-iter ΔL2 = 23-32 against init norm 85.8 (**27-37% of total weights changing every iter**), trend slowly growing. Two outlier iters (7→8 at 43%, 13→14 at 47%) suggest orchestrator-state hiccups.
+
+### Synthesis: three independent ceilings
+
+1. **Environmental-noise ceiling (corr ≈ 0.5).** ~50% of game-outcome variance is RNG (coin flips, hand draws, deck shuffles). A perfect value head couldn't get above corr ≈ 0.7-0.8 from state alone in this game. We hit 0.5 after **one** iter and parked there — the value head has already learned what's learnable from state.
+2. **Action-space ceiling (3.4 legal moves/decision).** AZ's premise — search differentiates many options — is broken on a 3-option action space. The policy can't get much more concentrated than ~0.5 top-1 visit. Sims past ~50 are wasted because visit-target precision is already excellent at low sims.
+3. **Weight-jitter ceiling (no-KL gradient noise dominates).** Weights swing 30%+ per iter despite flat val_loss. Without the W6 KL anchor the model hops between equally-good fits in a large flat basin. The 0.5880 v3.6 anchor *was* achieved with (a) the W6 anchor preventing this drift and (b) rollout-leaf naturally integrating the RNG.
+
+### Verdict
+
+**H1 (AZ joint-threshold lift) FALSIFIED.** AZ canon assumes Go-like conditions: no RNG, large branching factor, clear positional signal. This game has none. The "5 improvements" all targeted compute/data scaling, not the information-theoretic ceilings, so they couldn't move the needle. The v3.6 anchor's strength comes from removing the brittleness AZ canon introduces (rollout-leaf for RNG, KL anchor for stability) — both of which we removed for AZ purity.
+
+### Follow-up bets (more directly aligned to diagnostics)
+
+- **More-games shallower-search at sims=100.** Visit-target precision saturates at ~30 visits/action; sims=400 wastes 4× compute. Recipe: 15k games × sims=100 × no-buffer × 20 iters, wave-size=64. Same wall budget, 3× more diverse selfplay. The hypothesis is that the value-head plateau at corr=0.5 is data-limited, not search-limited.
+- **Restore weak KL anchor (weight ≈ 0.02-0.05).** Damps the 30%+ per-iter weight drift while leaving room for whatever weak signal exists. Falsification: weight ΔL2 should drop below 15 per iter and per-iter wl variance should compress below σ=0.025.
+- **Asymmetry-redux exploit.** Iter-1 of the warm AZ run reduced per-side asymmetry by half under anchor-recipe eval. If the only consistent off-axis gain from AZ is "shape the policy slightly more symmetric without losing strength," that's a *targeted distillation* loss-term ("asymmetry penalty") not an AZ recipe — different axis entirely.
+
+### Scripts + artifacts
+
+- `runs/R16-P3-v36-az-5k-nobuffer-cuda/analyze.py` — diagnostic script (training metrics, policy concentration, value calibration, weight drift)
+- `runs/R16-P3-v36-az-5k-nobuffer-cuda/events.jsonl` — full per-iter events
+- `runs/R16-P3-v36-az-5k-nobuffer-cuda/iter-{0..19}/checkpoint.pt` — ckpt chain
