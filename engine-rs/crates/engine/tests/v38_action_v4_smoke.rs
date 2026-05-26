@@ -1,24 +1,30 @@
-//! v3.8 action-vector v4 (slots [48:52]) truth-table smoke.
+//! v3.8 action-vector v4 (slots [48:52]) + v5 (slots [52:57]) truth-
+//! table smoke. (File name retains the v38_action_v4 historical anchor;
+//! contents extended for v5.)
 //!
-//! v4 extends v3 (48-d) with 4 new slots per scoping doc §4.5:
+//! v4 extends v3 (48-d) with 4 new slots per v3.8 scoping doc §4.5:
 //!   slot 48 = swap_in_attack_ready
-//!     1 iff the action carries a retreat_swap_target AND that target
-//!     has enough energy for its primary attack.
 //!   slot 49 = expected_damage_norm
-//!     base + activeAttackDamageBonus + weakness (no conditional
-//!     bonuses, no coin-flip), divided by 300. Fires for kinds in
-//!     {attack, retreatAttack, useAbility} given source + defender.
 //!   slot 50 = attach_color_matches_typed_need
-//!     1 iff kind=attachEnergy AND attach_color reduces a typed deficit.
 //!   slot 51 = attach_completes_typed_threshold
-//!     1 iff kind=attachEnergy AND post-attach target meets primary-
-//!     attack typed cost (colorless still allowed unmet).
 //!
-//! v3 slots [0:48] BYTE-STABLE: we verify ACTION_FEATURE_COUNT=52 and
-//! ACTION_FEATURE_SCHEMA_VERSION=4, then exercise each new slot via
-//! a direct call to the build_features helper. Because build_features
-//! is private, this test lives as an end-to-end enumerator smoke
-//! through the public `enumerate_legal_ai_actions` API.
+//! v5 extends v4 (52-d) with 5 new choice-card stat slots per v5
+//! scoping doc §4.5:
+//!   slot 52 = choice_card_present
+//!     1 iff `input.choice_card_id` resolves a catalog card.
+//!   slot 53 = choice_card_hp_norm
+//!     card.hp / 180 (umamusume only); 0 for trainer / absent.
+//!   slot 54 = choice_card_attack_damage_norm
+//!     primary_attack(card).damage / 150 (umamusume only).
+//!   slot 55 = choice_card_attack_cost_total_norm
+//!     min(sum(cost values), 4) / 4 (umamusume only).
+//!   slot 56 = choice_card_has_ability
+//!     1 iff card.kind=umamusume AND card.ability is_some.
+//!
+//! v3 slots [0:48] + v4 slots [48:52] BYTE-STABLE: we verify
+//! ACTION_FEATURE_COUNT=57 and ACTION_FEATURE_SCHEMA_VERSION=5, then
+//! exercise each new slot via the public `enumerate_legal_ai_actions`
+//! API (build_features is private).
 
 use engine::core::catalog::catalog;
 use engine::core::constants::{EnergyType, SideId};
@@ -29,21 +35,21 @@ use engine::policy::actions::{
 };
 
 #[test]
-fn action_feature_count_is_fifty_two() {
-    assert_eq!(ACTION_FEATURE_COUNT, 52);
+fn action_feature_count_is_fifty_seven() {
+    assert_eq!(ACTION_FEATURE_COUNT, 57);
 }
 
 #[test]
-fn action_feature_schema_version_is_four() {
-    assert_eq!(ACTION_FEATURE_SCHEMA_VERSION, 4);
+fn action_feature_schema_version_is_five() {
+    assert_eq!(ACTION_FEATURE_SCHEMA_VERSION, 5);
 }
 
 #[test]
-fn every_action_carries_a_full_v4_vector() {
+fn every_action_carries_a_full_v5_vector() {
     // End-to-end: a fresh self-play setup enumerates legal actions for
     // BOTH sides across a few phases and every emitted action's
-    // `features` Vec must be exactly 52-d. Catches any TS/Rust call
-    // site that forgot to extend to the v4 width.
+    // `features` Vec must be exactly 57-d. Catches any TS/Rust call
+    // site that forgot to extend to the v5 width.
     let rng = Rng::from_seed("v38-action-v4-smoke:setup", "v38");
     let (state, _used) = with_rng(rng, || setup_ai_vs_ai_game());
     for side in [SideId::Player, SideId::Opponent] {
@@ -113,21 +119,109 @@ fn slot_48_to_51_default_to_zero_outside_their_kinds() {
 }
 
 #[test]
-fn legal_actions_features_packs_v4_width() {
+fn slot_52_to_56_default_to_zero_without_choice_card() {
+    // setupChooseBoard / pass have no `choice_card_id`; all 5 v5 slots
+    // must be exactly 0.0 for those actions. Catches accidental wiring
+    // where slots fire on absent choice cards.
+    let rng = Rng::from_seed("v5-action-zeros:setup", "v5");
+    let (state, _used) = with_rng(rng, || setup_ai_vs_ai_game());
+    let actions = enumerate_legal_ai_actions(&state, SideId::Player);
+    for action in &actions {
+        if action.kind == "setupChooseBoard" || action.kind == "pass" {
+            for slot in 52..57 {
+                assert_eq!(
+                    action.features[slot], 0.0,
+                    "action {} (kind={}) slot {} expected 0.0 (no choice card), got {}",
+                    action.id, action.kind, slot, action.features[slot]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn slot_52_to_56_are_finite_and_in_unit_range() {
+    // All 5 v5 choice-card slots are normalized to [0, 1] (or {0, 1}
+    // for the binary flags 52 and 56). Verify finiteness + range across
+    // every emitted action in a fresh setup. Picks up out-of-range bugs
+    // (e.g. a missed clamp on hp_norm if a card had hp > 180).
+    let rng = Rng::from_seed("v5-action-range:setup", "v5");
+    let (state, _used) = with_rng(rng, || setup_ai_vs_ai_game());
+    let actions = enumerate_legal_ai_actions(&state, SideId::Player);
+    for action in &actions {
+        for slot in 52..57 {
+            let v = action.features[slot];
+            assert!(
+                v.is_finite(),
+                "v5 slot {} non-finite ({}) on action {} (kind={})",
+                slot,
+                v,
+                action.id,
+                action.kind
+            );
+            assert!(
+                (0.0..=1.0).contains(&v),
+                "v5 slot {} out of [0, 1] range ({}) on action {} (kind={})",
+                slot,
+                v,
+                action.id,
+                action.kind
+            );
+        }
+        // Slot 52 (present) and 56 (has_ability) are binary.
+        for slot in [52usize, 56] {
+            let v = action.features[slot];
+            assert!(
+                v == 0.0 || v == 1.0,
+                "v5 slot {} must be 0.0 or 1.0; got {} on action {}",
+                slot,
+                v,
+                action.id
+            );
+        }
+    }
+}
+
+#[test]
+fn slot_52_implies_or_zeroes_other_choice_card_slots() {
+    // Logical invariant: if choice_card_present (slot 52) is 0, then
+    // slots 53, 54, 55, 56 must all be 0. If slot 52 is 1, slot 56 may
+    // still be 0 (ability-less basic uma), but slots 53-55 must be
+    // non-negative finite numbers (zero is allowed for trainer choice
+    // cards, which set slot 52=1 but 53-55=0).
+    let rng = Rng::from_seed("v5-action-invariant:setup", "v5");
+    let (state, _used) = with_rng(rng, || setup_ai_vs_ai_game());
+    let actions = enumerate_legal_ai_actions(&state, SideId::Player);
+    for action in &actions {
+        let present = action.features[52];
+        if present == 0.0 {
+            for slot in 53..57 {
+                assert_eq!(
+                    action.features[slot], 0.0,
+                    "slot 52=0 must zero slot {}; got {} on action {}",
+                    slot, action.features[slot], action.id
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn legal_actions_features_packs_v5_width() {
     // legal_actions_features asserts action.features.len() == ACTION_DIM.
-    // Since the runtime ACTION_DIM is now 52, the packer should pack
-    // n_actions × 52 floats.
+    // Since the runtime ACTION_DIM is now 57 (v5), the packer should
+    // pack n_actions × 57 floats.
     use engine::policy::featurize::{legal_actions_features, ACTION_DIM};
     let rng = Rng::from_seed("v38-action-packed:setup", "v38");
     let (state, _used) = with_rng(rng, || setup_ai_vs_ai_game());
     let actions = enumerate_legal_ai_actions(&state, SideId::Player);
-    let packed = legal_actions_features(&actions).expect("pack v4 action features");
+    let packed = legal_actions_features(&actions).expect("pack v5 action features");
     assert_eq!(
         packed.len(),
         actions.len() * ACTION_DIM,
         "packed action features should have n_actions * ACTION_DIM elements"
     );
-    assert_eq!(ACTION_DIM, 52, "v4 runtime action width should be 52");
+    assert_eq!(ACTION_DIM, 57, "v5 runtime action width should be 57");
 }
 
 // ---------------------------------------------------------------------------

@@ -150,10 +150,19 @@ All 5 slots fire iff `choiceCardId !== undefined` (resolved via `getChoiceCardId
 | Slot | Field | Definition | Source |
 |---|---|---|---|
 | 52 | `choice_card_present` | 1 iff `getChoiceCardId` resolves a valid catalog card. **0 otherwise.** | `actions.ts:704-709 getChoiceCardId` |
-| 53 | `choice_card_hp_norm` | `getCardById(choiceCardId).hp / 180` if `card.kind === "umamusume"`. **0 if card is non-uma (trainer) or choice card absent.** | `core/catalog.ts getCardById`; `Card.hp` |
-| 54 | `choice_card_attack_damage_norm` | `getPrimaryAttack(getUmamusumeCard(choiceCardId)).damage / 150` if `card.kind === "umamusume"`. **0 otherwise.** | `core/catalog.ts getPrimaryAttack` |
-| 55 | `choice_card_attack_cost_total_norm` | `min(sum(getPrimaryAttack(getUmamusumeCard(choiceCardId)).cost values), 4) / 4` if `card.kind === "umamusume"`. **0 otherwise.** | `core/effects.ts Attack.cost: EnergyCost` |
+| 53 | `choice_card_hp_norm` | `card.hp / 180` if `card.kind === "umamusume"`, where `card = getCard(choiceCardId)`. **0 if card is non-uma (trainer) or choice card absent.** | `core/catalog.ts getCard`; `Card.hp` |
+| 54 | `choice_card_attack_damage_norm` | `getPrimaryAttack(card).damage / 150` after narrowing `card.kind === "umamusume"`. **0 otherwise.** | `core/catalog.ts getPrimaryAttack(card: UmamusumeCard)` |
+| 55 | `choice_card_attack_cost_total_norm` | `min(sum(getPrimaryAttack(card).cost values), 4) / 4` after narrowing `card.kind === "umamusume"`. **0 otherwise.** | `core/effects.ts Attack.cost: EnergyCost` |
 | 56 | `choice_card_has_ability` | 1 iff `card.kind === "umamusume" && card.ability !== undefined`. **0 otherwise.** | `Card.ability` |
+
+> **Implementation note (post-scoping):** the catalog API exports
+> `getCard(cardId): Card` (not `getCardById`) and `getUmamusumeCard(instance:
+> UmamusumeInstance): UmamusumeCard` (takes a live instance, not a
+> cardId). The v5 builder reuses the existing v4 slot-42-45 idiom — call
+> `const choiceCard = input.choiceCardId ? getCard(input.choiceCardId) :
+> null;` once and narrow on `choiceCard?.kind === "umamusume"` for each
+> umamusume-only slot. Rust mirrors via `cat.get(cid)` + `Card::Umamusume(u)`
+> pattern.
 
 **Defaults:** all 5 slots emit `0` when no choice card is resolved. For non-umamusume choice cards (rare; only fires when a search-trainer fetches a trainer — currently no such trainer exists in catalog but the guard prevents accidental NaN), slot 52 = 1 and slots 53-56 = 0.
 
@@ -275,7 +284,7 @@ The implementer lands code + smoke + init-parity ckpt + Python↔Rust parity smo
 - `frontend/src/game/engine/ai-policy/actions.ts:704-709` — `getChoiceCardId` (route hub for all 5 v5 slots).
 - `frontend/src/game/engine/ai-policy/actions.ts:711-739` — `cardRoleKind/Progression/Output/Utility` (existing role-bit helpers feeding slots 42-45; v5 slots are complementary stat helpers, not duplicates).
 - `frontend/src/game/engine/core/playTypes.ts:1-6` — `PlayChoices` type (payload source of all 3 choice-card routes).
-- `frontend/src/game/engine/core/catalog.ts` — `getCardById`, `getPrimaryAttack`, `getUmamusumeCard`.
+- `frontend/src/game/engine/core/catalog.ts` — `getCard(cardId)`, `getPrimaryAttack(card)`, `getUmamusumeCard(instance)`. The v5 builder uses `getCard` + `kind === "umamusume"` narrowing; it does NOT call `getUmamusumeCard` (which takes a live `UmamusumeInstance`, not a cardId).
 - `engine-rs/crates/engine/src/policy/actions.rs:64-71` — Rust action-schema constants.
 - `engine-rs/crates/engine/src/policy/actions.rs:1104-1746` — `build_features` Rust mirror (extend to 57-d).
 - `engine-rs/crates/engine/src/policy/actions.rs:1778-1796` — `play_choices_to_value` (payload serializer; confirms `deckCardIndex` plumbing in worktree).
@@ -314,6 +323,8 @@ The implementer lands code + smoke + init-parity ckpt + Python↔Rust parity smo
 ## 12. Status line
 
 DRAFT — USER-GATED 2026-05-26. Blocked on v3.8 A1 promotion. Implementer instruction: do not fire A1 until (a) v3.8 A1 verdict is in r110.md §4o-pre, (b) v5 init-parity smoke (Δlogits ≤ 1e-5 vs the v3.8-promoted ckpt) passes, (c) v5 Python↔Rust parity smoke Gate C passes. User-gate confirms A1 fire post-pre-condition checks.
+
+**IMPLEMENTATION LANDED 2026-05-26** (single commit per `feedback_bigger_fixes_at_once`): all Phase A+B+C code in place. TS canonical + Rust mirror + Python constants bumped; engine-rs inference dispatch extended (sidecar-aware action_dim detection via `read_action_features_last_dim`, accepts v4 sidecar under V3_8 graph for legacy serving); ckpt expander `make_v5_action_init.py` produces bit-identical iter-0 logits (Δ=0.0 on fabricated v3.8 source); v5_action_init_smoke 8/8 PASS; Rust slot-truth-table smoke 12/12 PASS in `v38_action_v4_smoke.rs`. A1 fire remains user-gated.
 
 ---
 

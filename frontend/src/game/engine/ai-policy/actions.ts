@@ -47,8 +47,29 @@ import type { PlayChoices } from "../core/playTypes";
 // Python ACTION_FEATURE_SCHEMA_VERSION, and Rust ACTION_FEATURE_COUNT
 // in `engine-rs/.../policy/featurize.rs` + `policy/actions.rs` bumped
 // to match. v3 slots [0:48] BYTE-STABLE.
-export const ACTION_FEATURE_SCHEMA_VERSION = 4;
-export const ACTION_FEATURE_COUNT = 52;
+// v5-action-disambiguation bumped 4 → 5. Adds 5 new choice-card stat
+// slots at [52:57]. All fire iff `getChoiceCardId(side, choices)`
+// resolves a catalog card (deck-search / discard-cost / rainbow-
+// evolution payload routes). Closes 99.4% of empirical per-action
+// feature-degeneracy measured in the R16-P3-v36 iter-19 corpus
+// (4,605 / 4,631 degenerate pairs are 3starMakeDebutScout deck-search
+// rows differing only in which umamusume is fetched).
+//   slot 52 = choice_card_present (1 iff getChoiceCardId resolves)
+//   slot 53 = choice_card_hp_norm = card.hp / 180 (umamusume only;
+//             0 for trainer choice cards or no choice card)
+//   slot 54 = choice_card_attack_damage_norm =
+//             getPrimaryAttack(card).damage / 150 (umamusume only)
+//   slot 55 = choice_card_attack_cost_total_norm =
+//             min(sum(getPrimaryAttack(card).cost values), 4) / 4
+//             (umamusume only)
+//   slot 56 = choice_card_has_ability (1 iff card.kind=umamusume AND
+//             card.ability !== undefined)
+// Rust mirror (`engine-rs/.../policy/actions.rs::build_features`),
+// Python ACTION_FEATURE_SCHEMA_VERSION, and Rust ACTION_FEATURE_COUNT
+// in `engine-rs/.../policy/featurize.rs` + `policy/actions.rs` bumped
+// to match. v4 slots [0:52] BYTE-STABLE.
+export const ACTION_FEATURE_SCHEMA_VERSION = 5;
+export const ACTION_FEATURE_COUNT = 57;
 const ENERGY_TYPES: EnergyType[] = ["grass", "fire", "water", "lightning", "psychic", "fighting", "darkness", "steel", "colorless", "dragon"];
 
 export function enumerateLegalAiActions(state: GameState, sideId: SideId): LegalAiAction[] {
@@ -613,6 +634,16 @@ function features(input: {
   vector[49] = v38ExpectedDamageNorm(input);
   vector[50] = v38AttachColorMatchesTypedNeed(input);
   vector[51] = v38AttachCompletesTypedThreshold(input);
+  // v5-action-disambiguation slots [52:57]. All 5 default to 0 when no
+  // choice card resolves. See header comment + scoping §4.5 for slot
+  // definitions. Reads `input.choiceCardId` (already plumbed for slots
+  // 42-45 cardRole bits) and narrows on `card.kind === "umamusume"` —
+  // same pattern as `choiceCard` above.
+  vector[52] = choiceCard ? 1 : 0;
+  vector[53] = choiceCard?.kind === "umamusume" ? choiceCard.hp / 180 : 0;
+  vector[54] = choiceCard?.kind === "umamusume" ? getPrimaryAttack(choiceCard).damage / 150 : 0;
+  vector[55] = choiceCard?.kind === "umamusume" ? Math.min(Object.values(getPrimaryAttack(choiceCard).cost).reduce((sum, cost) => sum + (cost ?? 0), 0), 4) / 4 : 0;
+  vector[56] = choiceCard?.kind === "umamusume" && choiceCard.ability !== undefined ? 1 : 0;
   return vector;
 }
 

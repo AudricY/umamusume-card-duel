@@ -27,7 +27,16 @@ STATE_DIM = 110
 # now require 52-d. v3.7 ckpts are no longer re-exportable without
 # downgrading this constant; v3.7 is SOFT-SHIPPED and not in further
 # rotation.
-ACTION_DIM = 52
+# v5-action-disambiguation bumped 52 → 57 (5 new choice-card stat slots
+# at [52:57]: present flag + hp / attack damage / cost total / ability
+# bit for the choice card resolved via getChoiceCardId). v4 slots [0:52]
+# BYTE-STABLE. v3.8 ckpts (action schema 4) require the v5 expander
+# (`make_v5_action_init.py`) to widen the action input projection 52→57
+# before re-export; legacy v3.8 ONNX graphs continue to serve via the
+# sidecar-aware slicing path in `engine-rs/.../inference/mod.rs`.
+ACTION_DIM = 57
+ACTION_DIM_V4 = 52
+ACTION_DIM_V3 = 48
 # R7.b.2 Phase 2 bumped STATE_FEATURE_SCHEMA_VERSION 2.1 → 3.0 (Python
 # encoder consumes `cardIdsByZone` + per-action idx). R16-P1 bumps the
 # latest-schema marker 3.0 → 3.1 (164-d temporal/turn-state builder). This
@@ -54,7 +63,15 @@ STATE_FEATURE_SCHEMA_VERSION = 3.1
 # attach_completes_typed_threshold (slot 51, attachEnergy threshold-cross
 # predicate). v3 slots [0:48] BYTE-STABLE. See
 # `docs/ai-research/scoping/v38-slim-feature-add-scoping.md` §4.5.
-ACTION_FEATURE_SCHEMA_VERSION = 4
+# v5-action-disambiguation bumped 4 → 5. v5 extends v4 with 5 new
+# choice-card stat slots at [52:57]: choice_card_present (52),
+# choice_card_hp_norm (53), choice_card_attack_damage_norm (54),
+# choice_card_attack_cost_total_norm (55), choice_card_has_ability (56).
+# All fire iff getChoiceCardId(side, choices) resolves a catalog card
+# (deck-search / discard-cost / rainbow-evolution payload routes). v4
+# slots [0:52] BYTE-STABLE. See
+# `docs/ai-research/scoping/v5-action-disambiguation-scoping.md` §4.5.
+ACTION_FEATURE_SCHEMA_VERSION = 5
 
 # --- Serving-schema 96/110/164 freeze contract (r16 P1 prerequisite) -------
 # `serve_onnx` resolves the feature builder from the loaded ONNX graph's

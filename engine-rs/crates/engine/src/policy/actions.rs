@@ -61,14 +61,30 @@ use crate::policy::types::{AiPhase, LegalAiAction};
 ///   slot 50 = `attach_color_matches_typed_need` (attachEnergy only)
 ///   slot 51 = `attach_completes_typed_threshold` (attachEnergy only)
 /// v3 slots [0:48] BYTE-STABLE.
-pub const ACTION_FEATURE_SCHEMA_VERSION: u32 = 4;
+///
+/// v5-action-disambiguation bumped 4 → 5. Adds 5 new choice-card stat
+/// slots at [52:57]. All fire iff `input.choice_card_id` resolves a
+/// catalog card. v4 slots [0:52] BYTE-STABLE.
+///   slot 52 = `choice_card_present` (1 iff resolves; 0 otherwise)
+///   slot 53 = `choice_card_hp_norm` = card.hp / 180 (umamusume only)
+///   slot 54 = `choice_card_attack_damage_norm` =
+///             primary_attack(card).damage / 150 (umamusume only)
+///   slot 55 = `choice_card_attack_cost_total_norm` =
+///             min(sum(cost values), 4) / 4 (umamusume only)
+///   slot 56 = `choice_card_has_ability` (1 iff umamusume AND
+///             card.ability is_some)
+pub const ACTION_FEATURE_SCHEMA_VERSION: u32 = 5;
 
 /// `ai-policy/actions.ts:22`. Per-action feature count — locks the Python
 /// collator's input width.
 ///
 /// v38-slim-feature-add bumped 48 → 52. v3 slots [0:48] BYTE-STABLE; the
 /// 4 new slots [48:52] are pure additions per the v4 schema.
-pub const ACTION_FEATURE_COUNT: usize = 52;
+///
+/// v5-action-disambiguation bumped 52 → 57. v4 slots [0:52] BYTE-STABLE;
+/// the 5 new choice-card stat slots [52:57] are pure additions per the
+/// v5 schema.
+pub const ACTION_FEATURE_COUNT: usize = 57;
 
 /// `ai-policy/actions.ts:23`. Source-declaration order. Matches
 /// `EnergyType::ALL`.
@@ -1350,6 +1366,38 @@ fn build_features(input: FeatureInput<'_>) -> Vec<f64> {
     v[49] = v38_expected_damage_norm(&input);
     v[50] = v38_attach_color_matches_typed_need(&input);
     v[51] = v38_attach_completes_typed_threshold(&input);
+    // v5-action-disambiguation slots [52:57] — mirrors TS choice-card
+    // stat slots. All 5 default to 0 when no choice card resolves.
+    // Reuses `choice_card` resolved above for slots 42-45 cardRole bits.
+    v[52] = if choice_card.is_some() { 1.0 } else { 0.0 };
+    v[53] = match choice_card {
+        Some(Card::Umamusume(u)) => u.hp as f64 / 180.0,
+        _ => 0.0,
+    };
+    v[54] = match choice_card {
+        Some(Card::Umamusume(u)) => match primary_attack(u) {
+            Some(a) => a.damage as f64 / 150.0,
+            None => 0.0,
+        },
+        _ => 0.0,
+    };
+    v[55] = match choice_card {
+        Some(Card::Umamusume(u)) => match primary_attack(u) {
+            Some(a) => {
+                let sum: u32 = EnergyType::ALL
+                    .iter()
+                    .map(|t| a.cost.get(*t) as u32)
+                    .sum();
+                (sum.min(4) as f64) / 4.0
+            }
+            None => 0.0,
+        },
+        _ => 0.0,
+    };
+    v[56] = match choice_card {
+        Some(Card::Umamusume(u)) if u.ability.is_some() => 1.0,
+        _ => 0.0,
+    };
     v
 }
 
@@ -1987,15 +2035,19 @@ mod tests {
     // ----------------------------------------------------------------
 
     #[test]
-    fn schema_version_bumped_to_four() {
+    fn schema_version_bumped_to_five() {
         // v38-slim-feature-add bumped 3 → 4 (added slots [48:52]).
-        assert_eq!(ACTION_FEATURE_SCHEMA_VERSION, 4);
+        // v5-action-disambiguation bumped 4 → 5 (added choice-card stat
+        // slots [52:57]).
+        assert_eq!(ACTION_FEATURE_SCHEMA_VERSION, 5);
     }
 
     #[test]
-    fn action_feature_count_is_fifty_two() {
+    fn action_feature_count_is_fifty_seven() {
         // v38-slim-feature-add bumped 48 → 52 (4 new slots at [48:52]).
-        assert_eq!(ACTION_FEATURE_COUNT, 52);
+        // v5-action-disambiguation bumped 52 → 57 (5 new choice-card
+        // stat slots at [52:57]).
+        assert_eq!(ACTION_FEATURE_COUNT, 57);
     }
 
     #[test]

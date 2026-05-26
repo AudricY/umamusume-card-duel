@@ -1,16 +1,20 @@
-"""v3.8 action-vector v4 schema-bump smoke (Python side).
+"""v3.8 action-vector v4 + v5-action-disambiguation schema-bump smoke
+(Python side). File name retained from the v4 transition; contents
+extended to cover v5.
 
 Python doesn't compute action features (TS owns the canonical builder;
 Rust mirrors it via `engine-rs/.../policy/actions.rs::build_features`).
 This smoke validates the Python-side constants + sidecar metadata
 contract that downstream training/serving consumers rely on:
 
-  1. `ACTION_FEATURE_SCHEMA_VERSION == 4` (Python sees v4).
-  2. The serve_onnx schema table registers state_dim=304 → schema "v3.8".
-  3. A regression assertion: the v3 → v4 bump must NOT alter the v3
-     schema marker (3) elsewhere — only the latest is 4.
+  1. `ACTION_FEATURE_SCHEMA_VERSION == 5` (Python sees v5).
+  2. `ACTION_DIM == 57` (Python sees the widened 57-d action width).
+  3. The serve_onnx schema table registers state_dim=304 → schema "v3.8".
+     (v5 is an ACTION-axis bump only; state schema stays v3.8.)
+  4. TS constants pin to 57 / 5.
+  5. Rust constants pin to 57 / 5.
 
-Per-slot byte-stable truth-tables on the v4 action surface live in
+Per-slot byte-stable truth-tables on the v5 action surface live in
 the Rust smoke `engine-rs/crates/engine/tests/v38_action_v4_smoke.rs`
 (invoked via `cargo test -p engine --test v38_action_v4_smoke`) and in
 the Python↔Rust parity smoke (`v38_python_rust_parity_smoke.py`).
@@ -24,17 +28,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from uma_ai.features import (  # noqa: E402
+    ACTION_DIM,
     ACTION_FEATURE_SCHEMA_VERSION,
     STATE_DIM_V3_8,
 )
 
 
 def main() -> int:
-    # 1. Python ACTION_FEATURE_SCHEMA_VERSION is at v4.
-    if ACTION_FEATURE_SCHEMA_VERSION != 4:
+    # 1. Python ACTION_FEATURE_SCHEMA_VERSION is at v5.
+    if ACTION_FEATURE_SCHEMA_VERSION != 5:
         raise SystemExit(
             f"FAIL[python-schema]: ACTION_FEATURE_SCHEMA_VERSION="
-            f"{ACTION_FEATURE_SCHEMA_VERSION}, expected 4 (v38 bump)"
+            f"{ACTION_FEATURE_SCHEMA_VERSION}, expected 5 (v5 bump)"
+        )
+    if ACTION_DIM != 57:
+        raise SystemExit(
+            f"FAIL[python-dim]: ACTION_DIM={ACTION_DIM}, expected 57 "
+            f"(v5 bump 52 → 57)"
         )
 
     # 2. serve_onnx schema table maps state_dim=304 → "v3.8".
@@ -86,18 +96,18 @@ def main() -> int:
         / "actions.ts"
     )
     ts_text = actions_ts.read_text(encoding="utf-8")
-    if "ACTION_FEATURE_COUNT = 52" not in ts_text:
+    if "ACTION_FEATURE_COUNT = 57" not in ts_text:
         raise SystemExit(
-            f"FAIL[ts-count]: ACTION_FEATURE_COUNT = 52 not found in {actions_ts}"
+            f"FAIL[ts-count]: ACTION_FEATURE_COUNT = 57 not found in {actions_ts}"
         )
-    if "ACTION_FEATURE_SCHEMA_VERSION = 4" not in ts_text:
+    if "ACTION_FEATURE_SCHEMA_VERSION = 5" not in ts_text:
         raise SystemExit(
-            f"FAIL[ts-schema]: ACTION_FEATURE_SCHEMA_VERSION = 4 not found "
+            f"FAIL[ts-schema]: ACTION_FEATURE_SCHEMA_VERSION = 5 not found "
             f"in {actions_ts}"
         )
 
-    # 4. Regression guard: Rust ACTION_FEATURE_COUNT and
-    # ACTION_FEATURE_SCHEMA_VERSION constants pin to 52 / 4.
+    # 5. Regression guard: Rust ACTION_FEATURE_COUNT and
+    # ACTION_FEATURE_SCHEMA_VERSION constants pin to 57 / 5.
     actions_rs = (
         Path(__file__).resolve().parents[1]
         / "engine-rs"
@@ -108,20 +118,20 @@ def main() -> int:
         / "actions.rs"
     )
     rs_text = actions_rs.read_text(encoding="utf-8")
-    if "ACTION_FEATURE_COUNT: usize = 52" not in rs_text:
+    if "ACTION_FEATURE_COUNT: usize = 57" not in rs_text:
         raise SystemExit(
-            f"FAIL[rust-count]: ACTION_FEATURE_COUNT: usize = 52 not found "
+            f"FAIL[rust-count]: ACTION_FEATURE_COUNT: usize = 57 not found "
             f"in {actions_rs}"
         )
-    if "ACTION_FEATURE_SCHEMA_VERSION: u32 = 4" not in rs_text:
+    if "ACTION_FEATURE_SCHEMA_VERSION: u32 = 5" not in rs_text:
         raise SystemExit(
-            f"FAIL[rust-schema]: ACTION_FEATURE_SCHEMA_VERSION: u32 = 4 not "
+            f"FAIL[rust-schema]: ACTION_FEATURE_SCHEMA_VERSION: u32 = 5 not "
             f"found in {actions_rs}"
         )
 
     print(
         f"v38_action_v4_smoke: ALL Python+TS+Rust constants align "
-        f"(action_schema=v4, action_count=52, state_dim=304→'v3.8')"
+        f"(action_schema=v5, action_count=57, state_dim=304→'v3.8')"
     )
     return 0
 

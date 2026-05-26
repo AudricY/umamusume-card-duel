@@ -93,7 +93,24 @@ pub const STATE_DIM_V3_8: usize = 304;
 /// slots at [48:52]: swap_in_attack_ready, expected_damage_norm,
 /// attach_color_matches_typed_need, attach_completes_typed_threshold.
 /// v3 slots [0:48] BYTE-STABLE.
-pub const ACTION_DIM: usize = 52;
+///
+/// v5-action-disambiguation bumped 52 → 57 (action schema v4 → v5). 5
+/// new choice-card stat slots at [52:57]: choice_card_present,
+/// choice_card_hp_norm, choice_card_attack_damage_norm,
+/// choice_card_attack_cost_total_norm, choice_card_has_ability. All
+/// fire iff `input.choice_card_id` resolves (deck-search / discard-cost
+/// / rainbow-evolution payload routes). v4 slots [0:52] BYTE-STABLE.
+pub const ACTION_DIM: usize = 57;
+/// The v4 action-feature width — preserved for graphs/sidecars trained
+/// at action schema 4 (v3.8 lineage). `pack_row` slices the v5 57-d
+/// feature buffer down to this width when the graph + sidecar declare
+/// the v4 contract.
+pub const ACTION_DIM_V4: usize = 52;
+/// The v3 action-feature width — preserved for graphs/sidecars trained
+/// at action schema 3 (v3.7-and-earlier). `pack_row` slices the v5
+/// 57-d feature buffer down to this width when the graph + sidecar
+/// declare the v3 contract.
+pub const ACTION_DIM_V3: usize = 48;
 /// Per-zone padding widths — mirrors `CARD_ID_SHAPES`. Order is
 /// load-bearing (matches Python `ZONE_ORDER` tuple).
 pub const ZONE_NAMES: [&str; 8] = [

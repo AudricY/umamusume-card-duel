@@ -266,7 +266,7 @@ _SCHEMA_TABLE: tuple[tuple[int, bool, bool, str, str], ...] = (
         True,
         False,
         "v3.8",
-        "304-d v3.8 slim-feature-add (embedding inputs, no slot tokens; v3.7 head + 8-bit per-bench ETA + gust-swing catastrophe tail at [296:304]; action schema v4 at [48:52])",
+        "304-d v3.8 slim-feature-add (embedding inputs, no slot tokens; v3.7 head + 8-bit per-bench ETA + gust-swing catastrophe tail at [296:304]; action schema v4 at [48:52] OR v5 at [52:57] for fresh exports — discriminated by sidecar action_feature_schema_version, dispatch handles both via pack_row slicing)",
     ),
 )
 _PLACEHOLDER_DIMS: dict[int, str] = {}

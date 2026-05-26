@@ -290,6 +290,14 @@ pub struct InferenceSession {
     dispatcher: Option<Arc<BatchedDispatcher>>,
     onnx_path: PathBuf,
     schema: GraphSchema,
+    /// Per-action feature width the ONNX graph's `action_features` input
+    /// expects. v5-action-disambiguation introduced action-schema-version
+    /// dispatch independent of the state-schema (`GraphSchema`); a v3.8
+    /// state-dim graph may expect either 52-d (legacy v4 sidecar) or
+    /// 57-d (fresh v5 sidecar) action features. Detected at load time
+    /// from the graph's `action_features` input shape with a fallback to
+    /// `action_dim_for_schema(schema)` when the shape is symbolic.
+    action_dim: usize,
     device: Device,
 }
 
@@ -388,13 +396,20 @@ impl InferenceSession {
         // missing) is rejected explicitly.
         let schema = validate_graph_signature(&session)?;
 
-        // Apply the deferred action_feature_schema_version check. v3.8
-        // (state_dim=304) requires runtime parity; v3.7-and-earlier
-        // schemas tolerate the legacy v3 schema in addition to the
-        // current runtime.
+        // Apply the deferred action_feature_schema_version check.
+        //
+        // Acceptance matrix (runtime ACTION_FEATURE_SCHEMA_VERSION = 5):
+        //   - sidecar == runtime: always accepted (fresh v5 export).
+        //   - sidecar == 4 + schema V3_8: accepted (legacy v3.8 ONNX
+        //     exported pre-v5; the graph's action_features input is 52-d,
+        //     and `pack_row` slices the 57-d feature buffer accordingly).
+        //   - sidecar == 3 + schema != V3_8: accepted (v3.7-and-earlier
+        //     ONNX). v3.7 graph's action_features is 48-d.
+        //   - Anything else: ActionSchemaMismatch.
         if let Some(expected) = sidecar_action_schema {
             let runtime = crate::policy::actions::ACTION_FEATURE_SCHEMA_VERSION;
             let accepted = expected == runtime
+                || (matches!(schema, GraphSchema::V3_8) && expected == 4)
                 || (!matches!(schema, GraphSchema::V3_8) && expected == 3);
             if !accepted {
                 return Err(InferenceError::ActionSchemaMismatch {
@@ -403,6 +418,18 @@ impl InferenceSession {
                 });
             }
         }
+
+        // Detect the action_features input width from the ONNX graph
+        // directly. v5-action-disambiguation: a v3.8 state-dim graph may
+        // have a 52-d (legacy) or 57-d (fresh v5) action_features input;
+        // sidecar+schema acceptance above already validated the pairing,
+        // here we capture the runtime width for `pack_row`. Symbolic last
+        // dim falls back to `action_dim_for_schema(schema)` which
+        // resolves to the runtime ACTION_DIM for V3_8 (= 57) and the v3
+        // 48-d prefix for earlier schemas.
+        let detected_action_dim = read_action_features_last_dim(&session)
+            .map(|d| d as usize)
+            .unwrap_or_else(|| action_dim_for_schema(schema));
 
         let guard = match device {
             Device::Cpu => SessionGuard::Cpu(UnsafeCell::new(session)),
@@ -414,6 +441,7 @@ impl InferenceSession {
             dispatcher: None,
             onnx_path: onnx_path.to_path_buf(),
             schema,
+            action_dim: detected_action_dim,
             device,
         })
     }
@@ -450,6 +478,7 @@ impl InferenceSession {
         let InferenceSession {
             session,
             schema,
+            action_dim,
             onnx_path: path_out,
             device: device_out,
             ..
@@ -461,12 +490,14 @@ impl InferenceSession {
         };
 
         let dispatcher = BatchedDispatcher::start(session, schema, max_batch, max_wait_us);
+        let _ = action_dim; // captured on the InferenceSession; dispatcher reads per-row.
 
         Ok(InferenceSession {
             session: SessionStorage::Dispatched,
             dispatcher: Some(Arc::new(dispatcher)),
             onnx_path: path_out,
             schema,
+            action_dim,
             device: device_out,
         })
     }
@@ -500,7 +531,7 @@ impl InferenceSession {
                 "legalActions must not be empty".into(),
             ));
         }
-        let row = pack_row(self.schema, observation, legal_actions)?;
+        let row = pack_row(self.schema, self.action_dim, observation, legal_actions)?;
 
         // Dispatched path: enqueue the packed row to the dispatcher
         // thread and block on the per-request response channel. The
@@ -593,7 +624,7 @@ impl InferenceSession {
                     "legalActions must not be empty".into(),
                 ));
             }
-            rows.push(pack_row(self.schema, obs, legal)?);
+            rows.push(pack_row(self.schema, self.action_dim, obs, legal)?);
         }
         run_inline_batch(guard, self.schema, rows)
     }
@@ -630,9 +661,15 @@ struct PackedRow {
     slot_features: Option<Vec<f32>>,
 }
 
-/// v3.8 widens the runtime per-action feature width 48 → 52. Earlier
-/// schemas (v3.0–v3.7) consume only the v3 byte-stable prefix; this
-/// helper returns the slice width to pack into the ORT input tensor.
+/// v3.8 widens the runtime per-action feature width 48 → 52. v5
+/// re-widens to 57. Earlier schemas (v3.0–v3.7) consume only the v3
+/// byte-stable 48-d prefix; v3.8 ONNX exported pre-v5 consumes the v4
+/// 52-d prefix. This helper is the FALLBACK target width when the
+/// graph's `action_features` input shape cannot be read (symbolic
+/// last dim); `InferenceSession::load_on` prefers the actual graph
+/// shape via `read_action_features_last_dim`. Returns the runtime
+/// ACTION_DIM for V3_8 (matches the v5 fresh-export width); v3.7-and-
+/// earlier fall back to the v3 byte-stable 48-d prefix.
 fn action_dim_for_schema(schema: GraphSchema) -> usize {
     match schema {
         GraphSchema::V3_8 => ACTION_DIM,
@@ -642,6 +679,7 @@ fn action_dim_for_schema(schema: GraphSchema) -> usize {
 
 fn pack_row(
     schema: GraphSchema,
+    target_action_dim: usize,
     observation: &PublicObservation,
     legal_actions: &[LegalAiAction],
 ) -> Result<PackedRow, InferenceError> {
@@ -676,12 +714,22 @@ fn pack_row(
         ),
     };
     let n_actions = legal_actions.len();
-    let action_dim = action_dim_for_schema(schema);
+    let action_dim = target_action_dim;
     let full_action_features = featurize::legal_actions_features(legal_actions)?;
-    // For v3.7-and-earlier schemas, slice each action's 52-d vector
-    // down to its v3 byte-stable 48-d prefix. v3.8 keeps the full row.
+    // Slice each action's runtime 57-d vector down to the ORT graph's
+    // expected width. v5 graph keeps the full 57-d row; v3.8-legacy (v4
+    // sidecar) slices to 52-d; v3.7-and-earlier slice to the v3 byte-
+    // stable 48-d prefix. All prefix slices are byte-stable per the
+    // schema-bump invariants (v4→v3 was [0:48] BYTE-STABLE; v5→v4 is
+    // [0:52] BYTE-STABLE).
     let action_features: Vec<f32> = if action_dim == ACTION_DIM {
         full_action_features
+    } else if action_dim > ACTION_DIM {
+        return Err(InferenceError::SchemaMismatch(format!(
+            "graph expects action_features last dim {action_dim}, but the runtime \
+             builder only emits {ACTION_DIM}-d rows. The graph was likely exported \
+             at a newer action schema than this binary."
+        )));
     } else {
         let mut buf: Vec<f32> = Vec::with_capacity(n_actions * action_dim);
         for chunk in full_action_features.chunks_exact(ACTION_DIM) {
@@ -836,7 +884,10 @@ fn run_inline_batch(
         ));
     }
     let needs_slots = matches!(schema, GraphSchema::V3_2 | GraphSchema::V3_4);
-    let action_dim = action_dim_for_schema(schema);
+    // Per-row action_dim is set by pack_row from the graph's actual
+    // action_features last dim; rows in a batch share the same width
+    // (one session = one graph = one width).
+    let action_dim = rows[0].action_dim;
 
     let mut state_buf: Vec<f32> = Vec::with_capacity(n_batch * state_dim);
     let mut action_features_buf: Vec<f32> = vec![0.0; n_batch * max_n * action_dim];
@@ -1191,8 +1242,11 @@ fn run_batch(
         return;
     }
 
-    // Allocate stacked-B buffers and copy/pad each row in.
-    let action_dim = action_dim_for_schema(schema);
+    // Allocate stacked-B buffers and copy/pad each row in. Per-row
+    // action_dim is set by pack_row from the graph's actual
+    // action_features last dim; rows in a batch share the same width
+    // (one session = one graph = one width).
+    let action_dim = batch[0].row.action_dim;
     let mut state_buf: Vec<f32> = Vec::with_capacity(n_batch * state_dim);
     let mut action_features_buf: Vec<f32> = vec![0.0; n_batch * max_n * action_dim];
     let mut action_mask_buf: Vec<bool> = vec![false; n_batch * max_n];
@@ -1560,6 +1614,22 @@ fn card_vocab_metadata_hash() -> String {
 /// input (caught downstream by the set-equality check) or if the shape
 /// has no concrete last dim. Mirrors the Python `_graph_signature`
 /// state-dim discriminator in `serve_onnx.py`.
+fn read_action_features_last_dim(session: &Session) -> Option<i64> {
+    for inp in session.inputs().iter() {
+        if inp.name() == "action_features" {
+            if let Some(shape) = inp.dtype().tensor_shape() {
+                if let Some(&last) = shape.last() {
+                    if last > 0 {
+                        return Some(last);
+                    }
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
 fn read_state_features_last_dim(session: &Session) -> Option<i64> {
     for inp in session.inputs().iter() {
         if inp.name() == "state_features" {
