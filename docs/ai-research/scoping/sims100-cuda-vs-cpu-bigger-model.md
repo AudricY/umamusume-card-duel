@@ -24,7 +24,9 @@
 | cpu-w128 | 4.52s | 38 ms | 0.85× | 54 | 0.3639 | −0.040 |
 | **cuda-w128** | **2.18s** | **18 ms** | **1.76×** | **53** | **0.3560** | **−0.048** |
 
-Raw: `runs/sims100-cpu-vs-cuda/{cpu,cuda}-w{16,64,128}/{manifest.json,log}`.
+Raw: `runs/sims100-cpu-vs-cuda/{cpu,cuda}-w{16,64,128,256,512}/{manifest.json,log}`.
+
+**Wave>128 confirmation:** cuda-w256 and cuda-w512 both gave wins=53/120 wl=0.3560 — bit-identical to cuda-w128. Expected per `driver.rs:519` (`wave = min(total_sims - sim_index, wave_size)`): at sims=100, any wave_size ≥ 100 collapses to a single B=100 wave per root decision. Walls (5.3s, 4.7s) were noisier than cuda-w128 (2.18s) due to CPU contention from in-flight CPU orchestrators running concurrently, but strength is bit-identical — no compute difference exists above wave=100 at sims=100.
 
 ## Findings
 
