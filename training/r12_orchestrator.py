@@ -30,6 +30,7 @@ that needs maintenance is small.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import contextlib
 import json
 import math
@@ -230,40 +231,46 @@ def main() -> None:
         )
 
     last_iter = max((entry["iteration"] for entry in state.iterations), default=-1)
-    for iteration in range(last_iter + 1, args.iterations):
-        if state.halted:
-            emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "halted_before_iteration",
-                                     "iteration": iteration, "halt_reason": state.halt_reason, "ts": time.time()})
-            break
+    if getattr(args, "async_pipeline", False):
+        _run_async_pipeline(
+            repo_root, out_dir, args, state, events_path,
+            start_iter=last_iter + 1,
+        )
+    else:
+        for iteration in range(last_iter + 1, args.iterations):
+            if state.halted:
+                emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "halted_before_iteration",
+                                         "iteration": iteration, "halt_reason": state.halt_reason, "ts": time.time()})
+                break
 
-        try:
-            record = run_iteration(repo_root, out_dir, iteration, args, state, events_path)
-        except Exception as exc:
-            emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "iteration_error",
-                                     "iteration": iteration, "error": str(exc), "ts": time.time()})
-            raise
+            try:
+                record = run_iteration(repo_root, out_dir, iteration, args, state, events_path)
+            except Exception as exc:
+                emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "iteration_error",
+                                         "iteration": iteration, "error": str(exc), "ts": time.time()})
+                raise
 
-        state.iterations.append(record)
-        save_state(out_dir / "orchestrator-state.json", state)
-        if record["promote"]:
-            state.promoted_checkpoint = Path(record["checkpoint"]).resolve()
-            state.promoted_wilson_lower = float(record["wilson_lower"])
-            state.consecutive_failures = 0
-        else:
-            state.consecutive_failures += 1
-            if (
-                args.halt_after_consecutive_failures > 0
-                and state.consecutive_failures >= args.halt_after_consecutive_failures
-            ):
-                state.halted = True
-                state.halt_reason = (
-                    f"halt-after-{args.halt_after_consecutive_failures} "
-                    "consecutive promotion failures"
-                )
-                emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "halted",
-                                         "iteration": iteration, "halt_reason": state.halt_reason,
-                                         "ts": time.time()})
-        save_state(out_dir / "orchestrator-state.json", state)
+            state.iterations.append(record)
+            save_state(out_dir / "orchestrator-state.json", state)
+            if record["promote"]:
+                state.promoted_checkpoint = Path(record["checkpoint"]).resolve()
+                state.promoted_wilson_lower = float(record["wilson_lower"])
+                state.consecutive_failures = 0
+            else:
+                state.consecutive_failures += 1
+                if (
+                    args.halt_after_consecutive_failures > 0
+                    and state.consecutive_failures >= args.halt_after_consecutive_failures
+                ):
+                    state.halted = True
+                    state.halt_reason = (
+                        f"halt-after-{args.halt_after_consecutive_failures} "
+                        "consecutive promotion failures"
+                    )
+                    emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "halted",
+                                             "iteration": iteration, "halt_reason": state.halt_reason,
+                                             "ts": time.time()})
+            save_state(out_dir / "orchestrator-state.json", state)
 
     emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "run_completed",
                              "halted": state.halted, "halt_reason": state.halt_reason,
@@ -440,6 +447,421 @@ def run_iteration(
     emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "iteration_completed",
                              **record, "ts": time.time()})
     return record
+
+
+# --- async-alphazero-pipelining Phase 1 (2026-05-26) -----------------------
+# When --async-pipeline is set, iter-N+1 selfplay runs in parallel with
+# iter-N distill+gate using the promoted ckpt as of iter-N start
+# (one-iter-stale data). The sync path above stays byte-identical; the
+# async path below is the new code path. See scoping doc at
+# docs/ai-research/scoping/async-alphazero-pipelining.md Phase 1.
+#
+# Design contract:
+#   - Main thread runs selfplay (blocking subprocess.run) and submits
+#     distill+gate jobs to a single background worker thread via
+#     ThreadPoolExecutor(max_workers=1). Selfplay is the long pole; running
+#     it serially in main keeps the writer single-threaded.
+#   - Background worker builds a `record` dict (same schema as
+#     run_iteration's return) and the main thread applies it to `state`
+#     before the next selfplay. save_state() is only ever called on main.
+#   - `init_ckpt` and `init_wilson_lower` are captured at iter-N start in
+#     main and passed explicitly into the worker so distill-N's KL/init
+#     and decide_promotion's floor stay tied to that frozen snapshot, even
+#     if main has already drained an earlier iter's promotion.
+#   - kl_anchor_checkpoint is a long-lived constant (set once at L210, no
+#     per-iter update) so the worker reads it from state without races.
+#   - emit_event is thread-safe enough for our load: open(..., 'a') + a
+#     single short write + close is line-atomic under the GIL on Linux for
+#     payloads << PIPE_BUF (~4 KB). No event payload here is anywhere near
+#     that bound.
+
+
+def _run_iteration_selfplay(
+    repo_root: Path,
+    out_dir: Path,
+    iteration: int,
+    args: argparse.Namespace,
+    init_ckpt: Path,
+    state: R12State,
+    events_path: Path,
+) -> tuple[dict[str, Any], float, int, Path]:
+    """Async-path: run JUST the selfplay phase of iter-N against `init_ckpt`.
+
+    Returns (pool_record, selfplay_elapsed_sec, n_rows, selfplay_path).
+    `init_ckpt` overrides state.promoted_checkpoint as the opponent in the
+    legacy single-opponent path (the pool path uses its own resolution
+    against the pool, with state.promoted_checkpoint only as a fallback —
+    matching the sync behavior).
+    """
+    iter_dir = out_dir / f"iter-{iteration}"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    selfplay_path = iter_dir / "selfplay.jsonl"
+    selfplay_manifest = iter_dir / "selfplay.manifest.json"
+
+    emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "iteration_started",
+                             "iteration": iteration,
+                             "promoted_checkpoint": str(init_ckpt),
+                             "async_pipeline": True,
+                             "ts": time.time()})
+    emit_event(events_path, {"stage": "selfplay", "event_type": "started",
+                             "iteration": iteration, "games": args.selfplay_games,
+                             "mcts_simulations": args.mcts_simulations,
+                             "rollout_vs_pool": bool(getattr(args, "rollout_vs_pool", False)),
+                             "ts": time.time()})
+    t0 = time.time()
+    pool_record: dict[str, Any] = {"rollout_vs_pool": False}
+    if getattr(args, "rollout_vs_pool", False):
+        pool_record = _run_pool_selfplay(
+            repo_root, iter_dir, iteration, args, state,
+            selfplay_path, selfplay_manifest, events_path,
+        )
+    if not pool_record.get("rollout_vs_pool", False):
+        promoted_onnx = ensure_onnx(repo_root, init_ckpt)
+        with inference_context(repo_root, promoted_onnx, args) as model_url:
+            run_selfplay(repo_root, iter_dir, model_url, args,
+                         selfplay_path, selfplay_manifest, iteration,
+                         games=args.selfplay_games,
+                         seed_start=args.selfplay_seed_start + iteration * args.selfplay_games)
+    selfplay_elapsed = time.time() - t0
+    n_rows = count_lines(selfplay_path)
+    emit_event(events_path, {"stage": "selfplay", "event_type": "completed",
+                             "iteration": iteration, "rows": n_rows,
+                             "elapsed_sec": selfplay_elapsed,
+                             "rollout_vs_pool": bool(pool_record.get("rollout_vs_pool", False)),
+                             "ts": time.time()})
+    return pool_record, selfplay_elapsed, n_rows, selfplay_path
+
+
+def _run_iteration_distill_and_gate(
+    repo_root: Path,
+    out_dir: Path,
+    iteration: int,
+    args: argparse.Namespace,
+    init_ckpt: Path,
+    init_wilson_lower: float | None,
+    kl_anchor_checkpoint: Path,
+    pool_record: dict[str, Any],
+    selfplay_elapsed: float,
+    n_rows: int,
+    selfplay_path: Path,
+    events_path: Path,
+) -> dict[str, Any]:
+    """Async-path: run distill + crossover + ONNX export + gate + promotion
+    decision for iter-N. Returns the iter `record` dict (same schema as
+    run_iteration). Does NOT mutate any state — main thread applies the
+    returned record. Safe to run on a background ThreadPoolExecutor worker.
+
+    `init_ckpt` is the promoted ckpt as of iter-N start (what selfplay-N
+    saw) and is what distill warm-starts from. `init_wilson_lower` is the
+    matching floor captured at iter-N start, used by decide_promotion to
+    judge whether iter-N's gate clears the bar.
+    """
+    iter_dir = out_dir / f"iter-{iteration}"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    new_ckpt = iter_dir / "checkpoint.pt"
+    new_onnx = iter_dir / "policy.onnx"
+    gate_manifest = iter_dir / "gate.manifest.json"
+
+    # --- step 2: distill ---
+    distill_data = _build_distill_dataset(
+        out_dir, iter_dir, iteration, selfplay_path, args, events_path
+    )
+    emit_event(events_path, {"stage": "distill", "event_type": "started",
+                             "iteration": iteration, "epochs": args.epochs,
+                             "distill_data": str(distill_data),
+                             "async_pipeline": True, "ts": time.time()})
+    t0 = time.time()
+    run_distill(repo_root, iter_dir, distill_data, init_ckpt,
+                kl_anchor_checkpoint, iteration, args, events_path)
+    distill_elapsed = time.time() - t0
+    if not new_ckpt.exists():
+        raise RuntimeError(f"distill did not produce checkpoint at {new_ckpt}")
+    emit_event(events_path, {"stage": "distill", "event_type": "completed",
+                             "iteration": iteration, "elapsed_sec": distill_elapsed,
+                             "checkpoint": str(new_ckpt), "ts": time.time()})
+
+    # --- step 2.5: crossover probe ---
+    crossover = run_crossover_probe(repo_root, out_dir, iteration, new_ckpt, iter_dir, args, events_path)
+
+    # --- step 3: gate ---
+    export_checkpoint_to_onnx(repo_root, new_ckpt, new_onnx)
+    emit_event(events_path, {"stage": "mcts-gate", "event_type": "started",
+                             "iteration": iteration, "games": args.eval_games,
+                             "mcts_simulations": args.mcts_simulations, "ts": time.time()})
+    t0 = time.time()
+    with inference_context(repo_root, new_onnx, args) as model_url:
+        gate_rc = run_gate(repo_root, iter_dir, model_url, args, gate_manifest, iteration)
+    gate_elapsed = time.time() - t0
+    summary = load_summary(gate_manifest)
+    wilson_lower = float(summary.get("wilson95", {}).get("lower", 0))
+    win_rate = float(summary.get("modelWinRate", 0))
+    games = int(summary.get("games", 0))
+    fallbacks = int(summary.get("heuristicFallbacks", 0))
+    if gate_manifest.exists():
+        raw_manifest = json.loads(gate_manifest.read_text(encoding="utf8"))
+        manifest_passed = bool(raw_manifest.get("passed", False)) if isinstance(raw_manifest, dict) else False
+        if manifest_passed and (games <= 0 or not math.isfinite(wilson_lower)):
+            raise RuntimeError(
+                f"gate.manifest.json reports passed=true at {gate_manifest} but parser "
+                f"extracted wilson_lower={wilson_lower!r} / games={games} — manifest shape "
+                f"and load_summary have diverged. Check the Rust sim-eval-gate emitter "
+                f"vs backend/src/sim/evalGate.ts::summarize."
+            )
+    emit_event(events_path, {"stage": "mcts-gate", "event_type": "completed",
+                             "iteration": iteration,
+                             "wilson_lower": wilson_lower, "win_rate": win_rate, "games": games,
+                             "heuristic_fallbacks": fallbacks, "elapsed_sec": gate_elapsed,
+                             "ts": time.time()})
+
+    # --- promotion decision ---
+    # Frozen-floor: use the floor captured at iter-N START, not whatever
+    # state.promoted_wilson_lower happens to be now (it may have advanced
+    # if main thread drained an iter-(N-1) promotion in the meantime).
+    class _FrozenFloorAdapter:
+        promoted_wilson_lower = init_wilson_lower
+
+    decision = dagger_decide_promotion(
+        _FrozenFloorAdapter(),
+        gate_returncode=gate_rc,
+        wilson_lower=wilson_lower,
+        args=_promotion_args(args, None),
+        eval_n=games,
+        matchup_violations=None,
+    )
+    record = {
+        "iteration": iteration,
+        "checkpoint": str(new_ckpt),
+        "wilson_lower": wilson_lower,
+        "win_rate": win_rate,
+        "games": games,
+        "heuristic_fallbacks": fallbacks,
+        "selfplay_rows": n_rows,
+        "promote": bool(decision.get("promote")),
+        "reason": str(decision.get("reason")),
+        "selfplay_elapsed_sec": selfplay_elapsed,
+        "distill_elapsed_sec": distill_elapsed,
+        "gate_elapsed_sec": gate_elapsed,
+        "crossover": crossover,
+        "rollout_pool": pool_record,
+    }
+    emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "iteration_completed",
+                             **record, "ts": time.time()})
+    return record
+
+
+def _apply_record_to_state(
+    out_dir: Path,
+    state: R12State,
+    record: dict[str, Any],
+    args: argparse.Namespace,
+    events_path: Path,
+) -> None:
+    """Drain one completed iteration record into state (main thread only).
+
+    Mirrors the sync-path post-`run_iteration` block in main(): appends to
+    state.iterations, updates promoted_* on success or consecutive_failures
+    on miss, fires halt event if the failure threshold trips. Saves state
+    twice (once after append, once after promotion-or-halt resolution) to
+    match the sync path's two save_state() calls in main().
+    """
+    iteration = int(record["iteration"])
+    state.iterations.append(record)
+    save_state(out_dir / "orchestrator-state.json", state)
+    if record["promote"]:
+        state.promoted_checkpoint = Path(record["checkpoint"]).resolve()
+        state.promoted_wilson_lower = float(record["wilson_lower"])
+        state.consecutive_failures = 0
+    else:
+        state.consecutive_failures += 1
+        if (
+            args.halt_after_consecutive_failures > 0
+            and state.consecutive_failures >= args.halt_after_consecutive_failures
+        ):
+            state.halted = True
+            state.halt_reason = (
+                f"halt-after-{args.halt_after_consecutive_failures} "
+                "consecutive promotion failures"
+            )
+            emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "halted",
+                                     "iteration": iteration, "halt_reason": state.halt_reason,
+                                     "ts": time.time()})
+    save_state(out_dir / "orchestrator-state.json", state)
+
+
+def _warn_orphan_selfplay(
+    out_dir: Path, start_iter: int, events_path: Path
+) -> None:
+    """If an iter-(start_iter)/selfplay.jsonl exists but the iter wasn't
+    committed to state, it's an orphan from a prior crashed async run.
+    The async path will overwrite it on next selfplay launch (see
+    --resume design in the scoping doc Phase 1 §7). Warn so an operator
+    can notice if they expected this data to be preserved.
+    """
+    orphan = out_dir / f"iter-{start_iter}" / "selfplay.jsonl"
+    if orphan.exists():
+        msg = (
+            f"[r12_orchestrator] WARNING: orphan iter-{start_iter}/selfplay.jsonl "
+            f"from prior crashed run; will be overwritten."
+        )
+        print(msg, flush=True)
+        emit_event(events_path, {
+            "stage": "r12-orchestrator", "event_type": "async_resume_orphan_warning",
+            "iteration": start_iter, "orphan_path": str(orphan), "ts": time.time(),
+        })
+
+
+def _run_async_pipeline(
+    repo_root: Path,
+    out_dir: Path,
+    args: argparse.Namespace,
+    state: R12State,
+    events_path: Path,
+    *,
+    start_iter: int,
+) -> None:
+    """Phase 1: 2-stage pipeline driver.
+
+    Main thread loop (per iteration N):
+      a. Drain any completed records from the background-lane futures and
+         apply them to state (single-writer invariant for state file).
+      b. Check halt: if halted or threshold tripped, stop submitting new
+         iters. Drain in-flight futures and exit.
+      c. Capture (init_ckpt, init_wilson_lower) as the FROZEN snapshot for
+         iter-N — what selfplay-N opposes AND what distill-N warm-starts.
+      d. Run selfplay-N blocking (subprocess.run inside).
+      e. Submit (iteration, init_ckpt, init_wilson_lower, pool_record, ...)
+         to the background distill+gate executor.
+
+    Post-loop: wait for all background futures; drain remaining records.
+
+    Halt-after-N-consecutive-failures may overrun by ≤1 selfplay because
+    iter-N's gate verdict isn't known when iter-(N+1) selfplay starts.
+    This is documented in the scoping doc Phase 1 §6.
+    """
+    emit_event(events_path, {"stage": "r12-orchestrator", "event_type": "async_pipeline_started",
+                             "start_iter": start_iter,
+                             "iterations": args.iterations, "ts": time.time()})
+    _warn_orphan_selfplay(out_dir, start_iter, events_path)
+
+    # In-flight futures from the background lane. Each yields a `record`
+    # dict (or raises). Single-worker pool serializes distill+gate, which
+    # is the GPU-compete constraint — at any time at most one distill+gate
+    # runs, in parallel with at most one selfplay.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1,
+                                               thread_name_prefix="r12-distill-gate") as pool:
+        pending: list[concurrent.futures.Future] = []
+
+        def _drain_completed(block: bool = False) -> None:
+            """Pop completed futures from `pending`, apply records in
+            iteration order. If `block`, wait on each future in submit
+            order (used for the final drain). Otherwise opportunistically
+            drain any DONE futures while preserving submission order.
+            """
+            nonlocal pending
+            if block:
+                # Process in submission order; each .result() blocks.
+                for fut in pending:
+                    try:
+                        record = fut.result()
+                    except Exception as exc:
+                        emit_event(events_path, {
+                            "stage": "r12-orchestrator",
+                            "event_type": "iteration_error_async",
+                            "error": str(exc), "ts": time.time(),
+                        })
+                        raise
+                    _apply_record_to_state(out_dir, state, record, args, events_path)
+                pending = []
+                return
+            # Non-blocking: drain only the contiguous prefix of done futures.
+            # Out-of-order completion is impossible with max_workers=1, but
+            # we still iterate in-order to keep state.iterations append
+            # order stable.
+            while pending and pending[0].done():
+                fut = pending.pop(0)
+                try:
+                    record = fut.result()
+                except Exception as exc:
+                    emit_event(events_path, {
+                        "stage": "r12-orchestrator",
+                        "event_type": "iteration_error_async",
+                        "error": str(exc), "ts": time.time(),
+                    })
+                    raise
+                _apply_record_to_state(out_dir, state, record, args, events_path)
+
+        for iteration in range(start_iter, args.iterations):
+            _drain_completed(block=False)
+            if state.halted:
+                emit_event(events_path, {
+                    "stage": "r12-orchestrator", "event_type": "halted_before_iteration",
+                    "iteration": iteration, "halt_reason": state.halt_reason,
+                    "ts": time.time(),
+                })
+                break
+
+            # Freeze the (ckpt, wilson_lower) snapshot for this iter. This
+            # is what selfplay-N opposes (one-iter-stale relative to any
+            # in-flight distill+gate). It's also what distill-N warm-starts
+            # from and what decide_promotion uses as the floor.
+            iter_init_ckpt = state.promoted_checkpoint
+            iter_init_wilson_lower = state.promoted_wilson_lower
+            if iter_init_ckpt is None:
+                raise RuntimeError(
+                    f"async-pipeline: state.promoted_checkpoint is None at iter "
+                    f"{iteration}; cannot launch selfplay"
+                )
+            iter_init_ckpt = Path(iter_init_ckpt).resolve()
+            emit_event(events_path, {
+                "stage": "r12-orchestrator", "event_type": "async_iter_snapshot",
+                "iteration": iteration,
+                "init_checkpoint": str(iter_init_ckpt),
+                "init_wilson_lower": iter_init_wilson_lower,
+                "ts": time.time(),
+            })
+
+            try:
+                pool_record, selfplay_elapsed, n_rows, selfplay_path = (
+                    _run_iteration_selfplay(
+                        repo_root, out_dir, iteration, args,
+                        iter_init_ckpt, state, events_path,
+                    )
+                )
+            except Exception as exc:
+                emit_event(events_path, {
+                    "stage": "r12-orchestrator", "event_type": "iteration_error",
+                    "iteration": iteration, "error": str(exc), "phase": "selfplay",
+                    "ts": time.time(),
+                })
+                raise
+
+            # KL anchor is a long-lived constant set once at L210 — safe
+            # to capture-by-reference here; the background worker reads
+            # the same Path.
+            kl_anchor = state.kl_anchor_checkpoint
+            fut = pool.submit(
+                _run_iteration_distill_and_gate,
+                repo_root, out_dir, iteration, args,
+                iter_init_ckpt, iter_init_wilson_lower,
+                kl_anchor, pool_record, selfplay_elapsed, n_rows, selfplay_path,
+                events_path,
+            )
+            pending.append(fut)
+
+        # Loop exhausted (either ran all iters or halted). Wait for
+        # in-flight distill+gate jobs to finish so their records land in
+        # state and orchestrator-state.json reflects the final post-pipeline
+        # outcome (matches sync-path semantics where every committed iter
+        # had its record saved before main returned).
+        emit_event(events_path, {
+            "stage": "r12-orchestrator", "event_type": "async_pipeline_draining",
+            "pending": len(pending), "ts": time.time(),
+        })
+        _drain_completed(block=True)
+        emit_event(events_path, {
+            "stage": "r12-orchestrator", "event_type": "async_pipeline_completed",
+            "ts": time.time(),
+        })
 
 
 def resolve_engine_command(engine: str, sim_name: str, repo_root: Path) -> list[str]:
@@ -1679,6 +2101,19 @@ def parse_args() -> argparse.Namespace:
                    help="Forward --amp to train_bc.py (bfloat16 by default on CUDA). "
                         "Default ON post distill-throughput-spike Phase 1. Use --no-amp "
                         "to disable.")
+    # async-alphazero-pipelining Phase 1 (2026-05-26): when set, iter-N+1
+    # selfplay starts in parallel with iter-N distill+gate using the
+    # promoted ckpt as of iter-N start (one-iter-stale data). Default OFF
+    # preserves sequential semantics (byte-identical to pre-spike). See
+    # docs/ai-research/scoping/async-alphazero-pipelining.md. Phase 2
+    # Wilson-A/B validation will determine whether the default flips.
+    p.add_argument("--async-pipeline", dest="async_pipeline",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="When set, iter-N+1 selfplay starts in parallel with "
+                        "iter-N distill+gate using the promoted ckpt as of iter-N "
+                        "start (one-iter-stale data). Default OFF preserves "
+                        "sequential semantics. See "
+                        "docs/ai-research/scoping/async-alphazero-pipelining.md.")
     p.add_argument("--distill-compile", action="store_true",
                    help="When set, forwards --compile to train_bc.py so distill wraps the "
                         "model in torch.compile(mode=reduce-overhead) on CUDA. Default OFF "
