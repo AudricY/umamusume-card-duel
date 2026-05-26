@@ -1,7 +1,7 @@
 # v3.6 AlphaZero-style Recipe — Scoping
 
 - **Date:** 2026-05-26
-- **Status:** **IMPLEMENTED-FIRING-P0-P3** — `--mcts-two-sided` plumbed through `r12_orchestrator.py` (run_selfplay + run_gate + run_started event). Phase 1 probes P0-P3 firing on the v3.6 cap128 cont-iter2 ckpt; Phase 2 training loop user-pre-approved.
+- **Status:** **LANDED-AZ-RECIPE-INFERIOR-AT-V36-SCALE** — Phase 1 collapsed across all three AZ deltas (P3 wl=0.3798 at n=120, falsifying rule 3 at smoke); overrode into Phase 2 on calibration-mismatch grounds. Phase 2 halted at iter-4 after the predicted iter-2-peak-then-regress pattern (best iter-1 wl=0.4578 at n=240, in-recipe). Tight-gate at n=10k under the **anchor recipe** (rollout, single-sided): iter-1 wl=0.5868, **statistically tied** with v3.6 anchor 0.5880, with **per-side asymmetry halved** (0.068 → 0.034). Tight-gate at n=10k under the **matched (AZ) recipe**: iter-1 wl=0.4615, a **−0.125 regression** — the AZ recipe at inference is genuinely worse than rule-bot-collapse + rollout, even on the model trained for it. **Net: H1 (overall-strength lift) FALSIFIED. The only positive signals are (a) cross-recipe asymmetry redistribution and (b) ~7× faster eval (67s vs 495s at n=10k with wave-size=16).**
 - **Parent:** `v36-priors-and-arithmetic-scoping.md` (LANDED-SOFT-SHIP-2026-05-25, wl_lower=0.5880) + `two-sided-mcts-scoping.md` (IMPLEMENTED-AWAITING-A1) + `progress/r110.md §4a` (value-head-leaf at n=10k flagged as untested follow-up).
 - **Scope:** Convert the v3.6-extended training recipe into the closest practical match to AlphaZero canon, holding state-feature schema (state_dim=246), trunk capacity (hidden=128, depth=2), sim budget (100), and replay-window-3 fixed. Tests whether AZ search shape (two-sided MCTS + value-head leaf + no KL anchor) lifts strength vs the rule-bot-collapse + rollout-leaf + KL-pinned v3.6-extended baseline.
 
@@ -169,4 +169,71 @@ Per-iter eval cadence:
 
 ## 9. Status line
 
-**`IMPLEMENTED-FIRING-P0-P3 2026-05-26`** — wiring landed; Phase 1 probes firing on v3.6 cap128 cont-iter2; Phase 2 training loop user-pre-approved; gate decisions follow §3 and §4 falsification bands.
+**`LANDED-NULL-WITH-ASYMMETRY-REDISTRIBUTION 2026-05-26`** — see §10 for full result chain.
+
+---
+
+## 10. Results
+
+### 10.1 Phase 1 — gate-eval probes at n=120 on v3.6 cap128 cont-iter2
+
+`runs/R16-P3-v36-az-phase1/{P0,P1,P2,P3}/gate.manifest.json` (n=120 each, --games 60 --model-side both, sims=100, prior=policy):
+
+| arm | leaf | two-sided | wl_lower | win_rate | wl_upper | Δ vs P0 |
+|---|---|---|---|---|---|---|
+| P0 | rollout | off | 0.5442 | 0.6333 | 0.7142 | — (within Wilson noise of n=10k anchor 0.5880) |
+| P1 | rollout | on | 0.4526 | 0.5417 | 0.6281 | −0.0916 |
+| P2 | value-head | off | 0.3719 | 0.4583 | 0.5474 | −0.1724 |
+| P3 | value-head | on | 0.3798 | 0.4667 | 0.5556 | −0.1644 |
+
+**Pre-registered rule 3 fired** (P3 < 0.50). Override into Phase 2 on calibration-mismatch grounds: the v3.6 value head was trained on rule-bot-collapse self-play; using it as a MCTS leaf is OOD. The eval result measures inference compatibility; only retraining can measure adaptation.
+
+### 10.2 Phase 2 — AZ training loop (8-iter cap, halt-after-3)
+
+`runs/R16-P3-v36-az-from-cont-iter2/iter-*/gate.manifest.json` (n=240 each, in-recipe gate: value-head + two-sided, sims=100):
+
+| iter | wl_lower (n=240) | promote | reason |
+|---|---|---|---|
+| 0 | 0.4372 | ✓ | floor=0.30 (init re-eval) |
+| 1 | 0.4578 | ✓ | +0.0206 vs iter-0, BEST |
+| 2 | 0.3964 | ✗ | < floor 0.4578 (FAIL #1) |
+| 3 | 0.3883 | ✗ | < floor 0.4578 (FAIL #2) |
+| 4 | 0.4005 | ✗ | < floor 0.4578 (FAIL #3 → HALT) |
+
+The predicted iter-2-peak-then-regress pattern (scoping risk #2) fired hard with KL anchor dropped. Each iter ~30s wall (5s self-play + 16-27s distill + 5s gate); total run ~4 min wall.
+
+### 10.3 Phase 3 — tight gates at n=10k on iter-1 (best AZ ckpt)
+
+`runs/R16-P3-v36-az-from-cont-iter2/tight-gate-iter-1/gate.manifest.json` (anchor recipe: rollout, single-sided, sims=100):
+
+| | overall wl_lower | player_wl | opp_wl | asymmetry |
+|---|---|---|---|---|
+| v3.6 cap128 cont-iter2 anchor | **0.5880** | 0.5500 | 0.6179 | 0.0679 |
+| AZ iter-1 (anchor-recipe eval) | **0.5868** | 0.5659 | 0.5998 | 0.0339 |
+| Δ | −0.0012 (tied) | +0.0159 | −0.0181 | **−0.0340 (halved)** |
+
+`runs/R16-P3-v36-az-from-cont-iter2/tight-gate-az-recipe-iter-1/gate.manifest.json` (matched recipe: value-head + two-sided + wave-size=16, sims=100, n=10k):
+
+| | overall wl_lower | player_wl | opp_wl | asymmetry | elapsed |
+|---|---|---|---|---|---|
+| iter-1 (AZ-recipe eval) | **0.4615** | 0.4424 | 0.4726 | 0.0302 | **67s** |
+| iter-1 (anchor-recipe eval) | 0.5868 | 0.5659 | 0.5998 | 0.0339 | 495s |
+| Δ (AZ vs anchor recipe, same ckpt) | **−0.1253** | −0.1235 | −0.1272 | −0.0037 | **7.4× faster** |
+
+Production verdict: under the recipe iter-1 was TRAINED for, it loses 12.5 points of wl_lower vs the legacy rollout recipe. The AZ search mechanism (value-head leaf + two-sided opp nodes) is the regression source; rule-bot-collapse + rollout-to-terminal is the stronger search at v3.6 scale.
+
+### 10.4 Interpretation
+
+1. **Overall-strength bet (H1) FALSIFIED at hidden=128/depth=2.** Under the matched AZ recipe (the production form), iter-1 regresses −0.125 vs the v3.6 anchor. Under the legacy rollout recipe, iter-1 ties the v3.6 anchor (Δ=−0.0012). AZ search shape is the regression source — at v3.6 scale, rule-bot-collapse + rollout-to-terminal is genuinely a stronger search than value-head leaf + two-sided opponent nodes, even on the model trained for the AZ recipe.
+2. **Per-side asymmetry redistribution is a real off-axis lift (anchor-recipe only).** The v3.6 anchor's known weak-player-side / strong-opp-side asymmetry (the surface that commit `cdd8ae5` flagged as the next probe target) **shrinks by half** when iter-1 is evaluated under the anchor recipe: player gains +0.0159, opp gives back −0.0181. Under the matched AZ recipe the asymmetry is also reduced (0.034 → 0.030) but at a floor 12 points lower, so the lift is moot for production. The asymmetry-redux finding is recipe-specific.
+3. **Iter-2-peak-then-regress (H3) FALSIFIED as recipe-stability claim.** Dropping the KL anchor produces the same pattern as r110 §1 documented — peak at iter-1 then degrade. The W6 fixed-KL-anchor remains load-bearing for stability past iter-1.
+4. **Cross-recipe transfer is robust for the underlying model.** Iter-1 was trained under value-head + two-sided MCTS; evaluating it under rollout + single-sided MCTS still ties the v3.6 anchor. The model's learned policy/value is generalizable across MCTS recipes — the inference-time gap is the search-mechanism difference, not a model-quality difference.
+5. **Compute-side benefit of AZ recipe: 7.4× faster eval at n=10k.** Wave-size=16 batched inference on the value-head MCTS path completes 10k games in 67s vs 495s for the rollout path. If asymmetry-redistribution or compute were the production levers (rather than overall winrate), the AZ recipe would be the right choice. They aren't, so it isn't.
+
+### 10.5 Follow-up backlog (if pursued)
+
+- **AZ with weak KL anchor (`--kl-anchor-weight 0.01`).** Could the AZ recipe with a weak anti-drift regularizer survive past iter-1 and accumulate more asymmetry-reduction gains? Cheap (~4 min wall) follow-up.
+- **Asymmetry-targeted recipe.** If asymmetry reduction is the only consistent AZ lift, an explicit asymmetry-penalty in the distill loss might dominate AZ search shape. Different axis.
+- **From-scratch ("Zero") AZ.** Untested. The full AZ promise is bootstrap-from-random; this scoping inherited a v3.6 ckpt. Estimate: ~10× the compute of this Phase 2 (cold init + many more iters needed).
+- **Sim-budget bump (sims=400 or 800).** Orthogonal to the search-shape axis tested here; lives in `gpu-fed-stronger-mcts-scoping.md`.
+
