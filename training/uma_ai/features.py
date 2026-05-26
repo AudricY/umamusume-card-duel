@@ -20,7 +20,14 @@ import numpy as np
 # Additive only. Existing slot meanings unchanged. Existing R7/R15.S1 trace
 # JSONLs re-extract under v2.1 without resimulating (R7.b.0 verdict YES).
 STATE_DIM = 110
-ACTION_DIM = 48
+# v38-slim-feature-add bumped 48 → 52 (4 new cross-bit action slots at
+# [48:52]). v3 (48-d) action vectors are NOT loadable under v4 — call
+# sites that compare `action_features.shape[-1]` against ACTION_DIM
+# (dataset loader, serve_onnx guard, export_onnx ckpt-vs-runtime gate)
+# now require 52-d. v3.7 ckpts are no longer re-exportable without
+# downgrading this constant; v3.7 is SOFT-SHIPPED and not in further
+# rotation.
+ACTION_DIM = 52
 # R7.b.2 Phase 2 bumped STATE_FEATURE_SCHEMA_VERSION 2.1 → 3.0 (Python
 # encoder consumes `cardIdsByZone` + per-action idx). R16-P1 bumps the
 # latest-schema marker 3.0 → 3.1 (164-d temporal/turn-state builder). This
