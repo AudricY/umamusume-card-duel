@@ -737,12 +737,24 @@ fn run_inline_row(
 /// Run a stacked-B batch through the inline session and return per-row
 /// `PredictionV3`s in input order. Shared between the public
 /// `predict_v3_batch` API (B6 intra-tree wave batching) and the
-/// cross-thread dispatcher's `run_batch` (B2). Behaviour is identical to
-/// the dispatcher path: same n_actions-padding, same `Session::run`
-/// shape, same per-row `greedy_masked_softmax`. The only difference is
-/// the `Session` access pattern — inline uses the `UnsafeCell`
-/// punch-through (ORT's `Session::run` is documented thread-safe), the
-/// dispatcher path owns the Session single-threadedly.
+/// cross-thread dispatcher's `run_batch` (B2).
+///
+/// **Action-count bucketing (2026-05-26).** Rows are sorted by
+/// `n_actions` desc and (when the wave has meaningful spread) split
+/// into K=2 buckets that each run their own `Session::run` padded to
+/// the bucket's local max. This avoids paying the global wave-max
+/// padding on every row when most rows have small `n_actions`. The
+/// tripwire `small_max * 4 >= big_max * 3` (i.e. small ≥ 0.75 * big)
+/// OR `n_batch < 4` falls back to a single bucket, which is byte-
+/// identical to the pre-2026-05-26 single-call path. Scoping:
+/// `docs/ai-research/scoping/action-count-bucketed-wave-batching.md`.
+///
+/// Bit-identity: per-row inputs and per-row outputs (probs via
+/// `greedy_masked_softmax`, scalar value) are identical to the
+/// single-call path because `Session::run` computes each row
+/// independently — no cross-row reduction. Rows in different buckets
+/// never share a reduction. Output order is reassembled to the
+/// original input order via the sort permutation.
 fn run_inline_batch(
     guard: &SessionGuard,
     schema: GraphSchema,
@@ -752,13 +764,101 @@ fn run_inline_batch(
     if n_batch == 0 {
         return Ok(Vec::new());
     }
-    let state_dim = rows[0].state_dim;
-    let max_n = rows.iter().map(|r| r.n_actions).max().unwrap_or(0);
+
+    let mut sorted_indices: Vec<usize> = (0..n_batch).collect();
+    sorted_indices.sort_by_key(|&i| std::cmp::Reverse(rows[i].n_actions));
+
+    let max_n_global = rows[sorted_indices[0]].n_actions;
+    let min_n_global = rows[sorted_indices[n_batch - 1]].n_actions;
+    if max_n_global == 0 {
+        return Err(InferenceError::SchemaMismatch(
+            "predict_v3_batch: every row has empty legal_actions".into(),
+        ));
+    }
+
+    // Bucketing decision. Two tripwires must BOTH clear to bucket:
+    //   1. `big_max >= 8`  — below this the policy head is cheap enough
+    //      (per the probe at hidden=256/depth=4: A=4 → 3.4ms,
+    //      A=8 → 4.3ms; super-linear cost starts kicking in past A=8)
+    //      that an extra Session::run loses to overhead.
+    //   2. `small_max * 2 < big_max`  — at least a 2× A reduction on the
+    //      small bucket, so the saved policy-head FLOPs amortize the
+    //      extra per-call overhead.
+    // First validation pass (without `big_max >= 8`) regressed wall
+    // 1.56× because production wave_size=16 vhleaf at sims=400 has
+    // bursts of forced moves: ~80% of waves had max_n ≤ 5 (1-3 legal
+    // actions per leaf), where bucketing doubles call count for no
+    // FLOP savings. Scoping doc + histogram: docs/ai-research/scoping/
+    // action-count-bucketed-wave-batching.md.
+    let bucket_ranges: Vec<(usize, usize)> = if std::env::var("UMA_DISABLE_ACTION_BUCKETING").is_ok()
+    {
+        vec![(0, n_batch)]
+    } else if n_batch >= 4 {
+        let split = n_batch / 2;
+        let big_max = rows[sorted_indices[0]].n_actions;
+        let small_max = rows[sorted_indices[split]].n_actions;
+        if big_max >= 8 && small_max * 2 < big_max {
+            vec![(0, split), (split, n_batch)]
+        } else {
+            vec![(0, n_batch)]
+        }
+    } else {
+        vec![(0, n_batch)]
+    };
+
+    if std::env::var("UMA_LOG_WAVE_NACTIONS").is_ok() {
+        static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n < 20 {
+            eprintln!(
+                "[wave_nactions] B={} max_n={} min_n={} buckets={}",
+                n_batch,
+                max_n_global,
+                min_n_global,
+                bucket_ranges.len()
+            );
+        }
+    }
+
+    let mut out: Vec<Option<PredictionV3>> = (0..n_batch).map(|_| None).collect();
+    for (start, end) in bucket_ranges {
+        let bucket = &sorted_indices[start..end];
+        let bucket_max_n = rows[bucket[0]].n_actions;
+        let bucket_preds = run_inline_bucket(guard, schema, &rows, bucket, bucket_max_n)?;
+        for (b_idx, pred) in bucket_preds.into_iter().enumerate() {
+            out[bucket[b_idx]] = Some(pred);
+        }
+    }
+
+    Ok(out
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| p.unwrap_or_else(|| panic!("run_inline_batch: row {i} not filled")))
+        .collect())
+}
+
+/// Single-bucket runner: pack `bucket` (indices into `rows`) into the
+/// stacked input arrays at padding `max_n`, call `Session::run` once,
+/// return per-row predictions in **bucket order** (same order as
+/// `bucket.iter()`). Caller is responsible for the final permutation
+/// back to original input order.
+fn run_inline_bucket(
+    guard: &SessionGuard,
+    schema: GraphSchema,
+    rows: &[PackedRow],
+    bucket: &[usize],
+    max_n: usize,
+) -> Result<Vec<PredictionV3>, InferenceError> {
+    let n_batch = bucket.len();
+    if n_batch == 0 {
+        return Ok(Vec::new());
+    }
     if max_n == 0 {
         return Err(InferenceError::SchemaMismatch(
             "predict_v3_batch: every row has empty legal_actions".into(),
         ));
     }
+    let state_dim = rows[bucket[0]].state_dim;
     let needs_slots = matches!(schema, GraphSchema::V3_2 | GraphSchema::V3_4);
 
     let mut state_buf: Vec<f32> = Vec::with_capacity(n_batch * state_dim);
@@ -777,11 +877,12 @@ fn run_inline_batch(
         Vec::new()
     };
 
-    for (row_idx, r) in rows.iter().enumerate() {
+    for (row_idx, &orig_idx) in bucket.iter().enumerate() {
+        let r = &rows[orig_idx];
         if r.state_dim != state_dim {
             return Err(InferenceError::SchemaMismatch(format!(
                 "predict_v3_batch: state_dim {} != {} on row {}",
-                r.state_dim, state_dim, row_idx
+                r.state_dim, state_dim, orig_idx
             )));
         }
         state_buf.extend_from_slice(&r.state);
@@ -915,7 +1016,8 @@ fn run_inline_batch(
     }
 
     let mut out: Vec<PredictionV3> = Vec::with_capacity(n_batch);
-    for (row_idx, r) in rows.iter().enumerate() {
+    for (row_idx, &orig_idx) in bucket.iter().enumerate() {
+        let r = &rows[orig_idx];
         let row_start = row_idx * max_n;
         let row_logits = &logits_flat[row_start..row_start + r.n_actions];
         let probs = greedy_masked_softmax(row_logits);
