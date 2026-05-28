@@ -7,7 +7,7 @@
 
 ## Summary
 
-ReBeL is the best long-term research direction for this game's AI shape, but it should be implemented as a staged end-to-end system rather than as a one-shot full reproduction of the poker paper.
+ReBeL is the best long-term research direction for this game's AI shape, and the implementation target should be a full end-to-end ReBeL system rather than another AlphaZero variant with belief sampling bolted on.
 
 The reason is structural. The failed AlphaZero-style line searched exact simulator states and asked a value head to summarize stochastic hidden-card futures. That recipe was mismatched to this game:
 
@@ -16,7 +16,7 @@ The reason is structural. The failed AlphaZero-style line searched exact simulat
 - the observed legal-action branching factor is small, so higher MCTS sims mostly sharpen already-small visit targets;
 - no-anchor self-play produced large per-iteration weight drift without a positive strength curve.
 
-ReBeL's core move is the right theoretical correction: search over a **public belief state** instead of a fully known game state. For this repo, the first useful version should be "ReBeL-lite": particle public-belief state + rollout/value search + belief-conditioned training rows. True CFR subgame search can come after that substrate proves useful.
+ReBeL's core move is the right theoretical correction: search over a **public belief state** instead of a fully known game state. For this repo, the big-bang target is public-history belief reconstruction, public-belief subgame search, neural belief-state policy/value prediction, self-play data generation, training, export, and fixed/diverse evaluation as one coherent system.
 
 ## Relevant Literature
 
@@ -78,7 +78,7 @@ one exact sampled full state
 
 This matters because a legal policy must choose the same action for all hidden worlds that look identical to the acting player. A search that can pick different actions for different sampled opponent hands is cheating, even if it never explicitly exposes those cards to the model.
 
-### Full ReBeL is too large for the first patch
+### Full ReBeL is the implementation target
 
 A faithful ReBeL implementation needs:
 
@@ -89,11 +89,11 @@ A faithful ReBeL implementation needs:
 - training targets from belief-aware search;
 - exploitability or best-response-style evaluation.
 
-That is a large system. Implementing all of it at once would make failures hard to diagnose. The right approach is to land an end-to-end ReBeL-shaped minimum viable loop first, then replace approximations with more principled pieces.
+That is the scope. Intermediate experiments are allowed, but only as validation probes inside the full build. They should not redefine the target into a phased rollout or a ReBeL-lite endpoint.
 
 ### Rollouts remain important
 
-The AlphaZero postmortem found that rollout leaf outperformed pure value-head leaf. ReBeL does not require deleting rollouts immediately. In this game, rollouts are an integration tool for stochastic futures. The first ReBeL-lite version should keep rollout-backed evaluation and use the belief machinery to fix hidden-information conditioning before trying pure value leaves again.
+The AlphaZero postmortem found that rollout leaf outperformed pure value-head leaf. ReBeL does not require deleting rollouts from the codebase, but full ReBeL should make the primary search backup a public-belief value/search procedure rather than ordinary rollout MCTS. Rollouts remain useful as a baseline, debugging oracle, and auxiliary target source.
 
 ## Working Definitions
 
@@ -112,7 +112,7 @@ PublicObservation
 + per-particle weight
 ```
 
-The initial version can use uniformly weighted particles.
+Particles carry weights. Uniform weights are acceptable only where public history gives no basis to distinguish private worlds; otherwise weights should reflect consistency and likelihood under the observed public sequence.
 
 ### Particle
 
@@ -120,202 +120,256 @@ A particle is a full `GameState` consistent with the acting player's public obse
 
 ### Belief search target
 
-A belief search target is an action distribution and optional action-value vector produced by aggregating search over particles rooted at the same public belief state. It must be indexed only by actions legal from the acting player's observation.
+A belief search target is an action distribution and optional action-value vector produced by public-belief search rooted at one public information set. Particles support belief evaluation and sampled traversal, but the returned root target must be indexed only by actions legal from the acting player's observation.
 
-## E2E Implementation Plan
+## Full E2E Implementation Scope
 
-### Slice 0: Evidence and contract locks
+The target is a complete ReBeL-style system with all major components present in the first full implementation. Validation probes can run along the way, but the implementation should be scoped as one integrated architecture.
 
-Goal: make the ReBeL line hard to confuse with the closed pure-AZ line.
+### 1. Public history and belief reconstruction
 
-Deliverables:
+Add a public-history layer that records enough information to reconstruct legal hidden-state beliefs from the perspective of either side:
 
-- Add a manifest mode name, e.g. `rebel-lite-v0`.
-- Every generated row records:
-  - `kind: "belief-selfplay"`;
-  - `beliefSchemaVersion`;
-  - `particleCount`;
-  - `beliefSampler`;
-  - `searchAggregator`;
-  - deck pair ids;
-  - state/action schema metadata.
-- Add a small smoke fixture proving rows from two different hidden particles share one public observation/action target frame.
+- initial deck identities and decklists for both players;
+- public setup events and all public zone transitions;
+- cards revealed from deck/hand/prize-equivalent hidden zones;
+- search, draw, discard, shuffle, promote, evolution, and trainer effects with public/private visibility tags;
+- chance events such as coin flips;
+- current public board, discard, stadium, points, turn, phase, pending choices, and visible energy zones.
 
-Exit gate:
+The belief constructor should take `(public_history, observer_side, known_private_state_for_observer)` and produce a `PublicBeliefState`.
 
-- A 1-game smoke writes parseable belief-selfplay rows with legal actions, target distribution, value target, and belief metadata.
+The first implementation may use exact simulator access during self-play to audit the belief, but the belief itself should be generated from public history and legal private information. Avoid making true hidden state the primary sampler input, because that preserves the wrong abstraction.
 
-### Slice 1: Public-belief particle sampler
+Required outputs:
 
-Goal: sample hidden worlds consistent with the current public observation.
+- `PublicBeliefState`
+- hidden-zone card probability summaries
+- weighted private-state particles
+- consistency/audit diagnostics
+- deterministic serialization for replay and dataset rows
 
-MVP algorithm:
+### 2. Public-belief state representation
 
-1. Start from the real `GameState` during self-play.
-2. For the acting side, preserve known private hand and all public zones.
-3. For the non-acting side, hide private hand/deck order from the search policy, then resample from the side's remaining decklist multiset minus public zones.
-4. Generate `N` full `GameState` particles with deterministic seed labels.
-5. Reject particles that violate counts, public active/bench/discard/stadium, points, turn, pending choice, or energy zones.
-
-Initial simplification:
-
-- It is acceptable for the sampler to use the true remaining hidden-card multiset while randomizing assignment/order, because self-play infrastructure has access to the full simulator state. The row must not expose the sampled private cards to the model input. Later slices can replace this with stricter public-history reconstruction.
-
-Key risk:
-
-- If search uses full sampled hidden state too freely, strategy fusion can remain. Slice 2 mitigates by aggregating one action target per public observation rather than training per-particle policies.
-
-Exit gate:
-
-- For fixed seeds, particle generation is deterministic.
-- Particle public observations match the root public observation for the acting side.
-- Hidden opponent hand/deck vary across particles when enough unknown cards exist.
-
-### Slice 2: Belief-sampled search aggregation
-
-Goal: produce one legal action distribution per public belief state.
-
-MVP algorithm:
+Represent each search/train root as:
 
 ```text
-for each decision:
-  root_obs = build_public_observation(real_state, side_to_act)
-  root_legal = enumerate_legal_actions(real_state, side_to_act)
-  particles = sample_particles(real_state, side_to_act, K)
-
-  aggregate_visits = zeros(len(root_legal))
-  aggregate_q = zeros(len(root_legal))
-
-  for particle in particles:
-    particle_legal = enumerate_legal_actions(particle, side_to_act)
-    map particle actions back to root legal actions by stable action identity
-    run existing MCTS on the particle
-    add visits/Q into aggregate slots
-
-  target = normalize(aggregate_visits)
-  selected_action = sample target early / argmax late
-  apply selected_action to the real state
+PublicBeliefState:
+  public_observation
+  public_history_digest
+  observer_side
+  legal_actions
+  particles: [PrivateWorldParticle]
+  particle_weights
+  belief_features
 ```
 
-Use rollout leaf first. Use policy prior only if the policy input is the acting player's public observation, not the hidden particle internals.
+Each `PrivateWorldParticle` is a full private-world assignment consistent with public history and the observer's legal knowledge:
 
-Action mapping requirement:
+```text
+PrivateWorldParticle:
+  game_state
+  weight
+  hidden_zone_assignment
+  likelihood_features
+  rng_seed_label
+```
 
-- Do not rely on legal-action index equality across particles. Use stable action identity serialization. If an action references an unknown opponent-private card, it should not be a legal root action for the acting player anyway.
+`belief_features` should be model-facing and stable:
 
-Exit gate:
+- opponent hand card-presence probabilities;
+- opponent deck composition probabilities by card id and coarse card class;
+- own deck draw probabilities when own deck order is unknown to the player;
+- hidden-zone entropy/count features;
+- reveal-history features;
+- per-action belief annotations when relevant, e.g. probability that an action's target line is punished by known card classes.
 
-- Aggregated visit distributions sum to 1.
-- Selected action is legal in the real root state.
-- Same public root with different particle order produces either identical targets or differences bounded to RNG labels.
+The model should not receive sampled hidden card identities as ordinary visible cards. It receives public observation plus belief summaries.
 
-### Slice 3: Belief-selfplay row loader
+### 3. Neural ReBeL model
 
-Goal: train the current policy/value model from belief-search rows.
+Extend the current policy/value model into a belief-conditioned network:
 
-MVP row fields:
+```text
+inputs:
+  public state features
+  card zone embeddings
+  per-Uma slot tokens
+  belief summary features
+  legal action features
+  optional public-history features
+
+outputs:
+  action policy logits over legal actions
+  public-belief scalar value
+  private-state / counterfactual value estimates
+  optional action-value head
+```
+
+The key difference from the current value head is that value prediction is conditioned on public belief, not a single exact simulator state. If private-state value heads are too expensive for every hidden world, bucket them initially by particle/sample index at training time and distill to aggregate belief value plus optional action-Q.
+
+Training losses:
+
+- policy loss against public-belief search policy;
+- value loss against search value and/or terminal outcome;
+- counterfactual/private-state value loss where search supplies it;
+- optional action-Q loss from subgame search;
+- weak anchor/regularization to prevent the no-KL drift seen in pure AZ.
+
+### 4. Public-belief subgame search
+
+Implement a ReBeL-style search module separate from ordinary MCTS:
+
+```text
+run_public_belief_search(public_belief_state, config, model) -> BeliefSearchResult
+```
+
+`BeliefSearchResult` should include:
+
+- root policy over legal public actions;
+- root action values;
+- public-belief value;
+- per-particle/private-state values where available;
+- regret/search diagnostics;
+- sampled action;
+- search tree/subgame summary suitable for debugging.
+
+Search should operate over public belief states. At player decision nodes, actions are chosen from the public legal action set. At chance/private-update nodes, particle states and weights update according to draw/search/shuffle/reveal mechanics. At opponent decision nodes, the policy is conditioned on that opponent's own information set/public belief, not on the root player's hidden sample.
+
+The principled target is CFR-style subgame search:
+
+```text
+initialize strategy from neural policy
+for iteration in search_iters:
+  traverse public-belief subgame
+  use neural value at depth/leaf public-belief states
+  update cumulative regrets per public information set
+  update average strategy
+return average root strategy + values
+```
+
+Practical implementation can use sampled particles and sampled traversals, but the search state must remain an information-set/public-belief state, not independent perfect-information MCTS per particle.
+
+### 5. Belief-aware self-play
+
+Add a new self-play driver, preferably a distinct Rust binary:
+
+```text
+sim-rebel-selfplay
+```
+
+Per decision:
+
+1. Append public event history from the real game.
+2. Build public belief state for side to act.
+3. Run public-belief subgame search.
+4. Sample/select action from the search policy with a temperature schedule.
+5. Apply selected action to the real simulator state.
+6. Record a `rebel-selfplay` row.
+
+Rows should include:
 
 ```json
 {
-  "kind": "belief-selfplay",
+  "kind": "rebel-selfplay",
   "schemaVersion": 1,
   "beliefSchemaVersion": 1,
   "observation": {},
+  "beliefFeatures": {},
+  "publicHistoryDigest": {},
   "legalActions": [],
-  "visitDistribution": [],
-  "rootMeanQ": [],
+  "searchPolicy": [],
+  "searchActionValues": [],
+  "beliefValue": 0.0,
+  "privateStateValues": [],
   "valueTarget": 1.0,
-  "particleCount": 16,
-  "beliefSampler": "hidden-zone-resample-v0",
-  "searchAggregator": "particle-rollout-mcts-v0"
+  "particleCount": 64,
+  "searchIterations": 64,
+  "searchAlgorithm": "public-belief-cfr-v1",
+  "beliefSampler": "public-history-particles-v1",
+  "playerDeckId": "...",
+  "opponentDeckId": "..."
 }
 ```
 
-Implementation path:
+Use `kind="rebel-selfplay"` rather than overloading `mcts-selfplay`; this is a different algorithm and should fail loudly if accidentally loaded by the old dataset path.
 
-- Mirror `training/uma_ai/selfplay_dataset.py`, but keep a distinct loader class so schema errors identify belief rows explicitly.
-- Reuse existing feature builders and legal-action featurization.
-- Keep value target as terminal outcome initially.
-- Optional: include aggregate root mean-Q as an auxiliary target after the loader is stable.
+### 6. Training and orchestration
 
-Exit gate:
-
-- Loader smoke constructs a batch with state features, action features, action mask, policy target, and value target.
-
-### Slice 4: ReBeL-lite orchestrator
-
-Goal: run the full loop end-to-end.
-
-First recipe:
+Add a full training mode:
 
 ```text
-self-play:
-  engine: rust
-  deck-sampling: uniform
-  model-side: both
-  belief particles: 8 or 16
-  per-particle sims: 25-50
-  leaf: rollout
-  prior: policy after smoke, uniform for first invariants
-  root dirichlet: on
-
-training:
-  data-mode: belief-distill
-  value target: terminal z
-  policy target: aggregate belief-search visits
-  KL anchor: weak on, not zero
-  replay: checkpoint/windowed replay preserved
-
-eval:
-  fixed gate for continuity
-  uniform/deck-diverse gate for directive A
-  side split reported
+data-mode: rebel
+engine: rust
+selfplay-binary: sim-rebel-selfplay
+search: public-belief-cfr-v1
+deck-sampling: uniform
+model-side: both
 ```
 
-Compute note:
+The orchestrator should run:
 
-- `K particles * S sims` should initially match or stay below the current rollout-MCTS budget. Example: `K=8, S=25` is 200 particle-sims per decision, but each particle search has lower per-tree depth/statistical strength. The point of the first run is target quality, not raw eval strength.
+1. self-play with public-belief search;
+2. dataset validation and schema guard;
+3. policy/value/counterfactual training;
+4. ONNX export with belief-input metadata;
+5. fixed gate;
+6. uniform/deck-diverse gate;
+7. side-split and matchup diagnostics;
+8. checkpoint pool update.
 
-Exit gate:
+This is a new line, not a patch on the old AlphaZero recipe. Manifest names should reflect that, e.g. `R17-rebel-e2e`.
 
-- One full iteration completes: belief self-play, distill, ONNX export, fixed gate, uniform gate.
-- Manifest records all belief and schema knobs.
+### 7. Evaluation and exploitability probes
 
-### Slice 5: Replace approximations
+ReBeL's point is robust imperfect-information play, so evaluation cannot only be latest-vs-heuristic:
 
-Only after slices 0-4 produce stable artifacts:
+- fixed historical gate for continuity;
+- uniform deck-diverse gate;
+- side-conditioned gate;
+- checkpoint league;
+- policy-vs-rollout-MCTS comparison;
+- belief-search-vs-ordinary-MCTS comparison;
+- exploitability-style probe where a policy or search agent trains/responds against frozen ReBeL checkpoints;
+- forced-state tactical benchmark with hidden-information cases.
 
-- Replace true-state hidden multiset access with public-history belief reconstruction.
-- Add particle weights from likelihood under observed public actions.
-- Add a belief encoder: aggregate hidden-zone probabilities/card-class histograms into model features.
-- Add per-private-state value heads or counterfactual-value targets.
-- Prototype CFR-style subgame search for high-value decision states.
+The first full run is successful only if it produces valid artifacts across self-play, training, export, and eval. Strength promotion is separate.
 
-This is the transition from ReBeL-lite to fuller ReBeL.
+## Validation Probes Inside The Big Build
 
-## Initial Experiment Matrix
+These are not rollout phases. They are correctness and risk probes to run while implementing the full system.
 
-### E0: Sampler and target sanity
+### V0: Belief reconstruction audit
 
-- `K=8`, `sims=16`, `prior=uniform`, `leaf=rollout`, no training.
-- Compare target entropy and selected action agreement against current rollout MCTS.
-- Acceptance: no illegal actions, deterministic with fixed seed, public-observation equality across particles.
+- For fixed seeds, reconstruct public beliefs at every decision.
+- Assert the true hidden state is inside the support when history permits.
+- Assert sampled particles match public observation and hidden-zone counts.
+- Report belief entropy and particle diversity.
 
-### E1: First training-bearing loop
+### V1: Information-set policy audit
 
-- `K=8`, `sims=25`, `prior=policy`, `leaf=rollout`, weak KL anchor.
-- 240-480 games, one iteration.
-- Acceptance: completes E2E, no schema failures, non-degenerate policy targets, value/policy losses finite.
+- Create multiple private worlds with the same public observation.
+- Run root search.
+- Assert the root policy is one public action distribution, not one policy per hidden world.
+- Flag any code path that indexes root action choice by hidden opponent private cards.
 
-### E2: Strength smoke
+### V2: Search target audit
 
-- Same as E1 but 3-5 iterations.
-- Acceptance: does not reproduce the pure-AZ collapse band. It need not beat production yet; it must show stable targets and no rapid drift.
+- Compare public-belief search policy against ordinary rollout MCTS on the same states.
+- Track policy entropy, action-Q variance, particle disagreement, and selected-action disagreement.
+- This can use small search iterations; it validates target shape, not strength.
 
-### E3: Particle count axis
+### V3: Loader/model audit
 
-- Compare `K=4/8/16` at fixed total sim budget.
-- Acceptance: identify whether diversity of hidden worlds or per-particle search depth matters more.
+- Load `rebel-selfplay` rows.
+- Verify belief features, public features, legal action features, policy targets, scalar values, and private-state/counterfactual values collate correctly.
+- Export ONNX and verify inference parity for belief-input tensors.
+
+### V4: One-iteration system audit
+
+- Run one full ReBeL iteration end-to-end.
+- Validate manifests, artifact paths, schema metadata, and eval outputs.
+- Do not interpret this as a phased milestone; it is a full-system smoke.
 
 ## Evaluation Gates
 
@@ -327,8 +381,8 @@ Report all of:
 - matchup matrix when available;
 - target diagnostics:
   - legal-action count histogram;
-  - visit top-1 share;
-  - target entropy;
+  - search-policy top-1 share;
+  - search-policy entropy;
   - particle action agreement;
   - aggregate Q variance across particles;
   - selected-action disagreement vs current rollout MCTS;
@@ -336,7 +390,7 @@ Report all of:
 
 Promotion bar:
 
-- Do not require first ReBeL-lite run to beat production. Require it to beat the pure-AZ failure mode: stable loop, non-degenerate belief targets, no fast value-head collapse, no no-KL drift.
+- Do not require the first full ReBeL run to beat production. Require it to beat the pure-AZ failure mode: stable loop, non-degenerate public-belief search targets, no fast value-head collapse, no no-KL drift, and no evidence that private hidden state is leaking into root policy selection.
 
 Strength bar:
 
@@ -346,19 +400,19 @@ Strength bar:
 
 ### Strategy fusion remains
 
-Particle aggregation reduces direct per-hidden-world training leakage, but per-particle MCTS can still plan with sampled private facts. This is why this is ReBeL-lite, not full ReBeL. The follow-up fix is information-set/shared-policy search or CFR subgame search over public belief states.
+The main implementation hazard is accidentally falling back to per-particle perfect-information MCTS while calling it ReBeL. The mitigation is architectural: keep root policy/regret tables keyed by public information set, not by full hidden state, and make V1 fail if root action choice varies by hidden world that is invisible to the acting player.
 
 ### Belief sampler encodes impossible histories
 
-Sampling from remaining hidden cards can produce worlds that are count-consistent but history-inconsistent. The MVP accepts this to get the loop running. Later slices should reconstruct beliefs from public action history and revealed cards.
+Sampling from remaining hidden cards can produce worlds that are count-consistent but history-inconsistent. The big-bang scope includes public-history reconstruction specifically to avoid making count-only sampling the final belief model. The audit should still report how often particles are rejected and why.
 
 ### Compute multiplies quickly
 
-Particle count times sims can exceed current MCTS cost. Keep first runs small, and optimize only after target diagnostics look better than current rollout MCTS.
+Public-belief CFR/search can exceed current MCTS cost. The implementation should include search-iteration, particle-count, and depth/depth-value controls from the start, plus profiling output per decision. Small validation runs are fine, but the code path should be the same full ReBeL search path.
 
 ### Current observation features may be too thin
 
-The current `PublicObservation` mostly contains visible state, own hand, and opponent counts/discards. ReBeL-like learning likely needs belief summaries: possible opponent hand classes, card-presence probabilities, draw odds, and public-history features.
+The current `PublicObservation` mostly contains visible state, own hand, and opponent counts/discards. Full ReBeL should add belief summaries as first-class model inputs: possible opponent hand classes, card-presence probabilities, draw odds, hidden-zone entropy, and public-history features.
 
 ### Exploitability can hide behind win rate
 
@@ -376,23 +430,101 @@ Self-play mirror strength can improve while the policy becomes exploitable. Once
 - Training orchestrator: `training/r12_orchestrator.py`
 - Existing closed-AZ evidence: `docs/ai-research/analysis/alphazero-style-training-postmortem.md`
 
-## Recommended First Patch
+## Big-Bang Work Packages
 
-Implement the smallest artifact-producing loop:
+These work packages should be implemented against the full ReBeL target. They can be developed in parallel where file ownership is clean, but they should converge into one end-to-end branch/run rather than a series of reduced algorithm releases.
 
-1. Add `engine-rs/crates/engine/src/belief/` with:
-   - `PublicBeliefConfig`;
-   - `BeliefParticle`;
-   - deterministic hidden-zone sampler;
-   - public-observation consistency checks.
-2. Add `sim-belief-selfplay` or a `--belief-particles` mode to `sim-mcts-selfplay`.
-3. Emit `kind="belief-selfplay"` rows with aggregate visit targets.
-4. Add `BeliefSelfPlayDataset` in Python.
-5. Add an orchestrator data mode `belief-distill`.
-6. Add smoke tests before any long run:
-   - sampler determinism;
-   - particle public-observation equality;
-   - aggregate target legality;
-   - Python loader batch shape.
+### A. Rust belief core
 
-The first goal is not to prove ReBeL wins. It is to land a correct end-to-end public-belief training loop whose failures are diagnosable.
+Owns:
+
+- `engine-rs/crates/engine/src/belief/`
+- public-history event types;
+- hidden-zone constraint solver;
+- weighted particle sampler;
+- belief feature builder;
+- belief serialization and replay;
+- audits for support, consistency, entropy, and determinism.
+
+Acceptance:
+
+- Given a replayed public history and observer side, the belief builder returns deterministic weighted particles and model-facing belief features.
+- The true simulator private state is either in support or the audit explains which public-history abstraction made it unrecoverable.
+
+### B. Rust public-belief search
+
+Owns:
+
+- `engine-rs/crates/engine/src/rebel/` or `engine-rs/crates/engine/src/search/rebel/`;
+- CFR-style public-belief subgame search;
+- neural policy/value priors over belief features;
+- leaf public-belief value calls;
+- regret/average-strategy tables keyed by public information set;
+- `BeliefSearchResult` diagnostics.
+
+Acceptance:
+
+- Root search returns one policy over public legal actions.
+- The same public information set with different hidden particles does not produce separate root policies.
+- Search can run with bounded iterations/depth and deterministic seed labels.
+
+### C. ReBeL self-play binary
+
+Owns:
+
+- `engine-rs/crates/sim-cli/src/bin/rebel_selfplay.rs`;
+- manifest output;
+- `rebel-selfplay` JSONL rows;
+- deck sampling integration;
+- side/model selection;
+- temperature schedule;
+- public-history capture during real simulator advancement.
+
+Acceptance:
+
+- A one-game run produces valid `rebel-selfplay` rows with public belief metadata, search policy, action values, belief values, terminal value targets, and deck ids.
+
+### D. Python belief dataset and model
+
+Owns:
+
+- `training/uma_ai/rebel_dataset.py`;
+- belief feature packing;
+- model input expansion;
+- policy/value/counterfactual/action-Q losses;
+- ONNX export metadata for belief-input tensors;
+- smoke tests for collate and ONNX parity.
+
+Acceptance:
+
+- `data-mode=rebel` batches public state, card ids, slot tokens, belief features, legal action features, search policy targets, belief values, and optional private/counterfactual values.
+- Exported ONNX carries enough metadata for Rust inference to reject schema mismatches.
+
+### E. Orchestrator and gates
+
+Owns:
+
+- `training/r12_orchestrator.py` or a dedicated `training/rebel_orchestrator.py`;
+- self-play/train/export/eval loop;
+- checkpoint pool update;
+- fixed and uniform/deck-diverse gates;
+- side split and matchup diagnostics;
+- schema preflight.
+
+Acceptance:
+
+- One full `R17-rebel-e2e` iteration runs self-play, trains, exports, evaluates, and writes a manifest that records every ReBeL-specific knob.
+
+### F. Test and diagnostic suite
+
+Owns:
+
+- Rust unit tests for belief reconstruction and public-information-set invariants;
+- sim smoke for `sim-rebel-selfplay`;
+- Python dataset/model/export smokes;
+- deterministic replay of a tiny public-history fixture;
+- target diagnostics report.
+
+Acceptance:
+
+- All V0-V4 validation probes pass on small fixtures before any long run is trusted.
