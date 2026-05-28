@@ -41,6 +41,12 @@ def main() -> None:
         )
         export_status = {"status": "ok", "onnx": str(export_path)}
 
+    gates = run_gates(args, repo, out_dir, export_path) if not args.skip_gates and not args.skip_export else {
+        "fixed": {"status": "not-run", "reason": "--skip-gates or --skip-export"},
+        "uniform_deck_diverse": {"status": "not-run", "reason": "--skip-gates or --skip-export"},
+        "side_split": {"status": "recorded-in-row-fields", "field": "sideId"},
+    }
+
     training_settings = effective_training_settings(args)
     manifest = {
         "name": "R17-rebel-e2e",
@@ -75,11 +81,7 @@ def main() -> None:
             "entropy_bonus": args.entropy_bonus,
             "use_release_binary": args.use_release_binary,
         },
-        "gates": {
-            "fixed": {"status": "not-run", "reason": "first e2e smoke trains/export artifacts only"},
-            "uniform_deck_diverse": {"status": "not-run", "reason": "run with --deck-sampling uniform for data generation first"},
-            "side_split": {"status": "recorded-in-row-fields", "field": "sideId"},
-        },
+        "gates": gates,
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
     print(json.dumps(manifest, indent=2))
@@ -216,6 +218,100 @@ def training_python(repo: Path) -> str:
     return sys.executable
 
 
+def run_gates(args: argparse.Namespace, repo: Path, out_dir: Path, onnx_path: Path) -> dict[str, Any]:
+    fixed_manifest = out_dir / "gate-fixed.manifest.json"
+    uniform_manifest = out_dir / "gate-uniform.manifest.json"
+    fixed = run_gate(args, repo, onnx_path, fixed_manifest, deck_sampling="fixed", seed_start=args.gate_seed_start)
+    uniform = run_gate(
+        args,
+        repo,
+        onnx_path,
+        uniform_manifest,
+        deck_sampling="uniform",
+        seed_start=args.gate_seed_start + args.gate_games,
+    )
+    return {
+        "fixed": fixed,
+        "uniform_deck_diverse": uniform,
+        "side_split": {
+            "status": "recorded-in-gate-manifests",
+            "fields": ["summary.playerSide", "summary.opponentSide"],
+        },
+    }
+
+
+def run_gate(
+    args: argparse.Namespace,
+    repo: Path,
+    onnx_path: Path,
+    manifest_path: Path,
+    *,
+    deck_sampling: str,
+    seed_start: int,
+) -> dict[str, Any]:
+    cmd = [
+        "cargo",
+        "run",
+        "-p",
+        "sim-cli",
+        "--bin",
+        "sim-eval-gate",
+        "--",
+        "--games",
+        str(args.gate_games),
+        "--seed-start",
+        str(seed_start),
+        "--sims",
+        str(args.gate_sims),
+        "--mcts-prior",
+        "policy",
+        "--mcts-leaf",
+        args.gate_leaf,
+        "--onnx-path",
+        str(onnx_path),
+        "--model-side",
+        "both",
+        "--deck-sampling",
+        deck_sampling,
+        "--max-steps",
+        str(args.gate_max_steps),
+        "--workers",
+        str(args.gate_workers),
+        "--batch-size",
+        str(args.gate_batch_size),
+        "--manifest-out",
+        str(manifest_path),
+    ]
+    env = ort_env(repo)
+    print("+ " + " ".join(cmd), flush=True)
+    subprocess.run(cmd, cwd=str(repo / "engine-rs"), check=True, env=env)
+    manifest = json.loads(manifest_path.read_text(encoding="utf8"))
+    summary = manifest.get("summary") or {}
+    return {
+        "status": manifest.get("status", "unknown"),
+        "passed": bool(manifest.get("passed", False)),
+        "manifest": str(manifest_path),
+        "deck_sampling": deck_sampling,
+        "games": summary.get("overall", {}).get("games", summary.get("games")),
+        "win_rate": summary.get("overall", {}).get("winRate", summary.get("modelWinRate")),
+        "wilson_lower": (summary.get("wilson95") or {}).get("lower"),
+        "player_side": summary.get("playerSide"),
+        "opponent_side": summary.get("opponentSide"),
+    }
+
+
+def ort_env(repo: Path) -> dict[str, str]:
+    import os
+
+    env = os.environ.copy()
+    if "ORT_DYLIB_PATH" not in env:
+        capi = repo / "training" / ".venv" / "lib" / "python3.12" / "site-packages" / "onnxruntime" / "capi"
+        candidate = capi / "libonnxruntime.so.1.22.0"
+        if candidate.exists():
+            env["ORT_DYLIB_PATH"] = str(candidate)
+    return env
+
+
 def validate_rebel_rows(path: Path) -> dict[str, Any]:
     required = {
         "kind",
@@ -322,6 +418,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kl-anchor-weight", type=float, default=0.0)
     parser.add_argument("--entropy-bonus", type=float, default=0.0)
     parser.add_argument("--skip-export", action="store_true")
+    parser.add_argument("--skip-gates", action="store_true")
+    parser.add_argument("--gate-games", type=int, default=20)
+    parser.add_argument("--gate-seed-start", type=int, default=90000)
+    parser.add_argument("--gate-sims", type=int, default=100)
+    parser.add_argument("--gate-leaf", choices=["rollout", "value-head"], default="rollout")
+    parser.add_argument("--gate-max-steps", type=int, default=500)
+    parser.add_argument("--gate-workers", type=int, default=1)
+    parser.add_argument("--gate-batch-size", type=int, default=1)
     return parser.parse_args()
 
 
