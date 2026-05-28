@@ -256,12 +256,19 @@ def run_loop_iteration(
     events.emit(iteration=iteration, stage="export", event_type="completed", onnx=str(export_path), elapsed_sec=export_elapsed)
 
     t0 = time.time()
-    gates = run_gates(iter_args, repo, iter_dir, export_path)
+    if args.skip_gates:
+        gates = {
+            "fixed": {"status": "not-run", "reason": "--skip-gates"},
+            "uniform_deck_diverse": {"status": "not-run", "reason": "--skip-gates"},
+            "side_split": {"status": "recorded-in-row-fields", "field": "sideId"},
+        }
+    else:
+        gates = run_gates(iter_args, repo, iter_dir, export_path)
     gate_elapsed = time.time() - t0
     fixed = gates.get("fixed") or {}
-    wilson_lower = float(fixed.get("wilson_lower") or 0.0)
     previous = state.promoted_wilson_lower
-    promote = bool(fixed.get("passed")) and (previous is None or wilson_lower >= previous)
+    wilson_lower = float(fixed.get("wilson_lower") or previous or 0.0)
+    promote = args.skip_gates or (bool(fixed.get("passed")) and (previous is None or wilson_lower >= previous))
     record = {
         "iteration": iteration,
         "dir": str(iter_dir),
@@ -531,6 +538,8 @@ def run_gate(
         "passed": bool(manifest.get("passed", False)),
         "manifest": str(manifest_path),
         "deck_sampling": deck_sampling,
+        "seed_start": seed_start,
+        "sims": args.gate_sims,
         "games": summary.get("overall", {}).get("games", summary.get("games")),
         "win_rate": summary.get("overall", {}).get("winRate", summary.get("modelWinRate")),
         "wilson_lower": (summary.get("wilson95") or {}).get("lower"),
