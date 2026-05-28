@@ -22,6 +22,10 @@ name = "sim-mcts-selfplay"
 path = "src/bin/mcts_selfplay.rs"
 
 [[bin]]
+name = "sim-rebel-selfplay"
+path = "src/bin/rebel_selfplay.rs"
+
+[[bin]]
 name = "sim-export-training"
 path = "src/bin/export_training.rs"
 
