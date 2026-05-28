@@ -495,39 +495,38 @@ def run_gate(
     deck_sampling: str,
     seed_start: int,
 ) -> dict[str, Any]:
-    cmd = [
-        "cargo",
-        "run",
-        "-p",
-        "sim-cli",
-        "--bin",
-        "sim-eval-gate",
-        "--",
-        "--games",
-        str(args.gate_games),
-        "--seed-start",
-        str(seed_start),
-        "--sims",
-        str(args.gate_sims),
-        "--mcts-prior",
-        "policy",
-        "--mcts-leaf",
-        args.gate_leaf,
-        "--onnx-path",
-        str(onnx_path),
-        "--model-side",
-        "both",
-        "--deck-sampling",
-        deck_sampling,
-        "--max-steps",
-        str(args.gate_max_steps),
-        "--workers",
-        str(args.gate_workers),
-        "--batch-size",
-        str(args.gate_batch_size),
-        "--manifest-out",
-        str(manifest_path),
-    ]
+    if args.use_release_binary:
+        cmd = [str(repo / "engine-rs" / "target" / "release" / "sim-eval-gate")]
+    else:
+        cmd = ["cargo", "run", "-p", "sim-cli", "--bin", "sim-eval-gate", "--"]
+    cmd.extend(
+        [
+            "--games",
+            str(args.gate_games),
+            "--seed-start",
+            str(seed_start),
+            "--sims",
+            str(args.gate_sims),
+            "--mcts-prior",
+            "policy",
+            "--mcts-leaf",
+            args.gate_leaf,
+            "--onnx-path",
+            str(onnx_path),
+            "--model-side",
+            "both",
+            "--deck-sampling",
+            deck_sampling,
+            "--max-steps",
+            str(args.gate_max_steps),
+            "--workers",
+            str(args.gate_workers),
+            "--batch-size",
+            str(args.gate_batch_size),
+            "--manifest-out",
+            str(manifest_path),
+        ]
+    )
     env = ort_env(repo)
     print("+ " + " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=str(repo / "engine-rs"), check=True, env=env)
