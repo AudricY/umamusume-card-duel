@@ -31,6 +31,8 @@ def main() -> None:
     if not out_dir.is_absolute():
         out_dir = repo / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.use_release_binary and args.iterations <= 1:
+        preflight_release_binaries(repo)
     if args.iterations > 1:
         run_loop(args, repo, out_dir)
         return
@@ -116,6 +118,8 @@ def run_loop(args: argparse.Namespace, repo: Path, out_dir: Path) -> None:
     loop_dir = out_dir / "loop"
     loop_dir.mkdir(parents=True, exist_ok=True)
     events = EventWriter(loop_dir)
+    if args.use_release_binary:
+        preflight_release_binaries(repo, events)
     state = load_loop_state(loop_dir / "orchestrator-state.json")
     if state.promoted_checkpoint is None and args.init_from_checkpoint:
         state.promoted_checkpoint = str(Path(args.init_from_checkpoint).resolve())
@@ -349,6 +353,52 @@ def load_loop_state(path: Path) -> RebelLoopState:
 
 def save_loop_state(path: Path, state: RebelLoopState) -> None:
     path.write_text(json.dumps(asdict(state), indent=2) + "\n", encoding="utf8")
+
+
+def preflight_release_binaries(repo: Path, events: EventWriter | None = None) -> None:
+    release_dir = repo / "engine-rs" / "target" / "release"
+    binaries = [
+        release_dir / "sim-rebel-selfplay",
+        release_dir / "sim-eval-gate",
+    ]
+    missing = [path for path in binaries if not path.exists()]
+    if missing:
+        missing_str = ", ".join(str(path) for path in missing)
+        if events is not None:
+            events.emit_run(
+                stage="rebel-orchestrator",
+                event_type="release_binary_preflight_failed",
+                reason="missing release binary",
+                missing=missing_str,
+            )
+        raise SystemExit(
+            f"Rust release binary missing: {missing_str}. "
+            "Build with: (cd engine-rs && cargo build --release -p sim-cli "
+            "--bin sim-rebel-selfplay --bin sim-eval-gate)."
+        )
+
+    source_paths = [
+        repo / "engine-rs" / "crates" / "engine" / "src" / "inference" / "mod.rs",
+        repo / "engine-rs" / "crates" / "engine" / "src" / "rebel" / "mod.rs",
+        repo / "engine-rs" / "crates" / "sim-cli" / "src" / "bin" / "rebel_selfplay.rs",
+        repo / "engine-rs" / "crates" / "sim-cli" / "src" / "bin" / "eval_gate.rs",
+    ]
+    newest_source = max((path.stat().st_mtime for path in source_paths if path.exists()), default=0.0)
+    oldest_binary = min(path.stat().st_mtime for path in binaries)
+    if newest_source > oldest_binary:
+        if events is not None:
+            events.emit_run(
+                stage="rebel-orchestrator",
+                event_type="release_binary_preflight_failed",
+                reason="release binary older than ReBeL/eval Rust source",
+                newest_source_mtime=newest_source,
+                oldest_binary_mtime=oldest_binary,
+            )
+        raise SystemExit(
+            "Rust release binaries are older than ReBeL/eval Rust sources. "
+            "Rebuild with: (cd engine-rs && cargo build --release -p sim-cli "
+            "--bin sim-rebel-selfplay --bin sim-eval-gate)."
+        )
 
 
 def resolve_kl_anchor(
