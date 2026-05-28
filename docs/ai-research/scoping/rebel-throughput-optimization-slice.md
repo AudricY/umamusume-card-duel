@@ -358,7 +358,15 @@ config: --seeds 4 --seed-start 19000 --model-side both --particles 2 --search-it
 workers 1/4 sha256: 2660b66cb66dee3b0ecface0124312a34884dad8968591be2b428f3843163058
 ```
 
+Two-stage ReBeL loop smoke:
+
+```text
+command: python training/rebel_orchestrator.py --out-dir /tmp/rebel-two-stage-smoke --iterations 2 --smoke --games 1 --particles 2 --search-iterations 4 --rollout-steps 5 --max-steps 20 --model-side player --workers 1 --epochs 1 --device cpu --skip-gates --selfplay-inference-batch-size 4 --neural-leaf-weight 1.0
+result: iteration 0 generated rollout-bootstrap rows, trained, exported ONNX; iteration 1 loaded iteration-0 ONNX for self-play, trained from the neural-leaf rows, and exported a new ONNX.
+iteration 1 row diagnostics: neuralLeafWeight=1.0, neuralLeafBatchRows=4, neuralLeafCalls=4, rolloutLeafCalls=0 for sampled rows.
+```
+
 Remaining work:
 
 - Run the neural leaf path on CUDA hardware and record GPU utilization/throughput. CPU ORT smoke proves wiring and determinism, but not GPU saturation.
-- Replace the first-iteration bootstrap recipe with an explicit two-stage flow: rollout-generated seed model, then ONNX-conditioned ReBeL self-play using `--selfplay-onnx-path`.
+- For production, replace `--skip-gates` bootstrap promotion with real gate thresholds once the neural-leaf recipe is stable.
