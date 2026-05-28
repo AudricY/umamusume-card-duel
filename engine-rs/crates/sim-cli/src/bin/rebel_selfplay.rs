@@ -728,6 +728,25 @@ fn main() -> Result<()> {
             .with_context(|| format!("write {}", p.display()))?;
     }
     println!("{}", serde_json::to_string_pretty(&summary)?);
+
+    // Mirror sim-eval-gate: surface dispatcher fill so we can see whether
+    // the inference path is starved (mean_fill ≪ max_batch) or saturated.
+    // ReBeL submits huge per-decision super-batches via `predict_many`;
+    // mean_fill is the key signal for whether `--inference-batch-size` /
+    // `--inference-max-wait-us` are sized for the workload.
+    if let Some(sess) = inference::global() {
+        if let Some(disp) = sess.dispatcher() {
+            let (batches, requests) = disp.stats();
+            if batches > 0 {
+                let mean_fill = requests as f64 / batches as f64;
+                eprintln!(
+                    "sim-rebel-selfplay: batched_inference batches={} requests={} mean_fill={:.2}",
+                    batches, requests, mean_fill
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 

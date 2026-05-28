@@ -1544,6 +1544,11 @@ fn run_batch(
     uses_belief_features: bool,
     batch: Vec<BatchedRequest>,
 ) {
+    // Env-gated per-batch timing: set UMA_LOG_DISPATCHER_TIMING=1 to emit
+    // one stderr line per batch with fill / pack_us / run_us / reply_us.
+    // Default-off; the eprintln cost is non-trivial at hot dispatcher rates.
+    let timing_enabled = std::env::var("UMA_LOG_DISPATCHER_TIMING").is_ok();
+    let t_enter = if timing_enabled { Some(Instant::now()) } else { None };
     let n_batch = batch.len();
     let state_dim = batch[0].row.state_dim;
     let max_n = batch.iter().map(|r| r.row.n_actions).max().unwrap_or(0);
@@ -1829,6 +1834,7 @@ fn run_batch(
         }
     };
 
+    let t_pack_done = t_enter.map(|_| Instant::now());
     let outputs = match session.run(inputs) {
         Ok(o) => o,
         Err(e) => {
@@ -1836,6 +1842,7 @@ fn run_batch(
             return;
         }
     };
+    let t_run_done = t_enter.map(|_| Instant::now());
 
     // Extract `logits[B, max_n]` and `value[B]`, then slice each row
     // back to its own `n_actions` and softmax — mirror of the inline
@@ -1883,6 +1890,15 @@ fn run_batch(
         let probs = greedy_masked_softmax(row_logits);
         let value = value_flat[row_idx];
         let _ = req.response.send(Ok(PredictionV3 { probs, value }));
+    }
+    if let (Some(t0), Some(tp), Some(tr)) = (t_enter, t_pack_done, t_run_done) {
+        let reply_us = Instant::now().duration_since(tr).as_micros();
+        let run_us = tr.duration_since(tp).as_micros();
+        let pack_us = tp.duration_since(t0).as_micros();
+        eprintln!(
+            "uma-dispatcher-timing fill={} max_n={} pack_us={} run_us={} reply_us={}",
+            n_batch, max_n, pack_us, run_us, reply_us
+        );
     }
 }
 
