@@ -75,6 +75,12 @@ struct Args {
     neural_policy_weight: f64,
     #[arg(long, default_value_t = 0.25)]
     neural_value_weight: f64,
+    #[arg(long, default_value_t = 1.0)]
+    neural_leaf_weight: f64,
+    #[arg(long, default_value_t = 1)]
+    inference_batch_size: usize,
+    #[arg(long, default_value_t = 2_000)]
+    inference_max_wait_us: u64,
 }
 
 impl Args {
@@ -99,6 +105,9 @@ impl Args {
             "cudaDeviceId": self.cuda_device_id,
             "neuralPolicyWeight": self.neural_policy_weight,
             "neuralValueWeight": self.neural_value_weight,
+            "neuralLeafWeight": self.neural_leaf_weight,
+            "inferenceBatchSize": self.inference_batch_size,
+            "inferenceMaxWaitUs": self.inference_max_wait_us,
             "dataMode": "rebel",
             "engine": "rust",
             "selfplayBinary": "sim-rebel-selfplay",
@@ -508,15 +517,22 @@ fn main() -> Result<()> {
             },
             other => anyhow::bail!("--device must be cpu or cuda (got {})", other),
         };
-        let session = InferenceSession::load_on(std::path::Path::new(onnx), device)
-            .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
+        let session = InferenceSession::load_on_with_batching(
+            std::path::Path::new(onnx),
+            device,
+            args.inference_batch_size,
+            args.inference_max_wait_us,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
         inference::set_global(session);
         eprintln!(
-            "sim-rebel-selfplay: loaded inference session from {} (device={:?}, neural_policy_weight={}, neural_value_weight={})",
+            "sim-rebel-selfplay: loaded inference session from {} (device={:?}, neural_policy_weight={}, neural_value_weight={}, neural_leaf_weight={}, inference_batch_size={})",
             onnx,
             device,
             args.neural_policy_weight,
             args.neural_value_weight,
+            args.neural_leaf_weight,
+            args.inference_batch_size,
         );
     }
     let workers: usize = if args.workers == 0 {
@@ -564,6 +580,11 @@ fn main() -> Result<()> {
         },
         neural_value_weight: if args.onnx_path.is_some() {
             args.neural_value_weight
+        } else {
+            0.0
+        },
+        neural_leaf_weight: if args.onnx_path.is_some() {
+            args.neural_leaf_weight
         } else {
             0.0
         },

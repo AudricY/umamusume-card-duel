@@ -337,6 +337,28 @@ command: python training/rebel_orchestrator.py --out-dir /tmp/rebel-e2e-export-s
 result: self-play rows=4, train_bc.py PASS, ONNX roundtrip PASS, exported /tmp/rebel-e2e-export-smoke/policy.onnx
 ```
 
+Neural leaf-evaluation progress:
+
+- `sim-rebel-selfplay --onnx-path ...` can now evaluate ReBeL particle/action leaves with batched belief-input ONNX inference via `--neural-leaf-weight`.
+- `--neural-leaf-weight 1.0` disables rollout leaves for nonterminal model-evaluable cells, so the hot `particles * legal_actions` matrix becomes one batched ORT value-head call per modeled decision instead of many CPU rollouts.
+- `--inference-batch-size` and `--inference-max-wait-us` route self-play through the same ORT dispatcher shape used by MCTS/eval, allowing cross-worker GPU coalescing.
+- Root output is still one public policy over public legal actions. Neural leaf values are aggregated over particles; no per-particle root policy is emitted.
+
+Neural self-play smoke:
+
+```text
+command: sim-rebel-selfplay --seeds 1 --model-side player --particles 2 --search-iterations 4 --rollout-steps 5 --max-steps 20 --workers 1 --onnx-path /tmp/rebel-e2e-export-smoke/policy.onnx --device cpu --neural-leaf-weight 1.0 --neural-policy-weight 0.25 --neural-value-weight 0.25 --inference-batch-size 4
+first decision: neuralLeafBatchRows=20 neuralLeafCalls=20 rolloutLeafCalls=0
+```
+
+Neural worker determinism:
+
+```text
+config: --seeds 4 --seed-start 19000 --model-side both --particles 2 --search-iterations 4 --rollout-steps 5 --max-steps 30 --onnx-path /tmp/rebel-e2e-export-smoke/policy.onnx --device cpu --neural-leaf-weight 1.0 --inference-batch-size 4
+workers 1/4 sha256: 2660b66cb66dee3b0ecface0124312a34884dad8968591be2b428f3843163058
+```
+
 Remaining work:
 
-- Inner-search parallelism is now better justified by timing: the measured sample is search-dominated, but implementation should still preserve one public root policy and fixed per-particle/action seed labels.
+- Run the neural leaf path on CUDA hardware and record GPU utilization/throughput. CPU ORT smoke proves wiring and determinism, but not GPU saturation.
+- Replace the first-iteration bootstrap recipe with an explicit two-stage flow: rollout-generated seed model, then ONNX-conditioned ReBeL self-play using `--selfplay-onnx-path`.

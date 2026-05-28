@@ -610,6 +610,20 @@ impl InferenceSession {
         &self,
         batch: &[(&PublicObservation, &[LegalAiAction])],
     ) -> Result<Vec<PredictionV3>, InferenceError> {
+        let batch_with_belief: Vec<(&PublicObservation, &[LegalAiAction], Option<&[f32]>)> = batch
+            .iter()
+            .map(|(obs, legal)| (*obs, *legal, None))
+            .collect();
+        self.predict_v3_batch_with_belief(&batch_with_belief)
+    }
+
+    /// Batched variant of [`predict_v3_with_belief`] for ReBeL public-belief
+    /// searches. Each row may carry a belief feature vector; legacy graphs
+    /// ignore it, belief-input graphs require the correct width.
+    pub fn predict_v3_batch_with_belief(
+        &self,
+        batch: &[(&PublicObservation, &[LegalAiAction], Option<&[f32]>)],
+    ) -> Result<Vec<PredictionV3>, InferenceError> {
         if batch.is_empty() {
             return Ok(Vec::new());
         }
@@ -619,13 +633,13 @@ impl InferenceSession {
         // wave_size=1 guarantee already calls the serial path, but a
         // caller building B6 follow-ons may still poke single rows here).
         if batch.len() == 1 {
-            let (obs, legal) = batch[0];
-            return Ok(vec![self.predict_v3(obs, legal)?]);
+            let (obs, legal, belief) = batch[0];
+            return Ok(vec![self.predict_v3_with_belief(obs, legal, belief)?]);
         }
         // Pack rows up-front; both the inline batch and the dispatcher
         // fan-out path consume `PackedRow`s.
         let mut rows: Vec<PackedRow> = Vec::with_capacity(batch.len());
-        for (obs, legal) in batch.iter() {
+        for (obs, legal, belief) in batch.iter() {
             if legal.is_empty() {
                 return Err(InferenceError::SchemaMismatch(
                     "legalActions must not be empty".into(),
@@ -637,7 +651,7 @@ impl InferenceSession {
                 self.action_dim,
                 obs,
                 legal,
-                None,
+                *belief,
             )?);
         }
         match &self.session {

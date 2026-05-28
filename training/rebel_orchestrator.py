@@ -4,8 +4,23 @@ import argparse
 import json
 import subprocess
 import sys
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from events import EventWriter
+
+
+@dataclass
+class RebelLoopState:
+    promoted_checkpoint: str | None = None
+    promoted_onnx: str | None = None
+    promoted_wilson_lower: float | None = None
+    iterations: list[dict[str, Any]] = field(default_factory=list)
+    consecutive_failures: int = 0
+    halted: bool = False
+    halt_reason: str | None = None
 
 
 def main() -> None:
@@ -15,6 +30,9 @@ def main() -> None:
     if not out_dir.is_absolute():
         out_dir = repo / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.iterations > 1:
+        run_loop(args, repo, out_dir)
+        return
     data_path = out_dir / "rebel-selfplay.jsonl"
     selfplay_manifest = out_dir / "selfplay.manifest.json"
     train_dir = out_dir / "train"
@@ -83,11 +101,208 @@ def main() -> None:
             "selfplay_onnx_path": args.selfplay_onnx_path,
             "neural_policy_weight": args.neural_policy_weight,
             "neural_value_weight": args.neural_value_weight,
+            "neural_leaf_weight": args.neural_leaf_weight,
+            "selfplay_inference_batch_size": args.selfplay_inference_batch_size,
+            "selfplay_inference_max_wait_us": args.selfplay_inference_max_wait_us,
         },
         "gates": gates,
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
     print(json.dumps(manifest, indent=2))
+
+
+def run_loop(args: argparse.Namespace, repo: Path, out_dir: Path) -> None:
+    loop_dir = out_dir / "loop"
+    loop_dir.mkdir(parents=True, exist_ok=True)
+    events = EventWriter(loop_dir)
+    state = load_loop_state(loop_dir / "orchestrator-state.json")
+    if state.promoted_checkpoint is None and args.init_from_checkpoint:
+        state.promoted_checkpoint = str(Path(args.init_from_checkpoint).resolve())
+    if state.promoted_onnx is None and args.selfplay_onnx_path:
+        state.promoted_onnx = str(Path(args.selfplay_onnx_path).resolve())
+    save_loop_state(loop_dir / "orchestrator-state.json", state)
+    events.emit_run(
+        stage="rebel-orchestrator",
+        event_type="run_started",
+        iterations=args.iterations,
+        games=args.games,
+        deck_sampling=args.deck_sampling,
+        model_side=args.model_side,
+    )
+
+    start_iter = max((int(r["iteration"]) for r in state.iterations), default=-1) + 1
+    for iteration in range(start_iter, args.iterations):
+        if state.halted:
+            events.emit(
+                iteration=iteration,
+                stage="rebel-orchestrator",
+                event_type="halted_before_iteration",
+                halt_reason=state.halt_reason,
+            )
+            break
+        record = run_loop_iteration(args, repo, loop_dir, iteration, state, events)
+        state.iterations.append(record)
+        if record["promote"]:
+            state.promoted_checkpoint = record["checkpoint"]
+            state.promoted_onnx = record["onnx"]
+            state.promoted_wilson_lower = record["wilson_lower"]
+            state.consecutive_failures = 0
+        else:
+            state.consecutive_failures += 1
+            if args.halt_after_consecutive_failures > 0 and state.consecutive_failures >= args.halt_after_consecutive_failures:
+                state.halted = True
+                state.halt_reason = f"halt-after-{args.halt_after_consecutive_failures} consecutive promotion failures"
+                events.emit(
+                    iteration=iteration,
+                    stage="rebel-orchestrator",
+                    event_type="halted",
+                    halt_reason=state.halt_reason,
+                )
+        save_loop_state(loop_dir / "orchestrator-state.json", state)
+
+    events.emit_run(
+        stage="rebel-orchestrator",
+        event_type="run_completed",
+        halted=state.halted,
+        halt_reason=state.halt_reason,
+        promoted_checkpoint=state.promoted_checkpoint,
+        promoted_onnx=state.promoted_onnx,
+        promoted_wilson_lower=state.promoted_wilson_lower,
+    )
+    final = {
+        "name": "R17-rebel-loop",
+        "status": "HALTED" if state.halted else "COMPLETED",
+        "loop_dir": str(loop_dir),
+        "events": str(loop_dir / "events.jsonl"),
+        "state": str(loop_dir / "orchestrator-state.json"),
+        "promoted_checkpoint": state.promoted_checkpoint,
+        "promoted_onnx": state.promoted_onnx,
+        "promoted_wilson_lower": state.promoted_wilson_lower,
+        "iterations_run": len(state.iterations),
+    }
+    (out_dir / "manifest.json").write_text(json.dumps(final, indent=2) + "\n", encoding="utf8")
+    print(json.dumps(final, indent=2))
+
+
+def run_loop_iteration(
+    args: argparse.Namespace,
+    repo: Path,
+    loop_dir: Path,
+    iteration: int,
+    state: RebelLoopState,
+    events: EventWriter,
+) -> dict[str, Any]:
+    iter_dir = loop_dir / f"iter-{iteration}"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    data_path = iter_dir / "rebel-selfplay.jsonl"
+    selfplay_manifest = iter_dir / "selfplay.manifest.json"
+    train_dir = iter_dir / "train"
+    export_path = iter_dir / "policy.onnx"
+    seed_start = args.seed_start + iteration * args.games
+    selfplay_onnx = state.promoted_onnx or args.selfplay_onnx_path
+    init_checkpoint = state.promoted_checkpoint or args.init_from_checkpoint
+    iter_args = argparse.Namespace(**vars(args))
+    iter_args.seed_start = seed_start
+    iter_args.gate_seed_start = args.gate_seed_start + iteration * args.gate_games * 2
+    iter_args.selfplay_onnx_path = selfplay_onnx
+    iter_args.init_from_checkpoint = init_checkpoint
+
+    events.emit(
+        iteration=iteration,
+        stage="iteration",
+        event_type="started",
+        selfplay_onnx_path=selfplay_onnx,
+        init_checkpoint=init_checkpoint,
+    )
+    t0 = time.time()
+    events.emit(iteration=iteration, stage="selfplay", event_type="started", seed_start=seed_start)
+    run(build_selfplay_cmd(iter_args, repo, data_path, selfplay_manifest), cwd=repo / "engine-rs", env=ort_env(repo))
+    row_summary = validate_rebel_rows(data_path)
+    selfplay_elapsed = time.time() - t0
+    events.emit(
+        iteration=iteration,
+        stage="selfplay",
+        event_type="completed",
+        rows=row_summary["rows"],
+        elapsed_sec=selfplay_elapsed,
+    )
+
+    t0 = time.time()
+    events.emit(iteration=iteration, stage="train", event_type="started", init_checkpoint=init_checkpoint)
+    run(build_train_cmd(iter_args, repo, data_path, train_dir), cwd=repo)
+    train_elapsed = time.time() - t0
+    checkpoint = train_dir / "checkpoint.pt"
+    events.emit(
+        iteration=iteration,
+        stage="train",
+        event_type="completed",
+        checkpoint=str(checkpoint),
+        elapsed_sec=train_elapsed,
+    )
+
+    t0 = time.time()
+    run(
+        [
+            training_python(repo),
+            str(repo / "training" / "export_onnx.py"),
+            "--checkpoint",
+            str(checkpoint),
+            "--out",
+            str(export_path),
+        ],
+        cwd=repo,
+    )
+    export_elapsed = time.time() - t0
+    events.emit(iteration=iteration, stage="export", event_type="completed", onnx=str(export_path), elapsed_sec=export_elapsed)
+
+    t0 = time.time()
+    gates = run_gates(iter_args, repo, iter_dir, export_path)
+    gate_elapsed = time.time() - t0
+    fixed = gates.get("fixed") or {}
+    wilson_lower = float(fixed.get("wilson_lower") or 0.0)
+    previous = state.promoted_wilson_lower
+    promote = bool(fixed.get("passed")) and (previous is None or wilson_lower >= previous)
+    record = {
+        "iteration": iteration,
+        "dir": str(iter_dir),
+        "checkpoint": str(checkpoint),
+        "onnx": str(export_path),
+        "selfplay": str(data_path),
+        "selfplay_manifest": str(selfplay_manifest),
+        "row_summary": row_summary,
+        "gates": gates,
+        "wilson_lower": wilson_lower,
+        "previous_wilson_lower": previous,
+        "promote": promote,
+        "reason": "fixed-gate-improved-or-first" if promote else "fixed-gate-below-promoted-floor",
+        "selfplay_elapsed_sec": selfplay_elapsed,
+        "train_elapsed_sec": train_elapsed,
+        "export_elapsed_sec": export_elapsed,
+        "gate_elapsed_sec": gate_elapsed,
+    }
+    (iter_dir / "manifest.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf8")
+    events.emit(iteration=iteration, stage="gate", event_type="completed", **fixed, elapsed_sec=gate_elapsed)
+    events.emit(iteration=iteration, stage="decision", event_type="completed", promote=promote, reason=record["reason"])
+    return record
+
+
+def load_loop_state(path: Path) -> RebelLoopState:
+    if not path.exists():
+        return RebelLoopState()
+    payload = json.loads(path.read_text(encoding="utf8"))
+    return RebelLoopState(
+        promoted_checkpoint=payload.get("promoted_checkpoint"),
+        promoted_onnx=payload.get("promoted_onnx"),
+        promoted_wilson_lower=payload.get("promoted_wilson_lower"),
+        iterations=list(payload.get("iterations") or []),
+        consecutive_failures=int(payload.get("consecutive_failures") or 0),
+        halted=bool(payload.get("halted") or False),
+        halt_reason=payload.get("halt_reason"),
+    )
+
+
+def save_loop_state(path: Path, state: RebelLoopState) -> None:
+    path.write_text(json.dumps(asdict(state), indent=2) + "\n", encoding="utf8")
 
 
 def build_selfplay_cmd(
@@ -139,6 +354,12 @@ def build_selfplay_cmd(
                 str(args.neural_policy_weight),
                 "--neural-value-weight",
                 str(args.neural_value_weight),
+                "--neural-leaf-weight",
+                str(args.neural_leaf_weight),
+                "--inference-batch-size",
+                str(args.selfplay_inference_batch_size),
+                "--inference-max-wait-us",
+                str(args.selfplay_inference_max_wait_us),
             ]
         )
     return cmd
@@ -403,6 +624,8 @@ def run(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one R17 ReBeL E2E iteration.")
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--iterations", type=int, default=1)
+    parser.add_argument("--halt-after-consecutive-failures", type=int, default=2)
     parser.add_argument("--smoke", action="store_true", help="Use tiny training defaults for CPU smoke runs.")
     parser.add_argument("--games", type=int, default=1)
     parser.add_argument("--seed-start", type=int, default=0)
@@ -419,6 +642,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--selfplay-cuda-device-id", type=int, default=0)
     parser.add_argument("--neural-policy-weight", type=float, default=0.25)
     parser.add_argument("--neural-value-weight", type=float, default=0.25)
+    parser.add_argument("--neural-leaf-weight", type=float, default=1.0)
+    parser.add_argument("--selfplay-inference-batch-size", type=int, default=1)
+    parser.add_argument("--selfplay-inference-max-wait-us", type=int, default=2_000)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)

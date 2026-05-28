@@ -19,6 +19,14 @@ def _args(**overrides: object) -> argparse.Namespace:
         "deck_sampling": "fixed",
         "workers": 8,
         "use_release_binary": False,
+        "selfplay_onnx_path": "/tmp/policy.onnx",
+        "selfplay_device": "cuda",
+        "selfplay_cuda_device_id": 0,
+        "neural_policy_weight": 0.25,
+        "neural_value_weight": 0.25,
+        "neural_leaf_weight": 1.0,
+        "selfplay_inference_batch_size": 32,
+        "selfplay_inference_max_wait_us": 2000,
         "epochs": 1,
         "batch_size": None,
         "lr": None,
@@ -71,6 +79,15 @@ def main() -> None:
             raise AssertionError(f"missing {flag} in train command: {train_cmd}")
     if not _contains_pair(selfplay_cmd, "--workers", "8"):
         raise AssertionError(f"missing --workers 8 in selfplay command: {selfplay_cmd}")
+    required_selfplay_pairs = {
+        "--onnx-path": "/tmp/policy.onnx",
+        "--device": "cuda",
+        "--neural-leaf-weight": "1.0",
+        "--inference-batch-size": "32",
+    }
+    for flag, value in required_selfplay_pairs.items():
+        if not _contains_pair(selfplay_cmd, flag, value):
+            raise AssertionError(f"missing {flag} {value} in selfplay command: {selfplay_cmd}")
 
     smoke_cmd = build_train_cmd(
         _args(smoke=True, device="cpu", amp=None, dataloader_workers=None, init_from_checkpoint=None),

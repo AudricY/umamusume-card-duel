@@ -13,7 +13,10 @@ use crate::core::constants::SideId;
 use crate::core::random::{with_rng, Rng};
 use crate::dispatcher::{advance_modeled_turn_step, get_forced_attack_coin_results};
 use crate::mcts::driver::rollout_leaf_value_for_state;
-use crate::policy::types::LegalAiAction;
+use crate::mcts::math::mcts_terminal_value;
+use crate::policy::actions::enumerate_legal_ai_actions;
+use crate::policy::observation::build_public_observation;
+use crate::policy::types::{LegalAiAction, PublicObservation};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +26,7 @@ pub struct RebelSearchConfig {
     pub rollout_steps: u32,
     pub neural_policy_weight: f64,
     pub neural_value_weight: f64,
+    pub neural_leaf_weight: f64,
     pub algorithm: String,
 }
 
@@ -34,6 +38,7 @@ impl Default for RebelSearchConfig {
             rollout_steps: 120,
             neural_policy_weight: 0.0,
             neural_value_weight: 0.0,
+            neural_leaf_weight: 0.0,
             algorithm: "public-belief-cfr-v1".to_string(),
         }
     }
@@ -47,8 +52,11 @@ pub struct RebelSearchDiagnostics {
     pub legal_action_count: usize,
     pub particle_action_evaluations: usize,
     pub rollout_leaf_calls: usize,
+    pub neural_leaf_calls: usize,
+    pub neural_leaf_batch_rows: usize,
     pub neural_policy_weight: f64,
     pub neural_value_weight: f64,
+    pub neural_leaf_weight: f64,
     pub neural_value: Option<f64>,
     pub search_iterations: u32,
     pub policy_entropy: f64,
@@ -88,8 +96,11 @@ pub fn run_public_belief_search(
                 legal_action_count: 0,
                 particle_action_evaluations: 0,
                 rollout_leaf_calls: 0,
+                neural_leaf_calls: 0,
+                neural_leaf_batch_rows: 0,
                 neural_policy_weight: config.neural_policy_weight,
                 neural_value_weight: config.neural_value_weight,
+                neural_leaf_weight: config.neural_leaf_weight,
                 neural_value: None,
                 search_iterations: 0,
                 policy_entropy: 0.0,
@@ -106,6 +117,17 @@ pub fn run_public_belief_search(
     let mut private_state_values = Vec::with_capacity(belief.particles.len());
     let mut particle_best = Vec::with_capacity(belief.particles.len());
     let mut rollout_leaf_calls = 0usize;
+    let mut neural_leaf_calls = 0usize;
+    let mut neural_leaf_batch_rows = 0usize;
+    let neural_leaf_weight = config.neural_leaf_weight.clamp(0.0, 1.0);
+    let use_rollouts = neural_leaf_weight < 1.0 || crate::inference::global().is_none();
+    let use_neural_leaf = neural_leaf_weight > 0.0;
+    let mut base_leaf_values: Vec<Vec<f64>> = vec![vec![0.0; action_count]; belief.particles.len()];
+    let mut leaf_observations: Vec<PublicObservation> = Vec::new();
+    let mut leaf_legal_actions: Vec<Vec<LegalAiAction>> = Vec::new();
+    let mut leaf_targets: Vec<(usize, usize)> = Vec::new();
+    let mut neural_leaf_values: Vec<Vec<Option<f64>>> =
+        vec![vec![None; action_count]; belief.particles.len()];
 
     for (particle_index, particle) in belief.particles.iter().enumerate() {
         let particle_weight = particle.weight.max(0.0);
@@ -121,18 +143,42 @@ pub fn run_public_belief_search(
                     forced,
                 )
             });
-            rollout_leaf_calls += 1;
-            let value = rollout_leaf_value_for_state(
-                &next,
-                belief.observer_side,
-                1,
-                config.rollout_steps,
-                format!(
-                    "{}:particle:{}:action:{}",
-                    belief.public_history_digest, particle_index, action_index
+            let rollout_value = if use_rollouts {
+                rollout_leaf_calls += 1;
+                rollout_leaf_value_for_state(
+                    &next,
+                    belief.observer_side,
+                    1,
+                    config.rollout_steps,
+                    format!(
+                        "{}:particle:{}:action:{}",
+                        belief.public_history_digest, particle_index, action_index
+                    )
+                    .as_str(),
                 )
-                .as_str(),
-            );
+            } else if next.game_over {
+                mcts_terminal_value(&next, belief.observer_side)
+            } else {
+                0.0
+            };
+            if use_neural_leaf {
+                if next.game_over {
+                    neural_leaf_values[particle_index][action_index] =
+                        Some(mcts_terminal_value(&next, belief.observer_side));
+                } else {
+                    let legal = enumerate_legal_ai_actions(&next, belief.observer_side);
+                    if legal.is_empty() {
+                        neural_leaf_values[particle_index][action_index] = Some(0.0);
+                    } else {
+                        leaf_observations
+                            .push(build_public_observation(&next, belief.observer_side));
+                        leaf_legal_actions.push(legal);
+                        leaf_targets.push((particle_index, action_index));
+                    }
+                }
+            }
+            let value = rollout_value;
+            base_leaf_values[particle_index][action_index] = value;
             per_particle[action_index] = value;
             action_values[action_index] += value * particle_weight;
             action_weight[action_index] += particle_weight;
@@ -140,6 +186,58 @@ pub fn run_public_belief_search(
         let best = argmax_f64(&per_particle);
         particle_best.push(best);
         private_state_values.push(per_particle.get(best).copied().unwrap_or(0.0));
+    }
+
+    if use_neural_leaf && !leaf_targets.is_empty() {
+        if let Some(session) = crate::inference::global() {
+            let belief_features = belief.belief_features.vector.as_slice();
+            let batch: Vec<(&PublicObservation, &[LegalAiAction], Option<&[f32]>)> =
+                leaf_observations
+                    .iter()
+                    .zip(leaf_legal_actions.iter())
+                    .map(|(obs, legal)| (obs, legal.as_slice(), Some(belief_features)))
+                    .collect();
+            match session.predict_v3_batch_with_belief(&batch) {
+                Ok(predictions) => {
+                    neural_leaf_batch_rows += predictions.len();
+                    for ((particle_index, action_index), prediction) in
+                        leaf_targets.iter().copied().zip(predictions.into_iter())
+                    {
+                        neural_leaf_calls += 1;
+                        neural_leaf_values[particle_index][action_index] =
+                            Some(prediction.value as f64);
+                    }
+                }
+                Err(_) => {
+                    neural_leaf_values = vec![vec![None; action_count]; belief.particles.len()];
+                }
+            }
+        }
+    }
+
+    if use_neural_leaf {
+        action_values.fill(0.0);
+        action_weight.fill(0.0);
+        private_state_values.clear();
+        particle_best.clear();
+        for (particle_index, particle) in belief.particles.iter().enumerate() {
+            let particle_weight = particle.weight.max(0.0);
+            let mut per_particle = vec![0.0; action_count];
+            for action_index in 0..action_count {
+                let rollout_value = base_leaf_values[particle_index][action_index];
+                let neural_value = neural_leaf_values[particle_index][action_index];
+                let value = match neural_value {
+                    Some(v) => (1.0 - neural_leaf_weight) * rollout_value + neural_leaf_weight * v,
+                    None => rollout_value,
+                };
+                per_particle[action_index] = value;
+                action_values[action_index] += value * particle_weight;
+                action_weight[action_index] += particle_weight;
+            }
+            let best = argmax_f64(&per_particle);
+            particle_best.push(best);
+            private_state_values.push(per_particle.get(best).copied().unwrap_or(0.0));
+        }
     }
 
     for (value, weight) in action_values.iter_mut().zip(action_weight.iter()) {
@@ -208,8 +306,11 @@ pub fn run_public_belief_search(
             legal_action_count: action_count,
             particle_action_evaluations: belief.particles.len() * action_count,
             rollout_leaf_calls,
+            neural_leaf_calls,
+            neural_leaf_batch_rows,
             neural_policy_weight: config.neural_policy_weight,
             neural_value_weight: config.neural_value_weight,
+            neural_leaf_weight: config.neural_leaf_weight,
             neural_value,
             search_iterations: config.iterations,
             policy_entropy: entropy(&root_policy),
