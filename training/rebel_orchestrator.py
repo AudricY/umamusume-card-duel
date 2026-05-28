@@ -20,7 +20,7 @@ def main() -> None:
     train_dir = out_dir / "train"
     export_path = out_dir / "policy.onnx"
 
-    run(build_selfplay_cmd(args, repo, data_path, selfplay_manifest), cwd=repo / "engine-rs")
+    run(build_selfplay_cmd(args, repo, data_path, selfplay_manifest), cwd=repo / "engine-rs", env=ort_env(repo))
     row_summary = validate_rebel_rows(data_path)
 
     train_cmd = build_train_cmd(args, repo, data_path, train_dir)
@@ -80,6 +80,9 @@ def main() -> None:
             "kl_anchor_weight": args.kl_anchor_weight,
             "entropy_bonus": args.entropy_bonus,
             "use_release_binary": args.use_release_binary,
+            "selfplay_onnx_path": args.selfplay_onnx_path,
+            "neural_policy_weight": args.neural_policy_weight,
+            "neural_value_weight": args.neural_value_weight,
         },
         "gates": gates,
     }
@@ -123,6 +126,21 @@ def build_selfplay_cmd(
             str(selfplay_manifest),
         ]
     )
+    if args.selfplay_onnx_path:
+        cmd.extend(
+            [
+                "--onnx-path",
+                str(args.selfplay_onnx_path),
+                "--device",
+                args.selfplay_device,
+                "--cuda-device-id",
+                str(args.selfplay_cuda_device_id),
+                "--neural-policy-weight",
+                str(args.neural_policy_weight),
+                "--neural-value-weight",
+                str(args.neural_value_weight),
+            ]
+        )
     return cmd
 
 
@@ -377,9 +395,9 @@ def safe_log(value: float) -> float:
     return math.log(max(value, 1e-12))
 
 
-def run(cmd: list[str], *, cwd: Path) -> None:
+def run(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
     print("+ " + " ".join(cmd), flush=True)
-    subprocess.run(cmd, cwd=str(cwd), check=True)
+    subprocess.run(cmd, cwd=str(cwd), check=True, env=env)
 
 
 def parse_args() -> argparse.Namespace:
@@ -396,6 +414,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--deck-sampling", default="fixed")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--use-release-binary", action="store_true")
+    parser.add_argument("--selfplay-onnx-path", default=None)
+    parser.add_argument("--selfplay-device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--selfplay-cuda-device-id", type=int, default=0)
+    parser.add_argument("--neural-policy-weight", type=float, default=0.25)
+    parser.add_argument("--neural-value-weight", type=float, default=0.25)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
