@@ -36,19 +36,19 @@ The right first slice is therefore **outer-loop throughput before inner-search t
 
 ### Search cost
 
-`engine-rs/crates/engine/src/rebel/mod.rs::run_public_belief_search` currently evaluates every particle/action pair:
+`engine-rs/crates/engine/src/rebel/mod.rs::run_public_belief_search` evaluates every particle/action pair for the configured search budget:
 
 ```text
-work per decision ~= particle_count * legal_action_count * rollout_steps
+work per decision ~= particle_count * legal_action_count * search_iterations * leaf_cost
 ```
 
 At defaults, that can mean roughly:
 
 ```text
-64 particles * O(2-20 legal actions) * 120 rollout steps
+64 particles * O(2-20 legal actions) * 64 iterations * leaf_cost
 ```
 
-per modeled decision. `RebelSearchConfig.iterations` and `max_depth` are currently recorded but not used to bound or scale the loop, so `--search-iterations` does not yet control actual search work.
+per modeled decision. With neural leaves, those leaf states are batched into one ONNX value-head call per public-belief decision.
 
 ### Self-play cost
 
@@ -253,7 +253,7 @@ Likely payoff order:
 - **Determinism risk:** worker completion order must not affect row order, RNG streams, or terminal value targets.
 - **False speedup risk:** `cargo run` build time and tiny smoke overhead can hide real throughput. Use release binary or warmed cargo for measurement.
 - **Training deployment gap:** ReBeL ONNX export has belief inputs, but current `serve_onnx.py` does not feed them. Do not claim deployable eval until serving/eval schema is extended.
-- **Iterations knob honesty:** either wire `search_iterations` into actual search work or rename/report it as diagnostic-only for this first search implementation.
+- **Iterations knob honesty:** `search_iterations` must correspond to actual particle/action leaf samples, not only a recorded diagnostic.
 
 ## Implementation Order
 
@@ -432,6 +432,12 @@ Production gates:
 
 - `rebel_orchestrator.py` now forwards `--gate-min-games`, `--gate-min-ci-lower`, and `--gate-min-win-rate` to both fixed and uniform/deck-diverse `sim-eval-gate` runs.
 - Gate failures are parsed from the written manifest and recorded in the iteration decision instead of crashing the orchestrator before promotion logic can reject the checkpoint.
+
+Search-iteration budget:
+
+- `run_public_belief_search` now uses `RebelSearchConfig.iterations` as repeated leaf samples per particle/action cell.
+- Diagnostics now report `particleActionEvaluations = particles * legal_actions * search_iterations`; rollout-only search increments `rolloutLeafCalls` by the same count, while neural-leaf search batches the expanded leaf matrix and reports matching `neuralLeafBatchRows` when all leaves are model-evaluable.
+- Determinism check after wiring the budget: `--workers 1` and `--workers 4` produced identical JSONL SHA-256 `d719a66bd77345cadb669a9005f6eadb2a38192aa43c9fb702cc249bc5b1ce3c` for `--seeds 4 --model-side both --particles 2 --search-iterations 4 --rollout-steps 5 --max-steps 30`.
 
 Remaining work:
 

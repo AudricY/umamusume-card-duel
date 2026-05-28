@@ -119,6 +119,7 @@ pub fn run_public_belief_search(
     let mut rollout_leaf_calls = 0usize;
     let mut neural_leaf_calls = 0usize;
     let mut neural_leaf_batch_rows = 0usize;
+    let search_iterations = config.iterations.max(1) as usize;
     let neural_leaf_weight = config.neural_leaf_weight.clamp(0.0, 1.0);
     let use_rollouts = neural_leaf_weight < 1.0 || crate::inference::global().is_none();
     let use_neural_leaf = neural_leaf_weight > 0.0;
@@ -126,66 +127,65 @@ pub fn run_public_belief_search(
     let mut leaf_observations: Vec<PublicObservation> = Vec::new();
     let mut leaf_legal_actions: Vec<Vec<LegalAiAction>> = Vec::new();
     let mut leaf_targets: Vec<(usize, usize)> = Vec::new();
-    let mut neural_leaf_values: Vec<Vec<Option<f64>>> =
-        vec![vec![None; action_count]; belief.particles.len()];
+    let mut neural_leaf_sums: Vec<Vec<f64>> = vec![vec![0.0; action_count]; belief.particles.len()];
+    let mut neural_leaf_counts: Vec<Vec<usize>> =
+        vec![vec![0; action_count]; belief.particles.len()];
 
     for (particle_index, particle) in belief.particles.iter().enumerate() {
-        let particle_weight = particle.weight.max(0.0);
-        let mut per_particle = vec![0.0; action_count];
         for (action_index, action) in belief.legal_actions.iter().enumerate() {
-            let forced =
-                with_rng_borrow(rng, || get_forced_attack_coin_results(&particle.game_state));
-            let next = with_rng_borrow(rng, || {
-                advance_modeled_turn_step(
-                    &particle.game_state,
-                    belief.observer_side,
-                    action,
-                    forced,
-                )
-            });
-            let rollout_value = if use_rollouts {
-                rollout_leaf_calls += 1;
-                rollout_leaf_value_for_state(
-                    &next,
-                    belief.observer_side,
-                    1,
-                    config.rollout_steps,
-                    format!(
-                        "{}:particle:{}:action:{}",
-                        belief.public_history_digest, particle_index, action_index
+            for sample_index in 0..search_iterations {
+                let forced =
+                    with_rng_borrow(rng, || get_forced_attack_coin_results(&particle.game_state));
+                let next = with_rng_borrow(rng, || {
+                    advance_modeled_turn_step(
+                        &particle.game_state,
+                        belief.observer_side,
+                        action,
+                        forced,
                     )
-                    .as_str(),
-                )
-            } else if next.game_over {
-                mcts_terminal_value(&next, belief.observer_side)
-            } else {
-                0.0
-            };
-            if use_neural_leaf {
-                if next.game_over {
-                    neural_leaf_values[particle_index][action_index] =
-                        Some(mcts_terminal_value(&next, belief.observer_side));
+                });
+                let rollout_value = if use_rollouts {
+                    rollout_leaf_calls += 1;
+                    rollout_leaf_value_for_state(
+                        &next,
+                        belief.observer_side,
+                        1,
+                        config.rollout_steps,
+                        format!(
+                            "{}:particle:{}:action:{}:sample:{}",
+                            belief.public_history_digest,
+                            particle_index,
+                            action_index,
+                            sample_index
+                        )
+                        .as_str(),
+                    )
+                } else if next.game_over {
+                    mcts_terminal_value(&next, belief.observer_side)
                 } else {
-                    let legal = enumerate_legal_ai_actions(&next, belief.observer_side);
-                    if legal.is_empty() {
-                        neural_leaf_values[particle_index][action_index] = Some(0.0);
+                    0.0
+                };
+                base_leaf_values[particle_index][action_index] += rollout_value;
+                if use_neural_leaf {
+                    if next.game_over {
+                        neural_leaf_sums[particle_index][action_index] +=
+                            mcts_terminal_value(&next, belief.observer_side);
+                        neural_leaf_counts[particle_index][action_index] += 1;
                     } else {
-                        leaf_observations
-                            .push(build_public_observation(&next, belief.observer_side));
-                        leaf_legal_actions.push(legal);
-                        leaf_targets.push((particle_index, action_index));
+                        let legal = enumerate_legal_ai_actions(&next, belief.observer_side);
+                        if legal.is_empty() {
+                            neural_leaf_counts[particle_index][action_index] += 1;
+                        } else {
+                            leaf_observations
+                                .push(build_public_observation(&next, belief.observer_side));
+                            leaf_legal_actions.push(legal);
+                            leaf_targets.push((particle_index, action_index));
+                        }
                     }
                 }
             }
-            let value = rollout_value;
-            base_leaf_values[particle_index][action_index] = value;
-            per_particle[action_index] = value;
-            action_values[action_index] += value * particle_weight;
-            action_weight[action_index] += particle_weight;
+            base_leaf_values[particle_index][action_index] /= search_iterations as f64;
         }
-        let best = argmax_f64(&per_particle);
-        particle_best.push(best);
-        private_state_values.push(per_particle.get(best).copied().unwrap_or(0.0));
     }
 
     if use_neural_leaf && !leaf_targets.is_empty() {
@@ -204,40 +204,38 @@ pub fn run_public_belief_search(
                         leaf_targets.iter().copied().zip(predictions.into_iter())
                     {
                         neural_leaf_calls += 1;
-                        neural_leaf_values[particle_index][action_index] =
-                            Some(prediction.value as f64);
+                        neural_leaf_sums[particle_index][action_index] += prediction.value as f64;
+                        neural_leaf_counts[particle_index][action_index] += 1;
                     }
                 }
                 Err(_) => {
-                    neural_leaf_values = vec![vec![None; action_count]; belief.particles.len()];
+                    neural_leaf_sums = vec![vec![0.0; action_count]; belief.particles.len()];
+                    neural_leaf_counts = vec![vec![0; action_count]; belief.particles.len()];
                 }
             }
         }
     }
 
-    if use_neural_leaf {
-        action_values.fill(0.0);
-        action_weight.fill(0.0);
-        private_state_values.clear();
-        particle_best.clear();
-        for (particle_index, particle) in belief.particles.iter().enumerate() {
-            let particle_weight = particle.weight.max(0.0);
-            let mut per_particle = vec![0.0; action_count];
-            for action_index in 0..action_count {
-                let rollout_value = base_leaf_values[particle_index][action_index];
-                let neural_value = neural_leaf_values[particle_index][action_index];
-                let value = match neural_value {
-                    Some(v) => (1.0 - neural_leaf_weight) * rollout_value + neural_leaf_weight * v,
-                    None => rollout_value,
-                };
-                per_particle[action_index] = value;
-                action_values[action_index] += value * particle_weight;
-                action_weight[action_index] += particle_weight;
-            }
-            let best = argmax_f64(&per_particle);
-            particle_best.push(best);
-            private_state_values.push(per_particle.get(best).copied().unwrap_or(0.0));
+    for (particle_index, particle) in belief.particles.iter().enumerate() {
+        let particle_weight = particle.weight.max(0.0);
+        let mut per_particle = vec![0.0; action_count];
+        for action_index in 0..action_count {
+            let rollout_value = base_leaf_values[particle_index][action_index];
+            let neural_count = neural_leaf_counts[particle_index][action_index];
+            let value = if use_neural_leaf && neural_count > 0 {
+                let neural_value =
+                    neural_leaf_sums[particle_index][action_index] / neural_count as f64;
+                (1.0 - neural_leaf_weight) * rollout_value + neural_leaf_weight * neural_value
+            } else {
+                rollout_value
+            };
+            per_particle[action_index] = value;
+            action_values[action_index] += value * particle_weight;
+            action_weight[action_index] += particle_weight;
         }
+        let best = argmax_f64(&per_particle);
+        particle_best.push(best);
+        private_state_values.push(per_particle.get(best).copied().unwrap_or(0.0));
     }
 
     for (value, weight) in action_values.iter_mut().zip(action_weight.iter()) {
@@ -304,7 +302,7 @@ pub fn run_public_belief_search(
             information_set_key: belief.public_history_digest.clone(),
             particle_count: belief.particles.len(),
             legal_action_count: action_count,
-            particle_action_evaluations: belief.particles.len() * action_count,
+            particle_action_evaluations: belief.particles.len() * action_count * search_iterations,
             rollout_leaf_calls,
             neural_leaf_calls,
             neural_leaf_batch_rows,
