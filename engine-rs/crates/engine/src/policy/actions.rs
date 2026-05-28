@@ -52,11 +52,39 @@ use crate::policy::types::{AiPhase, LegalAiAction};
 ///   slot 10 = combat `target_value` / 200 (0 outside combat)
 ///   slot 26 = combat `lethal_target` flag (0/1, outside combat = 0)
 ///   slot 28 = trainer `effect.heal` magnitude / 100 (0 outside trainer)
-pub const ACTION_FEATURE_SCHEMA_VERSION: u32 = 3;
+///
+/// v38-slim-feature-add bumped 3 → 4. Adds 4 new slots at [48:52]:
+///   slot 48 = `swap_in_attack_ready` (retreat/retreatAttack only)
+///   slot 49 = `expected_damage_norm` (base + activeAttackDamageBonus +
+///             weakness, normalized /300; RESTRICTED — no conditional
+///             bonuses, no coin-flip, no discard)
+///   slot 50 = `attach_color_matches_typed_need` (attachEnergy only)
+///   slot 51 = `attach_completes_typed_threshold` (attachEnergy only)
+/// v3 slots [0:48] BYTE-STABLE.
+///
+/// v5-action-disambiguation bumped 4 → 5. Adds 5 new choice-card stat
+/// slots at [52:57]. All fire iff `input.choice_card_id` resolves a
+/// catalog card. v4 slots [0:52] BYTE-STABLE.
+///   slot 52 = `choice_card_present` (1 iff resolves; 0 otherwise)
+///   slot 53 = `choice_card_hp_norm` = card.hp / 180 (umamusume only)
+///   slot 54 = `choice_card_attack_damage_norm` =
+///             primary_attack(card).damage / 150 (umamusume only)
+///   slot 55 = `choice_card_attack_cost_total_norm` =
+///             min(sum(cost values), 4) / 4 (umamusume only)
+///   slot 56 = `choice_card_has_ability` (1 iff umamusume AND
+///             card.ability is_some)
+pub const ACTION_FEATURE_SCHEMA_VERSION: u32 = 5;
 
 /// `ai-policy/actions.ts:22`. Per-action feature count — locks the Python
 /// collator's input width.
-pub const ACTION_FEATURE_COUNT: usize = 48;
+///
+/// v38-slim-feature-add bumped 48 → 52. v3 slots [0:48] BYTE-STABLE; the
+/// 4 new slots [48:52] are pure additions per the v4 schema.
+///
+/// v5-action-disambiguation bumped 52 → 57. v4 slots [0:52] BYTE-STABLE;
+/// the 5 new choice-card stat slots [52:57] are pure additions per the
+/// v5 schema.
+pub const ACTION_FEATURE_COUNT: usize = 57;
 
 /// `ai-policy/actions.ts:23`. Source-declaration order. Matches
 /// `EnergyType::ALL`.
@@ -437,6 +465,10 @@ fn enumerate_attach_actions(state: &GameState, side: &SideState) -> Vec<LegalAiA
         return Vec::new();
     }
     let turn_goal = choose_ai_turn_goal(state, side);
+    // v3.8 cross-bit context: `side.energy_zone[0]` is the color about
+    // to be attached (`flow/energy.ts:7` head-of-queue). Pass to
+    // `FeatureInput.attach_color` so slots 50/51 can compute.
+    let attach_color: Option<EnergyType> = side.energy_zone.first().copied();
     let mut out: Vec<LegalAiAction> = Vec::new();
     for (slot, target) in get_all_umamusume(side).into_iter().enumerate() {
         if !can_attach_energy_to_umamusume(state, side, target.uid) {
@@ -451,6 +483,7 @@ fn enumerate_attach_actions(state: &GameState, side: &SideState) -> Vec<LegalAiA
             kind: "attachEnergy",
             target: Some(target),
             target_slot: Some(slot as f64),
+            attach_color,
             ..Default::default()
         });
         out.push(LegalAiAction {
@@ -688,6 +721,14 @@ fn enumerate_combat_actions(state: &GameState, side: &SideState) -> Vec<LegalAiA
             let safe_bonus = if candidate.keeps_safe { 20.0 } else { 0.0 };
             let score = candidate.score + lethal_bonus + safe_bonus;
             let ends_turn = matches!(candidate.decision, AiCombatDecision::Attack(_));
+            // v3.8 cross-bit context: pass attacker side, opponent active,
+            // and the bench Uma that becomes active on retreatAttack swap.
+            let retreat_swap_target: Option<&UmamusumeInstance> = match &candidate.decision {
+                AiCombatDecision::Attack(a) => a
+                    .retreat_target_uid
+                    .and_then(|uid| side.bench.iter().find(|u| u.uid == uid)),
+                AiCombatDecision::EndTurn => None,
+            };
             // Payload: serialize the decision under the "decision" key with
             // the TS-equivalent shape. AiCombatDecision serialization uses
             // `tag = "kind"` already.
@@ -708,6 +749,9 @@ fn enumerate_combat_actions(state: &GameState, side: &SideState) -> Vec<LegalAiA
                 ends_turn: Some(ends_turn),
                 source_card_id,
                 target,
+                attacker_side: Some(side),
+                defender_active: opponent.active.as_ref(),
+                retreat_swap_target,
                 ..Default::default()
             });
             out.push(LegalAiAction {
@@ -1093,6 +1137,12 @@ struct FeatureInput<'a> {
     target_value: Option<f64>,
     lethal_target: Option<bool>,
     ends_turn: Option<bool>,
+    // v3.8 cross-bit context (slots [48:52]). Optional — call sites
+    // populate only on action kinds where the slot is meaningful.
+    attacker_side: Option<&'a SideState>,
+    defender_active: Option<&'a UmamusumeInstance>,
+    attach_color: Option<EnergyType>,
+    retreat_swap_target: Option<&'a UmamusumeInstance>,
 }
 
 impl Default for AiPhase {
@@ -1307,7 +1357,172 @@ fn build_features(input: FeatureInput<'_>) -> Vec<f64> {
         .target
         .map(|t| typed_energy_deficit(t) as f64 / 4.0)
         .unwrap_or(0.0);
+    // v3.8 slots [48:52] — mirrors TS `v38SwapInAttackReady`,
+    // `v38ExpectedDamageNorm`, `v38AttachColorMatchesTypedNeed`,
+    // `v38AttachCompletesTypedThreshold`. See
+    // `frontend/src/game/engine/ai-policy/actions.ts` and scoping doc
+    // §4.5 for slot definitions.
+    v[48] = v38_swap_in_attack_ready(&input);
+    v[49] = v38_expected_damage_norm(&input);
+    v[50] = v38_attach_color_matches_typed_need(&input);
+    v[51] = v38_attach_completes_typed_threshold(&input);
+    // v5-action-disambiguation slots [52:57] — mirrors TS choice-card
+    // stat slots. All 5 default to 0 when no choice card resolves.
+    // Reuses `choice_card` resolved above for slots 42-45 cardRole bits.
+    v[52] = if choice_card.is_some() { 1.0 } else { 0.0 };
+    v[53] = match choice_card {
+        Some(Card::Umamusume(u)) => u.hp as f64 / 180.0,
+        _ => 0.0,
+    };
+    v[54] = match choice_card {
+        Some(Card::Umamusume(u)) => match primary_attack(u) {
+            Some(a) => a.damage as f64 / 150.0,
+            None => 0.0,
+        },
+        _ => 0.0,
+    };
+    v[55] = match choice_card {
+        Some(Card::Umamusume(u)) => match primary_attack(u) {
+            Some(a) => {
+                let sum: u32 = EnergyType::ALL
+                    .iter()
+                    .map(|t| a.cost.get(*t) as u32)
+                    .sum();
+                (sum.min(4) as f64) / 4.0
+            }
+            None => 0.0,
+        },
+        _ => 0.0,
+    };
+    v[56] = match choice_card {
+        Some(Card::Umamusume(u)) if u.ability.is_some() => 1.0,
+        _ => 0.0,
+    };
     v
+}
+
+/// v3.8 slot 48 — `swap_in_attack_ready`. Fires when the action carries
+/// a `retreat_swap_target` (= retreat/retreatAttack semantics; the combat
+/// enumerator supplies the target iff `decision.retreat_target_uid` is
+/// set). 1 iff the swap-in Uma has enough energy for its primary attack.
+fn v38_swap_in_attack_ready(input: &FeatureInput<'_>) -> f64 {
+    let Some(swap_in) = input.retreat_swap_target else {
+        return 0.0;
+    };
+    let cat = catalog();
+    let Some(Card::Umamusume(card)) = cat.get(swap_in.card_id) else {
+        return 0.0;
+    };
+    let Some(attack) = primary_attack(card) else {
+        return 0.0;
+    };
+    if has_enough_energy(swap_in, &attack.cost) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// v3.8 slot 49 — `expected_damage_norm`. RESTRICTED to base +
+/// `activeAttackDamageBonus` + weakness (no conditional bonuses, no
+/// coin-flip, no discard). Fires for kinds in {attack, retreatAttack,
+/// useAbility} — but the combat enumerator passes the RAW decision kind
+/// (`"attack"` regardless of retreatAttack), so we accept all three kind
+/// strings and require both `source_card_id` and `defender_active`.
+fn v38_expected_damage_norm(input: &FeatureInput<'_>) -> f64 {
+    if input.kind != "attack" && input.kind != "retreatAttack" && input.kind != "useAbility" {
+        return 0.0;
+    }
+    let Some(source_id) = input.source_card_id else {
+        return 0.0;
+    };
+    let Some(defender) = input.defender_active else {
+        return 0.0;
+    };
+    let cat = catalog();
+    let Some(Card::Umamusume(attacker_card)) = cat.get(source_id) else {
+        return 0.0;
+    };
+    let Some(primary) = primary_attack(attacker_card) else {
+        return 0.0;
+    };
+    let mut damage: f64 = primary.damage as f64;
+    if let Some(side) = input.attacker_side {
+        damage += side.active_attack_damage_bonus as f64;
+    }
+    if damage > 0.0 {
+        if let Some(Card::Umamusume(def_card)) = cat.get(defender.card_id) {
+            if def_card.weakness.r#type == attacker_card.r#type {
+                damage += def_card.weakness.amount as f64;
+            }
+        }
+    }
+    if damage < 0.0 {
+        damage = 0.0;
+    }
+    damage / 300.0
+}
+
+/// v3.8 slot 50 — `attach_color_matches_typed_need`. 1 iff
+/// kind=attachEnergy AND attach_color reduces a typed deficit on the
+/// target's primary attack cost.
+fn v38_attach_color_matches_typed_need(input: &FeatureInput<'_>) -> f64 {
+    if input.kind != "attachEnergy" {
+        return 0.0;
+    }
+    let (Some(target), Some(color)) = (input.target, input.attach_color) else {
+        return 0.0;
+    };
+    if color == EnergyType::Colorless {
+        return 0.0;
+    }
+    let cat = catalog();
+    let Some(Card::Umamusume(card)) = cat.get(target.card_id) else {
+        return 0.0;
+    };
+    let Some(attack) = primary_attack(card) else {
+        return 0.0;
+    };
+    let need = attack.cost.get(color) as i32;
+    let have = target.energies[color as usize] as i32;
+    if need > have {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// v3.8 slot 51 — `attach_completes_typed_threshold`. 1 iff
+/// kind=attachEnergy AND post-attach target meets primary-attack typed
+/// cost (colorless still allowed unmet).
+fn v38_attach_completes_typed_threshold(input: &FeatureInput<'_>) -> f64 {
+    if input.kind != "attachEnergy" {
+        return 0.0;
+    }
+    let (Some(target), Some(color)) = (input.target, input.attach_color) else {
+        return 0.0;
+    };
+    let cat = catalog();
+    let Some(Card::Umamusume(card)) = cat.get(target.card_id) else {
+        return 0.0;
+    };
+    let Some(attack) = primary_attack(card) else {
+        return 0.0;
+    };
+    for t in ENERGY_TYPES {
+        if t == EnergyType::Colorless {
+            continue;
+        }
+        let need = attack.cost.get(t) as i32;
+        let mut have = target.energies[t as usize] as i32;
+        if t == color {
+            have += 1;
+        }
+        if have < need {
+            return 0.0;
+        }
+    }
+    1.0
 }
 
 fn matches_trainer_type(card: Option<&Card>, t: TrainerType) -> f64 {
@@ -1636,7 +1851,7 @@ fn play_choices_to_value(choices: &PlayChoices) -> Value {
 mod tests {
     use super::*;
     use crate::core::constants::{AiDeckStyle, AiDifficulty, SideId};
-    use crate::core::state::{CurrentSide, Phase, SetupState, SideState, UmamusumeInstance};
+    use crate::core::state::{CurrentSide, Phase, SetupState, SideState};
     use arrayvec::ArrayVec;
 
     fn empty_side(id: SideId) -> SideState {
@@ -1820,8 +2035,19 @@ mod tests {
     // ----------------------------------------------------------------
 
     #[test]
-    fn schema_version_bumped_to_three() {
-        assert_eq!(ACTION_FEATURE_SCHEMA_VERSION, 3);
+    fn schema_version_bumped_to_five() {
+        // v38-slim-feature-add bumped 3 → 4 (added slots [48:52]).
+        // v5-action-disambiguation bumped 4 → 5 (added choice-card stat
+        // slots [52:57]).
+        assert_eq!(ACTION_FEATURE_SCHEMA_VERSION, 5);
+    }
+
+    #[test]
+    fn action_feature_count_is_fifty_seven() {
+        // v38-slim-feature-add bumped 48 → 52 (4 new slots at [48:52]).
+        // v5-action-disambiguation bumped 52 → 57 (5 new choice-card
+        // stat slots at [52:57]).
+        assert_eq!(ACTION_FEATURE_COUNT, 57);
     }
 
     #[test]

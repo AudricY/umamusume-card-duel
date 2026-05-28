@@ -390,8 +390,7 @@ pub fn has_consecutive_no_attack_turns(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::card_id::CardId;
-    use crate::core::constants::{AiDeckStyle, AiDifficulty, EnergyType, SideId};
+    use crate::core::constants::{AiDeckStyle, AiDifficulty, SideId};
     use crate::core::state::{CurrentSide, Phase, SideState};
     use arrayvec::ArrayVec;
 
