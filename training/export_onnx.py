@@ -170,8 +170,52 @@ def main() -> None:
             "logits": {0: "batch", 1: "actions"},
             "value": {0: "batch"},
         }
+    export_model: torch.nn.Module = model
+    if config.uses_belief_features:
+        class _BeliefExportWrapper(torch.nn.Module):
+            def __init__(self, wrapped: CandidatePolicyNet) -> None:
+                super().__init__()
+                self.wrapped = wrapped
+
+            def forward(self, state_x, action_x, mask_x, zone_x, action_idx_x, belief_x):  # noqa: ANN001
+                return self.wrapped(
+                    state_x,
+                    action_x,
+                    mask_x,
+                    card_ids_by_zone=zone_x,
+                    action_card_idx=action_idx_x,
+                    belief_features=belief_x,
+                )
+
+        class _SlotBeliefExportWrapper(torch.nn.Module):
+            def __init__(self, wrapped: CandidatePolicyNet) -> None:
+                super().__init__()
+                self.wrapped = wrapped
+
+            def forward(self, state_x, action_x, mask_x, zone_x, action_idx_x, slot_ids_x, slot_feat_x, belief_x):  # noqa: ANN001
+                return self.wrapped(
+                    state_x,
+                    action_x,
+                    mask_x,
+                    card_ids_by_zone=zone_x,
+                    action_card_idx=action_idx_x,
+                    uma_slot_card_ids=slot_ids_x,
+                    uma_slot_features=slot_feat_x,
+                    belief_features=belief_x,
+                )
+
+        export_model = (
+            _SlotBeliefExportWrapper(model)
+            if config.uses_uma_slot_tokens
+            else _BeliefExportWrapper(model)
+        )
+        export_model.eval()
+        belief_features = torch.zeros((1, config.belief_feature_dim), dtype=torch.float32)
+        positional_inputs = positional_inputs + (belief_features,)
+        input_names.append("belief_features")
+        dynamic_axes["belief_features"] = {0: "batch"}
     torch.onnx.export(
-        model,
+        export_model,
         # Positional args mirror the model's `forward` signature; the two
         # new int inputs must be passed as positional tensors (not kwargs)
         # to participate in the traced graph. Phase 2's optional-kwarg
@@ -239,6 +283,11 @@ def main() -> None:
         sidecar_payload["q_value_scalar"] = config.q_value_scalar
         sidecar_payload["q_value_scalar_scale"] = config.q_value_scalar_scale
         sidecar_payload["q_value_scalar_bias"] = config.q_value_scalar_bias
+    if config.uses_belief_features:
+        sidecar_payload["uses_belief_features"] = True
+        sidecar_payload["belief_feature_dim"] = config.belief_feature_dim
+        sidecar_payload["belief_schema_version"] = 1
+        sidecar_payload["selfplay_kind"] = "rebel-selfplay"
     sidecar = out.with_suffix(out.suffix + ".meta.json")
     sidecar.write_text(
         json.dumps(sidecar_payload, indent=2) + "\n",

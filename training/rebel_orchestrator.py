@@ -67,6 +67,8 @@ def main() -> None:
         str(args.batch_size),
         "--state-dim",
         str(args.state_dim),
+        "--split-by",
+        "row",
         "--device",
         args.device,
         "--value-weight",

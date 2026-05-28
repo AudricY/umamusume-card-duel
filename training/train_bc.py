@@ -546,8 +546,53 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
             "logits": {0: "batch", 1: "actions"},
             "value": {0: "batch"},
         }
+    belief_input = None
+    export_model: nn.Module = cpu_model
+    if config.uses_belief_features:
+        class _BeliefExportWrapper(nn.Module):
+            def __init__(self, wrapped: CandidatePolicyNet) -> None:
+                super().__init__()
+                self.wrapped = wrapped
+
+            def forward(self, state_x, action_x, mask_x, zone_x, action_idx_x, belief_x):  # noqa: ANN001
+                return self.wrapped(
+                    state_x,
+                    action_x,
+                    mask_x,
+                    card_ids_by_zone=zone_x,
+                    action_card_idx=action_idx_x,
+                    belief_features=belief_x,
+                )
+
+        class _SlotBeliefExportWrapper(nn.Module):
+            def __init__(self, wrapped: CandidatePolicyNet) -> None:
+                super().__init__()
+                self.wrapped = wrapped
+
+            def forward(self, state_x, action_x, mask_x, zone_x, action_idx_x, slot_ids_x, slot_feat_x, belief_x):  # noqa: ANN001
+                return self.wrapped(
+                    state_x,
+                    action_x,
+                    mask_x,
+                    card_ids_by_zone=zone_x,
+                    action_card_idx=action_idx_x,
+                    uma_slot_card_ids=slot_ids_x,
+                    uma_slot_features=slot_feat_x,
+                    belief_features=belief_x,
+                )
+
+        export_model = (
+            _SlotBeliefExportWrapper(cpu_model)
+            if config.uses_uma_slot_tokens
+            else _BeliefExportWrapper(cpu_model)
+        )
+        export_model.eval()
+        belief_input = torch.zeros((1, config.belief_feature_dim), dtype=torch.float32)
+        positional_inputs = positional_inputs + (belief_input,)
+        input_names.append("belief_features")
+        dynamic_axes["belief_features"] = {0: "batch"}
     torch.onnx.export(
-        cpu_model,
+        export_model,
         positional_inputs,
         onnx_path,
         input_names=input_names,
@@ -598,6 +643,11 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
     else:
         populated_uma_ids = None
         populated_uma_feat = None
+    populated_belief = (
+        torch.rand((1, config.belief_feature_dim), dtype=torch.float32, generator=gen)
+        if config.uses_belief_features
+        else None
+    )
     populated_feed: dict[str, Any] = {
         "state_features": state.numpy(),
         "action_features": actions.numpy(),
@@ -608,6 +658,8 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
     if populated_uma_ids is not None and populated_uma_feat is not None:
         populated_feed["uma_slot_card_ids"] = populated_uma_ids.numpy()
         populated_feed["uma_slot_features"] = populated_uma_feat.numpy()
+    if populated_belief is not None:
+        populated_feed["belief_features"] = populated_belief.numpy()
     onnx_logits, onnx_value = session.run(None, populated_feed)
     with torch.no_grad():
         torch_logits, torch_value = cpu_model(
@@ -618,6 +670,7 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
             action_card_idx=populated_aci,
             uma_slot_card_ids=populated_uma_ids,
             uma_slot_features=populated_uma_feat,
+            belief_features=populated_belief,
         )
     max_logit_diff = float((torch.from_numpy(onnx_logits) - torch_logits).abs().max())
     max_value_diff = float((torch.from_numpy(onnx_value) - torch_value).abs().max())
@@ -650,6 +703,11 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
     else:
         zero_uma_ids = None
         zero_uma_feat = None
+    zero_belief = (
+        torch.zeros((1, config.belief_feature_dim), dtype=torch.float32)
+        if config.uses_belief_features
+        else None
+    )
     zero_feed: dict[str, Any] = {
         "state_features": state.numpy(),
         "action_features": actions.numpy(),
@@ -660,6 +718,8 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
     if zero_uma_ids is not None and zero_uma_feat is not None:
         zero_feed["uma_slot_card_ids"] = zero_uma_ids.numpy()
         zero_feed["uma_slot_features"] = zero_uma_feat.numpy()
+    if zero_belief is not None:
+        zero_feed["belief_features"] = zero_belief.numpy()
     onnx_logits_z, onnx_value_z = session.run(None, zero_feed)
     with torch.no_grad():
         torch_logits_z, torch_value_z = cpu_model(
@@ -670,12 +730,17 @@ def run_onnx_roundtrip_smoke(model: CandidatePolicyNet, config: ModelConfig, out
             action_card_idx=zero_aci,
             uma_slot_card_ids=zero_uma_ids,
             uma_slot_features=zero_uma_feat,
+            belief_features=zero_belief,
         )
         # Reference: forward with the kwargs omitted entirely. Phase 2
         # `padding_idx=0` + `zone_projection(bias=False)` ensures
         # `forward(...)` with zero embedding inputs is bit-equivalent
         # to `forward(...)` with the kwargs omitted.
-        torch_logits_none, torch_value_none = cpu_model(state, actions, mask)
+        if config.uses_belief_features:
+            torch_logits_none = torch_logits_z
+            torch_value_none = torch_value_z
+        else:
+            torch_logits_none, torch_value_none = cpu_model(state, actions, mask)
     max_logit_diff_zero = float((torch.from_numpy(onnx_logits_z) - torch_logits_z).abs().max())
     max_value_diff_zero = float((torch.from_numpy(onnx_value_z) - torch_value_z).abs().max())
     max_logit_diff_pad = float((torch_logits_z - torch_logits_none).abs().max())
