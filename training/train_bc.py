@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Subset
 
 from events import EventWriter
 from uma_ai.dataset import JsonlPolicyDataset, collate_policy_batch
+from uma_ai.rebel_dataset import RebelSelfPlayDataset, collate_rebel_selfplay_batch
 from uma_ai.selfplay_dataset import MctsSelfPlayDataset, collate_mcts_selfplay_batch
 from uma_ai.features import ACTION_DIM, ACTION_FEATURE_SCHEMA_VERSION, STATE_DIM, card_vocab_metadata, schema_version_for_state_dim
 from uma_ai.model import CandidatePolicyNet, ModelConfig
@@ -59,6 +60,15 @@ def main() -> None:
             uses_uma_slot_tokens=uses_uma_slot_tokens,
         )
         collate_fn = collate_mcts_selfplay_batch
+    elif args.data_mode == "rebel":
+        dataset = RebelSelfPlayDataset(
+            args.data,
+            min_actions=2,
+            ablations=ablations,
+            state_dim=state_dim,
+            uses_uma_slot_tokens=uses_uma_slot_tokens,
+        )
+        collate_fn = collate_rebel_selfplay_batch
     else:
         # R16 Fork A contested-coverage pilot knobs. Both default OFF
         # (weight=1.0 / fraction=None) so unset is bit-identical to
@@ -121,6 +131,7 @@ def main() -> None:
         q_value_scalar=args.q_value_scalar,
         q_value_scalar_scale=args.q_value_scalar_scale,
         q_value_scalar_bias=args.q_value_scalar_bias,
+        uses_belief_features=args.data_mode == "rebel" or bool(args.belief_features),
     )
     model = CandidatePolicyNet(config).to(device)
     # distill-throughput-spike Phase 1: torch.compile is applied AFTER
@@ -292,6 +303,7 @@ def main() -> None:
         "model_state": {key: value.detach().cpu() for key, value in save_model.state_dict().items()},
         "model_config": config.to_dict(),
         "feature_schema": feature_schema_metadata(config.state_dim),
+        "rebel_schema": rebel_schema_metadata(config),
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "scaler_state": scaler.state_dict() if scaler is not None else None,
@@ -300,6 +312,7 @@ def main() -> None:
         "history": history,
         "training": {
             "data": str(args.data),
+            "data_mode": args.data_mode,
             "samples": len(dataset),
             "train_samples": len(train_indices),
             "val_samples": len(val_indices),
@@ -312,6 +325,7 @@ def main() -> None:
             "value_weight": args.value_weight,
             "q_value_weight": args.q_value_weight,
             "q_value_head": bool(args.q_value_head),
+            "belief_features": bool(config.uses_belief_features),
             "q_value_scalar": args.q_value_scalar,
             "q_value_scalar_scale": float(args.q_value_scalar_scale),
             "q_value_scalar_bias": float(args.q_value_scalar_bias),
@@ -339,6 +353,7 @@ def main() -> None:
         "checkpoint": "checkpoint.pt",
         "model_config": config.to_dict(),
         "feature_schema": feature_schema_metadata(config.state_dim),
+        "rebel_schema": rebel_schema_metadata(config),
         "device": str(device),
         "data": str(args.data),
         "samples": len(dataset),
@@ -346,6 +361,8 @@ def main() -> None:
         "dataset_summary": dataset_summary,
         "feature_ablations": sorted(ablations),
         "training_kwargs": {
+            "data_mode": args.data_mode,
+            "belief_features": bool(config.uses_belief_features),
             "amp": use_amp,
             "grad_accum": grad_accum,
             "lr_schedule": args.lr_schedule,
@@ -725,6 +742,7 @@ def run_epoch(
                 action_card_idx=batch.get("action_card_idx"),
                 uma_slot_card_ids=batch.get("uma_slot_card_ids"),
                 uma_slot_features=batch.get("uma_slot_features"),
+                belief_features=batch.get("belief_features"),
                 return_q_values=q_value_weight > 0.0,
             )
             if q_value_weight > 0.0:
@@ -768,6 +786,7 @@ def run_epoch(
                         action_card_idx=batch.get("action_card_idx"),
                         uma_slot_card_ids=batch.get("uma_slot_card_ids"),
                         uma_slot_features=batch.get("uma_slot_features"),
+                        belief_features=batch.get("belief_features"),
                     )
                 kl_loss = masked_kl_divergence(anchor_logits, logits, batch["action_mask"])
             # R3 entropy bonus: subtract β·H(π) so loss minimization
@@ -839,6 +858,7 @@ def evaluate(
             action_card_idx=batch.get("action_card_idx"),
             uma_slot_card_ids=batch.get("uma_slot_card_ids"),
             uma_slot_features=batch.get("uma_slot_features"),
+            belief_features=batch.get("belief_features"),
             return_q_values=q_value_weight > 0.0,
         )
         if q_value_weight > 0.0:
@@ -1094,6 +1114,18 @@ def feature_schema_metadata(state_dim: int = STATE_DIM) -> dict[str, Any]:
     }
 
 
+def rebel_schema_metadata(config: ModelConfig) -> dict[str, Any] | None:
+    if not config.uses_belief_features:
+        return None
+    return {
+        "belief_schema_version": 1,
+        "belief_feature_dim": int(config.belief_feature_dim),
+        "selfplay_kind": "rebel-selfplay",
+        "search_algorithm": "public-belief-cfr-v1",
+        "belief_sampler": "public-history-particles-v1",
+    }
+
+
 def move_batch(batch: dict[str, torch.Tensor], model: CandidatePolicyNet) -> dict[str, torch.Tensor]:
     device = next(model.parameters()).device
     return {key: value.to(device) for key, value in batch.items()}
@@ -1242,10 +1274,11 @@ def parse_args() -> argparse.Namespace:
                         help="Frozen prior-iteration checkpoint to regularize toward (anti-forgetting).")
     parser.add_argument("--kl-anchor-weight", type=float, default=0.0,
                         help="Per-batch weight on KL(anchor || target). 0 disables. Try 0.05-0.5.")
-    parser.add_argument("--data-mode", choices=["bc", "mcts-distill"], default="bc",
+    parser.add_argument("--data-mode", choices=["bc", "mcts-distill", "rebel"], default="bc",
                         help="bc: read teacher-labeled rows (hard target index, CE loss). "
                              "mcts-distill: read mcts-selfplay rows (soft visit-distribution target, "
-                             "soft cross-entropy loss). R12 phase C.")
+                             "soft cross-entropy loss). "
+                             "rebel: read rebel-selfplay rows with public-belief features.")
     parser.add_argument("--policy-weight", type=float, default=1.0,
                         help="Weight on the policy loss (distill mode uses soft CE).")
     parser.add_argument("--state-dim", type=int, default=STATE_DIM,
@@ -1304,6 +1337,9 @@ def parse_args() -> argparse.Namespace:
                              "the source of truth read by export_onnx (which "
                              "auto-gates the 7-input ONNX graph) — no "
                              "exporter-side CLI flag needed.")
+    parser.add_argument("--belief-features", action="store_true",
+                        help="Enable the ReBeL public-belief feature branch. "
+                             "--data-mode rebel enables this automatically.")
     return parser.parse_args()
 
 

@@ -22,6 +22,7 @@ CARD_EMBED_DIM = 32
 CARD_VOCAB_TABLE_SIZE = 108  # 107 cards + reserved 0 for unknown/pad
 NUM_ZONES = len(ZONE_ORDER)
 ACTION_PAIR_FANOUT = 2  # source + target idx per action
+BELIEF_FEATURE_DIM = 16
 
 # R7.b.3 set-attention probe: pre-trunk encoder hyperparameters. Frozen for
 # the Slice 1/2 path; widening or going to >1 layer fires only if Slice 2 is
@@ -123,6 +124,10 @@ class ModelConfig:
     # checkpoint outputs at construction/load time while giving value retrain
     # a policy-preserving capacity path.
     value_adapter: str = "none"
+    # ReBeL E2E: optional fixed-width public-belief summary vector. Defaults
+    # are inert so existing checkpoints keep the same graph and parameter set.
+    uses_belief_features: bool = False
+    belief_feature_dim: int = BELIEF_FEATURE_DIM
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -376,6 +381,8 @@ class CandidatePolicyNet(nn.Module):
                 f"unknown value_adapter {self.config.value_adapter!r}; "
                 f"expected one of {_VALID_VALUE_ADAPTERS}"
             )
+        if self.config.belief_feature_dim <= 0:
+            raise ValueError("belief_feature_dim must be positive")
         hidden = self.config.hidden_dim
         # R7.b.3 set-attention probe: the "mlp" variant is the legacy
         # additive state_encoder / zone_projection / uma_slot_encoder trunk.
@@ -394,6 +401,15 @@ class CandidatePolicyNet(nn.Module):
             nn.GELU(),
             ResidualBlock(hidden, self.config.dropout),
         )
+        if self.config.uses_belief_features:
+            self.belief_encoder = nn.Sequential(
+                nn.Linear(self.config.belief_feature_dim, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden, bias=False),
+            )
+            nn.init.zeros_(self.belief_encoder[-1].weight)
+        else:
+            self.belief_encoder = None
         # R7.b.2 Phase 2: shared per-card embedding table consumed by BOTH
         # the per-zone state branch (sum-pool over zone-packed ids → linear
         # to `hidden`, ADDED to `state_encoded` as an additive residual) and
@@ -528,6 +544,7 @@ class CandidatePolicyNet(nn.Module):
         action_card_idx: torch.Tensor | None = None,
         uma_slot_card_ids: torch.Tensor | None = None,
         uma_slot_features: torch.Tensor | None = None,
+        belief_features: torch.Tensor | None = None,
         return_q_values: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Candidate-conditioned forward.
@@ -656,6 +673,13 @@ class CandidatePolicyNet(nn.Module):
                 uma_slot_card_ids,
                 uma_slot_features,
             )
+
+        if (
+            self.config.uses_belief_features
+            and self.belief_encoder is not None
+            and belief_features is not None
+        ):
+            state_encoded = state_encoded + self.belief_encoder(belief_features)
 
         action_encoded = self.action_encoder(action_features)
         # R7.b.2 Phase 2: source + target embedding for each candidate.
