@@ -22,6 +22,7 @@ use engine::dispatcher::{
     get_forced_attack_coin_results, state_fingerprint,
 };
 use engine::headless_setup::setup_ai_vs_ai_game_with_decks;
+use engine::inference::{self, Device, InferenceSession};
 use engine::policy::actions::enumerate_legal_ai_actions;
 use engine::policy::types::{LegalAiAction, PublicObservation};
 use engine::rebel::{run_public_belief_search, BeliefSearchResult, RebelSearchConfig};
@@ -64,6 +65,16 @@ struct Args {
     manifest_out: Option<String>,
     #[arg(long, default_value_t = 1)]
     workers: u32,
+    #[arg(long)]
+    onnx_path: Option<String>,
+    #[arg(long, default_value = "cpu")]
+    device: String,
+    #[arg(long, default_value_t = 0)]
+    cuda_device_id: i32,
+    #[arg(long, default_value_t = 0.25)]
+    neural_policy_weight: f64,
+    #[arg(long, default_value_t = 0.25)]
+    neural_value_weight: f64,
 }
 
 impl Args {
@@ -83,6 +94,11 @@ impl Args {
             "out": self.out,
             "manifestOut": self.manifest_out,
             "workers": self.workers,
+            "onnxPath": self.onnx_path,
+            "device": self.device,
+            "cudaDeviceId": self.cuda_device_id,
+            "neuralPolicyWeight": self.neural_policy_weight,
+            "neuralValueWeight": self.neural_value_weight,
             "dataMode": "rebel",
             "engine": "rust",
             "selfplayBinary": "sim-rebel-selfplay",
@@ -484,6 +500,25 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let sampling = DeckSampling::parse(&args.deck_sampling)
         .map_err(|e| anyhow::anyhow!("--deck-sampling: {}", e))?;
+    if let Some(onnx) = args.onnx_path.as_ref() {
+        let device = match args.device.as_str() {
+            "cpu" => Device::Cpu,
+            "cuda" => Device::Cuda {
+                device_id: args.cuda_device_id,
+            },
+            other => anyhow::bail!("--device must be cpu or cuda (got {})", other),
+        };
+        let session = InferenceSession::load_on(std::path::Path::new(onnx), device)
+            .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
+        inference::set_global(session);
+        eprintln!(
+            "sim-rebel-selfplay: loaded inference session from {} (device={:?}, neural_policy_weight={}, neural_value_weight={})",
+            onnx,
+            device,
+            args.neural_policy_weight,
+            args.neural_value_weight,
+        );
+    }
     let workers: usize = if args.workers == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get() / 2)
@@ -522,6 +557,16 @@ fn main() -> Result<()> {
         iterations: args.iterations,
         max_depth: args.max_depth,
         rollout_steps: args.rollout_steps,
+        neural_policy_weight: if args.onnx_path.is_some() {
+            args.neural_policy_weight
+        } else {
+            0.0
+        },
+        neural_value_weight: if args.onnx_path.is_some() {
+            args.neural_value_weight
+        } else {
+            0.0
+        },
         algorithm: "public-belief-cfr-v1".to_string(),
     };
     let mut writer: Option<fs::File> = match args.out.as_ref() {

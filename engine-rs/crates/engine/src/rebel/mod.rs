@@ -21,6 +21,8 @@ pub struct RebelSearchConfig {
     pub iterations: u32,
     pub max_depth: u32,
     pub rollout_steps: u32,
+    pub neural_policy_weight: f64,
+    pub neural_value_weight: f64,
     pub algorithm: String,
 }
 
@@ -30,6 +32,8 @@ impl Default for RebelSearchConfig {
             iterations: 64,
             max_depth: 1,
             rollout_steps: 120,
+            neural_policy_weight: 0.0,
+            neural_value_weight: 0.0,
             algorithm: "public-belief-cfr-v1".to_string(),
         }
     }
@@ -43,6 +47,9 @@ pub struct RebelSearchDiagnostics {
     pub legal_action_count: usize,
     pub particle_action_evaluations: usize,
     pub rollout_leaf_calls: usize,
+    pub neural_policy_weight: f64,
+    pub neural_value_weight: f64,
+    pub neural_value: Option<f64>,
     pub search_iterations: u32,
     pub policy_entropy: f64,
     pub particle_action_agreement: f64,
@@ -81,6 +88,9 @@ pub fn run_public_belief_search(
                 legal_action_count: 0,
                 particle_action_evaluations: 0,
                 rollout_leaf_calls: 0,
+                neural_policy_weight: config.neural_policy_weight,
+                neural_value_weight: config.neural_value_weight,
+                neural_value: None,
                 search_iterations: 0,
                 policy_entropy: 0.0,
                 particle_action_agreement: 0.0,
@@ -137,13 +147,48 @@ pub fn run_public_belief_search(
             *value /= *weight;
         }
     }
-    let root_policy = softmax(&action_values);
+    let rollout_policy = softmax(&action_values);
+    let mut neural_value = None;
+    let root_policy = if config.neural_policy_weight > 0.0 || config.neural_value_weight > 0.0 {
+        if let Some(session) = crate::inference::global() {
+            match session.predict_v3_with_belief(
+                &belief.public_observation,
+                &belief.legal_actions,
+                Some(&belief.belief_features.vector),
+            ) {
+                Ok(prediction) => {
+                    neural_value = Some(prediction.value as f64);
+                    if config.neural_policy_weight > 0.0 {
+                        mix_policy(
+                            &rollout_policy,
+                            &prediction.probs,
+                            config.neural_policy_weight,
+                        )
+                    } else {
+                        rollout_policy.clone()
+                    }
+                }
+                Err(_) => rollout_policy.clone(),
+            }
+        } else {
+            rollout_policy.clone()
+        }
+    } else {
+        rollout_policy.clone()
+    };
     let sampled_action_index = sample_policy(&root_policy, rng);
-    let public_belief_value = root_policy
+    let rollout_belief_value: f64 = root_policy
         .iter()
         .zip(action_values.iter())
         .map(|(p, q)| p * q)
         .sum();
+    let public_belief_value = match neural_value {
+        Some(v) if config.neural_value_weight > 0.0 => {
+            let w = config.neural_value_weight.clamp(0.0, 1.0);
+            (1.0 - w) * rollout_belief_value + w * v
+        }
+        _ => rollout_belief_value,
+    };
     let top = argmax_f64(&action_values);
     let agreement = if particle_best.is_empty() {
         0.0
@@ -163,6 +208,9 @@ pub fn run_public_belief_search(
             legal_action_count: action_count,
             particle_action_evaluations: belief.particles.len() * action_count,
             rollout_leaf_calls,
+            neural_policy_weight: config.neural_policy_weight,
+            neural_value_weight: config.neural_value_weight,
+            neural_value,
             search_iterations: config.iterations,
             policy_entropy: entropy(&root_policy),
             particle_action_agreement: agreement,
@@ -170,6 +218,24 @@ pub fn run_public_belief_search(
         },
         legal_actions: belief.legal_actions.clone(),
         search_algorithm: config.algorithm.clone(),
+    }
+}
+
+fn mix_policy(rollout_policy: &[f64], neural_policy: &[f32], neural_weight: f64) -> Vec<f64> {
+    let w = neural_weight.clamp(0.0, 1.0);
+    let mut mixed = Vec::with_capacity(rollout_policy.len());
+    for (i, rollout_p) in rollout_policy.iter().enumerate() {
+        let neural_p = neural_policy.get(i).copied().unwrap_or(0.0).max(0.0) as f64;
+        mixed.push((1.0 - w) * *rollout_p + w * neural_p);
+    }
+    let total: f64 = mixed.iter().sum();
+    if total > 0.0 && total.is_finite() {
+        for p in mixed.iter_mut() {
+            *p /= total;
+        }
+        mixed
+    } else {
+        rollout_policy.to_vec()
     }
 }
 

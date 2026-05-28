@@ -527,6 +527,15 @@ impl InferenceSession {
         observation: &PublicObservation,
         legal_actions: &[LegalAiAction],
     ) -> Result<PredictionV3, InferenceError> {
+        self.predict_v3_with_belief(observation, legal_actions, None)
+    }
+
+    pub fn predict_v3_with_belief(
+        &self,
+        observation: &PublicObservation,
+        legal_actions: &[LegalAiAction],
+        belief_features: Option<&[f32]>,
+    ) -> Result<PredictionV3, InferenceError> {
         if legal_actions.is_empty() {
             return Err(InferenceError::SchemaMismatch(
                 "legalActions must not be empty".into(),
@@ -538,6 +547,7 @@ impl InferenceSession {
             self.action_dim,
             observation,
             legal_actions,
+            belief_features,
         )?;
 
         // Dispatched path: enqueue the packed row to the dispatcher
@@ -627,6 +637,7 @@ impl InferenceSession {
                 self.action_dim,
                 obs,
                 legal,
+                None,
             )?);
         }
         match &self.session {
@@ -710,6 +721,7 @@ fn pack_row(
     target_action_dim: usize,
     observation: &PublicObservation,
     legal_actions: &[LegalAiAction],
+    belief_features: Option<&[f32]>,
 ) -> Result<PackedRow, InferenceError> {
     let (state, state_dim) = match schema {
         GraphSchema::V3_1 => (
@@ -790,7 +802,19 @@ fn pack_row(
         action_card_idx,
         slot_card_ids,
         slot_features,
-        belief_features: uses_belief_features.then(|| vec![0.0; BELIEF_FEATURE_DIM]),
+        belief_features: if uses_belief_features {
+            let features = belief_features.unwrap_or(&[0.0; BELIEF_FEATURE_DIM]);
+            if features.len() != BELIEF_FEATURE_DIM {
+                return Err(InferenceError::SchemaMismatch(format!(
+                    "belief_features has len {}, expected {}",
+                    features.len(),
+                    BELIEF_FEATURE_DIM
+                )));
+            }
+            Some(features.to_vec())
+        } else {
+            None
+        },
     })
 }
 
