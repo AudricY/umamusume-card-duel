@@ -134,6 +134,10 @@ def run_loop(args: argparse.Namespace, repo: Path, out_dir: Path) -> None:
         games=args.games,
         deck_sampling=args.deck_sampling,
         model_side=args.model_side,
+        cross_iter_replay=args.cross_iter_replay,
+        replay_window=args.replay_window,
+        replay_old_fraction=args.replay_old_fraction,
+        fixed_kl_anchor=args.fixed_kl_anchor,
     )
 
     start_iter = max((int(r["iteration"]) for r in state.iterations), default=-1) + 1
@@ -216,6 +220,9 @@ def run_loop_iteration(
     iter_args.gate_seed_start = args.gate_seed_start + iteration * args.gate_games * 2
     iter_args.selfplay_onnx_path = selfplay_onnx
     iter_args.init_from_checkpoint = init_checkpoint
+    iter_args.kl_anchor_checkpoint = resolve_kl_anchor(args, state, init_checkpoint)
+    iter_args.events_out = str(events.path)
+    iter_args.events_iteration = iteration
 
     events.emit(
         iteration=iteration,
@@ -223,6 +230,7 @@ def run_loop_iteration(
         event_type="started",
         selfplay_onnx_path=selfplay_onnx,
         init_checkpoint=init_checkpoint,
+        kl_anchor_checkpoint=iter_args.kl_anchor_checkpoint,
     )
     t0 = time.time()
     events.emit(iteration=iteration, stage="selfplay", event_type="started", seed_start=seed_start)
@@ -237,9 +245,26 @@ def run_loop_iteration(
         elapsed_sec=selfplay_elapsed,
     )
 
+    train_data_path, replay_summary = materialize_replay_mix(
+        args=args,
+        loop_dir=loop_dir,
+        iter_dir=iter_dir,
+        iteration=iteration,
+        current_selfplay=data_path,
+        events=events,
+    )
+    train_row_summary = validate_rebel_rows(train_data_path)
+
     t0 = time.time()
-    events.emit(iteration=iteration, stage="train", event_type="started", init_checkpoint=init_checkpoint)
-    run(build_train_cmd(iter_args, repo, data_path, train_dir), cwd=repo)
+    events.emit(
+        iteration=iteration,
+        stage="train",
+        event_type="started",
+        init_checkpoint=init_checkpoint,
+        kl_anchor_checkpoint=iter_args.kl_anchor_checkpoint,
+        data_path=str(train_data_path),
+    )
+    run(build_train_cmd(iter_args, repo, train_data_path, train_dir), cwd=repo)
     train_elapsed = time.time() - t0
     checkpoint = train_dir / "checkpoint.pt"
     events.emit(
@@ -286,7 +311,10 @@ def run_loop_iteration(
         "onnx": str(export_path),
         "selfplay": str(data_path),
         "selfplay_manifest": str(selfplay_manifest),
+        "train_data": str(train_data_path),
         "row_summary": row_summary,
+        "train_row_summary": train_row_summary,
+        "replay": replay_summary,
         "gates": gates,
         "wilson_lower": wilson_lower,
         "previous_wilson_lower": previous,
@@ -311,6 +339,7 @@ def load_loop_state(path: Path) -> RebelLoopState:
         promoted_checkpoint=payload.get("promoted_checkpoint"),
         promoted_onnx=payload.get("promoted_onnx"),
         promoted_wilson_lower=payload.get("promoted_wilson_lower"),
+        kl_anchor_checkpoint=payload.get("kl_anchor_checkpoint"),
         iterations=list(payload.get("iterations") or []),
         consecutive_failures=int(payload.get("consecutive_failures") or 0),
         halted=bool(payload.get("halted") or False),
@@ -320,6 +349,115 @@ def load_loop_state(path: Path) -> RebelLoopState:
 
 def save_loop_state(path: Path, state: RebelLoopState) -> None:
     path.write_text(json.dumps(asdict(state), indent=2) + "\n", encoding="utf8")
+
+
+def resolve_kl_anchor(
+    args: argparse.Namespace,
+    state: RebelLoopState,
+    init_checkpoint: str | None,
+) -> str | None:
+    if args.kl_anchor_checkpoint:
+        return str(Path(args.kl_anchor_checkpoint).resolve())
+    if not args.fixed_kl_anchor:
+        return init_checkpoint
+    return state.kl_anchor_checkpoint or init_checkpoint
+
+
+def materialize_replay_mix(
+    *,
+    args: argparse.Namespace,
+    loop_dir: Path,
+    iter_dir: Path,
+    iteration: int,
+    current_selfplay: Path,
+    events: EventWriter,
+) -> tuple[Path, dict[str, Any]]:
+    if not args.cross_iter_replay:
+        current_rows = count_lines(current_selfplay)
+        summary = {
+            "status": "disabled",
+            "data": str(current_selfplay),
+            "current_rows": current_rows,
+            "old_rows": 0,
+            "total_rows": current_rows,
+        }
+        events.emit(iteration=iteration, stage="replay", event_type="passthrough", **summary)
+        return current_selfplay, summary
+
+    prior_paths: list[Path] = []
+    window = max(0, int(args.replay_window))
+    for prior in range(iteration - 1, max(-1, iteration - 1 - window), -1):
+        candidate = loop_dir / f"iter-{prior}" / "rebel-selfplay.jsonl"
+        if candidate.exists() and count_lines(candidate) > 0:
+            prior_paths.append(candidate)
+
+    current_lines = read_jsonl_lines(current_selfplay)
+    if not prior_paths or not current_lines:
+        summary = {
+            "status": "passthrough",
+            "reason": "no_prior_vintage" if not prior_paths else "empty_current_selfplay",
+            "data": str(current_selfplay),
+            "current_rows": len(current_lines),
+            "old_rows": 0,
+            "total_rows": len(current_lines),
+            "vintages": [str(p) for p in prior_paths],
+        }
+        events.emit(iteration=iteration, stage="replay", event_type="passthrough", **summary)
+        return current_selfplay, summary
+
+    old_pool: list[str] = []
+    for path in prior_paths:
+        old_pool.extend(read_jsonl_lines(path))
+    old_fraction = min(0.95, max(0.0, float(args.replay_old_fraction)))
+    old_target = int(round(len(current_lines) * old_fraction / max(1.0e-9, 1.0 - old_fraction)))
+    old_count = min(len(old_pool), old_target)
+    if old_count <= 0:
+        summary = {
+            "status": "passthrough",
+            "reason": "zero_old_target",
+            "data": str(current_selfplay),
+            "current_rows": len(current_lines),
+            "old_rows": 0,
+            "total_rows": len(current_lines),
+            "vintages": [str(p) for p in prior_paths],
+        }
+        events.emit(iteration=iteration, stage="replay", event_type="passthrough", **summary)
+        return current_selfplay, summary
+
+    stride = max(1, len(old_pool) // old_count)
+    old_lines = old_pool[::stride][:old_count]
+    mixed_path = iter_dir / "rebel-train-mixed.jsonl"
+    with mixed_path.open("w", encoding="utf8") as fh:
+        for line in current_lines:
+            fh.write(line + "\n")
+        for line in old_lines:
+            fh.write(line + "\n")
+
+    summary = {
+        "status": "materialized",
+        "data": str(mixed_path),
+        "current_rows": len(current_lines),
+        "old_rows": len(old_lines),
+        "old_pool_rows": len(old_pool),
+        "total_rows": len(current_lines) + len(old_lines),
+        "old_fraction_target": old_fraction,
+        "old_fraction_actual": len(old_lines) / max(1, len(current_lines) + len(old_lines)),
+        "window": window,
+        "vintages": [str(p) for p in prior_paths],
+    }
+    events.emit(iteration=iteration, stage="replay", event_type="materialized", **summary)
+    return mixed_path, summary
+
+
+def read_jsonl_lines(path: Path) -> list[str]:
+    return [line for line in path.read_text(encoding="utf8").splitlines() if line.strip()]
+
+
+def count_lines(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open("r", encoding="utf8") as fh:
+        return sum(1 for line in fh if line.strip())
 
 
 def build_selfplay_cmd(
@@ -464,6 +602,9 @@ def build_train_cmd(
         train_cmd.append("--uma-slot-tokens")
     if args.kl_anchor_checkpoint:
         train_cmd.extend(["--kl-anchor-checkpoint", args.kl_anchor_checkpoint])
+    if getattr(args, "events_out", None):
+        train_cmd.extend(["--events-out", str(args.events_out)])
+        train_cmd.extend(["--events-iteration", str(getattr(args, "events_iteration", -1))])
     return train_cmd
 
 
@@ -655,6 +796,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--halt-after-consecutive-failures", type=int, default=2)
+    parser.add_argument("--cross-iter-replay", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--replay-window", type=int, default=3)
+    parser.add_argument("--replay-old-fraction", type=float, default=0.4)
+    parser.add_argument("--fixed-kl-anchor", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--smoke", action="store_true", help="Use tiny training defaults for CPU smoke runs.")
     parser.add_argument("--games", type=int, default=1)
     parser.add_argument("--seed-start", type=int, default=0)
