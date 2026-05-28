@@ -428,6 +428,11 @@ Device resolution:
 - `rebel_orchestrator.py --device auto` resolves to CUDA when the training Python can import Torch and `torch.cuda.is_available()` is true.
 - `--selfplay-device auto` follows the resolved training device, so a CUDA training run also uses CUDA ONNX Runtime for ReBeL self-play once a self-play ONNX is available. Override with `--selfplay-device cpu` when intentionally keeping search inference on CPU.
 
+Production gates:
+
+- `rebel_orchestrator.py` now forwards `--gate-min-games`, `--gate-min-ci-lower`, and `--gate-min-win-rate` to both fixed and uniform/deck-diverse `sim-eval-gate` runs.
+- Gate failures are parsed from the written manifest and recorded in the iteration decision instead of crashing the orchestrator before promotion logic can reject the checkpoint.
+
 Remaining work:
 
-- For production, replace `--skip-gates` bootstrap promotion with real gate thresholds once the neural-leaf recipe is stable.
+- Calibrate the production threshold values for the neural-leaf recipe; the orchestrator plumbing now supports enforcing them.

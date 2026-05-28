@@ -25,6 +25,7 @@ from rebel_orchestrator import (  # noqa: E402
     RebelLoopState,
     allocate_games,
     append_jsonl_with_pool_annotation,
+    build_gate_cmd,
     load_pool_entries_from_state,
     materialize_replay_mix,
     pfsp_weights_from_pool,
@@ -286,6 +287,37 @@ def test_pool_state_file_and_annotation() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_gate_cmd_forwards_production_thresholds() -> None:
+    cmd = build_gate_cmd(
+        argparse.Namespace(
+            use_release_binary=True,
+            gate_games=32,
+            gate_sims=100,
+            gate_leaf="value-head",
+            gate_max_steps=500,
+            gate_workers=4,
+            gate_batch_size=1,
+            gate_min_games=64,
+            gate_min_ci_lower=0.52,
+            gate_min_win_rate=0.55,
+        ),
+        Path("/repo"),
+        Path("/tmp/policy.onnx"),
+        Path("/tmp/gate.manifest.json"),
+        deck_sampling="uniform",
+        seed_start=1234,
+    )
+    expected_pairs = {
+        "--min-games": "64",
+        "--min-ci-lower": "0.52",
+        "--min-win-rate": "0.55",
+        "--deck-sampling": "uniform",
+        "--seed-start": "1234",
+    }
+    for flag, value in expected_pairs.items():
+        assert any(cmd[i] == flag and cmd[i + 1] == value for i in range(len(cmd) - 1)), cmd
+
+
 def main() -> None:
     test_replay_mix_materializes_bounded_old_fraction()
     test_replay_passthrough_when_disabled()
@@ -294,6 +326,7 @@ def main() -> None:
     test_promoted_artifacts_snapshot_to_pool()
     test_selfplay_pool_resolution_and_allocation()
     test_pool_state_file_and_annotation()
+    test_gate_cmd_forwards_production_thresholds()
     print(json.dumps({"status": "PASS"}, indent=2))
 
 

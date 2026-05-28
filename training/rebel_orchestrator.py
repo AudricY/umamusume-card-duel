@@ -1001,6 +1001,40 @@ def run_gate(
     deck_sampling: str,
     seed_start: int,
 ) -> dict[str, Any]:
+    cmd = build_gate_cmd(args, repo, onnx_path, manifest_path, deck_sampling=deck_sampling, seed_start=seed_start)
+    env = ort_env(repo)
+    print("+ " + " ".join(cmd), flush=True)
+    result = subprocess.run(cmd, cwd=str(repo / "engine-rs"), check=False, env=env)
+    if result.returncode != 0 and not manifest_path.exists():
+        result.check_returncode()
+    manifest = json.loads(manifest_path.read_text(encoding="utf8"))
+    summary = manifest.get("summary") or {}
+    return {
+        "status": manifest.get("status", "unknown"),
+        "passed": bool(manifest.get("passed", False)),
+        "failures": manifest.get("failures", []),
+        "returncode": result.returncode,
+        "manifest": str(manifest_path),
+        "deck_sampling": deck_sampling,
+        "seed_start": seed_start,
+        "sims": args.gate_sims,
+        "games": summary.get("overall", {}).get("games", summary.get("games")),
+        "win_rate": summary.get("overall", {}).get("winRate", summary.get("modelWinRate")),
+        "wilson_lower": (summary.get("wilson95") or {}).get("lower"),
+        "player_side": summary.get("playerSide"),
+        "opponent_side": summary.get("opponentSide"),
+    }
+
+
+def build_gate_cmd(
+    args: argparse.Namespace,
+    repo: Path,
+    onnx_path: Path,
+    manifest_path: Path,
+    *,
+    deck_sampling: str,
+    seed_start: int,
+) -> list[str]:
     if args.use_release_binary:
         cmd = [str(repo / "engine-rs" / "target" / "release" / "sim-eval-gate")]
     else:
@@ -1033,24 +1067,13 @@ def run_gate(
             str(manifest_path),
         ]
     )
-    env = ort_env(repo)
-    print("+ " + " ".join(cmd), flush=True)
-    subprocess.run(cmd, cwd=str(repo / "engine-rs"), check=True, env=env)
-    manifest = json.loads(manifest_path.read_text(encoding="utf8"))
-    summary = manifest.get("summary") or {}
-    return {
-        "status": manifest.get("status", "unknown"),
-        "passed": bool(manifest.get("passed", False)),
-        "manifest": str(manifest_path),
-        "deck_sampling": deck_sampling,
-        "seed_start": seed_start,
-        "sims": args.gate_sims,
-        "games": summary.get("overall", {}).get("games", summary.get("games")),
-        "win_rate": summary.get("overall", {}).get("winRate", summary.get("modelWinRate")),
-        "wilson_lower": (summary.get("wilson95") or {}).get("lower"),
-        "player_side": summary.get("playerSide"),
-        "opponent_side": summary.get("opponentSide"),
-    }
+    if args.gate_min_games > 0:
+        cmd.extend(["--min-games", str(args.gate_min_games)])
+    if args.gate_min_ci_lower > 0.0:
+        cmd.extend(["--min-ci-lower", str(args.gate_min_ci_lower)])
+    if args.gate_min_win_rate > 0.0:
+        cmd.extend(["--min-win-rate", str(args.gate_min_win_rate)])
+    return cmd
 
 
 def ort_env(repo: Path) -> dict[str, str]:
@@ -1085,6 +1108,7 @@ def validate_rebel_rows(path: Path) -> dict[str, Any]:
         "beliefFeatures",
         "publicHistoryDigest",
         "legalActions",
+        "selectedActionIndex",
         "searchPolicy",
         "searchActionValues",
         "beliefValue",
@@ -1100,6 +1124,7 @@ def validate_rebel_rows(path: Path) -> dict[str, Any]:
     rows = 0
     policy_entropy_sum = 0.0
     legal_hist: dict[str, int] = {}
+    pool_policy_hist: dict[str, int] = {}
     with path.open("r", encoding="utf8") as fh:
         for line_number, line in enumerate(fh, start=1):
             if not line.strip():
@@ -1117,12 +1142,45 @@ def validate_rebel_rows(path: Path) -> dict[str, Any]:
             q_values = row["searchActionValues"]
             if len(actions) < 2 or len(policy) != len(actions) or len(q_values) != len(actions):
                 raise SystemExit(f"{path}:{line_number}: action/search target length mismatch")
+            selected = int(row["selectedActionIndex"])
+            if selected < 0 or selected >= len(actions):
+                raise SystemExit(f"{path}:{line_number}: selectedActionIndex {selected} out of range")
             total = sum(float(v) for v in policy)
             if abs(total - 1.0) > 1e-4:
                 raise SystemExit(f"{path}:{line_number}: searchPolicy sums to {total}")
+            if not all_finite(policy) or not all_finite(q_values):
+                raise SystemExit(f"{path}:{line_number}: non-finite search targets")
+            belief_value = float(row["beliefValue"])
+            if not is_finite(belief_value):
+                raise SystemExit(f"{path}:{line_number}: non-finite beliefValue")
+            private_values = row["privateStateValues"]
+            particle_count = int(row["particleCount"])
+            if len(private_values) != particle_count:
+                raise SystemExit(
+                    f"{path}:{line_number}: privateStateValues length {len(private_values)} != particleCount {particle_count}"
+                )
+            if not all_finite(private_values):
+                raise SystemExit(f"{path}:{line_number}: non-finite privateStateValues")
             belief_vector = (row.get("beliefFeatures") or {}).get("vector") or []
             if len(belief_vector) != 16:
                 raise SystemExit(f"{path}:{line_number}: belief feature dim {len(belief_vector)} != 16")
+            if not all_finite(belief_vector):
+                raise SystemExit(f"{path}:{line_number}: non-finite belief feature")
+            diagnostics = row.get("searchDiagnostics") or {}
+            for key in ("particleCount", "legalActionCount", "searchIterations", "policyEntropy"):
+                if key not in diagnostics:
+                    raise SystemExit(f"{path}:{line_number}: missing searchDiagnostics.{key}")
+            if int(diagnostics["particleCount"]) != particle_count:
+                raise SystemExit(f"{path}:{line_number}: diagnostics particleCount mismatch")
+            if int(diagnostics["legalActionCount"]) != len(actions):
+                raise SystemExit(f"{path}:{line_number}: diagnostics legalActionCount mismatch")
+            pool_fields = ["poolPolicyIter", "poolPolicyOnnx", "poolPolicyCheckpoint"]
+            present_pool_fields = [field for field in pool_fields if field in row]
+            if present_pool_fields and len(present_pool_fields) != len(pool_fields):
+                raise SystemExit(f"{path}:{line_number}: incomplete pool annotation {present_pool_fields}")
+            if present_pool_fields:
+                pool_key = str(row["poolPolicyIter"])
+                pool_policy_hist[pool_key] = pool_policy_hist.get(pool_key, 0) + 1
             policy_entropy_sum += -sum(float(p) * safe_log(float(p)) for p in policy if float(p) > 0.0)
             legal_hist[str(len(actions))] = legal_hist.get(str(len(actions)), 0) + 1
             rows += 1
@@ -1132,7 +1190,18 @@ def validate_rebel_rows(path: Path) -> dict[str, Any]:
         "rows": rows,
         "legal_action_count_histogram": legal_hist,
         "mean_search_policy_entropy": policy_entropy_sum / rows,
+        "pool_policy_histogram": pool_policy_hist,
     }
+
+
+def is_finite(value: float) -> bool:
+    import math
+
+    return math.isfinite(float(value))
+
+
+def all_finite(values: list[Any]) -> bool:
+    return all(is_finite(float(value)) for value in values)
 
 
 def safe_log(value: float) -> float:
@@ -1208,6 +1277,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gate-max-steps", type=int, default=500)
     parser.add_argument("--gate-workers", type=int, default=1)
     parser.add_argument("--gate-batch-size", type=int, default=1)
+    parser.add_argument("--gate-min-games", type=int, default=0)
+    parser.add_argument("--gate-min-ci-lower", type=float, default=0.0)
+    parser.add_argument("--gate-min-win-rate", type=float, default=0.0)
     return parser.parse_args()
 
 
