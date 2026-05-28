@@ -159,9 +159,8 @@ fn load_catalog() -> Catalog {
 
     // Base cards first, in source-declaration order.
     for (id, value) in &raw.base_cards {
-        let card = parse_card(value).unwrap_or_else(|e| {
-            panic!("failed to parse base card {}: {} (raw: {})", id, e, value)
-        });
+        let card = parse_card(value)
+            .unwrap_or_else(|e| panic!("failed to parse base card {}: {} (raw: {})", id, e, value));
         expanded.insert(id.clone(), card);
     }
 
@@ -273,7 +272,9 @@ mod tests {
             c.len()
         );
         // matikanetannhauserBasic is the first base card in cards.json — must exist.
-        let id = c.id_for("matikanetannhauserBasic").expect("base umamusume present");
+        let id = c
+            .id_for("matikanetannhauserBasic")
+            .expect("base umamusume present");
         let card = c.get(id).expect("lookup by interned id");
         match card {
             Card::Umamusume(u) => {
@@ -325,22 +326,13 @@ mod tests {
         for card in c.cards.iter() {
             if let Card::Umamusume(u) = card {
                 umas += 1;
-                assert!(
-                    u.hp > 0,
-                    "umamusume {} has non-positive hp {}",
-                    u.id,
-                    u.hp
-                );
+                assert!(u.hp > 0, "umamusume {} has non-positive hp {}", u.id, u.hp);
                 assert!(
                     !u.attacks.is_empty(),
                     "umamusume {} has zero attacks — unplayable",
                     u.id
                 );
-                assert!(
-                    !u.name.is_empty(),
-                    "umamusume {} has empty name",
-                    u.id
-                );
+                assert!(!u.name.is_empty(), "umamusume {} has empty name", u.id);
                 assert!(
                     !u.species.is_empty(),
                     "umamusume {} has empty species",
@@ -358,11 +350,7 @@ mod tests {
         for card in c.cards.iter() {
             if let Card::Trainer(t) = card {
                 trainers += 1;
-                assert!(
-                    !t.name.is_empty(),
-                    "trainer {} has empty name",
-                    t.id
-                );
+                assert!(!t.name.is_empty(), "trainer {} has empty name", t.id);
             }
         }
         assert!(trainers > 0, "catalog has zero trainer cards");

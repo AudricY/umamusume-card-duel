@@ -17,7 +17,10 @@ struct Args {
     input: String,
 
     /// Output Rust file (will be `include!`'d by the engine crate).
-    #[arg(long, default_value = "engine-rs/crates/engine/src/core/catalog_gen.rs")]
+    #[arg(
+        long,
+        default_value = "engine-rs/crates/engine/src/core/catalog_gen.rs"
+    )]
     output: String,
 }
 

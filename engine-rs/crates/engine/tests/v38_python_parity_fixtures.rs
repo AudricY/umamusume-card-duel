@@ -37,9 +37,7 @@ use engine::core::random::{with_rng, Rng};
 use engine::headless_setup::setup_ai_vs_ai_game;
 use engine::policy::featurize::observation_state_features_v3_8;
 use engine::policy::observation::build_public_observation;
-use engine::policy::types::{
-    PublicObservation, PublicUmaObservation, PublicUmaTurnState,
-};
+use engine::policy::types::{PublicObservation, PublicUmaObservation, PublicUmaTurnState};
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -250,15 +248,13 @@ fn write_fixture(dir: &Path, name: &str, obs: &PublicObservation) {
 
     let json = serde_json::to_string_pretty(obs)
         .unwrap_or_else(|e| panic!("serialize {} obs: {}", name, e));
-    fs::write(&json_path, json)
-        .unwrap_or_else(|e| panic!("write {:?}: {}", json_path, e));
+    fs::write(&json_path, json).unwrap_or_else(|e| panic!("write {:?}: {}", json_path, e));
 
     let mut bytes: Vec<u8> = Vec::with_capacity(vec.len() * 4);
     for v in &vec {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
-    fs::write(&bin_path, bytes)
-        .unwrap_or_else(|e| panic!("write {:?}: {}", bin_path, e));
+    fs::write(&bin_path, bytes).unwrap_or_else(|e| panic!("write {:?}: {}", bin_path, e));
 }
 
 #[test]
@@ -315,11 +311,10 @@ fn fixtures_roundtrip_against_current_rust_featurizer() {
 
         let json = fs::read_to_string(&json_path)
             .unwrap_or_else(|e| panic!("read {:?}: {}", json_path, e));
-        let obs: PublicObservation = serde_json::from_str(&json)
-            .unwrap_or_else(|e| panic!("deserialize {}: {}", name, e));
+        let obs: PublicObservation =
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("deserialize {}: {}", name, e));
         let live = observation_state_features_v3_8(&obs);
-        let bytes = fs::read(&bin_path)
-            .unwrap_or_else(|e| panic!("read {:?}: {}", bin_path, e));
+        let bytes = fs::read(&bin_path).unwrap_or_else(|e| panic!("read {:?}: {}", bin_path, e));
         assert_eq!(
             bytes.len(),
             live.len() * 4,
@@ -347,5 +342,8 @@ fn fixtures_roundtrip_against_current_rust_featurizer() {
         checked += 1;
     }
     assert!(checked > 0, "no fixtures found to roundtrip-check");
-    eprintln!("roundtrip OK: {} fixtures match current Rust featurizer", checked);
+    eprintln!(
+        "roundtrip OK: {} fixtures match current Rust featurizer",
+        checked
+    );
 }

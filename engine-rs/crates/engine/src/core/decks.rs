@@ -73,18 +73,29 @@ fn load() -> DeckRegistry {
             .iter()
             .filter_map(|cid| {
                 cat.id_for(cid).or_else(|| {
-                    eprintln!("warning: premade deck {} references unknown card {}", d.id, cid);
+                    eprintln!(
+                        "warning: premade deck {} references unknown card {}",
+                        d.id, cid
+                    );
                     None
                 })
             })
             .collect();
-        Deck { id: d.id, card_ids, source_card_count }
+        Deck {
+            id: d.id,
+            card_ids,
+            source_card_count,
+        }
     };
     DeckRegistry {
         default_player_deck_id: parsed.default_player_deck_id,
         default_ai_opponent_deck_id: parsed.default_ai_opponent_deck_id,
         player_decks: parsed.premade_decks.into_iter().map(intern_deck).collect(),
-        ai_decks: parsed.ai_premade_decks.into_iter().map(intern_deck).collect(),
+        ai_decks: parsed
+            .ai_premade_decks
+            .into_iter()
+            .map(intern_deck)
+            .collect(),
     }
 }
 
@@ -106,12 +117,20 @@ pub fn deck_by_id(deck_id: &str) -> Option<&'static [CardId]> {
 /// `gameData.ts:149-152`.
 pub fn default_player_deck() -> &'static [CardId] {
     let r = decks();
-    if let Some(d) = r.player_decks.iter().find(|d| d.id == r.default_player_deck_id) {
+    if let Some(d) = r
+        .player_decks
+        .iter()
+        .find(|d| d.id == r.default_player_deck_id)
+    {
         if !d.card_ids.is_empty() {
             return &d.card_ids;
         }
     }
-    if let Some(d) = r.ai_decks.iter().find(|d| d.id == "mihonoBourbonNishinoFlower") {
+    if let Some(d) = r
+        .ai_decks
+        .iter()
+        .find(|d| d.id == "mihonoBourbonNishinoFlower")
+    {
         if !d.card_ids.is_empty() {
             return &d.card_ids;
         }
@@ -125,7 +144,11 @@ pub fn default_player_deck() -> &'static [CardId] {
 /// Default AI-opponent deck — analogous to `gameData.ts:155-158`.
 pub fn default_ai_opponent_deck() -> &'static [CardId] {
     let r = decks();
-    if let Some(d) = r.ai_decks.iter().find(|d| d.id == r.default_ai_opponent_deck_id) {
+    if let Some(d) = r
+        .ai_decks
+        .iter()
+        .find(|d| d.id == r.default_ai_opponent_deck_id)
+    {
         if !d.card_ids.is_empty() {
             return &d.card_ids;
         }
@@ -135,7 +158,10 @@ pub fn default_ai_opponent_deck() -> &'static [CardId] {
             return &d.card_ids;
         }
     }
-    r.ai_decks.first().map(|d| d.card_ids.as_slice()).unwrap_or(&[])
+    r.ai_decks
+        .first()
+        .map(|d| d.card_ids.as_slice())
+        .unwrap_or(&[])
 }
 
 #[cfg(test)]

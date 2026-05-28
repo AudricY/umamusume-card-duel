@@ -68,7 +68,10 @@ pub fn emit_ai_telemetry(event: AiTelemetryEvent, payload: Map<String, Value>) {
         let mut key_obj = Map::new();
         key_obj.insert("event".into(), Value::String(event.tag().to_string()));
         for field in ["turn", "side", "phase", "goal"] {
-            key_obj.insert(field.into(), payload.get(field).cloned().unwrap_or(Value::Null));
+            key_obj.insert(
+                field.into(),
+                payload.get(field).cloned().unwrap_or(Value::Null),
+            );
         }
         // Note: TS keys this on `reasonTags` (not `tags`); preserve.
         key_obj.insert(

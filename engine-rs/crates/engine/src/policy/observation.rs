@@ -7,7 +7,7 @@
 use indexmap::IndexMap;
 
 use crate::core::catalog::catalog;
-use crate::core::constants::{EnergyType, SideId, MAX_BENCH, SpecialCondition};
+use crate::core::constants::{EnergyType, SideId, SpecialCondition, MAX_BENCH};
 use crate::core::state::{
     CurrentSide, GameState, PendingPlayerChoice, SideState, UmamusumeInstance,
 };
@@ -251,9 +251,7 @@ fn to_public_uma_turn_state(
         took_damage_last_turn: umamusume.took_damage_last_turn,
         took_damage_this_turn: umamusume.took_damage_this_turn,
         next_turn_damage_reduction: umamusume.next_turn_damage_reduction,
-        attack_blocked_this_turn: umamusume
-            .attack_blocked_until_own_turn
-            == Some(side_turns_taken),
+        attack_blocked_this_turn: umamusume.attack_blocked_until_own_turn == Some(side_turns_taken),
         paralysis_recovery_pending,
     }
 }

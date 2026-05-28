@@ -15,9 +15,7 @@
 
 use crate::core::card_id::CardId;
 use crate::core::catalog::{catalog, Card, TrainerCard};
-use crate::core::constants::{
-    EnergyType, SideId, TrainerType, MAX_HAND,
-};
+use crate::core::constants::{EnergyType, SideId, TrainerType, MAX_HAND};
 use crate::core::effects::TrainerHealTarget;
 use crate::core::play_types::PlayChoices;
 use crate::core::random::random_int;
@@ -30,7 +28,12 @@ use crate::flow::turn::draw_cards;
 
 /// `trainers.ts:16` `playStadium`. Discards the previous stadium card
 /// (if any) into its owner's discard pile, then installs the new one.
-pub fn play_stadium(state: &mut GameState, side_id: SideId, _card_id: CardId, stadium: &TrainerCard) {
+pub fn play_stadium(
+    state: &mut GameState,
+    side_id: SideId,
+    _card_id: CardId,
+    stadium: &TrainerCard,
+) {
     if let Some(previous) = state.stadium.clone() {
         let owner_side = state.side_mut(previous.owner);
         let _ = owner_side.discard.try_push(previous.card_id);
@@ -130,8 +133,9 @@ pub fn apply_trainer(
     }
     if let Some(amount) = trainer.effect.active_attack_damage_bonus {
         let side = state.side_mut(side_id);
-        side.active_attack_damage_bonus =
-            (side.active_attack_damage_bonus as i32 + amount).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        side.active_attack_damage_bonus = (side.active_attack_damage_bonus as i32 + amount)
+            .clamp(i16::MIN as i32, i16::MAX as i32)
+            as i16;
     }
     if let Some(extra) = trainer.effect.extra_energy_attach {
         // Snapshot the pool, generate `extra` rolls, then bulk-push.
@@ -212,7 +216,10 @@ pub fn apply_trainer(
 }
 
 /// `trainers.ts:117` `hasDamagedHealingTarget`.
-pub fn has_damaged_healing_target(side: &crate::core::state::SideState, card: &TrainerCard) -> bool {
+pub fn has_damaged_healing_target(
+    side: &crate::core::state::SideState,
+    card: &TrainerCard,
+) -> bool {
     let mut candidates: Vec<&UmamusumeInstance> = Vec::new();
     if let Some(a) = &side.active {
         candidates.push(a);
@@ -285,7 +292,13 @@ fn search_umamusume_from_deck(
     let cat = catalog();
     let side = state.side(side_id);
     let index: i32 = match deck_card_index {
-        Some(i) if side.deck.get(i).map(|&cid| cat.is_umamusume(cid)).unwrap_or(false) => {
+        Some(i)
+            if side
+                .deck
+                .get(i)
+                .map(|&cid| cat.is_umamusume(cid))
+                .unwrap_or(false) =>
+        {
             i as i32
         }
         _ => side
@@ -304,9 +317,8 @@ fn search_evolution_umamusume_from_deck(
     deck_card_index: Option<usize>,
 ) {
     let cat = catalog();
-    let is_evolution = |cid: CardId| -> bool {
-        matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage > 0)
-    };
+    let is_evolution =
+        |cid: CardId| -> bool { matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage > 0) };
     let side = state.side(side_id);
     let index: i32 = match deck_card_index {
         Some(i) if side.deck.get(i).copied().map(is_evolution).unwrap_or(false) => i as i32,
@@ -339,7 +351,11 @@ fn search_random_basic_umamusume_from_deck(state: &mut GameState, side_id: SideI
         -1
     } else {
         let pick = random_int(candidates.len() as u32) as usize;
-        candidates.get(pick).copied().map(|i| i as i32).unwrap_or(-1)
+        candidates
+            .get(pick)
+            .copied()
+            .map(|i| i as i32)
+            .unwrap_or(-1)
     };
     move_deck_card_to_hand(state, side_id, chosen_index);
 }
@@ -442,9 +458,7 @@ fn move_deck_card_to_hand(state: &mut GameState, side_id: SideId, deck_index: i3
 mod tests {
     use super::*;
     use crate::core::card_id::CardId;
-    use crate::core::constants::{
-        AiDeckStyle, AiDifficulty, EnergyType, SideId,
-    };
+    use crate::core::constants::{AiDeckStyle, AiDifficulty, EnergyType, SideId};
     use crate::core::random::{with_rng, Rng};
     use crate::core::state::{CurrentSide, Phase, SideState};
     use arrayvec::ArrayVec;
@@ -547,9 +561,7 @@ mod tests {
         let mut state = empty_state();
         // Fill hand to MAX_HAND with a sentinel id.
         for _ in 0..MAX_HAND {
-            state.sides[SideId::Player as usize]
-                .hand
-                .push(CardId(99));
+            state.sides[SideId::Player as usize].hand.push(CardId(99));
         }
         state.sides[SideId::Player as usize].deck.push(CardId(7));
         move_deck_card_to_hand(&mut state, SideId::Player, 0);

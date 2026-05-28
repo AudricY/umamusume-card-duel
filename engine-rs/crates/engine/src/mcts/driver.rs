@@ -265,8 +265,7 @@ fn run_serial_loop(
             if node.terminal_value.is_some() {
                 break;
             }
-            let action_index =
-                puct_select(&node.visits, &node.wsum, &node.priors, config.c_puct);
+            let action_index = puct_select(&node.visits, &node.wsum, &node.priors, config.c_puct);
             path.push(PathStep {
                 node_ptr,
                 action_index,
@@ -561,12 +560,8 @@ fn run_wave_loop(
                 if node.terminal_value.is_some() {
                     break;
                 }
-                let action_index = puct_select(
-                    &node.visits,
-                    &node.wsum,
-                    &node.priors,
-                    config.c_puct,
-                );
+                let action_index =
+                    puct_select(&node.visits, &node.wsum, &node.priors, config.c_puct);
                 path.push(PathStep {
                     node_ptr,
                     action_index,
@@ -751,9 +746,7 @@ enum WaveActionKind {
     },
     /// Expansion produced a `next_state` that became terminal. Use
     /// `mcts_terminal_value` without inserting a new child.
-    TerminalAfterStep {
-        value: f64,
-    },
+    TerminalAfterStep { value: f64 },
     /// Expansion produced a non-terminal `next_state`. We need to
     /// build the child node (which under `prior=policy` requires a
     /// `predict_v3` call — batched in phase 3) and then compute the
@@ -968,7 +961,13 @@ fn wave_run_priors(members: &mut [WaveMember], _config: &MctsConfig) {
             .iter()
             .take(legal.len())
             .copied()
-            .map(|p| if p.is_finite() { p.max(0.0) as f64 } else { 0.0 })
+            .map(|p| {
+                if p.is_finite() {
+                    p.max(0.0) as f64
+                } else {
+                    0.0
+                }
+            })
             .collect();
         let sum: f64 = probs.iter().sum();
         if sum > 0.0 {

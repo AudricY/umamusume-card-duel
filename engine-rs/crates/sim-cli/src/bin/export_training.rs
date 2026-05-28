@@ -18,7 +18,10 @@ use clap::Parser;
 use engine::core::random::{with_rng, Rng};
 use engine::core::state::CurrentSide;
 use engine::deck_sampling::{manifest_pair_for, DeckSampling};
-use engine::dispatcher::{advance_opponent_turn_step, advance_player_ai_turn_step, get_forced_attack_coin_results, state_hash};
+use engine::dispatcher::{
+    advance_opponent_turn_step, advance_player_ai_turn_step, get_forced_attack_coin_results,
+    state_hash,
+};
 use engine::headless_setup::setup_ai_vs_ai_game_with_decks;
 use engine::policy::actions::{choose_highest_scored_action, enumerate_legal_ai_actions};
 use engine::policy::observation::build_public_observation;
@@ -150,10 +153,7 @@ fn drive_one_game(
             // advance without recording.
         } else {
             let selected = choose_highest_scored_action(&legal);
-            let selected_idx = legal
-                .iter()
-                .position(|a| a.id == selected.id)
-                .unwrap_or(0);
+            let selected_idx = legal.iter().position(|a| a.id == selected.id).unwrap_or(0);
             let phase_str = match selected.phase {
                 engine::policy::types::AiPhase::Setup => "setup",
                 engine::policy::types::AiPhase::PendingChoice => "pendingChoice",
@@ -251,8 +251,7 @@ fn main() -> Result<()> {
             .as_ref()
             .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
             .unwrap_or((None, None));
-        let (player_deck_id, opponent_deck_id) =
-            manifest_pair_for(&sampling, args.seed_start, i);
+        let (player_deck_id, opponent_deck_id) = manifest_pair_for(&sampling, args.seed_start, i);
         let (examples, terminal) = drive_one_game(
             &seed,
             args.max_steps,

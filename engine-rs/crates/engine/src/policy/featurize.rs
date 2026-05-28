@@ -39,7 +39,9 @@ use crate::core::constants::{EnergyType, TrainerType};
 use crate::core::effect_kinds::{classify_active_ability, classify_tool_effect};
 use crate::core::effects::Attack;
 use crate::policy::card_vocab::{card_vocab, card_vocab_index};
-use crate::policy::types::{AiPhase, LegalAiAction, PublicObservation, PublicSideObservation, PublicUmaObservation};
+use crate::policy::types::{
+    AiPhase, LegalAiAction, PublicObservation, PublicSideObservation, PublicUmaObservation,
+};
 
 /// Mirrors `STATE_DIM_V3` / `STATE_DIM` in Python (frozen 110-d v3.0).
 pub const STATE_DIM_V3: usize = 110;
@@ -173,13 +175,7 @@ const PENDING_CHOICE_KINDS: [&str; 2] = ["promoteAfterKnockout", "switchAfterGus
 // engine emits into `special_conditions: Vec<String>`. Adding a new
 // arm requires bumping the schema (additive v3.6 tail), never editing
 // this vocab.
-const V35_CONDITION_VOCAB: [&str; 5] = [
-    "paralysed",
-    "burned",
-    "poisoned",
-    "asleep",
-    "frozen",
-];
+const V35_CONDITION_VOCAB: [&str; 5] = ["paralysed", "burned", "poisoned", "asleep", "frozen"];
 
 // Energy-type label order MUST match Python `_energy_vector` and the
 // JSON keys emitted by the observation builder (`energy_label_camel`).
@@ -252,7 +248,11 @@ pub fn observation_state_features(obs: &PublicObservation) -> Vec<f32> {
     f[6] = opp.hand_count as f32 / 10.0;
     f[7] = own.deck_count as f32 / 50.0;
     f[8] = opp.deck_count as f32 / 50.0;
-    f[9] = if shared.stadium_card_id.is_some() { 1.0 } else { 0.0 };
+    f[9] = if shared.stadium_card_id.is_some() {
+        1.0
+    } else {
+        0.0
+    };
 
     // [10:18) own board, [18:26) opp board.
     let own_board = side_board_features(own);
@@ -263,7 +263,11 @@ pub fn observation_state_features(obs: &PublicObservation) -> Vec<f32> {
     f[26] = own.discard.len() as f32 / 50.0;
     f[27] = opp.discard.len() as f32 / 50.0;
     f[28] = own.energy_zone.len() as f32 / 4.0;
-    f[29] = if own.used_supporter_this_turn { 1.0 } else { 0.0 };
+    f[29] = if own.used_supporter_this_turn {
+        1.0
+    } else {
+        0.0
+    };
     f[30] = if own.used_retreat_this_turn { 1.0 } else { 0.0 };
     f[31] = if own.used_stadium_this_turn { 1.0 } else { 0.0 };
 
@@ -334,7 +338,10 @@ fn side_turn_state_vec(side: &PublicSideObservation) -> [f32; 7] {
     out[1] = norm_v3_1(ts.bonus_energy_attachments as f32, _BUDGET_CAP_V3_1);
     out[2] = norm_v3_1(ts.effective_retreat_cost_reduction as f32, _DAMAGE_CAP_V3_1);
     out[3] = norm_v3_1(ts.active_attack_damage_bonus as f32, _DAMAGE_CAP_V3_1);
-    out[4] = norm_v3_1(ts.used_ability_name_count_this_turn as f32, _BUDGET_CAP_V3_1);
+    out[4] = norm_v3_1(
+        ts.used_ability_name_count_this_turn as f32,
+        _BUDGET_CAP_V3_1,
+    );
     out[5] = norm_v3_1(ts.used_ability_name_count_this_game as f32, _TURN_CAP_V3_1);
     out[6] = norm_v3_1(ts.guaranteed_coin_flip_heads as f32, _BUDGET_CAP_V3_1);
     out
@@ -345,7 +352,9 @@ fn side_turn_state_vec(side: &PublicSideObservation) -> [f32; 7] {
 /// return zeros`).
 fn uma_turn_state_vec(uma: Option<&PublicUmaObservation>) -> [f32; 9] {
     let mut out = [0.0f32; 9];
-    let Some(u) = uma else { return out; };
+    let Some(u) = uma else {
+        return out;
+    };
     let ts = &u.turn_state;
     out[0] = norm_v3_1(ts.turns_in_play as f32, _TURN_CAP_V3_1);
     out[1] = if ts.entered_this_turn { 1.0 } else { 0.0 };
@@ -354,16 +363,23 @@ fn uma_turn_state_vec(uma: Option<&PublicUmaObservation>) -> [f32; 9] {
     out[4] = if ts.took_damage_last_turn { 1.0 } else { 0.0 };
     out[5] = if ts.took_damage_this_turn { 1.0 } else { 0.0 };
     out[6] = norm_v3_1(ts.next_turn_damage_reduction as f32, _DAMAGE_CAP_V3_1);
-    out[7] = if ts.attack_blocked_this_turn { 1.0 } else { 0.0 };
-    out[8] = if ts.paralysis_recovery_pending { 1.0 } else { 0.0 };
+    out[7] = if ts.attack_blocked_this_turn {
+        1.0
+    } else {
+        0.0
+    };
+    out[8] = if ts.paralysis_recovery_pending {
+        1.0
+    } else {
+        0.0
+    };
     out
 }
 
 /// Mirror of Python `_bench_turn_state_aggregate`. Mean of the 9 per-Uma
 /// temporal scalars over PRESENT bench Umas. Empty bench → zeros.
 fn bench_turn_state_aggregate(side: &PublicSideObservation) -> [f32; 9] {
-    let present: Vec<&PublicUmaObservation> =
-        side.bench.iter().flatten().collect();
+    let present: Vec<&PublicUmaObservation> = side.bench.iter().flatten().collect();
     let mut out = [0.0f32; 9];
     if present.is_empty() {
         return out;
@@ -399,7 +415,11 @@ pub fn observation_state_features_v3_1(obs: &PublicObservation) -> Vec<f32> {
     f[110] = norm_v3_1(temporal.own_turns_taken as f32, _TURN_CAP_V3_1);
     f[111] = norm_v3_1(temporal.opponent_turns_taken as f32, _TURN_CAP_V3_1);
     f[112] = if temporal.own_is_first_turn { 1.0 } else { 0.0 };
-    f[113] = if temporal.opponent_is_first_turn { 1.0 } else { 0.0 };
+    f[113] = if temporal.opponent_is_first_turn {
+        1.0
+    } else {
+        0.0
+    };
 
     // 114–120: own side turnState; 121–127: opp side turnState.
     f[114..121].copy_from_slice(&side_turn_state_vec(&obs.own));
@@ -429,9 +449,21 @@ pub fn observation_state_features_v3_3(obs: &PublicObservation) -> Vec<f32> {
     // Opp-side flag tail (mirror of own-side at slots 29/30/31, which
     // are emitted by the frozen v3.0/v2 head). v3.0/v3.1/v3.2 had no
     // opponent-side equivalent — v3.3 is the first surfacing.
-    f[164] = if obs.opponent.used_supporter_this_turn { 1.0 } else { 0.0 };
-    f[165] = if obs.opponent.used_retreat_this_turn { 1.0 } else { 0.0 };
-    f[166] = if obs.opponent.used_stadium_this_turn { 1.0 } else { 0.0 };
+    f[164] = if obs.opponent.used_supporter_this_turn {
+        1.0
+    } else {
+        0.0
+    };
+    f[165] = if obs.opponent.used_retreat_this_turn {
+        1.0
+    } else {
+        0.0
+    };
+    f[166] = if obs.opponent.used_stadium_this_turn {
+        1.0
+    } else {
+        0.0
+    };
 
     f
 }
@@ -442,7 +474,9 @@ fn v35_condition_one_hot(uma: Option<&PublicUmaObservation>, out: &mut [f32]) {
     // zero-init). Unknown tokens → silently dropped (mirrors Python
     // `_v35_condition_one_hot`).
     debug_assert_eq!(out.len(), V35_CONDITION_VOCAB.len());
-    let Some(uma) = uma else { return; };
+    let Some(uma) = uma else {
+        return;
+    };
     for cond in &uma.special_conditions {
         if let Some(idx) = V35_CONDITION_VOCAB.iter().position(|v| *v == cond.as_str()) {
             out[idx] = 1.0;
@@ -456,7 +490,9 @@ fn v35_energy_front_one_hot(side: &PublicSideObservation, out: &mut [f32]) {
     // all zeros. Mirrors Python `_v35_energy_front_one_hot`.
     debug_assert_eq!(out.len(), ENERGY_TYPES_ORDER.len());
     let zone = &side.energy_zone;
-    let Some(front) = zone.first() else { return; };
+    let Some(front) = zone.first() else {
+        return;
+    };
     if let Some(idx) = ENERGY_TYPES_ORDER.iter().position(|t| *t == front.as_str()) {
         out[idx] = 1.0;
     }
@@ -626,7 +662,9 @@ fn v36_attack_cost_covered(
 /// catalog-access path; mirrors Python `_v36_active_attacks` (Python
 /// returns the attack list directly; Rust returns the card so callers
 /// also see `attacks[1]`).
-fn v36_uma_card_for_active(active: Option<&PublicUmaObservation>) -> Option<&'static UmamusumeCard> {
+fn v36_uma_card_for_active(
+    active: Option<&PublicUmaObservation>,
+) -> Option<&'static UmamusumeCard> {
     let entry = active?;
     let card = get_card(&entry.card_id)?;
     match card {
@@ -669,7 +707,11 @@ fn v36_lethal_face_value(
         .iter()
         .map(|a| a.damage as f32)
         .fold(f32::NEG_INFINITY, f32::max);
-    if max_dmg >= defender_hp { 1.0 } else { 0.0 }
+    if max_dmg >= defender_hp {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// (usable, would_KO) for the attacker's `attacks[1]`. Both 0.0 if no
@@ -826,7 +868,11 @@ fn v37_weakness_lethal_for_attack(
     if attack.damage > 0 && attacker_card.r#type == defender_card.weakness.r#type {
         damage += defender_card.weakness.amount as f32;
     }
-    if damage >= defender_hp { 1.0 } else { 0.0 }
+    if damage >= defender_hp {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// Channel 1 primary-attack predicate. Returns 0.0 on absent / non-Uma
@@ -1113,10 +1159,13 @@ pub fn observation_state_features_v3_7(obs: &PublicObservation) -> Vec<f32> {
     f[_V37_COND_BONUS_BASE + 7] = opp_s_pb;
 
     // Channel 4 — energy ETA.
-    f[_V37_ETA_BASE + 0] = v37_attack_usable_next_turn(own_active, own_primary, &obs.own.energy_pool);
+    f[_V37_ETA_BASE + 0] =
+        v37_attack_usable_next_turn(own_active, own_primary, &obs.own.energy_pool);
     f[_V37_ETA_BASE + 1] = v37_attack_usable_next_turn(own_active, own_sec, &obs.own.energy_pool);
-    f[_V37_ETA_BASE + 2] = v37_attack_usable_next_turn(opp_active, opp_primary, &obs.opponent.energy_pool);
-    f[_V37_ETA_BASE + 3] = v37_attack_usable_next_turn(opp_active, opp_sec, &obs.opponent.energy_pool);
+    f[_V37_ETA_BASE + 2] =
+        v37_attack_usable_next_turn(opp_active, opp_primary, &obs.opponent.energy_pool);
+    f[_V37_ETA_BASE + 3] =
+        v37_attack_usable_next_turn(opp_active, opp_sec, &obs.opponent.energy_pool);
 
     // Channel 4 paralysis (own window open iff opp.active paralysed).
     f[_V37_PARALYSIS_BASE + 0] = v37_paralysis_window_open(opp_active);
@@ -1345,10 +1394,7 @@ fn v38_lose_if_opp_gusts_weakest_bench(
 }
 
 /// v3.8 slot [303] — own_can_gust_win_prize_race. Symmetric.
-fn v38_can_gust_win_prize_race(
-    own: &PublicSideObservation,
-    opp: &PublicSideObservation,
-) -> f32 {
+fn v38_can_gust_win_prize_race(own: &PublicSideObservation, opp: &PublicSideObservation) -> f32 {
     if v38_remaining_prizes(opp) > 1 {
         return 0.0;
     }
@@ -1385,8 +1431,7 @@ pub fn observation_state_features_v3_8(obs: &PublicObservation) -> Vec<f32> {
         &mut f[_V38_OPP_BENCH_ETA_BASE.._V38_OPP_BENCH_ETA_BASE + 3],
     );
     // [302] own_lose_if_opp_gusts_weakest_bench.
-    f[_V38_OWN_LOSE_IF_OPP_GUSTS] =
-        v38_lose_if_opp_gusts_weakest_bench(&obs.own, &obs.opponent);
+    f[_V38_OWN_LOSE_IF_OPP_GUSTS] = v38_lose_if_opp_gusts_weakest_bench(&obs.own, &obs.opponent);
     // [303] own_can_gust_win_prize_race.
     f[_V38_OWN_GUST_WIN_RACE] = v38_can_gust_win_prize_race(&obs.own, &obs.opponent);
 
@@ -1444,18 +1489,36 @@ fn side_board_features(side: &PublicSideObservation) -> [f32; 8] {
 
 fn identity_features(own: &PublicSideObservation, opp: &PublicSideObservation) -> [f32; 16] {
     let mut v = [0.0f32; 16];
-    let own_active_id = own.active.as_ref().map(|a| a.card_id.as_str()).unwrap_or("");
-    let opp_active_id = opp.active.as_ref().map(|a| a.card_id.as_str()).unwrap_or("");
+    let own_active_id = own
+        .active
+        .as_ref()
+        .map(|a| a.card_id.as_str())
+        .unwrap_or("");
+    let opp_active_id = opp
+        .active
+        .as_ref()
+        .map(|a| a.card_id.as_str())
+        .unwrap_or("");
     v[0] = hash_to_unit(own_active_id);
     v[1] = hash_to_unit(opp_active_id);
     // own bench[0..4], opp bench[0..4] — pad with empty entries beyond
     // the engine's MAX_BENCH=3 cap (Python iterates `bench[:4]`).
     for i in 0..4 {
-        let id = own.bench.get(i).and_then(|o| o.as_ref()).map(|u| u.card_id.as_str()).unwrap_or("");
+        let id = own
+            .bench
+            .get(i)
+            .and_then(|o| o.as_ref())
+            .map(|u| u.card_id.as_str())
+            .unwrap_or("");
         v[2 + i] = hash_to_unit(id);
     }
     for i in 0..4 {
-        let id = opp.bench.get(i).and_then(|o| o.as_ref()).map(|u| u.card_id.as_str()).unwrap_or("");
+        let id = opp
+            .bench
+            .get(i)
+            .and_then(|o| o.as_ref())
+            .map(|u| u.card_id.as_str())
+            .unwrap_or("");
         v[6 + i] = hash_to_unit(id);
     }
     // Python iterates `handCardIds` (the private hand ids — present on
@@ -1485,7 +1548,9 @@ fn identity_features(own: &PublicSideObservation, opp: &PublicSideObservation) -
 
 fn energy_vector_from_uma(uma: Option<&PublicUmaObservation>) -> [f32; 10] {
     let mut v = [0.0f32; 10];
-    let Some(u) = uma else { return v; };
+    let Some(u) = uma else {
+        return v;
+    };
     for (i, &name) in ENERGY_TYPES_ORDER.iter().enumerate() {
         let amount = u.energies.get(name).copied().unwrap_or(0) as f32;
         v[i] = amount / 4.0;
@@ -1753,7 +1818,9 @@ fn discard_role_features(card_ids: &[String]) -> [f32; 3] {
 
 fn uma_readiness_features(entry: Option<&PublicUmaObservation>) -> [f32; 4] {
     let mut v = [0.0f32; 4];
-    let Some(entry) = entry else { return v; };
+    let Some(entry) = entry else {
+        return v;
+    };
     let card = match get_card(&entry.card_id) {
         Some(c) => c,
         None => return v,
@@ -2024,10 +2091,8 @@ pub fn observation_uma_slots(obs: &PublicObservation) -> (Vec<i64>, Vec<f32>) {
 
     // Active slots: own at slot 0 (polarity +1), opp at slot 5 (polarity
     // -1). `slot_idx_norm = -1.0` marks the active role (per chunk plan).
-    for &(side, polarity, slot_idx) in &[
-        (Side::Own, 1.0f32, 0usize),
-        (Side::Opp, -1.0f32, 5usize),
-    ] {
+    for &(side, polarity, slot_idx) in &[(Side::Own, 1.0f32, 0usize), (Side::Opp, -1.0f32, 5usize)]
+    {
         let side_obs = match side {
             Side::Own => &obs.own,
             Side::Opp => &obs.opponent,
@@ -2051,20 +2116,17 @@ pub fn observation_uma_slots(obs: &PublicObservation) -> (Vec<i64>, Vec<f32>) {
     // index norm = i / max(1, bench_per_side - 1) (= i/3 for the 4-slot
     // placeholder; the 4th slot is always absent under MAX_BENCH=3).
     let bench_denom = (UMA_SLOT_BENCH_PER_SIDE - 1).max(1) as f32;
-    for &(side, polarity, slot_base) in &[
-        (Side::Own, 1.0f32, 1usize),
-        (Side::Opp, -1.0f32, 6usize),
-    ] {
+    for &(side, polarity, slot_base) in &[(Side::Own, 1.0f32, 1usize), (Side::Opp, -1.0f32, 6usize)]
+    {
         let side_obs = match side {
             Side::Own => &obs.own,
             Side::Opp => &obs.opponent,
         };
         for bench_pos in 0..UMA_SLOT_BENCH_PER_SIDE {
-            let entry = side_obs
-                .bench
-                .get(bench_pos)
-                .and_then(|o| o.as_ref());
-            let Some(entry) = entry else { continue; };
+            let entry = side_obs.bench.get(bench_pos).and_then(|o| o.as_ref());
+            let Some(entry) = entry else {
+                continue;
+            };
             if entry.card_id.is_empty() {
                 continue;
             }
@@ -2101,7 +2163,9 @@ fn fill_uma_slot_row(
     slot_idx_norm: f32,
 ) {
     debug_assert_eq!(row.len(), UMA_SLOT_FEATURE_DIM);
-    let Some(uma) = uma else { return; };
+    let Some(uma) = uma else {
+        return;
+    };
     if uma.card_id.is_empty() {
         return;
     }
@@ -2123,16 +2187,18 @@ fn fill_uma_slot_row(
         row[_UMA_SLOT_F_ENERGY_TYPED_START + offset] = amount / 4.0;
     }
 
-    row[_UMA_SLOT_F_TOOL] = if uma.tool_card_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+    row[_UMA_SLOT_F_TOOL] = if uma
+        .tool_card_id
+        .as_ref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+    {
         1.0
     } else {
         0.0
     };
 
-    let cond_paralysis = uma
-        .special_conditions
-        .iter()
-        .any(|c| c == "paralysed");
+    let cond_paralysis = uma.special_conditions.iter().any(|c| c == "paralysed");
     row[_UMA_SLOT_F_COND_PARALYSIS] = if cond_paralysis { 1.0 } else { 0.0 };
     // Full SpecialCondition union has 5 members (asleep/burned/frozen/
     // paralysed/poisoned per shared/src/types.ts:10), so divide by 5.0.
@@ -2155,7 +2221,12 @@ pub enum FeaturizeError {
 impl std::fmt::Display for FeaturizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FeaturizeError::ActionFeatureLen { index, got, expected, id } => {
+            FeaturizeError::ActionFeatureLen {
+                index,
+                got,
+                expected,
+                id,
+            } => {
                 write!(
                     f,
                     "action[{index}] id={id:?}: feature length {got} != expected {expected}"
@@ -2257,7 +2328,10 @@ mod tests {
         let (card_ids, features) = observation_uma_slots(&obs);
 
         // Own active is slot 0; setup_ai_vs_ai_game always assigns one.
-        assert!(card_ids[0] > 0, "own active card_id must be a real vocab idx");
+        assert!(
+            card_ids[0] > 0,
+            "own active card_id must be a real vocab idx"
+        );
         let row0 = &features[0..UMA_SLOT_FEATURE_DIM];
         assert_eq!(row0[_UMA_SLOT_F_POLARITY], 1.0, "own polarity = +1");
         assert_eq!(row0[_UMA_SLOT_F_ROLE_ACTIVE], 1.0, "active flag = 1");
@@ -2265,9 +2339,7 @@ mod tests {
         assert_eq!(row0[_UMA_SLOT_F_PRESENT], 1.0, "present mask = 1");
         // hp ratio is in [0, 1]; evolved is 0 or 1.
         assert!(row0[_UMA_SLOT_F_HP] >= 0.0 && row0[_UMA_SLOT_F_HP] <= 1.0);
-        assert!(
-            row0[_UMA_SLOT_F_EVOLVED] == 0.0 || row0[_UMA_SLOT_F_EVOLVED] == 1.0
-        );
+        assert!(row0[_UMA_SLOT_F_EVOLVED] == 0.0 || row0[_UMA_SLOT_F_EVOLVED] == 1.0);
 
         // Opp active is slot 5; opponent polarity = -1.
         assert!(card_ids[5] > 0, "opp active card_id must be set");
@@ -2344,7 +2416,9 @@ mod tests {
         assert!(
             (typed_sum - expected).abs() < 1e-5,
             "typed-energy sum {} != raw {}/4.0 = {}",
-            typed_sum, raw_sum, expected
+            typed_sum,
+            raw_sum,
+            expected
         );
     }
 
@@ -2383,13 +2457,16 @@ mod tests {
             assert!(
                 v[slot] >= 0.0 && v[slot] <= 1.0,
                 "global temporal slot {} out of [0,1]: {}",
-                slot, v[slot]
+                slot,
+                v[slot]
             );
         }
         for &slot in &[112usize, 113] {
             assert!(
                 v[slot] == 0.0 || v[slot] == 1.0,
-                "isFirstTurn slot {} must be 0/1: {}", slot, v[slot]
+                "isFirstTurn slot {} must be 0/1: {}",
+                slot,
+                v[slot]
             );
         }
 
@@ -2399,7 +2476,9 @@ mod tests {
         for slot in 114..128 {
             assert!(
                 v[slot] >= 0.0 && v[slot] <= 1.0,
-                "side turnState slot {} out of [0,1]: {}", slot, v[slot]
+                "side turnState slot {} out of [0,1]: {}",
+                slot,
+                v[slot]
             );
         }
 
@@ -2407,7 +2486,9 @@ mod tests {
         for slot in 128..164 {
             assert!(
                 v[slot] >= 0.0 && v[slot] <= 1.0,
-                "per-Uma temporal slot {} out of [0,1]: {}", slot, v[slot]
+                "per-Uma temporal slot {} out of [0,1]: {}",
+                slot,
+                v[slot]
             );
         }
     }
@@ -2681,11 +2762,19 @@ mod tests {
         // own [187:197] — front="fire" at index 1.
         let own_front: Vec<f32> = v35[187..197].to_vec();
         assert_eq!(own_front[1], 1.0, "fire should be set at index 1");
-        assert_eq!(own_front.iter().sum::<f32>(), 1.0, "exactly one own-front bit");
+        assert_eq!(
+            own_front.iter().sum::<f32>(),
+            1.0,
+            "exactly one own-front bit"
+        );
         // opp [197:207] — front="psychic" at index 4.
         let opp_front: Vec<f32> = v35[197..207].to_vec();
         assert_eq!(opp_front[4], 1.0, "psychic should be set at index 4");
-        assert_eq!(opp_front.iter().sum::<f32>(), 1.0, "exactly one opp-front bit");
+        assert_eq!(
+            opp_front.iter().sum::<f32>(),
+            1.0,
+            "exactly one opp-front bit"
+        );
     }
 
     #[test]
@@ -2701,10 +2790,17 @@ mod tests {
 
         // Put one Uma on own bench; own bit flips to 0.
         let mut obs2 = obs.clone();
-        let proto = obs2.opponent.active.clone().or_else(|| obs2.own.active.clone());
+        let proto = obs2
+            .opponent
+            .active
+            .clone()
+            .or_else(|| obs2.own.active.clone());
         obs2.own.bench[0] = proto;
         let v35b = observation_state_features_v3_5(&obs2);
-        assert_eq!(v35b[210], 0.0, "own bench-refill flips when bench has a Uma");
+        assert_eq!(
+            v35b[210], 0.0,
+            "own bench-refill flips when bench has a Uma"
+        );
         assert_eq!(v35b[211], 1.0, "opp still no bench → still 1.0");
     }
 
@@ -2789,11 +2885,7 @@ mod tests {
     fn v3_6_energy_pool_collapses_duplicates() {
         // Bag semantics: duplicates collapse.
         let mut obs = fixture();
-        obs.own.energy_pool = vec![
-            "fire".to_string(),
-            "fire".to_string(),
-            "water".to_string(),
-        ];
+        obs.own.energy_pool = vec!["fire".to_string(), "fire".to_string(), "water".to_string()];
         let v = observation_state_features_v3_6(&obs);
         let own_band = &v[197..207];
         assert_eq!(own_band[1], 1.0, "fire bit set");
@@ -2821,7 +2913,8 @@ mod tests {
             assert_eq!(
                 own_prize.iter().sum::<f32>(),
                 1.0,
-                "exactly one own-prize bit for points={}", points
+                "exactly one own-prize bit for points={}",
+                points
             );
             // Opp prize at [226:230] — points=0 → bit 0.
             let opp_prize = &v[226..230];
@@ -2846,24 +2939,12 @@ mod tests {
             &[("fire", 1), ("water", 1)],
         );
         a.uid = 100;
-        let mut b = make_uma_obs(
-            "matikanetannhauserBasic",
-            60,
-            60,
-            1,
-            &[("darkness", 1)],
-        );
+        let mut b = make_uma_obs("matikanetannhauserBasic", 60, 60, 1, &[("darkness", 1)]);
         b.uid = 101;
         obs.opponent.bench = vec![Some(a), Some(b), None];
         // Inject own bench with typed energies — these MUST NOT appear
         // in any v3.6 slot (own bench was dropped at reconciliation).
-        let mut own_bench = make_uma_obs(
-            "matikanetannhauserBasic",
-            60,
-            60,
-            1,
-            &[("steel", 1)],
-        );
+        let mut own_bench = make_uma_obs("matikanetannhauserBasic", 60, 60, 1, &[("steel", 1)]);
         own_bench.uid = 200;
         obs.own.bench = vec![Some(own_bench), None, None];
 
@@ -2875,7 +2956,10 @@ mod tests {
         assert_eq!(opp_bench_band[1], 1.0, "opp bench fire bit");
         assert_eq!(opp_bench_band[2], 1.0, "opp bench water bit");
         assert_eq!(opp_bench_band[6], 1.0, "opp bench darkness bit");
-        assert_eq!(opp_bench_band[7], 0.0, "opp bench steel bit not set (only own had steel)");
+        assert_eq!(
+            opp_bench_band[7], 0.0,
+            "opp bench steel bit not set (only own had steel)"
+        );
         assert_eq!(
             opp_bench_band.iter().sum::<f32>(),
             3.0,
@@ -2935,13 +3019,7 @@ mod tests {
         let mut obs = fixture();
         // Energy covers BOTH costs (2 psychic ≥ {psychic:1} for primary,
         // 2 psychic ≥ {psychic:1, colorless:1} since colorless absorbs).
-        let attacker = make_uma_obs(
-            "matikanefukukitaruStage1",
-            100,
-            100,
-            2,
-            &[("psychic", 2)],
-        );
+        let attacker = make_uma_obs("matikanefukukitaruStage1", 100, 100, 2, &[("psychic", 2)]);
         let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
         obs.own.active = Some(attacker.clone());
         obs.opponent.active = Some(defender.clone());
@@ -2952,13 +3030,8 @@ mod tests {
 
         // Insufficient energy: 1 psychic covers primary {psychic:1} but
         // not secondary {psychic:1, colorless:1} (total cost 2 > attached 1).
-        let mut attacker2 = make_uma_obs(
-            "matikanefukukitaruStage1",
-            100,
-            100,
-            1,
-            &[("psychic", 1)],
-        );
+        let mut attacker2 =
+            make_uma_obs("matikanefukukitaruStage1", 100, 100, 1, &[("psychic", 1)]);
         attacker2.uid = 101;
         let mut obs2 = fixture();
         obs2.own.active = Some(attacker2);
@@ -3132,11 +3205,13 @@ mod tests {
         obs.opponent.active = Some(defender);
         let v = observation_state_features_v3_7(&obs);
         assert_eq!(
-            v[_V37_COND_BONUS_BASE + 0], 1.0,
+            v[_V37_COND_BONUS_BASE + 0],
+            1.0,
             "own primary per_energy bit"
         );
         assert_eq!(
-            v[_V37_COND_BONUS_BASE + 1], 0.0,
+            v[_V37_COND_BONUS_BASE + 1],
+            0.0,
             "own primary per_bench bit (haruUraraBasic has no per-bench bonus)"
         );
     }
@@ -3153,7 +3228,11 @@ mod tests {
         obs.opponent.active = Some(defender);
         obs.own.energy_pool = vec![];
         let v = observation_state_features_v3_7(&obs);
-        assert_eq!(v[_V37_ETA_BASE + 0], 1.0, "own primary ETA (psychic:1 from +1 attach)");
+        assert_eq!(
+            v[_V37_ETA_BASE + 0],
+            1.0,
+            "own primary ETA (psychic:1 from +1 attach)"
+        );
     }
 
     #[test]
@@ -3170,11 +3249,19 @@ mod tests {
         obs.opponent.active = Some(defender);
         obs.own.energy_pool = vec![];
         let v = observation_state_features_v3_7(&obs);
-        assert_eq!(v[_V37_ETA_BASE + 0], 0.0, "own primary ETA (dragon shortfall not in pool)");
+        assert_eq!(
+            v[_V37_ETA_BASE + 0],
+            0.0,
+            "own primary ETA (dragon shortfall not in pool)"
+        );
         // With pool=[dragon] → surviving dragon covered → ETA=1.
         obs.own.energy_pool = vec!["dragon".to_string()];
         let v = observation_state_features_v3_7(&obs);
-        assert_eq!(v[_V37_ETA_BASE + 0], 1.0, "own primary ETA (dragon now in pool)");
+        assert_eq!(
+            v[_V37_ETA_BASE + 0],
+            1.0,
+            "own primary ETA (dragon now in pool)"
+        );
     }
 
     #[test]
@@ -3203,7 +3290,11 @@ mod tests {
         obs.own.active = Some(own_a);
         obs.opponent.active = Some(make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]));
         let v = observation_state_features_v3_7(&obs);
-        assert_eq!(v[_V37_TOOL_KIND_OWN_BASE + 0], 1.0, "own tool HealAtTurnEnd");
+        assert_eq!(
+            v[_V37_TOOL_KIND_OWN_BASE + 0],
+            1.0,
+            "own tool HealAtTurnEnd"
+        );
         // Exactly one bit in the 4-bit own block.
         let sum: f32 = v[_V37_TOOL_KIND_OWN_BASE.._V37_TOOL_KIND_OWN_BASE + 4]
             .iter()
@@ -3226,7 +3317,11 @@ mod tests {
         obs.own.active = Some(own_a);
         obs.opponent.active = Some(make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]));
         let v = observation_state_features_v3_7(&obs);
-        assert_eq!(v[_V37_ABILITY_KIND_OWN_BASE + 2], 1.0, "own ability HpBonus");
+        assert_eq!(
+            v[_V37_ABILITY_KIND_OWN_BASE + 2],
+            1.0,
+            "own ability HpBonus"
+        );
         let sum: f32 = v[_V37_ABILITY_KIND_OWN_BASE.._V37_ABILITY_KIND_OWN_BASE + 8]
             .iter()
             .sum();
@@ -3257,13 +3352,7 @@ mod tests {
         // Darkness; attacker is Psychic → no weakness type match.
         // Damage=0 → even with weakness off, 0 < hp → secondary KO=0.
         let mut obs = fixture();
-        let attacker = make_uma_obs(
-            "matikanefukukitaruStage1",
-            100,
-            100,
-            2,
-            &[("psychic", 2)],
-        );
+        let attacker = make_uma_obs("matikanefukukitaruStage1", 100, 100, 2, &[("psychic", 2)]);
         let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
         obs.own.active = Some(attacker);
         obs.opponent.active = Some(defender);

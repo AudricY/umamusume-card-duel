@@ -63,20 +63,14 @@ pub fn ai_attach_one_energy(state: &mut GameState, side_id: SideId, turn_goal: A
         useful_cap_by_uid.insert(umamusume.uid, cap);
     }
     let has_undercharged_alternative = candidates_owned.iter().any(|umamusume| {
-        let cap = useful_cap_by_uid
-            .get(&umamusume.uid)
-            .copied()
-            .unwrap_or(1);
+        let cap = useful_cap_by_uid.get(&umamusume.uid).copied().unwrap_or(1);
         attached_energy_count(umamusume) < cap
     });
 
     let mut scored: Vec<(UmamusumeInstance, f64)> = candidates_owned
         .iter()
         .map(|umamusume| {
-            let cap = useful_cap_by_uid
-                .get(&umamusume.uid)
-                .copied()
-                .unwrap_or(1);
+            let cap = useful_cap_by_uid.get(&umamusume.uid).copied().unwrap_or(1);
             let s = score_attach_target(
                 state,
                 state.side(side_id),
@@ -101,7 +95,11 @@ pub fn ai_attach_one_energy(state: &mut GameState, side_id: SideId, turn_goal: A
                 .unwrap_or(std::cmp::Ordering::Equal);
         }
         let left_active = if Some(left.0.uid) == active_uid { 1 } else { 0 };
-        let right_active = if Some(right.0.uid) == active_uid { 1 } else { 0 };
+        let right_active = if Some(right.0.uid) == active_uid {
+            1
+        } else {
+            0
+        };
         if right_active != left_active {
             return right_active.cmp(&left_active);
         }
@@ -497,7 +495,9 @@ fn get_useful_energy_cap(
     let base_attack_cost = total_attack_cost(&attack.cost);
     let attack_discard_cost = typed_energy_total(attack.discard_energy.as_ref());
     let ability_discard_cost = typed_energy_total(
-        card.ability.as_ref().and_then(|a| a.discard_energy.as_ref()),
+        card.ability
+            .as_ref()
+            .and_then(|a| a.discard_energy.as_ref()),
     );
     let total_discard_cost = attack_discard_cost + ability_discard_cost;
     let damage_scaling_types: &[EnergyType] = attack
@@ -514,12 +514,20 @@ fn get_useful_energy_cap(
         cap += 1;
     }
     if !damage_scaling_types.is_empty()
-        && side.active.as_ref().map(|a| a.uid == target.uid).unwrap_or(false)
+        && side
+            .active
+            .as_ref()
+            .map(|a| a.uid == target.uid)
+            .unwrap_or(false)
     {
         cap += 1;
     }
     if deck_style == AiDeckStyle::Stall
-        && side.active.as_ref().map(|a| a.uid == target.uid).unwrap_or(false)
+        && side
+            .active
+            .as_ref()
+            .map(|a| a.uid == target.uid)
+            .unwrap_or(false)
     {
         cap += 1;
     }
@@ -533,7 +541,12 @@ fn get_useful_energy_cap(
             cap += 1;
         }
     }
-    if side.active.as_ref().map(|a| a.uid == target.uid).unwrap_or(false) {
+    if side
+        .active
+        .as_ref()
+        .map(|a| a.uid == target.uid)
+        .unwrap_or(false)
+    {
         let retreat_cost = effective_retreat_cost(state, side);
         if retreat_cost >= 2 {
             cap += 1;
@@ -670,8 +683,8 @@ fn build_future_energy_demand(side: &SideState) -> [f64; EnergyType::COUNT] {
     let cat = catalog();
 
     let add_cost_demand = |demand: &mut [f64; EnergyType::COUNT],
-                            card_id: crate::core::card_id::CardId,
-                            weight: f64| {
+                           card_id: crate::core::card_id::CardId,
+                           weight: f64| {
         let Some(Card::Umamusume(card)) = cat.get(card_id) else {
             return;
         };
@@ -696,7 +709,10 @@ fn build_future_energy_demand(side: &SideState) -> [f64; EnergyType::COUNT] {
             .as_ref()
             .and_then(|a| a.attack_damage_bonus_if_attached_energy.as_ref())
         {
-            if available_energy_types.iter().any(|&e| e == threshold.r#type) {
+            if available_energy_types
+                .iter()
+                .any(|&e| e == threshold.r#type)
+            {
                 demand[threshold.r#type as usize] += (threshold.min as f64) * weight * 0.4;
             }
         }
@@ -827,12 +843,8 @@ mod tests {
             paralysed_until_own_turn: None,
             tool_card_id: None,
         };
-        let score = score_ai_attach_target(
-            &state,
-            SideId::Player,
-            &inst,
-            AiTurnGoal::MaximizeProgress,
-        );
+        let score =
+            score_ai_attach_target(&state, SideId::Player, &inst, AiTurnGoal::MaximizeProgress);
         assert_eq!(score, f64::NEG_INFINITY);
     }
 

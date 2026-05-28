@@ -317,13 +317,18 @@ fn score_shuffle_hand_into_deck_draw_value(state: &GameState, side: &SideState) 
         4.0
     };
     let attack_penalty: f64 = if can_attack(state, side) { 0.45 } else { 1.0 };
-    let already_used_penalty: f64 = if side.used_stadium_this_turn { 0.35 } else { 1.0 };
+    let already_used_penalty: f64 = if side.used_stadium_this_turn {
+        0.35
+    } else {
+        1.0
+    };
     let mut score = hand_size_score * attack_penalty * already_used_penalty;
     let has_bench = !side.bench.is_empty();
     let cat = catalog();
-    let has_basic_in_hand = side.hand.iter().any(|&cid| {
-        matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage == 0)
-    });
+    let has_basic_in_hand = side
+        .hand
+        .iter()
+        .any(|&cid| matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage == 0));
     if !has_bench && !has_basic_in_hand {
         let deck_counts = get_known_remaining_deck_counts(side);
         let basics_in_deck = deck_counts.basic_umamusume;
@@ -517,11 +522,7 @@ fn score_bench_attach_target(
     if !before_can_attack && after_can_attack {
         score += 120.0;
     }
-    if side.active.is_some()
-        && !can_attack(state, side)
-        && !before_can_attack
-        && after_can_attack
-    {
+    if side.active.is_some() && !can_attack(state, side) && !before_can_attack && after_can_attack {
         score += 80.0;
     }
     score
@@ -615,9 +616,7 @@ fn choose_ai_search_deck_index(
     if opts.prefer_basics {
         let basic_options: Vec<(crate::core::card_id::CardId, usize)> = deck_options
             .iter()
-            .filter(|(cid, _)| {
-                matches!(cat.get(*cid), Some(Card::Umamusume(c)) if c.stage == 0)
-            })
+            .filter(|(cid, _)| matches!(cat.get(*cid), Some(Card::Umamusume(c)) if c.stage == 0))
             .cloned()
             .collect();
         if !basic_options.is_empty() {
@@ -713,15 +712,13 @@ fn score_card_future_value(
                 Some(a) => a,
                 None => return 0.0,
             };
-            let mut value: f64 =
-                30.0 + (u.stage as f64) * 18.0 + (attack.damage as f64) * 0.7;
+            let mut value: f64 = 30.0 + (u.stage as f64) * 18.0 + (attack.damage as f64) * 0.7;
             value += score_attack_energy_pool_fit(side, &attack.cost);
             let evolution_targets: Vec<&UmamusumeInstance> = get_all_umamusume(side)
                 .into_iter()
                 .filter(|um| {
                     let evolves_from = u.evolves_from.as_deref().unwrap_or("");
-                    um.species() == evolves_from
-                        && (um.stage as i32) == (u.stage as i32 - 1)
+                    um.species() == evolves_from && (um.stage as i32) == (u.stage as i32 - 1)
                 })
                 .collect();
             if u.stage > 0 && !evolution_targets.is_empty() {
@@ -938,7 +935,8 @@ mod tests {
         };
         state.sides[SideId::Player as usize].active = Some(target.clone());
         let side = state.side(SideId::Player);
-        let score_active = score_evolution_target(&state, side, side.active.as_ref().unwrap(), stage1_card);
+        let score_active =
+            score_evolution_target(&state, side, side.active.as_ref().unwrap(), stage1_card);
         // With an active-uid match and matching evolution, the score
         // should at least include the +80 active bonus contribution.
         assert!(

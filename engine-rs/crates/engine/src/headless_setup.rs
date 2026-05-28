@@ -105,7 +105,10 @@ mod tests {
         });
         assert_eq!(state.phase, Phase::Play);
         assert!(state.sides[0].active.is_some(), "player should have active");
-        assert!(state.sides[1].active.is_some(), "opponent should have active");
+        assert!(
+            state.sides[1].active.is_some(),
+            "opponent should have active"
+        );
         assert!(state.turn_number >= 1);
         assert!(matches!(
             state.current_side,
@@ -122,14 +125,8 @@ mod tests {
             setup_ai_vs_ai_game()
         });
         // Hand cards should match.
-        assert_eq!(
-            a.sides[0].hand.as_slice(),
-            b.sides[0].hand.as_slice()
-        );
-        assert_eq!(
-            a.sides[1].hand.as_slice(),
-            b.sides[1].hand.as_slice()
-        );
+        assert_eq!(a.sides[0].hand.as_slice(), b.sides[0].hand.as_slice());
+        assert_eq!(a.sides[1].hand.as_slice(), b.sides[1].hand.as_slice());
         // Active uid matches.
         assert_eq!(
             a.sides[0].active.as_ref().map(|u| u.uid),

@@ -32,7 +32,9 @@ pub fn find_evolution_target<'a>(
     side: &'a SideState,
     evolution_card: &UmamusumeCard,
 ) -> Option<&'a UmamusumeInstance> {
-    get_evolution_targets(state, side, evolution_card).into_iter().next()
+    get_evolution_targets(state, side, evolution_card)
+        .into_iter()
+        .next()
 }
 
 pub fn is_valid_evolution_target(

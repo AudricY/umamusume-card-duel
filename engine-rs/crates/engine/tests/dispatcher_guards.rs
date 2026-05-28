@@ -70,7 +70,9 @@ fn advance_modeled_after_game_over_returns_unchanged() {
     let rng = Rng::from_seed("0:drive-to-end", "drive-to-end");
     let mut step_rng = rng;
     for _ in 0..200 {
-        if state.game_over { break; }
+        if state.game_over {
+            break;
+        }
         let side = current_side(&state);
         let (next, used) = with_rng(step_rng.clone(), || {
             let forced = get_forced_attack_coin_results(&state);

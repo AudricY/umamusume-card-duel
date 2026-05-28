@@ -9,19 +9,15 @@
 use serde_json::{json, Map, Value};
 
 use crate::core::catalog::{catalog, Card};
-use crate::core::constants::{
-    AiDeckStyle, CoinFlipResult, SideId, TrainerType, MAX_BENCH,
-};
+use crate::core::constants::{AiDeckStyle, CoinFlipResult, SideId, TrainerType, MAX_BENCH};
+use crate::core::random::random_float;
 use crate::core::state::{GameState, SideState};
 use crate::core::umamusume::get_all_umamusume;
 use crate::flow::board::choose_preferred_active_index;
 use crate::flow::combat::{perform_attack, CombatDeps};
 use crate::flow::eligibility::{can_attach_energy, can_use_umamusume_ability};
 use crate::flow::evolution::{evolve_umamusume, find_evolution_target};
-use crate::flow::play_rules::{
-    get_tool_targets, use_rainbow_uncap_crystal,
-};
-use crate::core::random::random_float;
+use crate::flow::play_rules::{get_tool_targets, use_rainbow_uncap_crystal};
 use crate::flow::setup::create_umamusume;
 use crate::flow::trainers::{apply_trainer, can_use_stadium, play_stadium};
 use crate::flow::turn::draw_cards;
@@ -45,7 +41,9 @@ use super::trainer_utils::{
     get_ai_rainbow_uncap_choice, get_ai_trainer_choices, score_evolution_target,
     should_ai_play_trainer,
 };
-use super::turn_plan::{choose_ai_turn_goal, explain_ai_turn_goal, has_consecutive_no_attack_turns};
+use super::turn_plan::{
+    choose_ai_turn_goal, explain_ai_turn_goal, has_consecutive_no_attack_turns,
+};
 use super::types::{
     AiCombatDecision, AiCombatDecisionResult, AiTurnGoal, PendingSwitchAfterGustResume,
 };
@@ -76,13 +74,10 @@ pub fn ai_play_one_basic(state: &mut GameState, side_id: SideId) -> bool {
         if c.stage != 0 {
             continue;
         }
-        let score =
-            score_basic_bench_candidate(state, &side_snapshot, cid, deck_style);
+        let score = score_basic_bench_candidate(state, &side_snapshot, cid, deck_style);
         scored.push((hand_index, score));
     }
-    scored.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let Some(&(best_idx, _)) = scored.first() else {
         return false;
     };
@@ -118,9 +113,7 @@ pub fn ai_evolve_one(state: &mut GameState, side_id: SideId) -> bool {
         let s = score_evolution_target(state, &side_snapshot, target, card);
         scored.push((hand_index, target.uid, s));
     }
-    scored.sort_by(|a, b| {
-        b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     let Some(&(best_idx, target_uid, _)) = scored.first() else {
         return false;
     };
@@ -187,7 +180,9 @@ pub fn ai_play_one_trainer(
         .hand
         .iter()
         .enumerate()
-        .filter(|(handi, &cid)| should_ai_play_trainer(state, &side_snapshot, cid, *handi, turn_goal))
+        .filter(|(handi, &cid)| {
+            should_ai_play_trainer(state, &side_snapshot, cid, *handi, turn_goal)
+        })
         .map(|(handi, _)| handi)
         .collect();
     let fallback_index = trainer_indexes.first().copied();
@@ -232,12 +227,13 @@ pub fn ai_play_one_trainer(
         } else {
             rainbow_choice.evolution_hand_index
         };
-        let resolved = use_rainbow_uncap_crystal(
-            state,
-            side_id,
-            Some(rainbow_choice.target_uid),
-            Some(shifted_evolution_hand_index),
-        ) || use_rainbow_uncap_crystal(state, side_id, Some(rainbow_choice.target_uid), None);
+        let resolved =
+            use_rainbow_uncap_crystal(
+                state,
+                side_id,
+                Some(rainbow_choice.target_uid),
+                Some(shifted_evolution_hand_index),
+            ) || use_rainbow_uncap_crystal(state, side_id, Some(rainbow_choice.target_uid), None);
         if resolved {
             let _ = state.side_mut(side_id).discard.try_push(cid);
         }
@@ -310,9 +306,7 @@ fn choose_trainer_index_for_two_turn_bundle(
             (handi, prio)
         })
         .collect();
-    top.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     top.truncate(3);
 
     let mut best_index: Option<usize> = None;
@@ -435,7 +429,8 @@ fn simulate_trainer_attach_combat_bundle(
         turn_goal,
     );
     if card.effect.rainbow_uncap_crystal == Some(true) {
-        if let Some(rainbow_choice) = get_ai_rainbow_uncap_choice(&simulated, simulated.side(side_id))
+        if let Some(rainbow_choice) =
+            get_ai_rainbow_uncap_choice(&simulated, simulated.side(side_id))
         {
             let side = simulated.side_mut(side_id);
             if trainer_hand_index < side.hand.len() {
@@ -525,7 +520,9 @@ fn simulate_trainer_attach_combat_bundle(
     let combat_candidates = build_combat_candidates(&simulated, side_id, &mut combat_deps, None);
     let mut sorted = combat_candidates;
     sorted.sort_by(|a, b| {
-        b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     let Some(best) = sorted.first() else {
         return 0.0;
@@ -607,7 +604,9 @@ pub fn ai_resolve_combat_decision(
         let mut top3_payload: Vec<Value> = Vec::new();
         let mut sorted_top = candidates.clone();
         sorted_top.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         for c in sorted_top.iter().take(3) {
             let mut rec = Map::new();
@@ -831,8 +830,8 @@ pub fn ai_use_one_ability(
             }
         }
         if has_shuffle_random_discard {
-            let count = (shuffle_random_discard_amount as usize)
-                .min(state.side(side_id).discard.len());
+            let count =
+                (shuffle_random_discard_amount as usize).min(state.side(side_id).discard.len());
             if count == 0 {
                 continue;
             }
@@ -946,10 +945,13 @@ fn score_basic_bench_candidate(
         .any(|u| u.species() == card.species.as_str());
     let mut score: f64 = (card.hp as f64) * 0.5 + (attack.damage as f64);
     score += score_attack_energy_pool_fit(side, &attack.cost);
-    score += (84.0_f64)
-        .min((evolution_in_hand as f64) * 36.0 + (evolution_in_deck as f64) * 12.0);
+    score += (84.0_f64).min((evolution_in_hand as f64) * 36.0 + (evolution_in_deck as f64) * 12.0);
     if immediate_evolution_in_hand {
-        score += if same_species_already_in_play { 22.0 } else { 64.0 };
+        score += if same_species_already_in_play {
+            22.0
+        } else {
+            64.0
+        };
     }
     if side.bench.len() < MAX_BENCH {
         score += 20.0;

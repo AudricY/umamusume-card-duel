@@ -22,9 +22,7 @@
 //!   immutable catalog reference with `&mut` on state.
 
 use crate::core::catalog::{catalog, Card, UmamusumeCard};
-use crate::core::constants::{
-    CoinFlipResult, EnergyType, SideId, SpecialCondition, MAX_POINTS,
-};
+use crate::core::constants::{CoinFlipResult, EnergyType, SideId, SpecialCondition, MAX_POINTS};
 use crate::core::effects::{
     Attack, AttackTarget, DamagePerUmamusumeSide, HealTarget, ShuffleSelfIntoDeck,
 };
@@ -136,7 +134,10 @@ pub fn perform_attack(
         let target = if defender.active.as_ref().map(|a| a.uid) == Some(attack_target_uid_resolved)
         {
             defender.active.as_ref().unwrap()
-        } else if let Some(b) = defender.bench.iter().find(|u| u.uid == attack_target_uid_resolved)
+        } else if let Some(b) = defender
+            .bench
+            .iter()
+            .find(|u| u.uid == attack_target_uid_resolved)
         {
             b
         } else {
@@ -181,9 +182,7 @@ pub fn perform_attack(
                 get_all_umamusume(state.side(attacker_id)).len() as i32
                     + get_all_umamusume(state.side(defender_id)).len() as i32
             }
-            DamagePerUmamusumeSide::Own => {
-                get_all_umamusume(state.side(attacker_id)).len() as i32
-            }
+            DamagePerUmamusumeSide::Own => get_all_umamusume(state.side(attacker_id)).len() as i32,
         };
         damage += in_play_count * d.amount;
     }
@@ -248,15 +247,13 @@ pub fn perform_attack(
     }
     if let Some(per_unique) = attack.damage_per_unique_attached_energy {
         let active = state.side(attacker_id).active.as_ref().unwrap();
-        let unique_energy_count =
-            active.energies.iter().filter(|&&count| count > 0).count() as i32;
+        let unique_energy_count = active.energies.iter().filter(|&&count| count > 0).count() as i32;
         damage += unique_energy_count * per_unique;
     }
     if let Some(per_discard) = attack.attack_damage_bonus_per_discarded_hand_card.clone() {
         let attacker = state.side_mut(attacker_id);
         if !attacker.hand.is_empty() {
-            let discard_count =
-                (per_discard.max_discard as usize).min(attacker.hand.len()) as i32;
+            let discard_count = (per_discard.max_discard as usize).min(attacker.hand.len()) as i32;
             for _ in 0..discard_count {
                 if attacker.hand.is_empty() {
                     break;
@@ -325,14 +322,19 @@ pub fn perform_attack(
     // guaranteeNextCoinFlipHeads — applies before knockOutActiveIfAllCoinHeads.
     if let Some(n) = attack.guarantee_next_coin_flip_heads {
         let attacker = state.side_mut(attacker_id);
-        attacker.guaranteed_coin_flip_heads = attacker.guaranteed_coin_flip_heads.saturating_add(n as u8);
+        attacker.guaranteed_coin_flip_heads =
+            attacker.guaranteed_coin_flip_heads.saturating_add(n as u8);
     }
 
     // knockOutActiveIfAllCoinHeads — multiple coin flips, zero target HP if all heads.
     if let Some(n) = attack.knock_out_active_if_all_coin_heads {
         let mut results = Vec::with_capacity(n as usize);
         for _ in 0..n {
-            results.push(flip_coin_with_state(state, attacker_id, &mut forced_coin_results));
+            results.push(flip_coin_with_state(
+                state,
+                attacker_id,
+                &mut forced_coin_results,
+            ));
         }
         if results.iter().all(|r| *r == CoinFlipResult::Heads) {
             let defender = state.side_mut(defender_id);
@@ -379,7 +381,10 @@ pub fn perform_attack(
             attack.name
         );
         let actor = crate::core::labels::actor_name(state.side(attacker_id));
-        let msg = format!("{} attacked with {} for {} damage.", actor, attacker_card_name, damage);
+        let msg = format!(
+            "{} attacked with {} for {} damage.",
+            actor, attacker_card_name, damage
+        );
         crate::core::log::log(state, msg);
     }
 
@@ -487,17 +492,17 @@ pub fn perform_attack(
     if let Some(condition) = attack.inflict_special_condition {
         // Check the resolved attack target's HP after main damage.
         let defender = state.side(defender_id);
-        let target_hp = if defender.active.as_ref().map(|a| a.uid) == Some(attack_target_uid_resolved)
-        {
-            defender.active.as_ref().map(|a| a.hp).unwrap_or(0)
-        } else {
-            defender
-                .bench
-                .iter()
-                .find(|u| u.uid == attack_target_uid_resolved)
-                .map(|u| u.hp)
-                .unwrap_or(0)
-        };
+        let target_hp =
+            if defender.active.as_ref().map(|a| a.uid) == Some(attack_target_uid_resolved) {
+                defender.active.as_ref().map(|a| a.hp).unwrap_or(0)
+            } else {
+                defender
+                    .bench
+                    .iter()
+                    .find(|u| u.uid == attack_target_uid_resolved)
+                    .map(|u| u.hp)
+                    .unwrap_or(0)
+            };
         if target_hp > 0 {
             apply_special_condition(state, defender_id, attack_target_uid_resolved, condition);
         }
@@ -659,11 +664,7 @@ pub fn perform_attack(
     if !state.game_over && !preserve_attacker_win {
         let attacker_active_dead = {
             let attacker = state.side(attacker_id);
-            attacker
-                .active
-                .as_ref()
-                .map(|a| a.hp <= 0)
-                .unwrap_or(false)
+            attacker.active.as_ref().map(|a| a.hp <= 0).unwrap_or(false)
         };
         if attacker_active_dead {
             let active_clone = state.side(attacker_id).active.clone().unwrap();
@@ -675,10 +676,8 @@ pub fn perform_attack(
                 deps.choose_preferred_active_index,
             );
             if did {
-                if let Some(PendingPlayerChoice::PromoteAfterKnockout {
-                    side_id,
-                    resume,
-                }) = state.pending_player_choice.as_mut()
+                if let Some(PendingPlayerChoice::PromoteAfterKnockout { side_id, resume }) =
+                    state.pending_player_choice.as_mut()
                 {
                     if *side_id == attacker_id {
                         *resume = PromoteResume::FinishOpponentTurn;
@@ -688,7 +687,6 @@ pub fn perform_attack(
             }
         }
     }
-
 }
 
 /// `combat.ts:285` `shuffleRandomDiscardIntoDeck`. RNG: one `randomInt`
@@ -777,9 +775,10 @@ fn shuffle_active_into_deck_if_paid(
         if effect.requires_bench && side.bench.is_empty() {
             return;
         }
-        let can_pay = EnergyType::ALL.iter().copied().all(|t| {
-            (active.energies[t as usize] as i32) >= (effect.discard_energy.get(t) as i32)
-        });
+        let can_pay = EnergyType::ALL
+            .iter()
+            .copied()
+            .all(|t| (active.energies[t as usize] as i32) >= (effect.discard_energy.get(t) as i32));
         if !can_pay {
             return;
         }
@@ -969,15 +968,14 @@ pub fn knock_out_umamusume(
 
     let promoted_index = choose_preferred_active_index(state.side(knocked_side_id));
     let defender = state.side_mut(knocked_side_id);
-    let promoted: Option<UmamusumeInstance> = if promoted_index >= 0
-        && (promoted_index as usize) < defender.bench.len()
-    {
-        Some(defender.bench.remove(promoted_index as usize))
-    } else if !defender.bench.is_empty() {
-        Some(defender.bench.remove(0))
-    } else {
-        None
-    };
+    let promoted: Option<UmamusumeInstance> =
+        if promoted_index >= 0 && (promoted_index as usize) < defender.bench.len() {
+            Some(defender.bench.remove(promoted_index as usize))
+        } else if !defender.bench.is_empty() {
+            Some(defender.bench.remove(0))
+        } else {
+            None
+        };
     if let Some(p) = promoted {
         defender.active = Some(p);
     }
@@ -1006,7 +1004,9 @@ fn attack_damage_reduction_for(state: &GameState, umamusume: &UmamusumeInstance)
     let ability_reduction = get_umamusume_ability(state, owner_side, umamusume)
         .and_then(|a| a.damage_reduction)
         .unwrap_or(0);
-    ability_reduction + umamusume.next_turn_damage_reduction + active_tool_damage_reduction(state, umamusume)
+    ability_reduction
+        + umamusume.next_turn_damage_reduction
+        + active_tool_damage_reduction(state, umamusume)
 }
 
 fn active_tool_damage_reduction(state: &GameState, umamusume: &UmamusumeInstance) -> i32 {
@@ -1104,11 +1104,7 @@ fn resolve_switch_target_uid(
     }
     let attacker = state.side(attacker_id);
     if let Some(uid) = switch_target_uid {
-        return attacker
-            .bench
-            .iter()
-            .find(|u| u.uid == uid)
-            .map(|u| u.uid);
+        return attacker.bench.iter().find(|u| u.uid == uid).map(|u| u.uid);
     }
     if state.human_by_side[attacker_id as usize] || attacker.bench.is_empty() {
         return None;
@@ -1190,9 +1186,7 @@ fn should_preserve_attacker_win_on_simultaneous_ko(
 mod tests {
     use super::*;
     use crate::core::card_id::CardId;
-    use crate::core::constants::{
-        AiDeckStyle, AiDifficulty, EnergyType, SideId, SpecialCondition,
-    };
+    use crate::core::constants::{AiDeckStyle, AiDifficulty, EnergyType, SideId, SpecialCondition};
     use crate::core::state::{CurrentSide, Phase, SideState};
     use arrayvec::ArrayVec;
 
@@ -1318,11 +1312,7 @@ mod tests {
             .push(bench_member);
 
         // Snapshot the knocked-out instance.
-        let knocked = state
-            .side(SideId::Opponent)
-            .active
-            .clone()
-            .unwrap();
+        let knocked = state.side(SideId::Opponent).active.clone().unwrap();
         let did = knock_out_umamusume(
             &mut state,
             SideId::Player,
@@ -1392,9 +1382,8 @@ mod tests {
         };
         assert!(is_non_damaging_attack(&a));
         // A switch effect that grants no bonus is still non-damaging.
-        a.switch_self_after_attack = Some(crate::core::effects::SwitchSelfAfterAttack {
-            bonus_damage: None,
-        });
+        a.switch_self_after_attack =
+            Some(crate::core::effects::SwitchSelfAfterAttack { bonus_damage: None });
         assert!(is_non_damaging_attack(&a));
         // A switch effect with a bonus tips into damaging.
         a.switch_self_after_attack = Some(crate::core::effects::SwitchSelfAfterAttack {

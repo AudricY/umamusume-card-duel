@@ -13,7 +13,9 @@ use arrayvec::ArrayVec;
 
 use crate::core::catalog::{catalog, Card, UmamusumeCard};
 use crate::core::constants::{SideId, MAX_BENCH};
-use crate::core::state::{GameState, PendingPlayerChoice, SideState, SwitchResume, UmamusumeInstance};
+use crate::core::state::{
+    GameState, PendingPlayerChoice, SideState, SwitchResume, UmamusumeInstance,
+};
 use crate::core::umamusume::{attached_energy_count, get_all_umamusume};
 use crate::flow::ability_rules::get_umamusume_ability;
 use crate::flow::retreat::retreat_cost;
@@ -198,9 +200,14 @@ fn refresh_side_continuous_effects(state: &mut GameState, side_id: SideId, basic
     };
 
     let apply = |umamusume: &mut UmamusumeInstance, printed_hp: i32, printed_stage: u8| {
-        let stadium_hp_bonus = if printed_stage == 0 { basic_hp_bonus } else { 0 };
+        let stadium_hp_bonus = if printed_stage == 0 {
+            basic_hp_bonus
+        } else {
+            0
+        };
         let is_active = Some(umamusume.uid) == active_uid;
-        let target_max_hp = printed_hp + stadium_hp_bonus + if is_active { active_hp_bonus } else { 0 };
+        let target_max_hp =
+            printed_hp + stadium_hp_bonus + if is_active { active_hp_bonus } else { 0 };
         let damage = umamusume.max_hp - umamusume.hp;
         let next_hp = (target_max_hp - damage).clamp(0, target_max_hp);
         umamusume.max_hp = target_max_hp;
@@ -208,15 +215,17 @@ fn refresh_side_continuous_effects(state: &mut GameState, side_id: SideId, basic
     };
 
     if let Some((_uid, cid)) = active_meta {
-        let (printed_hp, printed_stage) =
-            lookup_printed(cid).map(|c| (c.hp, c.stage)).unwrap_or((0, 0));
+        let (printed_hp, printed_stage) = lookup_printed(cid)
+            .map(|c| (c.hp, c.stage))
+            .unwrap_or((0, 0));
         if let Some(a) = side.active.as_mut() {
             apply(a, printed_hp, printed_stage);
         }
     }
     for (idx, (_uid, cid)) in bench_meta.iter().enumerate() {
-        let (printed_hp, printed_stage) =
-            lookup_printed(*cid).map(|c| (c.hp, c.stage)).unwrap_or((0, 0));
+        let (printed_hp, printed_stage) = lookup_printed(*cid)
+            .map(|c| (c.hp, c.stage))
+            .unwrap_or((0, 0));
         if let Some(u) = side.bench.get_mut(idx) {
             apply(u, printed_hp, printed_stage);
         }

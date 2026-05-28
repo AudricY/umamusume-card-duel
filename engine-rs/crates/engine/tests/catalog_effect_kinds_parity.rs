@@ -112,7 +112,10 @@ fn catalog_effect_kinds_parity() {
     // Catalog floor checks.
     let tool_total: usize = tool_counts.values().sum();
     let ability_total: usize = ability_counts.values().sum();
-    assert_eq!(tool_total, 3, "expected exactly 3 tool cards at v3.7 scope time");
+    assert_eq!(
+        tool_total, 3,
+        "expected exactly 3 tool cards at v3.7 scope time"
+    );
     assert_eq!(
         ability_total, 17,
         "expected exactly 17 ability cards at v3.7 scope time"

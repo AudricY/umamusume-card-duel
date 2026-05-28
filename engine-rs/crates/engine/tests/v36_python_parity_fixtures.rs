@@ -41,9 +41,7 @@ use engine::core::random::{with_rng, Rng};
 use engine::headless_setup::setup_ai_vs_ai_game;
 use engine::policy::featurize::observation_state_features_v3_6;
 use engine::policy::observation::build_public_observation;
-use engine::policy::types::{
-    PublicObservation, PublicUmaObservation, PublicUmaTurnState,
-};
+use engine::policy::types::{PublicObservation, PublicUmaObservation, PublicUmaTurnState};
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -131,11 +129,7 @@ fn build_fixtures() -> Vec<(&'static str, PublicObservation)> {
 
     // 05 — duplicates collapse.
     let mut o = base_obs();
-    o.own.energy_pool = vec![
-        "fire".to_string(),
-        "fire".to_string(),
-        "water".to_string(),
-    ];
+    o.own.energy_pool = vec!["fire".to_string(), "fire".to_string(), "water".to_string()];
     o.opponent.energy_pool = vec!["psychic".to_string(), "psychic".to_string()];
     out.push(("05_dup_pool", o));
 
@@ -147,8 +141,13 @@ fn build_fixtures() -> Vec<(&'static str, PublicObservation)> {
 
     // 07 — lethal-true case. Stage 2 attacker (60 dmg) vs hp=60 defender.
     let mut o = base_obs();
-    let attacker = make_uma_obs("matikanetannhauserStage2", 120, 120, 3,
-        &[("psychic", 2), ("colorless", 1)]);
+    let attacker = make_uma_obs(
+        "matikanetannhauserStage2",
+        120,
+        120,
+        3,
+        &[("psychic", 2), ("colorless", 1)],
+    );
     let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
     o.opponent.active = Some(attacker);
     o.own.active = Some(defender);
@@ -156,8 +155,7 @@ fn build_fixtures() -> Vec<(&'static str, PublicObservation)> {
 
     // 08 — lethal-false case (basic 20-dmg attacker vs hp=120 defender).
     let mut o = base_obs();
-    let weak_attacker = make_uma_obs("matikanetannhauserBasic", 60, 60, 1,
-        &[("psychic", 1)]);
+    let weak_attacker = make_uma_obs("matikanetannhauserBasic", 60, 60, 1, &[("psychic", 1)]);
     let tough_defender = make_uma_obs("matikanetannhauserStage2", 120, 120, 0, &[]);
     o.opponent.active = Some(weak_attacker);
     o.own.active = Some(tough_defender);
@@ -167,8 +165,13 @@ fn build_fixtures() -> Vec<(&'static str, PublicObservation)> {
     // attacks; secondary needs psychic+colorless). Fully covered so
     // own_secondary_usable=1. Secondary damage=0, so would_KO=0.
     let mut o = base_obs();
-    let attacker = make_uma_obs("matikanefukukitaruStage1", 100, 100, 2,
-        &[("psychic", 1), ("colorless", 1)]);
+    let attacker = make_uma_obs(
+        "matikanefukukitaruStage1",
+        100,
+        100,
+        2,
+        &[("psychic", 1), ("colorless", 1)],
+    );
     let defender = make_uma_obs("matikanetannhauserBasic", 60, 60, 0, &[]);
     o.own.active = Some(attacker);
     o.opponent.active = Some(defender);
@@ -177,15 +180,18 @@ fn build_fixtures() -> Vec<(&'static str, PublicObservation)> {
     // 10 — opp-bench typed-energy aggregate. Two opp bench Umas with
     // disjoint typed energies; own bench wiped so it can't bleed.
     let mut o = base_obs();
-    let mut a = make_uma_obs("matikanetannhauserBasic", 60, 60, 2,
-        &[("fire", 1), ("water", 1)]);
+    let mut a = make_uma_obs(
+        "matikanetannhauserBasic",
+        60,
+        60,
+        2,
+        &[("fire", 1), ("water", 1)],
+    );
     a.uid = 100;
-    let mut b = make_uma_obs("matikanetannhauserBasic", 60, 60, 1,
-        &[("darkness", 1)]);
+    let mut b = make_uma_obs("matikanetannhauserBasic", 60, 60, 1, &[("darkness", 1)]);
     b.uid = 101;
     o.opponent.bench = vec![Some(a), Some(b), None];
-    let mut own_b = make_uma_obs("matikanetannhauserBasic", 60, 60, 1,
-        &[("steel", 1)]);
+    let mut own_b = make_uma_obs("matikanetannhauserBasic", 60, 60, 1, &[("steel", 1)]);
     own_b.uid = 200;
     o.own.bench = vec![Some(own_b), None, None];
     out.push(("10_opp_bench_typed", o));
@@ -209,15 +215,13 @@ fn write_fixture(dir: &Path, name: &str, obs: &PublicObservation) {
 
     let json = serde_json::to_string_pretty(obs)
         .unwrap_or_else(|e| panic!("serialize {} obs: {}", name, e));
-    fs::write(&json_path, json)
-        .unwrap_or_else(|e| panic!("write {:?}: {}", json_path, e));
+    fs::write(&json_path, json).unwrap_or_else(|e| panic!("write {:?}: {}", json_path, e));
 
     let mut bytes: Vec<u8> = Vec::with_capacity(vec.len() * 4);
     for v in &vec {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
-    fs::write(&bin_path, bytes)
-        .unwrap_or_else(|e| panic!("write {:?}: {}", bin_path, e));
+    fs::write(&bin_path, bytes).unwrap_or_else(|e| panic!("write {:?}: {}", bin_path, e));
 }
 
 #[test]
@@ -238,7 +242,11 @@ fn emit_v36_parity_fixtures() {
     fs::write(dir.join("README.txt"), readme).expect("write README");
 
     let fixtures = build_fixtures();
-    assert!(fixtures.len() >= 5, "need ≥5 fixtures, got {}", fixtures.len());
+    assert!(
+        fixtures.len() >= 5,
+        "need ≥5 fixtures, got {}",
+        fixtures.len()
+    );
     for (name, obs) in &fixtures {
         write_fixture(&dir, name, obs);
     }
@@ -277,11 +285,10 @@ fn fixtures_roundtrip_against_current_rust_featurizer() {
 
         let json = fs::read_to_string(&json_path)
             .unwrap_or_else(|e| panic!("read {:?}: {}", json_path, e));
-        let obs: PublicObservation = serde_json::from_str(&json)
-            .unwrap_or_else(|e| panic!("deserialize {}: {}", name, e));
+        let obs: PublicObservation =
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("deserialize {}: {}", name, e));
         let live = observation_state_features_v3_6(&obs);
-        let bytes = fs::read(&bin_path)
-            .unwrap_or_else(|e| panic!("read {:?}: {}", bin_path, e));
+        let bytes = fs::read(&bin_path).unwrap_or_else(|e| panic!("read {:?}: {}", bin_path, e));
         assert_eq!(
             bytes.len(),
             live.len() * 4,
@@ -293,12 +300,7 @@ fn fixtures_roundtrip_against_current_rust_featurizer() {
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         // Bit-exact equality (both written as IEEE-754 f32 LE).
-        assert_eq!(
-            saved.len(),
-            live.len(),
-            "{}: vector width mismatch",
-            name
-        );
+        assert_eq!(saved.len(), live.len(), "{}: vector width mismatch", name);
         for (i, (&a, &b)) in saved.iter().zip(live.iter()).enumerate() {
             assert_eq!(
                 a.to_bits(),
@@ -315,5 +317,8 @@ fn fixtures_roundtrip_against_current_rust_featurizer() {
         checked += 1;
     }
     assert!(checked > 0, "no fixtures found to roundtrip-check");
-    eprintln!("roundtrip OK: {} fixtures match current Rust featurizer", checked);
+    eprintln!(
+        "roundtrip OK: {} fixtures match current Rust featurizer",
+        checked
+    );
 }

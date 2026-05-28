@@ -123,9 +123,12 @@ fn main() -> Result<()> {
             .as_ref()
             .map(|p| (Some(p.player_deck), Some(p.opponent_deck)))
             .unwrap_or((None, None));
-        let snapshot = sample_decision_point(seed, args.max_steps, player_deck_opt, opponent_deck_opt);
+        let snapshot =
+            sample_decision_point(seed, args.max_steps, player_deck_opt, opponent_deck_opt);
         seed += 1;
-        let Some((obs, legal)) = snapshot else { continue; };
+        let Some((obs, legal)) = snapshot else {
+            continue;
+        };
 
         // In-process ORT path.
         let t_rust = Instant::now();
@@ -153,7 +156,12 @@ fn main() -> Result<()> {
             );
         }
         let mut max_prob_diff = 0.0f64;
-        for (i, (&a, &b)) in rust_pred.probs.iter().zip(http_pred.probs.iter()).enumerate() {
+        for (i, (&a, &b)) in rust_pred
+            .probs
+            .iter()
+            .zip(http_pred.probs.iter())
+            .enumerate()
+        {
             let d = (a as f64 - b as f64).abs();
             if d > max_prob_diff {
                 max_prob_diff = d;
@@ -189,8 +197,16 @@ fn main() -> Result<()> {
     }
 
     let elapsed = start.elapsed();
-    let rust_mean_us = if samples_taken > 0 { total_rust_us / samples_taken as u128 } else { 0 };
-    let http_mean_us = if samples_taken > 0 { total_http_us / samples_taken as u128 } else { 0 };
+    let rust_mean_us = if samples_taken > 0 {
+        total_rust_us / samples_taken as u128
+    } else {
+        0
+    };
+    let http_mean_us = if samples_taken > 0 {
+        total_http_us / samples_taken as u128
+    } else {
+        0
+    };
 
     println!(
         "{}",
@@ -339,4 +355,3 @@ struct HttpPrediction {
     probs: Vec<f32>,
     value: f32,
 }
-

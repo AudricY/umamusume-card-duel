@@ -374,11 +374,7 @@ fn enumerate_trainer_actions(
         for choices in trainer_choices {
             let target = choices
                 .umamusume_target_uid
-                .and_then(|uid| {
-                    get_all_umamusume(side)
-                        .into_iter()
-                        .find(|u| u.uid == uid)
-                });
+                .and_then(|uid| get_all_umamusume(side).into_iter().find(|u| u.uid == uid));
             let choice_card_id = get_choice_card_id(side, &choices);
             let payload_choices = play_choices_to_value(&choices);
             let payload = json!({
@@ -410,8 +406,7 @@ fn enumerate_trainer_actions(
                 payload,
                 features: feats,
                 action_source_card_idx: Some(card_vocab_index_of(card_id) as u16),
-                action_target_card_idx: target
-                    .map(|t| card_vocab_index_of(t.card_id) as u16),
+                action_target_card_idx: target.map(|t| card_vocab_index_of(t.card_id) as u16),
             });
         }
     }
@@ -575,7 +570,7 @@ fn enumerate_ability_actions(state: &GameState, side: &SideState) -> Vec<LegalAi
                         features: feats,
                         action_source_card_idx: Some(card_vocab_index_of(source.card_id) as u16),
                         action_target_card_idx: Some(
-                            card_vocab_index_of(energy_source.card_id) as u16,
+                            card_vocab_index_of(energy_source.card_id) as u16
                         ),
                     });
                 }
@@ -596,7 +591,11 @@ fn enumerate_ability_actions(state: &GameState, side: &SideState) -> Vec<LegalAi
                         "abilityName": ability.name,
                         "targetUid": target.uid,
                     });
-                    let lethal_bonus = if target.hp <= damage_opponent { 80.0 } else { 0.0 };
+                    let lethal_bonus = if target.hp <= damage_opponent {
+                        80.0
+                    } else {
+                        0.0
+                    };
                     let feats = build_features(FeatureInput {
                         score: score + lethal_bonus + score_umamusume(target) * 0.05,
                         phase: AiPhase::Ability,
@@ -732,8 +731,7 @@ fn enumerate_combat_actions(state: &GameState, side: &SideState) -> Vec<LegalAiA
             // Payload: serialize the decision under the "decision" key with
             // the TS-equivalent shape. AiCombatDecision serialization uses
             // `tag = "kind"` already.
-            let decision_value =
-                serde_json::to_value(&candidate.decision).unwrap_or(Value::Null);
+            let decision_value = serde_json::to_value(&candidate.decision).unwrap_or(Value::Null);
             let payload = json!({ "decision": decision_value });
             let id = format!("combat:{}:{}", candidate.id, index);
             let feats = build_features(FeatureInput {
@@ -1050,7 +1048,8 @@ fn score_trainer_choices(side: &SideState, choices: &PlayChoices) -> f64 {
 
 fn choice_key(choices: &PlayChoices) -> String {
     fn opt_or_x<T: ToString>(opt: Option<T>) -> String {
-        opt.map(|v| v.to_string()).unwrap_or_else(|| "x".to_string())
+        opt.map(|v| v.to_string())
+            .unwrap_or_else(|| "x".to_string())
     }
     [
         opt_or_x(choices.discard_hand_index),
@@ -1166,7 +1165,9 @@ fn build_features(input: FeatureInput<'_>) -> Vec<f64> {
         None => -1.0,
     };
     v[5] = match input.target {
-        Some(t) => catalog_card_id_str(t.card_id).map(hash_to_unit).unwrap_or(0.0),
+        Some(t) => catalog_card_id_str(t.card_id)
+            .map(hash_to_unit)
+            .unwrap_or(0.0),
         None => 0.0,
     };
     v[6] = input.target.map(|t| t.stage as f64).unwrap_or(0.0);
@@ -1183,7 +1184,11 @@ fn build_features(input: FeatureInput<'_>) -> Vec<f64> {
         None => -1.0,
     };
     v[10] = input.target_value.map(|tv| tv / 200.0).unwrap_or(0.0);
-    v[11] = if input.ends_turn.unwrap_or(false) { 1.0 } else { 0.0 };
+    v[11] = if input.ends_turn.unwrap_or(false) {
+        1.0
+    } else {
+        0.0
+    };
     let source_card: Option<&Card> = input.source_card_id.and_then(|cid| cat.get(cid));
     v[12] = if input.kind == "pass" { 1.0 } else { 0.0 };
     v[13] = match source_card {
@@ -1248,7 +1253,11 @@ fn build_features(input: FeatureInput<'_>) -> Vec<f64> {
         _ => 0.0,
     };
     v[25] = input.target.map(|t| t.max_hp as f64 / 180.0).unwrap_or(0.0);
-    v[26] = if input.lethal_target.unwrap_or(false) { 1.0 } else { 0.0 };
+    v[26] = if input.lethal_target.unwrap_or(false) {
+        1.0
+    } else {
+        0.0
+    };
     v[27] = input
         .target
         .map(|t| t.special_conditions.len() as f64 / 4.0)
@@ -1280,8 +1289,7 @@ fn build_features(input: FeatureInput<'_>) -> Vec<f64> {
     };
     v[34] = match source_card {
         Some(Card::Trainer(t)) => {
-            if t.effect.heal.is_some() || t.effect.recover_active_special_conditions == Some(true)
-            {
+            if t.effect.heal.is_some() || t.effect.recover_active_special_conditions == Some(true) {
                 1.0
             } else {
                 0.0
@@ -1384,10 +1392,7 @@ fn build_features(input: FeatureInput<'_>) -> Vec<f64> {
     v[55] = match choice_card {
         Some(Card::Umamusume(u)) => match primary_attack(u) {
             Some(a) => {
-                let sum: u32 = EnergyType::ALL
-                    .iter()
-                    .map(|t| a.cost.get(*t) as u32)
-                    .sum();
+                let sum: u32 = EnergyType::ALL.iter().map(|t| a.cost.get(*t) as u32).sum();
                 (sum.min(4) as f64) / 4.0
             }
             None => 0.0,
@@ -1934,9 +1939,7 @@ mod tests {
         let Some(basic_id) = first_basic_card_id() else {
             return; // No basic card available; nothing to test.
         };
-        state.sides[SideId::Player as usize]
-            .hand
-            .push(basic_id);
+        state.sides[SideId::Player as usize].hand.push(basic_id);
         let actions = enumerate_legal_ai_actions(&state, SideId::Player);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "setupChooseBoard");
@@ -1988,9 +1991,7 @@ mod tests {
         let Some(basic_id) = first_basic_card_id() else {
             return;
         };
-        state.sides[SideId::Player as usize]
-            .hand
-            .push(basic_id);
+        state.sides[SideId::Player as usize].hand.push(basic_id);
         let actions = enumerate_legal_ai_actions(&state, SideId::Player);
         assert_eq!(actions.len(), 1);
         let idx = actions[0]
@@ -2128,7 +2129,9 @@ mod tests {
             assert!(
                 (feats[28] - h as f64 / 100.0).abs() < 1e-9,
                 "expected slot28 = {} / 100 = {}, got {}",
-                h, h as f64 / 100.0, feats[28]
+                h,
+                h as f64 / 100.0,
+                feats[28]
             );
         }
         // Non-trainer source → 0.

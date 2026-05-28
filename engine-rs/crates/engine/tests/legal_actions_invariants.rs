@@ -115,7 +115,9 @@ fn progress_action_is_always_legal_during_play() {
         let (legal, _) = with_rng(Rng::from_seed(*seed, "progress"), || {
             enumerate_legal_ai_actions(&state, side)
         });
-        let has_progress = legal.iter().any(|a| a.kind == "endTurn" || a.kind == "pass");
+        let has_progress = legal
+            .iter()
+            .any(|a| a.kind == "endTurn" || a.kind == "pass");
         assert!(
             has_progress,
             "seed {} for {:?} has no endTurn/pass action (kinds: {:?})",

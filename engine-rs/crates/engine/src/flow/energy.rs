@@ -1,7 +1,7 @@
 //! Bit-identical port of `frontend/src/game/engine/flow/energy.ts`.
 
-use crate::core::effects::{Ability, EnergyCost, MoveEnergyTypes};
 use crate::core::constants::EnergyType;
+use crate::core::effects::{Ability, EnergyCost, MoveEnergyTypes};
 use crate::core::state::{SideState, UmamusumeInstance};
 use crate::core::umamusume::attached_energy_count;
 
@@ -156,7 +156,10 @@ mod tests {
         };
         let ok = attach_energy(&mut side, 1);
         assert!(ok);
-        assert_eq!(side.active.as_ref().unwrap().energies[EnergyType::Fire as usize], 1);
+        assert_eq!(
+            side.active.as_ref().unwrap().energies[EnergyType::Fire as usize],
+            1
+        );
         assert_eq!(side.energy_zone.len(), 0);
         assert_eq!(side.energy_attachments_this_turn, 1);
     }

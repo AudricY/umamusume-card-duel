@@ -1,7 +1,7 @@
 //! Bit-identical port of `frontend/src/game/engine/ai-policy/phase.ts`.
 
 use crate::core::constants::{OpponentTurnStep, SideId};
-use crate::core::state::{CurrentSide, GameState, Phase, PendingPlayerChoice};
+use crate::core::state::{CurrentSide, GameState, PendingPlayerChoice, Phase};
 use crate::policy::types::AiPhase;
 
 pub fn get_ai_phase(state: &GameState, side_id: SideId) -> AiPhase {

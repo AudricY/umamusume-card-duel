@@ -217,14 +217,20 @@ mod tests {
     fn ability_heal_classifies() {
         let mut a = empty_ability();
         a.heal = Some(10);
-        assert_eq!(classify_active_ability(&a), AbilityEffectKind::HealOnTurnStart);
+        assert_eq!(
+            classify_active_ability(&a),
+            AbilityEffectKind::HealOnTurnStart
+        );
     }
 
     #[test]
     fn ability_damage_reduction_classifies() {
         let mut a = empty_ability();
         a.damage_reduction = Some(10);
-        assert_eq!(classify_active_ability(&a), AbilityEffectKind::DamageReduction);
+        assert_eq!(
+            classify_active_ability(&a),
+            AbilityEffectKind::DamageReduction
+        );
     }
 
     #[test]
@@ -239,8 +245,10 @@ mod tests {
         use crate::core::constants::EnergyType;
         use crate::core::effects::MoveEnergyTypes;
         let mut a = empty_ability();
-        a.move_benched_energy_to_active =
-            Some(MoveEnergyTypes::Many(vec![EnergyType::Psychic, EnergyType::Darkness]));
+        a.move_benched_energy_to_active = Some(MoveEnergyTypes::Many(vec![
+            EnergyType::Psychic,
+            EnergyType::Darkness,
+        ]));
         assert_eq!(
             classify_active_ability(&a),
             AbilityEffectKind::EnergyAcceleration

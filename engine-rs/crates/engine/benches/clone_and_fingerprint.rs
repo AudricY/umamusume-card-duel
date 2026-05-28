@@ -20,9 +20,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use engine::core::card_id::CardId;
 use engine::core::constants::{AiDeckStyle, AiDifficulty, EnergyType, SideId};
 use engine::core::packed::pack;
-use engine::core::state::{
-    CurrentSide, GameState, Phase, SideState, UmamusumeInstance,
-};
+use engine::core::state::{CurrentSide, GameState, Phase, SideState, UmamusumeInstance};
 use engine::fingerprint::fingerprint;
 
 fn build_realistic_state() -> GameState {
@@ -54,10 +52,7 @@ fn build_realistic_state() -> GameState {
         let mut s = SideState {
             id,
             title: format!("Side{:?}", id),
-            energy_pool: ArrayVec::from_iter([
-                EnergyType::Psychic,
-                EnergyType::Colorless,
-            ]),
+            energy_pool: ArrayVec::from_iter([EnergyType::Psychic, EnergyType::Colorless]),
             deck: ArrayVec::new(),
             discard: ArrayVec::new(),
             hand: ArrayVec::new(),

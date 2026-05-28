@@ -42,7 +42,9 @@ pub fn effective_retreat_cost(state: &GameState, side: &SideState) -> u32 {
     };
     let ability = get_umamusume_ability(state, side.id, active);
     if let Some(a) = ability {
-        if a.retreat_cost_zero_if_took_damage_last_turn == Some(true) && active.took_damage_last_turn {
+        if a.retreat_cost_zero_if_took_damage_last_turn == Some(true)
+            && active.took_damage_last_turn
+        {
             return 0;
         }
         if a.retreat_cost_zero_if_has_energy == Some(true) && attached_energy_count(active) > 0 {

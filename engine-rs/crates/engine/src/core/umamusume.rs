@@ -135,7 +135,10 @@ mod tests {
         side.active = Some(empty_instance(1));
         side.bench.push(empty_instance(2));
         side.bench.push(empty_instance(3));
-        let order: Vec<u32> = get_all_umamusume(&side).into_iter().map(|u| u.uid).collect();
+        let order: Vec<u32> = get_all_umamusume(&side)
+            .into_iter()
+            .map(|u| u.uid)
+            .collect();
         assert_eq!(order, vec![1, 2, 3]);
     }
 

@@ -65,9 +65,10 @@ pub fn choose_ai_turn_goal(state: &GameState, side: &SideState) -> AiTurnGoal {
     }
     let has_bench = !side.bench.is_empty();
     let cat = catalog();
-    let has_basic_in_hand = side.hand.iter().any(|&cid| {
-        matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage == 0)
-    });
+    let has_basic_in_hand = side
+        .hand
+        .iter()
+        .any(|&cid| matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage == 0));
     if !has_bench && !has_basic_in_hand {
         if has_bench_recovery_option_in_hand(side) {
             return AiTurnGoal::StabilizeBoard;
@@ -107,9 +108,10 @@ pub fn explain_ai_turn_goal(state: &GameState, side: &SideState) -> Vec<&'static
     }
     let cat = catalog();
     let has_bench = !side.bench.is_empty();
-    let has_basic_in_hand = side.hand.iter().any(|&cid| {
-        matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage == 0)
-    });
+    let has_basic_in_hand = side
+        .hand
+        .iter()
+        .any(|&cid| matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage == 0));
     if !has_bench && !has_basic_in_hand {
         return vec!["no_bench_no_basic_in_hand"];
     }
@@ -129,8 +131,7 @@ fn should_protect_loaded_active(state: &GameState, side: &SideState) -> bool {
     let Some(active_card) = umamusume_card(active) else {
         return false;
     };
-    let loaded =
-        active.stage >= 1 || active.max_hp >= 100 || attached_energy_count(active) >= 2;
+    let loaded = active.stage >= 1 || active.max_hp >= 100 || attached_energy_count(active) >= 2;
     if !loaded {
         return false;
     }
@@ -148,8 +149,7 @@ fn should_protect_loaded_active(state: &GameState, side: &SideState) -> bool {
             return false;
         };
         let attached = attached_energy_count(bench);
-        has_enough_energy(bench, &attack.cost)
-            || attached + 1 >= total_attack_cost(&attack.cost)
+        has_enough_energy(bench, &attack.cost) || attached + 1 >= total_attack_cost(&attack.cost)
     })
 }
 
@@ -445,7 +445,10 @@ mod tests {
     fn choose_ai_turn_goal_returns_maximize_progress_when_no_active() {
         let state = empty_state();
         let side = state.side(SideId::Player);
-        assert_eq!(choose_ai_turn_goal(&state, side), AiTurnGoal::MaximizeProgress);
+        assert_eq!(
+            choose_ai_turn_goal(&state, side),
+            AiTurnGoal::MaximizeProgress
+        );
     }
 
     #[test]

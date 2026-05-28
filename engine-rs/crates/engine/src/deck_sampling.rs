@@ -183,7 +183,11 @@ fn resolved_from(player: &'static Deck, ai: &'static Deck) -> ResolvedDeckPair<'
 ///
 /// For `Fixed`, returns the registry defaults
 /// (`defaultPlayerDeckId` / `defaultAiOpponentDeckId`).
-pub fn manifest_pair_for(sampling: &DeckSampling, seed_start: u32, game_index: u32) -> (&'static str, &'static str) {
+pub fn manifest_pair_for(
+    sampling: &DeckSampling,
+    seed_start: u32,
+    game_index: u32,
+) -> (&'static str, &'static str) {
     if let Some(pair) = sampling.resolve(seed_start, game_index) {
         return (pair.player_deck_id, pair.opponent_deck_id);
     }
@@ -224,8 +228,7 @@ mod tests {
             DeckSampling::Uniform => {}
             other => panic!("expected Uniform, got {:?}", other),
         }
-        let pair =
-            DeckSampling::parse("pair=matikanetannhauser:riceShower").unwrap();
+        let pair = DeckSampling::parse("pair=matikanetannhauser:riceShower").unwrap();
         match pair {
             DeckSampling::Pair {
                 player_deck_id,

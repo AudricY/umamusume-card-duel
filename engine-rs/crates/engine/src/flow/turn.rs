@@ -145,10 +145,8 @@ pub fn end_turn(
     refresh_continuous_effects(state);
 
     // The TS source mutates the pending choice's resume in place; mirror.
-    if let Some(crate::core::state::PendingPlayerChoice::PromoteAfterKnockout {
-        side_id,
-        resume,
-    }) = state.pending_player_choice.as_mut()
+    if let Some(crate::core::state::PendingPlayerChoice::PromoteAfterKnockout { side_id, resume }) =
+        state.pending_player_choice.as_mut()
     {
         if *side_id == current_side {
             *resume = crate::core::state::PromoteResume::FinishOpponentTurn;
@@ -204,18 +202,22 @@ fn are_tools_disabled(state: &GameState) -> bool {
 
 fn process_end_turn_status_conditions(state: &mut GameState) {
     // Snapshot per-side turnsTaken to avoid an aliasing borrow later.
-    let turns_taken: [u32; 2] = [
-        state.turns_taken_by_side[0],
-        state.turns_taken_by_side[1],
-    ];
+    let turns_taken: [u32; 2] = [state.turns_taken_by_side[0], state.turns_taken_by_side[1]];
     for &side_id in &SideId::ALL {
         let side = state.side_mut(side_id);
         let touch = |u: &mut crate::core::state::UmamusumeInstance| {
-            if u.special_conditions.iter().any(|&c| c == SpecialCondition::Poisoned) {
+            if u.special_conditions
+                .iter()
+                .any(|&c| c == SpecialCondition::Poisoned)
+            {
                 u.hp = (u.hp - 10).max(0);
                 u.took_damage_this_turn = true;
             }
-            if !u.special_conditions.iter().any(|&c| c == SpecialCondition::Paralysed) {
+            if !u
+                .special_conditions
+                .iter()
+                .any(|&c| c == SpecialCondition::Paralysed)
+            {
                 return;
             }
             let Some(recovery_turn) = u.paralysed_until_own_turn else {
@@ -224,7 +226,8 @@ fn process_end_turn_status_conditions(state: &mut GameState) {
             if turns_taken[side_id as usize] < recovery_turn {
                 return;
             }
-            u.special_conditions.retain(|c| *c != SpecialCondition::Paralysed);
+            u.special_conditions
+                .retain(|c| *c != SpecialCondition::Paralysed);
             u.paralysed_until_own_turn = None;
         };
         if let Some(active) = side.active.as_mut() {

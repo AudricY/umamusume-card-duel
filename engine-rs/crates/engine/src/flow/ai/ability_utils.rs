@@ -21,12 +21,8 @@ use super::combat_utils::{can_immediate_opponent_ko, get_damage_dealt};
 /// Function table for the move-energy heuristic. Mirrors TS
 /// `AbilityHeuristicDeps`.
 pub struct AbilityHeuristicDeps<'a> {
-    pub estimate_attack_damage_output: &'a dyn Fn(
-        &GameState,
-        SideId,
-        &UmamusumeInstance,
-        &UmamusumeInstance,
-    ) -> f64,
+    pub estimate_attack_damage_output:
+        &'a dyn Fn(&GameState, SideId, &UmamusumeInstance, &UmamusumeInstance) -> f64,
     pub with_energy_shift: &'a dyn Fn(&UmamusumeInstance, EnergyType, i32) -> UmamusumeInstance,
     pub mark_ability_used: &'a dyn Fn(&mut SideState, &UmamusumeInstance, &str),
 }
@@ -88,10 +84,8 @@ pub fn ai_use_move_benched_energy_ability(
             if source.energies[energy_type as usize] == 0 {
                 continue;
             }
-            let simulated_active =
-                (heuristic_deps.with_energy_shift)(&active, energy_type, 1);
-            let simulated_source =
-                (heuristic_deps.with_energy_shift)(source, energy_type, -1);
+            let simulated_active = (heuristic_deps.with_energy_shift)(&active, energy_type, 1);
+            let simulated_source = (heuristic_deps.with_energy_shift)(source, energy_type, -1);
             let after_active_damage = (heuristic_deps.estimate_attack_damage_output)(
                 state,
                 side.id,
@@ -156,9 +150,7 @@ pub fn ai_use_move_benched_energy_ability(
     }
     // Sort by score desc — stable sort preserves enumeration order on ties
     // (matches JS Array.prototype.sort which is stable on V8 ≥ 7.0).
-    candidates.sort_by(|a, b| {
-        b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     let best = candidates[0];
     if ai_difficulty == AiDifficulty::Hard && best.2 <= 20.0 {
         return false;
@@ -175,7 +167,8 @@ pub fn ai_use_move_benched_energy_ability(
         }
     }
     if let Some(active_mut) = side.active.as_mut() {
-        active_mut.energies[best.1 as usize] = active_mut.energies[best.1 as usize].saturating_add(1);
+        active_mut.energies[best.1 as usize] =
+            active_mut.energies[best.1 as usize].saturating_add(1);
     }
     // mark_ability_used wants the owner instance; capture a clone first.
     let owner_clone = find_in_side(side, ability_umamusume_uid).cloned();
@@ -214,9 +207,9 @@ pub fn ai_use_damage_ability(
         };
         if let Some(cost) = &ability.discard_energy {
             // Check we can pay.
-            let can_pay = EnergyType::ALL.iter().all(|&t| {
-                (owner.energies[t as usize] as i32) >= cost.get(t) as i32
-            });
+            let can_pay = EnergyType::ALL
+                .iter()
+                .all(|&t| (owner.energies[t as usize] as i32) >= cost.get(t) as i32);
             if !can_pay {
                 return false;
             }
@@ -234,17 +227,15 @@ pub fn ai_use_damage_ability(
     let opponent = state.side(opponent_id);
     use crate::core::effects::AttackTarget;
     let potential_targets: Vec<UmamusumeInstance> = match target_kind {
-        Some(AttackTarget::Any) => get_all_umamusume(opponent)
-            .into_iter()
-            .cloned()
-            .collect(),
+        Some(AttackTarget::Any) => get_all_umamusume(opponent).into_iter().cloned().collect(),
         _ => opponent.active.as_ref().cloned().into_iter().collect(),
     };
     if potential_targets.is_empty() {
         return false;
     }
 
-    let best_attack_damage_without_ability = estimate_best_attack_total_damage(state, side_id, deps);
+    let best_attack_damage_without_ability =
+        estimate_best_attack_total_damage(state, side_id, deps);
 
     // Sort targets: lethal first, then higher "value" first.
     let mut sorted: Vec<UmamusumeInstance> = potential_targets;
@@ -344,8 +335,13 @@ pub fn ai_use_damage_ability(
         }
     }
     if target_inst_snapshot.hp <= 0 {
-        let knocked_out =
-            knock_out_umamusume(state, side_id, opponent_id, &target_inst_snapshot, deps.choose_preferred_active_index);
+        let knocked_out = knock_out_umamusume(
+            state,
+            side_id,
+            opponent_id,
+            &target_inst_snapshot,
+            deps.choose_preferred_active_index,
+        );
         if knocked_out && !state.game_over {
             (deps.refresh_continuous_effects)(state);
         }
@@ -510,22 +506,21 @@ pub fn estimate_best_attack_total_damage(
         }
         _ => vec![None],
     };
-    let heal_targets: Vec<Option<u32>> = if let (Some(_), Some(HealTarget::Any)) =
-        (attack.heal, attack.heal_target)
-    {
-        let v: Vec<Option<u32>> = get_all_umamusume(side)
-            .into_iter()
-            .filter(|u| u.hp < u.max_hp)
-            .map(|u| Some(u.uid))
-            .collect();
-        if v.is_empty() {
-            vec![None]
+    let heal_targets: Vec<Option<u32>> =
+        if let (Some(_), Some(HealTarget::Any)) = (attack.heal, attack.heal_target) {
+            let v: Vec<Option<u32>> = get_all_umamusume(side)
+                .into_iter()
+                .filter(|u| u.hp < u.max_hp)
+                .map(|u| Some(u.uid))
+                .collect();
+            if v.is_empty() {
+                vec![None]
+            } else {
+                v
+            }
         } else {
-            v
-        }
-    } else {
-        vec![None]
-    };
+            vec![None]
+        };
     let mut best_damage: f64 = 0.0;
     for &attack_target_uid in attack_targets.iter() {
         for &heal_target_uid in heal_targets.iter() {
@@ -592,10 +587,7 @@ pub fn estimate_best_attack_total_damage(
                 None,
                 None,
             );
-            let dealt = get_damage_dealt(
-                before.side(defending_id),
-                simulated.side(defending_id),
-            );
+            let dealt = get_damage_dealt(before.side(defending_id), simulated.side(defending_id));
             if (dealt as f64) > best_damage {
                 best_damage = dealt as f64;
             }

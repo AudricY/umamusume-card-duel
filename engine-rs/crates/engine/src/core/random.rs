@@ -76,7 +76,6 @@ impl Rng {
     pub fn label(&self) -> &str {
         &self.label
     }
-
 }
 
 /// Mirror of TS `normalizeSeed`.

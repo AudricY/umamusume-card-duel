@@ -51,7 +51,8 @@ fn state_hash_format_is_stable() {
     let h = state_hash(&fresh_state("99"));
     assert_eq!(h.len(), 32, "hash was {}", h);
     assert!(
-        h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        h.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "hash {} has non-lowercase-hex chars",
         h
     );

@@ -15,7 +15,11 @@ use crate::flow::setup::create_umamusume;
 use crate::flow::trainers;
 
 /// Mirror of `getPlayableAction`.
-pub fn get_playable_action(state: &GameState, side: &SideState, card_id: CardId) -> PlayActionOutcome {
+pub fn get_playable_action(
+    state: &GameState,
+    side: &SideState,
+    card_id: CardId,
+) -> PlayActionOutcome {
     let cat = catalog();
     let Some(card) = cat.get(card_id) else {
         return PlayActionOutcome::CannotPlay {
@@ -69,7 +73,8 @@ pub fn get_playable_action(state: &GameState, side: &SideState, card_id: CardId)
                     reason: "You need a Basic Umamusume in discard.".into(),
                 };
             }
-            if effect.random_basic_umamusume_from_discard == Some(true) && side.hand.len() >= MAX_HAND
+            if effect.random_basic_umamusume_from_discard == Some(true)
+                && side.hand.len() >= MAX_HAND
             {
                 return PlayActionOutcome::CannotPlay {
                     reason: "Your hand is full.".into(),
@@ -242,14 +247,7 @@ pub fn resolve_card_play(
                     choices.rainbow_evolution_hand_index,
                 );
             } else {
-                trainers::apply_trainer(
-                    state,
-                    side_id,
-                    card_id,
-                    t,
-                    choices,
-                    SwitchResume::None,
-                );
+                trainers::apply_trainer(state, side_id, card_id, t, choices, SwitchResume::None);
             }
             if t.trainer_type == TrainerType::Supporter {
                 state.side_mut(side_id).used_supporter_this_turn = true;
@@ -335,12 +333,16 @@ pub fn use_rainbow_uncap_crystal(
 
 fn has_basic_umamusume_in_discard(side: &SideState) -> bool {
     let cat = catalog();
-    side.discard.iter().any(|&cid| matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage == 0))
+    side.discard
+        .iter()
+        .any(|&cid| matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage == 0))
 }
 
 fn has_evolution_umamusume_in_deck(side: &SideState) -> bool {
     let cat = catalog();
-    side.deck.iter().any(|&cid| matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage > 0))
+    side.deck
+        .iter()
+        .any(|&cid| matches!(cat.get(cid), Some(Card::Umamusume(u)) if u.stage > 0))
 }
 
 fn opponent_active_has_energy(state: &GameState, side: &SideState) -> bool {

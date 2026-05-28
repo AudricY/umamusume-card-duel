@@ -16,9 +16,7 @@ use engine::core::card_id::CardId;
 use engine::core::constants::{AiDeckStyle, AiDifficulty, EnergyType, SideId};
 use engine::core::packed::pack;
 use engine::core::random::{with_rng, Rng};
-use engine::core::state::{
-    CurrentSide, GameState, Phase, SideState, UmamusumeInstance,
-};
+use engine::core::state::{CurrentSide, GameState, Phase, SideState, UmamusumeInstance};
 use engine::fingerprint::fingerprint;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -113,10 +111,7 @@ fn build_realistic_state() -> GameState {
         let mut s = SideState {
             id,
             title: format!("Side{:?}", id),
-            energy_pool: ArrayVec::from_iter([
-                EnergyType::Psychic,
-                EnergyType::Colorless,
-            ]),
+            energy_pool: ArrayVec::from_iter([EnergyType::Psychic, EnergyType::Colorless]),
             deck: ArrayVec::new(),
             discard: ArrayVec::new(),
             hand: ArrayVec::new(),

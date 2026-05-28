@@ -22,10 +22,7 @@ pub fn get_unsupported_typed_energy(state_side: &SideState, cost: &EnergyCost) -
         if amount == 0 {
             continue;
         }
-        let in_pool = state_side
-            .energy_pool
-            .iter()
-            .any(|&e| e == energy_type);
+        let in_pool = state_side.energy_pool.iter().any(|&e| e == energy_type);
         if !in_pool {
             missing += amount;
         }

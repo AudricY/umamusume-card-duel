@@ -186,11 +186,7 @@ pub fn get_target_value(defender: &SideState, target_uid: Option<u32>) -> f64 {
     };
     let cat = catalog();
     let damage = match cat.get(target.card_id) {
-        Some(Card::Umamusume(u)) => u
-            .attacks
-            .first()
-            .map(|a| a.damage as f64)
-            .unwrap_or(0.0),
+        Some(Card::Umamusume(u)) => u.attacks.first().map(|a| a.damage as f64).unwrap_or(0.0),
         _ => 0.0,
     };
     damage + (attached_energy_count(target) as f64) * 12.0 + (target.stage as f64) * 18.0
@@ -306,11 +302,7 @@ pub fn predict_attack_damage(
         damage += bonus_energy_count * d.amount;
     }
     if let Some(per_unique) = attack.damage_per_unique_attached_energy {
-        let unique_energy_count = attacker
-            .energies
-            .iter()
-            .filter(|&&c| c > 0)
-            .count() as i32;
+        let unique_energy_count = attacker.energies.iter().filter(|&&c| c > 0).count() as i32;
         damage += unique_energy_count * per_unique;
     }
     if let Some(d) = &attack.damage_per_umamusume_in_play {
@@ -335,7 +327,9 @@ pub fn predict_attack_damage(
                 damage += cond.amount;
             }
         }
-        let evolved_last_turn_bonus = ability.attack_damage_bonus_if_evolved_last_turn.unwrap_or(0);
+        let evolved_last_turn_bonus = ability
+            .attack_damage_bonus_if_evolved_last_turn
+            .unwrap_or(0);
         if evolved_last_turn_bonus > 0 {
             if let Some(turn_number) = turn_number {
                 let target = turn_number.checked_sub(1);

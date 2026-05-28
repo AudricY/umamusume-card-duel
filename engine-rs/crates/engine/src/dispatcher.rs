@@ -58,7 +58,9 @@ use crate::flow::play_rules::{
     get_playable_action, get_rainbow_uncap_evolution_hand_options, get_rainbow_uncap_targets,
     resolve_card_play,
 };
-use crate::flow::retreat::{effective_retreat_cost, pay_retreat_cost, pay_retreat_cost_by_selection};
+use crate::flow::retreat::{
+    effective_retreat_cost, pay_retreat_cost, pay_retreat_cost_by_selection,
+};
 use crate::flow::setup::{
     auto_setup_basic_umamusume, build_opening_side, create_umamusume, reset_umamusume_id_counter,
 };
@@ -103,7 +105,9 @@ pub fn resolve_continuous_knockouts(state: &mut GameState) {
                     .find(|u| u.uid == uid)
                     .cloned()
             };
-            let Some(target_inst) = target_inst else { continue };
+            let Some(target_inst) = target_inst else {
+                continue;
+            };
             let did = knock_out_umamusume(state, scoring, sid, &target_inst, choose);
             if did {
                 refresh_continuous_hp(state);
@@ -161,14 +165,26 @@ pub fn create_game(
         opponent_energy_types,
     );
 
-    let mut opening_hands_player: arrayvec::ArrayVec<CardId, { crate::core::constants::OPENING_HAND }> =
-        arrayvec::ArrayVec::new();
-    for c in player_side.hand.iter().take(crate::core::constants::OPENING_HAND) {
+    let mut opening_hands_player: arrayvec::ArrayVec<
+        CardId,
+        { crate::core::constants::OPENING_HAND },
+    > = arrayvec::ArrayVec::new();
+    for c in player_side
+        .hand
+        .iter()
+        .take(crate::core::constants::OPENING_HAND)
+    {
         let _ = opening_hands_player.try_push(*c);
     }
-    let mut opening_hands_opponent: arrayvec::ArrayVec<CardId, { crate::core::constants::OPENING_HAND }> =
-        arrayvec::ArrayVec::new();
-    for c in opponent_side.hand.iter().take(crate::core::constants::OPENING_HAND) {
+    let mut opening_hands_opponent: arrayvec::ArrayVec<
+        CardId,
+        { crate::core::constants::OPENING_HAND },
+    > = arrayvec::ArrayVec::new();
+    for c in opponent_side
+        .hand
+        .iter()
+        .take(crate::core::constants::OPENING_HAND)
+    {
         let _ = opening_hands_opponent.try_push(*c);
     }
 
@@ -822,9 +838,7 @@ fn advance_ai_turn_step(
     let mut ability_phase_resolved = false;
 
     for _ in 0..8 {
-        let step = state
-            .opponent_turn_step
-            .unwrap_or(OpponentTurnStep::Bench);
+        let step = state.opponent_turn_step.unwrap_or(OpponentTurnStep::Bench);
         match step {
             OpponentTurnStep::Bench => {
                 if ai_play_one_basic(state, acting_side_id) {
@@ -1035,7 +1049,12 @@ pub fn use_player_ability(
             active.hp = (active.hp - damage).max(0);
             active.took_damage_this_turn = damage > 0;
         }
-        let active_hp = state.side(side_id).active.as_ref().map(|a| a.hp).unwrap_or(0);
+        let active_hp = state
+            .side(side_id)
+            .active
+            .as_ref()
+            .map(|a| a.hp)
+            .unwrap_or(0);
         if active_hp <= 0 {
             let scoring = side_id.opposite();
             let active_inst = state.side(side_id).active.clone();
@@ -1085,13 +1104,8 @@ pub fn use_player_ability(
     if let Some(damage) = ability.damage_opponent {
         let opponent_id = side_id.opposite();
         let target_uid = if ability.damage_opponent_target == Some(AttackTarget::Any) {
-            opponent_target_umamusume_uid.or_else(|| {
-                state
-                    .side(opponent_id)
-                    .active
-                    .as_ref()
-                    .map(|a| a.uid)
-            })
+            opponent_target_umamusume_uid
+                .or_else(|| state.side(opponent_id).active.as_ref().map(|a| a.uid))
         } else {
             state.side(opponent_id).active.as_ref().map(|a| a.uid)
         };
@@ -1249,7 +1263,8 @@ pub fn get_forced_attack_coin_results(state: &GameState) -> Option<Vec<CoinFlipR
     {
         return None;
     }
-    if active.attack_blocked_until_own_turn == Some(state.turns_taken_by_side[current_side as usize])
+    if active.attack_blocked_until_own_turn
+        == Some(state.turns_taken_by_side[current_side as usize])
     {
         return None;
     }
@@ -1485,7 +1500,11 @@ fn play_selected_hand_card(
     refresh_continuous_effects(state);
 }
 
-fn use_selected_ability(state: &mut GameState, side_id: SideId, payload: &serde_json::Value) -> bool {
+fn use_selected_ability(
+    state: &mut GameState,
+    side_id: SideId,
+    payload: &serde_json::Value,
+) -> bool {
     let source_uid = match read_u32(payload, "sourceUid") {
         Some(v) => v,
         None => return false,
@@ -1640,8 +1659,7 @@ fn use_selected_ability(state: &mut GameState, side_id: SideId, payload: &serde_
         if state.side(side_id).hand.len() < cfg.discard as usize {
             return false;
         }
-        let raw_idx =
-            read_usize(payload, "discardHandIndex").unwrap_or(0);
+        let raw_idx = read_usize(payload, "discardHandIndex").unwrap_or(0);
         if raw_idx >= state.side(side_id).hand.len() {
             return false;
         }
@@ -1848,7 +1866,10 @@ fn read_u32(payload: &serde_json::Value, key: &str) -> Option<u32> {
 }
 
 fn read_usize(payload: &serde_json::Value, key: &str) -> Option<usize> {
-    payload.get(key).and_then(|v| v.as_u64()).map(|v| v as usize)
+    payload
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
 }
 
 fn parse_energy_type(s: &str) -> Option<EnergyType> {

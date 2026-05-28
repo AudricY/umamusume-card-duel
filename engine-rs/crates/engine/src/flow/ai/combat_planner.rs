@@ -51,12 +51,7 @@ pub fn build_combat_candidates(
     }
 
     if can_retreat(state, state.side(side_id)) {
-        let bench_uids: Vec<u32> = state
-            .side(side_id)
-            .bench
-            .iter()
-            .map(|u| u.uid)
-            .collect();
+        let bench_uids: Vec<u32> = state.side(side_id).bench.iter().map(|u| u.uid).collect();
         for retreat_uid in bench_uids {
             let mut simulated_retreat = state.clone();
             if !ai_retreat_to_target(&mut simulated_retreat, side_id, retreat_uid) {
@@ -95,10 +90,7 @@ pub fn ai_retreat_to_target(state: &mut GameState, side_id: SideId, target_uid: 
     if side.active.is_none() {
         return false;
     }
-    let target_index = side
-        .bench
-        .iter()
-        .position(|u| u.uid == target_uid);
+    let target_index = side.bench.iter().position(|u| u.uid == target_uid);
     let Some(target_index) = target_index else {
         return false;
     };
@@ -196,25 +188,21 @@ fn build_attack_candidates(
         } else {
             vec![None]
         };
-        let random_discard_indexes: Vec<Option<usize>> = if attack
-            .shuffle_random_discard_into_deck
-            .is_some()
-            && !side.discard.is_empty()
-        {
-            choice_indexes(side.discard.len(), 4)
-                .into_iter()
-                .map(Some)
-                .collect()
-        } else {
-            vec![None]
-        };
-        let switch_target_uids: Vec<Option<u32>> = if attack.switch_self_after_attack.is_some()
-            && !side.bench.is_empty()
-        {
-            side.bench.iter().map(|u| Some(u.uid)).collect()
-        } else {
-            vec![None]
-        };
+        let random_discard_indexes: Vec<Option<usize>> =
+            if attack.shuffle_random_discard_into_deck.is_some() && !side.discard.is_empty() {
+                choice_indexes(side.discard.len(), 4)
+                    .into_iter()
+                    .map(Some)
+                    .collect()
+            } else {
+                vec![None]
+            };
+        let switch_target_uids: Vec<Option<u32>> =
+            if attack.switch_self_after_attack.is_some() && !side.bench.is_empty() {
+                side.bench.iter().map(|u| Some(u.uid)).collect()
+            } else {
+                vec![None]
+            };
 
         for &attack_target_uid in attack_target_uids.iter() {
             for &heal_target_uid in heal_target_uids.iter() {
@@ -360,8 +348,8 @@ fn build_choice_tag(
 }
 
 fn can_use_any_attack(state: &GameState, side: &SideState) -> bool {
-    use crate::core::state::{CurrentSide, Phase};
     use crate::core::constants::SpecialCondition;
+    use crate::core::state::{CurrentSide, Phase};
     if state.phase != Phase::Play
         || state.pending_player_choice.is_some()
         || state.game_over
@@ -398,7 +386,10 @@ fn choice_indexes(length: usize, limit: usize) -> Vec<usize> {
     (0..n).collect()
 }
 
-fn explicit_evolution_deck_indexes(side: &SideState, attack: &crate::core::effects::Attack) -> Vec<Option<usize>> {
+fn explicit_evolution_deck_indexes(
+    side: &SideState,
+    attack: &crate::core::effects::Attack,
+) -> Vec<Option<usize>> {
     if attack.evolve_from_deck != Some(true) || side.active.is_none() {
         return vec![None];
     }
@@ -411,8 +402,7 @@ fn explicit_evolution_deck_indexes(side: &SideState, attack: &crate::core::effec
         .enumerate()
         .filter_map(|(idx, &cid)| match cat.get(cid) {
             Some(Card::Umamusume(c))
-                if c.evolves_from.as_deref() == Some(active.species())
-                    && c.stage == next_stage =>
+                if c.evolves_from.as_deref() == Some(active.species()) && c.stage == next_stage =>
             {
                 Some(idx)
             }
@@ -469,18 +459,15 @@ fn score_candidate(
         );
     }
 
-    let points_gained = (simulated.side(acting_side_id).points as i32 - acting_before.points as i32) as f64;
-    let ko_count = (count_discarded_umamusume(
-        simulated.side(defending_id).discard.iter().copied(),
-    ) - count_discarded_umamusume(defending_before.discard.iter().copied())) as f64;
-    let damage_dealt = get_damage_dealt(
-        before.side(defending_id),
-        simulated.side(defending_id),
-    ) as f64;
-    let healing_gained = get_healing_gained(
-        before.side(acting_side_id),
-        simulated.side(acting_side_id),
-    ) as f64;
+    let points_gained =
+        (simulated.side(acting_side_id).points as i32 - acting_before.points as i32) as f64;
+    let ko_count = (count_discarded_umamusume(simulated.side(defending_id).discard.iter().copied())
+        - count_discarded_umamusume(defending_before.discard.iter().copied()))
+        as f64;
+    let damage_dealt =
+        get_damage_dealt(before.side(defending_id), simulated.side(defending_id)) as f64;
+    let healing_gained =
+        get_healing_gained(before.side(acting_side_id), simulated.side(acting_side_id)) as f64;
     let start_active_uid = acting_before.active.as_ref().map(|a| a.uid);
     let start_active_hp = acting_before.active.as_ref().map(|a| a.hp).unwrap_or(0);
     let acting_after = simulated.side(acting_side_id);
@@ -490,9 +477,8 @@ fn score_candidate(
             .find(|u| u.uid == uid),
         None => None,
     };
-    let damage_taken_by_starting_active = (start_active_hp
-        - after_start_active.map(|u| u.hp).unwrap_or(0))
-    .max(0) as f64;
+    let damage_taken_by_starting_active =
+        (start_active_hp - after_start_active.map(|u| u.hp).unwrap_or(0)).max(0) as f64;
     let active_koed = start_active_uid.is_some() && after_start_active.is_none();
 
     let attack_target_uid = match &decision {
@@ -513,7 +499,11 @@ fn score_candidate(
         + damage_dealt * BASE_DAMAGE_DEALT_WEIGHT
         + healing_gained * BASE_HEAL_GAINED_WEIGHT
         - damage_taken_by_starting_active * BASE_DAMAGE_TAKEN_WEIGHT
-        + (if active_koed { BASE_ACTIVE_KO_BONUS } else { 0.0 });
+        + (if active_koed {
+            BASE_ACTIVE_KO_BONUS
+        } else {
+            0.0
+        });
     let shuffle_risk_penalty = get_optional_self_shuffle_risk_penalty(
         &before,
         &simulated,
@@ -528,12 +518,8 @@ fn score_candidate(
         &decision,
         lethal_target,
     );
-    let bench_survival_penalty = get_bench_survival_floor_penalty(
-        &before,
-        &simulated,
-        acting_side_id,
-        lethal_target,
-    );
+    let bench_survival_penalty =
+        get_bench_survival_floor_penalty(&before, &simulated, acting_side_id, lethal_target);
 
     CombatCandidate {
         id,
@@ -746,7 +732,10 @@ mod tests {
         };
         let candidates = build_combat_candidates(&state, SideId::Player, &mut deps, None);
         assert_eq!(candidates.len(), 1);
-        assert!(matches!(candidates[0].decision, super::super::types::AiCombatDecision::EndTurn));
+        assert!(matches!(
+            candidates[0].decision,
+            super::super::types::AiCombatDecision::EndTurn
+        ));
         assert_eq!(candidates[0].id, "end-turn");
     }
 

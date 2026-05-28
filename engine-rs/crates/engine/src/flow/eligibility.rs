@@ -21,8 +21,7 @@ pub fn can_attach_energy(state: &GameState, side: &SideState) -> bool {
         && !state.game_over
         && state.current_side == CurrentSide::from_side(side.id)
         && !side.energy_zone.is_empty()
-        && (side.energy_attachments_this_turn as u32)
-            < 1 + side.bonus_energy_attachments as u32
+        && (side.energy_attachments_this_turn as u32) < 1 + side.bonus_energy_attachments as u32
 }
 
 pub fn can_attach_energy_to_umamusume(

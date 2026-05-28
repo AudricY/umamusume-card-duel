@@ -16,9 +16,7 @@ use arrayvec::ArrayVec;
 
 use crate::core::card_id::CardId;
 use crate::core::catalog::{catalog, Card};
-use crate::core::constants::{
-    EnergyType, SideId, UmamusumeType, MAX_BENCH, OPENING_HAND,
-};
+use crate::core::constants::{EnergyType, SideId, UmamusumeType, MAX_BENCH, OPENING_HAND};
 use crate::core::random::shuffle;
 use crate::core::state::{SideState, UmamusumeInstance};
 
@@ -44,7 +42,10 @@ pub fn create_umamusume(card_id: CardId, turn_number: u32) -> UmamusumeInstance 
     let cat = catalog();
     let card = match cat.get(card_id) {
         Some(Card::Umamusume(u)) => u,
-        _ => panic!("Expected Umamusume card: {:?}", cat.interner.resolve(card_id)),
+        _ => panic!(
+            "Expected Umamusume card: {:?}",
+            cat.interner.resolve(card_id)
+        ),
     };
     UmamusumeInstance {
         uid: next_umamusume_id(),
@@ -129,8 +130,7 @@ pub fn auto_setup_basic_umamusume(side: &mut SideState) {
     }
     side.bench = new_bench;
 
-    let taken: std::collections::BTreeSet<usize> =
-        basics.iter().map(|(_, idx)| *idx).collect();
+    let taken: std::collections::BTreeSet<usize> = basics.iter().map(|(_, idx)| *idx).collect();
     let mut new_hand: ArrayVec<CardId, { crate::core::constants::MAX_HAND }> = ArrayVec::new();
     for (idx, c) in side.hand.iter().copied().enumerate() {
         if !taken.contains(&idx) {
@@ -196,8 +196,7 @@ fn make_side(
     deck_vec: Vec<CardId>,
     energy_pool: Vec<EnergyType>,
 ) -> SideState {
-    let mut deck: ArrayVec<CardId, { crate::core::constants::DECK_CARD_COUNT }> =
-        ArrayVec::new();
+    let mut deck: ArrayVec<CardId, { crate::core::constants::DECK_CARD_COUNT }> = ArrayVec::new();
     for c in &deck_vec {
         let _ = deck.try_push(*c);
     }

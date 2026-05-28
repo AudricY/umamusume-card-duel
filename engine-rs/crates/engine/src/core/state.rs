@@ -251,10 +251,7 @@ impl GameState {
     /// they live in. Used by combat / trainer flows that must hold both
     /// sides mutably at once (TS routinely aliases `attacker.active` and
     /// `defender.active`).
-    pub fn sides_mut_for(
-        &mut self,
-        actor_id: SideId,
-    ) -> (&mut SideState, &mut SideState) {
+    pub fn sides_mut_for(&mut self, actor_id: SideId) -> (&mut SideState, &mut SideState) {
         let (p, o) = self.sides_mut();
         match actor_id {
             SideId::Player => (p, o),
