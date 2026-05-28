@@ -221,14 +221,17 @@ def main() -> None:
 
     # R14/R7.b.3: auto-infer model-shape fields from the init checkpoint so an
     # operator passing the orchestrator defaults (128/3) against a 64/2
-    # ckpt, or omitting the attention/slot-token flags against a set-attention
-    # ckpt, does not crash at the distill step with a state-dict mismatch.
+    # ckpt, omitting the state width against a v3.8/v5 checkpoint, or omitting
+    # the attention/slot-token flags against a set-attention ckpt, does not
+    # crash at the distill step with a state-dict mismatch.
     args = _maybe_override_dims_from_checkpoint(args, state.promoted_checkpoint, events_path)
     if args.model_variant == "set_attention" and not args.uma_slot_tokens:
         raise SystemExit(
             "--model-variant set_attention requires --uma-slot-tokens "
             "(or an init checkpoint whose model_config enables slot tokens)."
         )
+    if args.engine == "rust":
+        _preflight_rust_sim_binaries(repo_root, events_path)
 
     last_iter = max((entry["iteration"] for entry in state.iterations), default=-1)
     if getattr(args, "async_pipeline", False):
@@ -903,6 +906,51 @@ def resolve_engine_command(engine: str, sim_name: str, repo_root: Path) -> list[
     raise ValueError(f"unknown engine: {engine!r} (expected 'rust' or 'ts')")
 
 
+def _preflight_rust_sim_binaries(repo_root: Path, events_path: Path) -> None:
+    """Fail before iter-0 if Rust sim binaries are probably stale.
+
+    Schema bumps touch policy/action featurization or ONNX inference code. A
+    stale release binary fails later when self-play loads the ONNX sidecar; this
+    preflight catches the common case earlier and points at the exact rebuild.
+    """
+
+    release_dir = repo_root / "engine-rs" / "target" / "release"
+    binaries = [
+        release_dir / "sim-mcts-selfplay",
+        release_dir / "sim-eval-gate",
+    ]
+    missing = [path for path in binaries if not path.exists()]
+    if missing:
+        missing_str = ", ".join(str(path) for path in missing)
+        raise RuntimeError(
+            f"Rust sim CLI binary missing: {missing_str}. "
+            "Build with: (cd engine-rs && cargo build --release -p sim-cli) "
+            "or rerun the orchestrator with --engine ts to opt out."
+        )
+
+    schema_sources = [
+        repo_root / "engine-rs" / "crates" / "engine" / "src" / "policy" / "actions.rs",
+        repo_root / "engine-rs" / "crates" / "engine" / "src" / "policy" / "featurize.rs",
+        repo_root / "engine-rs" / "crates" / "engine" / "src" / "inference" / "mod.rs",
+    ]
+    newest_source = max((path.stat().st_mtime for path in schema_sources if path.exists()), default=0.0)
+    oldest_binary = min(path.stat().st_mtime for path in binaries)
+    if newest_source > oldest_binary:
+        emit_event(events_path, {
+            "stage": "r12-orchestrator",
+            "event_type": "rust_binary_preflight_failed",
+            "reason": "schema-sensitive Rust source is newer than release sim binaries",
+            "newest_schema_source_mtime": newest_source,
+            "oldest_binary_mtime": oldest_binary,
+            "ts": time.time(),
+        })
+        raise RuntimeError(
+            "Rust release sim binaries are older than schema-sensitive engine "
+            "sources. Rebuild before training: "
+            "(cd engine-rs && cargo build --release -p sim-cli)."
+        )
+
+
 @contextlib.contextmanager
 def inference_context(
     repo_root: Path,
@@ -1501,7 +1549,56 @@ def run_distill(
     if distill_workers > 0:
         cmd.extend(["--dataloader-workers", str(distill_workers)])
     with log_path.open("w") as logf:
-        subprocess.run(cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True)
+        try:
+            subprocess.run(cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True)
+        except subprocess.CalledProcessError:
+            if distill_workers <= 0 or not _distill_log_has_dataloader_socket_failure(log_path):
+                raise
+            emit_event(events_path, {
+                "stage": "distill",
+                "event_type": "dataloader_worker_fallback",
+                "iteration": iteration,
+                "from_workers": distill_workers,
+                "to_workers": 0,
+                "reason": "multiprocessing socket/fd sharing unsupported",
+                "ts": time.time(),
+            })
+            logf.write(
+                "\n[r12_orchestrator] DataLoader worker multiprocessing failed; "
+                "retrying distill with --dataloader-workers 0.\n"
+            )
+            logf.flush()
+            retry_cmd = _without_dataloader_workers(cmd)
+            subprocess.run(retry_cmd, cwd=repo_root, stdout=logf, stderr=subprocess.STDOUT, check=True)
+
+
+def _distill_log_has_dataloader_socket_failure(log_path: Path) -> bool:
+    try:
+        text = log_path.read_text(encoding="utf8", errors="replace")
+    except OSError:
+        return False
+    return (
+        "OSError: [Errno 95] Operation not supported" in text
+        and (
+            "multiprocessing/resource_sharer.py" in text
+            or "multiprocessing/connection.py" in text
+            or "torch/multiprocessing/reductions.py" in text
+        )
+    )
+
+
+def _without_dataloader_workers(cmd: list[str]) -> list[str]:
+    result: list[str] = []
+    skip_next = False
+    for token in cmd:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--dataloader-workers":
+            skip_next = True
+            continue
+        result.append(token)
+    return result
 
 
 def run_crossover_probe(
@@ -1828,11 +1925,15 @@ def _maybe_override_dims_from_checkpoint(
         })
         return args
     cfg = payload.get("model_config") or (payload.get("metadata", {}) or {}).get("model_config") or {}
+    ckpt_state_dim = cfg.get("state_dim")
     ckpt_hidden = cfg.get("hidden_dim")
     ckpt_depth = cfg.get("depth")
     ckpt_uses_uma_slot_tokens = bool(cfg.get("uses_uma_slot_tokens", False))
     ckpt_model_variant = cfg.get("model_variant")
     overrides: dict[str, Any] = {}
+    if isinstance(ckpt_state_dim, int) and ckpt_state_dim > 0 and ckpt_state_dim != args.state_dim:
+        overrides["state_dim"] = (args.state_dim, ckpt_state_dim)
+        args.state_dim = ckpt_state_dim
     if isinstance(ckpt_hidden, int) and ckpt_hidden > 0 and ckpt_hidden != args.hidden_dim:
         overrides["hidden_dim"] = (args.hidden_dim, ckpt_hidden)
         args.hidden_dim = ckpt_hidden
@@ -2091,12 +2192,11 @@ def parse_args() -> argparse.Namespace:
     # serve_onnx_context reads .device/.amp/etc indirectly; keep these
     # minimal Namespace fields so DAgger's helper doesn't crash on .get.
     p.add_argument("--device", default="cpu")
-    # distill-throughput-spike Phase 1 (2026-05-26): --amp and
-    # --distill-dataloader-workers=4 are now default-ON to forward AMP
-    # (bfloat16) and async DataLoader to train_bc.py. They give ~10% on
-    # top of the b=256+lr=6e-4 lever above. --no-amp / --distill-dataloader-workers
-    # 0 disable. --distill-compile stays default OFF (regressed at b=64;
-    # not re-validated at b=256). See scoping doc Phase 1 Results.
+    # distill-throughput-spike Phase 1 (2026-05-26): --amp stays default-ON.
+    # DataLoader workers remain opt-in because some WSL/desktop execution
+    # contexts cannot bind multiprocessing resource_sharer sockets and can
+    # hang instead of exiting. Use --distill-dataloader-workers N only on
+    # environments where the async loader path has been verified.
     p.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
                    help="Forward --amp to train_bc.py (bfloat16 by default on CUDA). "
                         "Default ON post distill-throughput-spike Phase 1. Use --no-amp "
@@ -2119,10 +2219,11 @@ def parse_args() -> argparse.Namespace:
                         "model in torch.compile(mode=reduce-overhead) on CUDA. Default OFF "
                         "-- regressed at b=64 (cudagraph thrash on 9 distinct shapes); not "
                         "re-validated at b=256.")
-    p.add_argument("--distill-dataloader-workers", type=int, default=4,
+    p.add_argument("--distill-dataloader-workers", type=int, default=0,
                    help="Forwards --dataloader-workers N to train_bc.py so distill uses N "
                         "async DataLoader workers with pin_memory and persistent_workers. "
-                        "Default 4 post distill-throughput-spike Phase 1. Use 0 to disable.")
+                        "Default 0 for launch robustness; opt in with N>0 on environments "
+                        "where multiprocessing socket/fd sharing is supported.")
     # R13.W1 parallelism — the orchestrator's selfplay + gate stages
     # accept a --workers count that is forwarded to the underlying
     # `sim:mcts-selfplay` and `sim:eval-gate` runners.
