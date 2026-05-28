@@ -368,6 +368,14 @@ command: python training/rebel_orchestrator.py --out-dir /tmp/rebel-cuda-train-s
 result: train_bc.py PASS, device=cuda, amp=true, ONNX roundtrip PASS.
 ```
 
+CUDA two-iteration E2E smoke:
+
+```text
+command: training/.venv/bin/python training/rebel_orchestrator.py --out-dir /tmp/rebel-cuda-e2e-smoke --iterations 2 --smoke --games 1 --particles 2 --search-iterations 4 --rollout-steps 5 --max-steps 20 --model-side player --workers 1 --epochs 1 --device cuda --amp --skip-gates --selfplay-device cuda --selfplay-inference-batch-size 1 --neural-leaf-weight 1.0
+result: COMPLETED; iteration 0 trained/exported on CUDA; iteration 1 loaded iteration-0 ONNX with device=Cuda { device_id: 0 }, generated neural-leaf rows, replay-mixed 7 rows, trained/exported on CUDA.
+iteration 1 sampled diagnostics: neuralLeafWeight=1.0, neuralLeafBatchRows=4, neuralLeafCalls=4, rolloutLeafCalls=0, neuralValue=-0.118075259.
+```
+
 Neural worker determinism:
 
 ```text
