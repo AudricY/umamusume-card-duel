@@ -383,7 +383,36 @@ result: iteration 0 generated rollout-bootstrap rows, trained, exported ONNX; it
 iteration 1 row diagnostics: neuralLeafWeight=1.0, neuralLeafBatchRows=4, neuralLeafCalls=4, rolloutLeafCalls=0 for sampled rows.
 ```
 
+Cross-iteration replay and fixed KL anchor:
+
+- The multi-iteration orchestrator now materializes a mixed training JSONL from current self-play plus prior loop vintages (`--cross-iter-replay`, `--replay-window`, `--replay-old-fraction`).
+- `--fixed-kl-anchor` keeps the KL regularizer anchored to the original warm-start/promoted checkpoint instead of chasing the moving previous checkpoint.
+- The training command receives the loop event sink, so train/eval events are part of the same per-iteration trace.
+
+Replay/KL smoke:
+
+```text
+command: python training/rebel_orchestrator.py --out-dir /tmp/rebel-replay-kl-smoke --iterations 2 --smoke --games 1 --particles 2 --search-iterations 4 --rollout-steps 5 --max-steps 20 --model-side player --workers 1 --epochs 1 --device cpu --skip-gates --selfplay-inference-batch-size 4 --neural-leaf-weight 1.0
+result: iteration 1 trained on rebel-train-mixed.jsonl with 4 current rows + 3 replay rows; kl_anchor_checkpoint remained the iteration-0 checkpoint.
+```
+
+CUDA throughput sweep:
+
+```text
+workload: sim-rebel-selfplay --seeds 64 --model-side player --particles 128 --search-iterations 16 --rollout-steps 20 --max-steps 80 --workers 8
+rollout CPU, no ONNX:     1.54s, 368 rows, 239.0 rows/s, rolloutLeafCalls=163712
+ONNX leaf CPU, batch=1:   3.01s, 386 rows, 128.2 rows/s, neuralLeafBatchRows=168232, rolloutLeafCalls=0
+ONNX leaf CUDA, batch=1:  1.65s, 386 rows, 233.9 rows/s, neuralLeafBatchRows=168232, rolloutLeafCalls=0, avg/max GPU util=26%/53%
+ONNX leaf CUDA, batch=32: 6.83s, 386 rows,  56.5 rows/s, neuralLeafBatchRows=168232, rolloutLeafCalls=0, avg/max GPU util=27.8%/32%
+ONNX leaf CUDA, batch=128: 2.39s, 386 rows, 161.5 rows/s, neuralLeafBatchRows=168232, rolloutLeafCalls=0, avg/max GPU util=23.1%/34%
+```
+
+Interpretation:
+
+- ReBeL model-valued search now uses CUDA for the hot value-head path when `--onnx-path ... --device cuda --neural-leaf-weight 1.0` is set.
+- On this measured search shape, inline CUDA (`--inference-batch-size 1`) is best because each public-belief decision already submits a large particle/action matrix as one batch. Dispatcher batching is still available for cross-worker coalescing, but it is not the right default for this workload yet.
+- Rollout-only CPU can still be competitive because the current rollout evaluator is lightweight. The gain from CUDA is that ideal/ReBeL-style neural value search is no longer CPU-bound by per-leaf model calls; it replaces 168k rollout leaves with 168k GPU-backed value predictions at roughly rollout-only wall time on this slice.
+
 Remaining work:
 
-- Record a larger CUDA throughput/GPU-utilization sweep after choosing production values for `--particles`, `--workers`, and `--selfplay-inference-batch-size`.
 - For production, replace `--skip-gates` bootstrap promotion with real gate thresholds once the neural-leaf recipe is stable.
