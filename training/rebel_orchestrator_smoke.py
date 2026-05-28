@@ -27,6 +27,7 @@ from rebel_orchestrator import (  # noqa: E402
     preflight_release_binaries,
     read_jsonl_lines,
     resolve_kl_anchor,
+    snapshot_promoted_artifacts,
 )
 
 
@@ -173,11 +174,46 @@ def test_release_binary_preflight_reports_missing_and_stale() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_promoted_artifacts_snapshot_to_pool() -> None:
+    work = Path(tempfile.mkdtemp(prefix="uma-rebel-pool-snapshot-"))
+    try:
+        loop = work / "loop"
+        iter_dir = loop / "iter-3"
+        train_dir = iter_dir / "train"
+        train_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = train_dir / "checkpoint.pt"
+        onnx = iter_dir / "policy.onnx"
+        meta = iter_dir / "policy.onnx.meta.json"
+        checkpoint.write_bytes(b"checkpoint")
+        onnx.write_bytes(b"onnx")
+        meta.write_text(json.dumps({"meta": True}), encoding="utf8")
+
+        snapshot = snapshot_promoted_artifacts(
+            loop,
+            {
+                "iteration": 3,
+                "checkpoint": str(checkpoint),
+                "onnx": str(onnx),
+                "wilson_lower": 0.42,
+            },
+        )
+
+        pool_dir = loop / "pool" / "iter-003"
+        assert snapshot["dir"] == str(pool_dir), snapshot
+        assert Path(snapshot["checkpoint"]).read_bytes() == b"checkpoint"
+        assert Path(snapshot["onnx"]).read_bytes() == b"onnx"
+        assert json.loads(Path(snapshot["onnx_meta"]).read_text(encoding="utf8")) == {"meta": True}
+        assert snapshot["wilson_lower"] == 0.42
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main() -> None:
     test_replay_mix_materializes_bounded_old_fraction()
     test_replay_passthrough_when_disabled()
     test_fixed_kl_anchor_stays_pinned()
     test_release_binary_preflight_reports_missing_and_stale()
+    test_promoted_artifacts_snapshot_to_pool()
     print(json.dumps({"status": "PASS"}, indent=2))
 
 
