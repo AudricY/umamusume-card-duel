@@ -20,74 +20,10 @@ def main() -> None:
     train_dir = out_dir / "train"
     export_path = out_dir / "policy.onnx"
 
-    run(
-        [
-            "cargo",
-            "run",
-            "-p",
-            "sim-cli",
-            "--bin",
-            "sim-rebel-selfplay",
-            "--",
-            "--seeds",
-            str(args.games),
-            "--seed-start",
-            str(args.seed_start),
-            "--particles",
-            str(args.particles),
-            "--search-iterations",
-            str(args.search_iterations),
-            "--rollout-steps",
-            str(args.rollout_steps),
-            "--max-steps",
-            str(args.max_steps),
-            "--model-side",
-            args.model_side,
-            "--deck-sampling",
-            args.deck_sampling,
-            "--out",
-            str(data_path),
-            "--manifest-out",
-            str(selfplay_manifest),
-        ],
-        cwd=repo / "engine-rs",
-    )
+    run(build_selfplay_cmd(args, repo, data_path, selfplay_manifest), cwd=repo / "engine-rs")
     row_summary = validate_rebel_rows(data_path)
 
-    train_cmd = [
-        sys.executable,
-        str(repo / "training" / "train_bc.py"),
-        "--data",
-        str(data_path),
-        "--out-dir",
-        str(train_dir),
-        "--data-mode",
-        "rebel",
-        "--epochs",
-        str(args.epochs),
-        "--batch-size",
-        str(args.batch_size),
-        "--state-dim",
-        str(args.state_dim),
-        "--split-by",
-        "row",
-        "--device",
-        args.device,
-        "--value-weight",
-        str(args.value_weight),
-        "--policy-weight",
-        str(args.policy_weight),
-        "--kl-anchor-weight",
-        str(args.kl_anchor_weight),
-        "--entropy-bonus",
-        str(args.entropy_bonus),
-    ]
-    if args.q_value_head:
-        train_cmd.extend(["--q-value-head", "--q-value-weight", str(args.q_value_weight)])
-    if args.uma_slot_tokens:
-        train_cmd.append("--uma-slot-tokens")
-    if args.kl_anchor_checkpoint:
-        train_cmd.extend(["--kl-anchor-checkpoint", args.kl_anchor_checkpoint])
+    train_cmd = build_train_cmd(args, repo, data_path, train_dir)
     run(train_cmd, cwd=repo)
 
     export_status: dict[str, Any] = {"status": "skipped", "reason": "--skip-export"}
@@ -105,6 +41,7 @@ def main() -> None:
         )
         export_status = {"status": "ok", "onnx": str(export_path)}
 
+    training_settings = effective_training_settings(args)
     manifest = {
         "name": "R17-rebel-e2e",
         "status": "complete",
@@ -128,13 +65,15 @@ def main() -> None:
             "search_iterations": args.search_iterations,
             "rollout_steps": args.rollout_steps,
             "max_steps": args.max_steps,
+            "workers": args.workers,
             "epochs": args.epochs,
-            "batch_size": args.batch_size,
+            **training_settings,
             "state_dim": args.state_dim,
             "q_value_head": args.q_value_head,
             "q_value_weight": args.q_value_weight,
             "kl_anchor_weight": args.kl_anchor_weight,
             "entropy_bonus": args.entropy_bonus,
+            "use_release_binary": args.use_release_binary,
         },
         "gates": {
             "fixed": {"status": "not-run", "reason": "first e2e smoke trains/export artifacts only"},
@@ -144,6 +83,130 @@ def main() -> None:
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
     print(json.dumps(manifest, indent=2))
+
+
+def build_selfplay_cmd(
+    args: argparse.Namespace,
+    repo: Path,
+    data_path: Path,
+    selfplay_manifest: Path,
+) -> list[str]:
+    if args.use_release_binary:
+        cmd = [str(repo / "engine-rs" / "target" / "release" / "sim-rebel-selfplay")]
+    else:
+        cmd = ["cargo", "run", "-p", "sim-cli", "--bin", "sim-rebel-selfplay", "--"]
+    cmd.extend(
+        [
+            "--seeds",
+            str(args.games),
+            "--seed-start",
+            str(args.seed_start),
+            "--particles",
+            str(args.particles),
+            "--search-iterations",
+            str(args.search_iterations),
+            "--rollout-steps",
+            str(args.rollout_steps),
+            "--max-steps",
+            str(args.max_steps),
+            "--model-side",
+            args.model_side,
+            "--deck-sampling",
+            args.deck_sampling,
+            "--workers",
+            str(args.workers),
+            "--out",
+            str(data_path),
+            "--manifest-out",
+            str(selfplay_manifest),
+        ]
+    )
+    return cmd
+
+
+def effective_training_settings(args: argparse.Namespace) -> dict[str, Any]:
+    batch_size = args.batch_size if args.batch_size is not None else (16 if args.smoke else 256)
+    lr = args.lr if args.lr is not None else (6e-4 if batch_size >= 256 else 3e-4)
+    dataloader_workers = (
+        args.dataloader_workers
+        if args.dataloader_workers is not None
+        else (0 if args.smoke or args.device != "cuda" else 4)
+    )
+    amp = args.amp if args.amp is not None else (False if args.smoke else args.device == "cuda")
+    return {
+        "batch_size": batch_size,
+        "lr": lr,
+        "amp": amp,
+        "dataloader_workers": dataloader_workers,
+        "compile": bool(args.compile),
+        "hidden_dim": args.hidden_dim,
+        "depth": args.depth,
+        "dropout": args.dropout,
+        "grad_accum": args.grad_accum,
+        "init_from_checkpoint": args.init_from_checkpoint,
+    }
+
+
+def build_train_cmd(
+    args: argparse.Namespace,
+    repo: Path,
+    data_path: Path,
+    train_dir: Path,
+) -> list[str]:
+    settings = effective_training_settings(args)
+    train_cmd = [
+        sys.executable,
+        str(repo / "training" / "train_bc.py"),
+        "--data",
+        str(data_path),
+        "--out-dir",
+        str(train_dir),
+        "--data-mode",
+        "rebel",
+        "--epochs",
+        str(args.epochs),
+        "--batch-size",
+        str(settings["batch_size"]),
+        "--state-dim",
+        str(args.state_dim),
+        "--hidden-dim",
+        str(settings["hidden_dim"]),
+        "--depth",
+        str(settings["depth"]),
+        "--dropout",
+        str(settings["dropout"]),
+        "--lr",
+        str(settings["lr"]),
+        "--split-by",
+        "row",
+        "--device",
+        args.device,
+        "--value-weight",
+        str(args.value_weight),
+        "--policy-weight",
+        str(args.policy_weight),
+        "--kl-anchor-weight",
+        str(args.kl_anchor_weight),
+        "--entropy-bonus",
+        str(args.entropy_bonus),
+        "--grad-accum",
+        str(settings["grad_accum"]),
+    ]
+    if settings["amp"]:
+        train_cmd.append("--amp")
+    if settings["compile"]:
+        train_cmd.append("--compile")
+    if settings["dataloader_workers"] > 0:
+        train_cmd.extend(["--dataloader-workers", str(settings["dataloader_workers"])])
+    if settings["init_from_checkpoint"]:
+        train_cmd.extend(["--init-from-checkpoint", str(settings["init_from_checkpoint"])])
+    if args.q_value_head:
+        train_cmd.extend(["--q-value-head", "--q-value-weight", str(args.q_value_weight)])
+    if args.uma_slot_tokens:
+        train_cmd.append("--uma-slot-tokens")
+    if args.kl_anchor_checkpoint:
+        train_cmd.extend(["--kl-anchor-checkpoint", args.kl_anchor_checkpoint])
+    return train_cmd
 
 
 def validate_rebel_rows(path: Path) -> dict[str, Any]:
@@ -219,6 +282,7 @@ def run(cmd: list[str], *, cwd: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one R17 ReBeL E2E iteration.")
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--smoke", action="store_true", help="Use tiny training defaults for CPU smoke runs.")
     parser.add_argument("--games", type=int, default=1)
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--particles", type=int, default=16)
@@ -227,10 +291,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--model-side", choices=["player", "opponent", "both"], default="both")
     parser.add_argument("--deck-sampling", default="fixed")
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--use-release-binary", action="store_true")
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--state-dim", type=int, default=110)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--dataloader-workers", type=int, default=None)
+    parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--hidden-dim", type=int, default=128)
+    parser.add_argument("--depth", type=int, default=3)
+    parser.add_argument("--dropout", type=float, default=0.05)
+    parser.add_argument("--grad-accum", type=int, default=1)
+    parser.add_argument("--init-from-checkpoint", default=None)
     parser.add_argument("--policy-weight", type=float, default=1.0)
     parser.add_argument("--value-weight", type=float, default=0.1)
     parser.add_argument("--q-value-head", action="store_true")

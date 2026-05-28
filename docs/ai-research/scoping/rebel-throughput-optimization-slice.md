@@ -1,7 +1,7 @@
 # ReBeL Throughput Optimization Slice
 
 - **Date:** 2026-05-28
-- **Status:** SCOPED-AWAITING-IMPLEMENTATION
+- **Status:** PARTIAL-IMPLEMENTED
 - **Parent scope:** `docs/ai-research/scoping/rebel-e2e-scoping.md`
 - **Predecessors:** `docs/ai-research/scoping/r12-selfplay-gate-throughput.md`, `docs/ai-research/scoping/distill-throughput-spike.md`, `docs/ai-research/scoping/gpu-batched-inference-throughput.md`, `docs/ai-research/scoping/action-count-bucketed-wave-batching.md`
 - **Intent:** Make the new ReBeL E2E line cheap enough for real iteration without changing its algorithmic target or leaking hidden information.
@@ -286,3 +286,45 @@ The slice is complete when:
 - ReBeL orchestrator can launch the known fast training recipe.
 - A tiny full ReBeL E2E run still completes and exports a belief-input ONNX.
 - The docs clearly state which throughput optimizations carry over today, which were ported, and which remain future work.
+
+## Implementation Notes - 2026-05-28
+
+Ported in `0d82f40`:
+
+- `sim-rebel-selfplay --workers N` now uses deterministic game-level fan-out with task-index ordered JSONL drain.
+- `--workers 0` resolves to `available_parallelism()/2`, matching the MCTS self-play policy.
+- `UMA_LOG_REBEL_TIMING=1` records capped per-decision stderr timing and aggregate `rebelTiming` manifest totals.
+- ReBeL search diagnostics now include `particleActionEvaluations` and `rolloutLeafCalls`.
+- Low-risk cleanup landed for duplicate legal-action enumeration, row observation reuse, stall `state_fingerprint`, the redundant search clone before modeled advance, and belief-feature mean vectors.
+- `training/rebel_orchestrator.py` now forwards `--workers` and the ReBeL training-throughput recipe knobs: `--batch-size`, `--lr`, `--amp/--no-amp`, `--dataloader-workers`, `--compile`, `--hidden-dim`, `--depth`, `--dropout`, `--grad-accum`, and `--init-from-checkpoint`. It also has `--use-release-binary` for a prebuilt `target/release/sim-rebel-selfplay`.
+
+Determinism smoke:
+
+```text
+config: --seeds 6 --seed-start 17000 --model-side both --particles 4 --search-iterations 4 --rollout-steps 8 --max-steps 40
+workers 1/4/8 sha256: 92cc53453e17b9515a0d01e9aa28e59486d68bce82957a616835cfc5e7f966f8
+```
+
+Debug-binary worker anchor sweep:
+
+```text
+config: --seeds 40 --model-side both --particles 16 --search-iterations 16 --rollout-steps 40 --max-steps 120
+workers=1  wall=26.50s games/sec=3.021  rows/sec=17.094  cpu=99%   speedup=1.00x
+workers=4  wall=7.59s  games/sec=10.530 rows/sec=59.684  cpu=390%  speedup=3.49x
+workers=8  wall=4.50s  games/sec=17.791 rows/sec=100.667 cpu=724%  speedup=5.89x
+workers=16 wall=3.72s  games/sec=21.509 rows/sec=121.774 cpu=1293% speedup=7.12x
+```
+
+Timing sample:
+
+```text
+config: --seeds 8 --model-side both --particles 16 --search-iterations 16 --rollout-steps 40 --max-steps 120 --workers 8
+decisions=76 meanLegalActionCount=4.25 particleActionEvaluations=5168
+beliefBuildWallShare=0.50% searchWallShare=99.07% rowSerializationWallShare=0.06% advanceWallShare=0.37%
+```
+
+Remaining work:
+
+- Run a tiny full ReBeL E2E after the unrelated dirty `engine/src/inference/mod.rs` compile break is resolved. The current worktree fails `cargo run -p sim-cli --bin sim-rebel-selfplay` when the default `engine/inference` feature rebuilds because `graph_has_belief_features` and a matching `BatchedDispatcher::start` signature are incomplete in that file.
+- Re-run the sweep with a release binary once `cargo build --release -p sim-cli --bin sim-rebel-selfplay` is clean.
+- Inner-search parallelism is now better justified by timing: the measured sample is search-dominated, but implementation should still preserve one public root policy and fixed per-particle/action seed labels.
