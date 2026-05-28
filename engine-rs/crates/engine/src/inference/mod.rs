@@ -49,11 +49,12 @@ use ort::ep::CUDA as CUDAExecutionProvider;
 use ort::session::Session;
 use ort::value::TensorRef;
 
+use crate::belief::BELIEF_FEATURE_DIM;
 use crate::policy::card_vocab::card_vocab;
 use crate::policy::featurize::{
     self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3,
-    STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7, STATE_DIM_V3_8,
-    UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM,
+    STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7, STATE_DIM_V3_8, UMA_SLOT_COUNT,
+    UMA_SLOT_FEATURE_DIM,
 };
 use crate::policy::types::{LegalAiAction, PublicObservation};
 
@@ -70,10 +71,8 @@ const REQUIRED_V3_INPUTS: [&str; 5] = [
 /// Additional input names that a v3.2 graph declares on top of v3.0.
 /// Both must be present (the slot-token pair is contractual; partial
 /// presence is rejected explicitly, matching serve_onnx).
-const REQUIRED_V3_2_EXTRA_INPUTS: [&str; 2] = [
-    "uma_slot_card_ids",
-    "uma_slot_features",
-];
+const REQUIRED_V3_2_EXTRA_INPUTS: [&str; 2] = ["uma_slot_card_ids", "uma_slot_features"];
+const BELIEF_INPUT: &str = "belief_features";
 
 /// Detected graph schema. Set at session load and read by
 /// `predict_v3` to dispatch the correct tensor packing. v3.0 and v3.1
@@ -142,19 +141,13 @@ pub enum InferenceError {
     /// Sidecar parse failure.
     SidecarParse(String),
     /// `card_vocab.hash` between runtime and sidecar disagrees.
-    VocabHashMismatch {
-        expected: String,
-        runtime: String,
-    },
+    VocabHashMismatch { expected: String, runtime: String },
     /// `action_feature_schema_version` between runtime and sidecar disagrees.
     /// Mirror of [`VocabHashMismatch`] for the v33-correctness-fix Fix 2-4
     /// action-slot bump (2 → 3). Running mismatched action features against
     /// a checkpoint trained at a different schema silently degrades MCTS
     /// prior quality — fail-fast.
-    ActionSchemaMismatch {
-        expected: u32,
-        runtime: u32,
-    },
+    ActionSchemaMismatch { expected: u32, runtime: u32 },
     /// ONNX graph signature does not match the v3.0 contract.
     SchemaMismatch(String),
     /// Action featurization error (e.g. ACTION_DIM mismatch).
@@ -290,6 +283,7 @@ pub struct InferenceSession {
     dispatcher: Option<Arc<BatchedDispatcher>>,
     onnx_path: PathBuf,
     schema: GraphSchema,
+    uses_belief_features: bool,
     /// Per-action feature width the ONNX graph's `action_features` input
     /// expects. v5-action-disambiguation introduced action-schema-version
     /// dispatch independent of the state-schema (`GraphSchema`); a v3.8
@@ -395,6 +389,7 @@ impl InferenceSession {
         // `serve_onnx._lookup_schema`. Partial v3.2 (one slot input
         // missing) is rejected explicitly.
         let schema = validate_graph_signature(&session)?;
+        let uses_belief_features = graph_has_belief_features(&session);
 
         // Apply the deferred action_feature_schema_version check.
         //
@@ -412,10 +407,7 @@ impl InferenceSession {
                 || (matches!(schema, GraphSchema::V3_8) && expected == 4)
                 || (!matches!(schema, GraphSchema::V3_8) && expected == 3);
             if !accepted {
-                return Err(InferenceError::ActionSchemaMismatch {
-                    expected,
-                    runtime,
-                });
+                return Err(InferenceError::ActionSchemaMismatch { expected, runtime });
             }
         }
 
@@ -441,6 +433,7 @@ impl InferenceSession {
             dispatcher: None,
             onnx_path: onnx_path.to_path_buf(),
             schema,
+            uses_belief_features,
             action_dim: detected_action_dim,
             device,
         })
@@ -478,6 +471,7 @@ impl InferenceSession {
         let InferenceSession {
             session,
             schema,
+            uses_belief_features,
             action_dim,
             onnx_path: path_out,
             device: device_out,
@@ -489,7 +483,13 @@ impl InferenceSession {
             SessionStorage::Dispatched => unreachable!("load_on always returns Inline"),
         };
 
-        let dispatcher = BatchedDispatcher::start(session, schema, max_batch, max_wait_us);
+        let dispatcher = BatchedDispatcher::start(
+            session,
+            schema,
+            uses_belief_features,
+            max_batch,
+            max_wait_us,
+        );
         let _ = action_dim; // captured on the InferenceSession; dispatcher reads per-row.
 
         Ok(InferenceSession {
@@ -497,6 +497,7 @@ impl InferenceSession {
             dispatcher: Some(Arc::new(dispatcher)),
             onnx_path: path_out,
             schema,
+            uses_belief_features,
             action_dim,
             device: device_out,
         })
@@ -531,7 +532,13 @@ impl InferenceSession {
                 "legalActions must not be empty".into(),
             ));
         }
-        let row = pack_row(self.schema, self.action_dim, observation, legal_actions)?;
+        let row = pack_row(
+            self.schema,
+            self.uses_belief_features,
+            self.action_dim,
+            observation,
+            legal_actions,
+        )?;
 
         // Dispatched path: enqueue the packed row to the dispatcher
         // thread and block on the per-request response channel. The
@@ -614,10 +621,18 @@ impl InferenceSession {
                     "legalActions must not be empty".into(),
                 ));
             }
-            rows.push(pack_row(self.schema, self.action_dim, obs, legal)?);
+            rows.push(pack_row(
+                self.schema,
+                self.uses_belief_features,
+                self.action_dim,
+                obs,
+                legal,
+            )?);
         }
         match &self.session {
-            SessionStorage::Inline(g) => run_inline_batch(g, self.schema, rows),
+            SessionStorage::Inline(g) => {
+                run_inline_batch(g, self.schema, self.uses_belief_features, rows)
+            }
             SessionStorage::Dispatched => {
                 // cross-game-dispatcher-selfplay Phase 1 killshot path.
                 // The wave caller has B rows in hand; instead of erroring
@@ -663,12 +678,14 @@ struct PackedRow {
     /// before reshape to keep legacy graphs loading without an ORT
     /// shape error).
     action_dim: usize,
-    card_ids: Vec<i64>, // NUM_ZONES * MAX_CARDS_PER_ZONE
+    card_ids: Vec<i64>,        // NUM_ZONES * MAX_CARDS_PER_ZONE
     action_card_idx: Vec<i64>, // n_actions * 2
     /// v3.2/v3.4 only.
     slot_card_ids: Option<Vec<i64>>,
     /// v3.2/v3.4 only.
     slot_features: Option<Vec<f32>>,
+    /// REBEL public-belief models only.
+    belief_features: Option<Vec<f32>>,
 }
 
 /// v3.8 widens the runtime per-action feature width 48 → 52. v5
@@ -689,6 +706,7 @@ fn action_dim_for_schema(schema: GraphSchema) -> usize {
 
 fn pack_row(
     schema: GraphSchema,
+    uses_belief_features: bool,
     target_action_dim: usize,
     observation: &PublicObservation,
     legal_actions: &[LegalAiAction],
@@ -772,6 +790,7 @@ fn pack_row(
         action_card_idx,
         slot_card_ids,
         slot_features,
+        belief_features: uses_belief_features.then(|| vec![0.0; BELIEF_FEATURE_DIM]),
     })
 }
 
@@ -792,11 +811,9 @@ fn run_inline_row(
     )
     .map_err(|e| InferenceError::OutputShape(format!("action_features reshape: {e}")))?;
     let action_mask_arr = Array::from_elem((1, row.n_actions), true);
-    let card_ids_arr = Array::from_shape_vec(
-        (1, NUM_ZONES, MAX_CARDS_PER_ZONE),
-        row.card_ids.clone(),
-    )
-    .map_err(|e| InferenceError::OutputShape(format!("card_ids reshape: {e}")))?;
+    let card_ids_arr =
+        Array::from_shape_vec((1, NUM_ZONES, MAX_CARDS_PER_ZONE), row.card_ids.clone())
+            .map_err(|e| InferenceError::OutputShape(format!("card_ids reshape: {e}")))?;
     let action_card_idx_arr =
         Array::from_shape_vec((1, row.n_actions, 2), row.action_card_idx.clone())
             .map_err(|e| InferenceError::OutputShape(format!("action_card_idx reshape: {e}")))?;
@@ -810,45 +827,85 @@ fn run_inline_row(
     };
     let slot_features_arr = match (schema, row.slot_features.as_ref()) {
         (GraphSchema::V3_2 | GraphSchema::V3_4, Some(feats)) => Some(
-            Array::from_shape_vec(
-                (1, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM),
-                feats.clone(),
-            )
-            .map_err(|e| InferenceError::OutputShape(format!("uma_slot_features reshape: {e}")))?,
+            Array::from_shape_vec((1, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), feats.clone())
+                .map_err(|e| {
+                    InferenceError::OutputShape(format!("uma_slot_features reshape: {e}"))
+                })?,
         ),
         _ => None,
     };
+    let belief_features_arr = match row.belief_features.as_ref() {
+        Some(features) => Some(
+            Array::from_shape_vec((1, BELIEF_FEATURE_DIM), features.clone()).map_err(|e| {
+                InferenceError::OutputShape(format!("belief_features reshape: {e}"))
+            })?,
+        ),
+        None => None,
+    };
 
-    let inputs = match schema {
-        GraphSchema::V3_0
-        | GraphSchema::V3_1
-        | GraphSchema::V3_3
-        | GraphSchema::V3_5
-        | GraphSchema::V3_6
-        | GraphSchema::V3_7
-        | GraphSchema::V3_8 => ort::inputs![
+    let inputs = match (schema, belief_features_arr.as_ref()) {
+        (
+            GraphSchema::V3_0
+            | GraphSchema::V3_1
+            | GraphSchema::V3_3
+            | GraphSchema::V3_5
+            | GraphSchema::V3_6
+            | GraphSchema::V3_7
+            | GraphSchema::V3_8,
+            None,
+        ) => ort::inputs![
             "state_features" => TensorRef::from_array_view(&state_arr)?,
             "action_features" => TensorRef::from_array_view(&action_features_arr)?,
             "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
             "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
             "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
         ],
-        GraphSchema::V3_2 | GraphSchema::V3_4 => {
+        (
+            GraphSchema::V3_0
+            | GraphSchema::V3_1
+            | GraphSchema::V3_3
+            | GraphSchema::V3_5
+            | GraphSchema::V3_6
+            | GraphSchema::V3_7
+            | GraphSchema::V3_8,
+            Some(belief),
+        ) => ort::inputs![
+            "state_features" => TensorRef::from_array_view(&state_arr)?,
+            "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+            "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+            "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+            "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+            "belief_features" => TensorRef::from_array_view(belief)?,
+        ],
+        (GraphSchema::V3_2 | GraphSchema::V3_4, belief_opt) => {
             let slot_ids = slot_card_ids_arr
                 .as_ref()
                 .expect("slot tensors built above for v3.2/v3.4");
             let slot_feats = slot_features_arr
                 .as_ref()
                 .expect("slot tensors built above for v3.2/v3.4");
-            ort::inputs![
-                "state_features" => TensorRef::from_array_view(&state_arr)?,
-                "action_features" => TensorRef::from_array_view(&action_features_arr)?,
-                "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
-                "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
-                "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
-                "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
-                "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
-            ]
+            if let Some(belief) = belief_opt {
+                ort::inputs![
+                    "state_features" => TensorRef::from_array_view(&state_arr)?,
+                    "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                    "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                    "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                    "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+                    "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
+                    "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
+                    "belief_features" => TensorRef::from_array_view(belief)?,
+                ]
+            } else {
+                ort::inputs![
+                    "state_features" => TensorRef::from_array_view(&state_arr)?,
+                    "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                    "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                    "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                    "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+                    "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
+                    "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
+                ]
+            }
         }
     };
 
@@ -892,6 +949,7 @@ fn run_inline_row(
 fn run_inline_batch(
     guard: &SessionGuard,
     schema: GraphSchema,
+    uses_belief_features: bool,
     rows: Vec<PackedRow>,
 ) -> Result<Vec<PredictionV3>, InferenceError> {
     let n_batch = rows.len();
@@ -924,21 +982,21 @@ fn run_inline_batch(
     // actions per leaf), where bucketing doubles call count for no
     // FLOP savings. Scoping doc + histogram: docs/ai-research/scoping/
     // action-count-bucketed-wave-batching.md.
-    let bucket_ranges: Vec<(usize, usize)> = if std::env::var("UMA_DISABLE_ACTION_BUCKETING").is_ok()
-    {
-        vec![(0, n_batch)]
-    } else if n_batch >= 4 {
-        let split = n_batch / 2;
-        let big_max = rows[sorted_indices[0]].n_actions;
-        let small_max = rows[sorted_indices[split]].n_actions;
-        if big_max >= 8 && small_max * 2 < big_max {
-            vec![(0, split), (split, n_batch)]
+    let bucket_ranges: Vec<(usize, usize)> =
+        if std::env::var("UMA_DISABLE_ACTION_BUCKETING").is_ok() {
+            vec![(0, n_batch)]
+        } else if n_batch >= 4 {
+            let split = n_batch / 2;
+            let big_max = rows[sorted_indices[0]].n_actions;
+            let small_max = rows[sorted_indices[split]].n_actions;
+            if big_max >= 8 && small_max * 2 < big_max {
+                vec![(0, split), (split, n_batch)]
+            } else {
+                vec![(0, n_batch)]
+            }
         } else {
             vec![(0, n_batch)]
-        }
-    } else {
-        vec![(0, n_batch)]
-    };
+        };
 
     if std::env::var("UMA_LOG_WAVE_NACTIONS").is_ok() {
         static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -958,7 +1016,14 @@ fn run_inline_batch(
     for (start, end) in bucket_ranges {
         let bucket = &sorted_indices[start..end];
         let bucket_max_n = rows[bucket[0]].n_actions;
-        let bucket_preds = run_inline_bucket(guard, schema, &rows, bucket, bucket_max_n)?;
+        let bucket_preds = run_inline_bucket(
+            guard,
+            schema,
+            uses_belief_features,
+            &rows,
+            bucket,
+            bucket_max_n,
+        )?;
         for (b_idx, pred) in bucket_preds.into_iter().enumerate() {
             out[bucket[b_idx]] = Some(pred);
         }
@@ -979,6 +1044,7 @@ fn run_inline_batch(
 fn run_inline_bucket(
     guard: &SessionGuard,
     schema: GraphSchema,
+    uses_belief_features: bool,
     rows: &[PackedRow],
     bucket: &[usize],
     max_n: usize,
@@ -1011,6 +1077,11 @@ fn run_inline_bucket(
     };
     let mut slot_features_buf: Vec<f32> = if needs_slots {
         Vec::with_capacity(n_batch * UMA_SLOT_COUNT * UMA_SLOT_FEATURE_DIM)
+    } else {
+        Vec::new()
+    };
+    let mut belief_features_buf: Vec<f32> = if uses_belief_features {
+        Vec::with_capacity(n_batch * BELIEF_FEATURE_DIM)
     } else {
         Vec::new()
     };
@@ -1057,6 +1128,14 @@ fn run_inline_bucket(
             slot_card_ids_buf.extend_from_slice(slot_ids);
             slot_features_buf.extend_from_slice(slot_feats);
         }
+        if uses_belief_features {
+            let belief = r.belief_features.as_ref().ok_or_else(|| {
+                InferenceError::SchemaMismatch(
+                    "predict_v3_batch: belief_features missing on REBEL row".into(),
+                )
+            })?;
+            belief_features_buf.extend_from_slice(belief);
+        }
     }
 
     let state_arr = Array::from_shape_vec((n_batch, state_dim), state_buf)
@@ -1069,14 +1148,13 @@ fn run_inline_bucket(
     let card_ids_arr =
         Array::from_shape_vec((n_batch, NUM_ZONES, MAX_CARDS_PER_ZONE), card_ids_buf)
             .map_err(|e| InferenceError::OutputShape(format!("card_ids reshape: {e}")))?;
-    let action_card_idx_arr =
-        Array::from_shape_vec((n_batch, max_n, 2), action_card_idx_buf)
-            .map_err(|e| InferenceError::OutputShape(format!("action_card_idx reshape: {e}")))?;
+    let action_card_idx_arr = Array::from_shape_vec((n_batch, max_n, 2), action_card_idx_buf)
+        .map_err(|e| InferenceError::OutputShape(format!("action_card_idx reshape: {e}")))?;
     let slot_card_ids_arr = if needs_slots {
         Some(
-            Array::from_shape_vec((n_batch, UMA_SLOT_COUNT), slot_card_ids_buf).map_err(
-                |e| InferenceError::OutputShape(format!("uma_slot_card_ids reshape: {e}")),
-            )?,
+            Array::from_shape_vec((n_batch, UMA_SLOT_COUNT), slot_card_ids_buf).map_err(|e| {
+                InferenceError::OutputShape(format!("uma_slot_card_ids reshape: {e}"))
+            })?,
         )
     } else {
         None
@@ -1092,37 +1170,81 @@ fn run_inline_bucket(
     } else {
         None
     };
+    let belief_features_arr = if uses_belief_features {
+        Some(
+            Array::from_shape_vec((n_batch, BELIEF_FEATURE_DIM), belief_features_buf).map_err(
+                |e| InferenceError::OutputShape(format!("belief_features reshape: {e}")),
+            )?,
+        )
+    } else {
+        None
+    };
 
-    let inputs = match schema {
-        GraphSchema::V3_0
-        | GraphSchema::V3_1
-        | GraphSchema::V3_3
-        | GraphSchema::V3_5
-        | GraphSchema::V3_6
-        | GraphSchema::V3_7
-        | GraphSchema::V3_8 => ort::inputs![
+    let inputs = match (schema, belief_features_arr.as_ref()) {
+        (
+            GraphSchema::V3_0
+            | GraphSchema::V3_1
+            | GraphSchema::V3_3
+            | GraphSchema::V3_5
+            | GraphSchema::V3_6
+            | GraphSchema::V3_7
+            | GraphSchema::V3_8,
+            None,
+        ) => ort::inputs![
             "state_features" => TensorRef::from_array_view(&state_arr)?,
             "action_features" => TensorRef::from_array_view(&action_features_arr)?,
             "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
             "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
             "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
         ],
-        GraphSchema::V3_2 | GraphSchema::V3_4 => {
-            let slot_ids = slot_card_ids_arr
-                .as_ref()
-                .expect("slot tensors built above for v3.2/v3.4");
-            let slot_feats = slot_features_arr
-                .as_ref()
-                .expect("slot tensors built above for v3.2/v3.4");
+        (
+            GraphSchema::V3_0
+            | GraphSchema::V3_1
+            | GraphSchema::V3_3
+            | GraphSchema::V3_5
+            | GraphSchema::V3_6
+            | GraphSchema::V3_7
+            | GraphSchema::V3_8,
+            Some(belief),
+        ) => {
             ort::inputs![
                 "state_features" => TensorRef::from_array_view(&state_arr)?,
                 "action_features" => TensorRef::from_array_view(&action_features_arr)?,
                 "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
                 "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
                 "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
-                "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
-                "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
+                "belief_features" => TensorRef::from_array_view(belief)?,
             ]
+        }
+        (GraphSchema::V3_2 | GraphSchema::V3_4, belief_opt) => {
+            let slot_ids = slot_card_ids_arr
+                .as_ref()
+                .expect("slot tensors built above for v3.2/v3.4");
+            let slot_feats = slot_features_arr
+                .as_ref()
+                .expect("slot tensors built above for v3.2/v3.4");
+            if let Some(belief) = belief_opt {
+                ort::inputs![
+                    "state_features" => TensorRef::from_array_view(&state_arr)?,
+                    "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                    "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                    "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                    "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+                    "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
+                    "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
+                    "belief_features" => TensorRef::from_array_view(belief)?,
+                ]
+            } else {
+                ort::inputs![
+                    "state_features" => TensorRef::from_array_view(&state_arr)?,
+                    "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                    "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                    "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                    "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+                    "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
+                    "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
+                ]
+            }
         }
     };
 
@@ -1219,6 +1341,7 @@ impl BatchedDispatcher {
     fn start(
         session: Session,
         schema: GraphSchema,
+        uses_belief_features: bool,
         max_batch: usize,
         max_wait_us: u64,
     ) -> Self {
@@ -1238,6 +1361,7 @@ impl BatchedDispatcher {
                 dispatcher_loop(
                     session,
                     schema,
+                    uses_belief_features,
                     max_batch,
                     max_wait_us,
                     rx,
@@ -1285,10 +1409,7 @@ impl BatchedDispatcher {
     /// the bound exists as a fail-loud guard against a wedged dispatcher.
     /// Each `resp_rx.recv()` then blocks until the dispatcher has run the
     /// batch containing that row. Output order matches input order.
-    fn predict_many(
-        &self,
-        rows: Vec<PackedRow>,
-    ) -> Result<Vec<PredictionV3>, InferenceError> {
+    fn predict_many(&self, rows: Vec<PackedRow>) -> Result<Vec<PredictionV3>, InferenceError> {
         let tx = self
             .tx
             .as_ref()
@@ -1338,6 +1459,7 @@ impl Drop for BatchedDispatcher {
 fn dispatcher_loop(
     mut session: Session,
     schema: GraphSchema,
+    uses_belief_features: bool,
     max_batch: usize,
     max_wait_us: u64,
     rx: Receiver<BatchedRequest>,
@@ -1369,7 +1491,7 @@ fn dispatcher_loop(
         let n_batch = batch.len();
         total_batches.fetch_add(1, Ordering::Relaxed);
         total_requests.fetch_add(n_batch as u64, Ordering::Relaxed);
-        run_batch(&mut session, schema, batch);
+        run_batch(&mut session, schema, uses_belief_features, batch);
     }
 }
 
@@ -1381,6 +1503,7 @@ fn dispatcher_loop(
 fn run_batch(
     session: &mut Session,
     schema: GraphSchema,
+    uses_belief_features: bool,
     batch: Vec<BatchedRequest>,
 ) {
     let n_batch = batch.len();
@@ -1419,6 +1542,11 @@ fn run_batch(
     } else {
         Vec::new()
     };
+    let mut belief_features_buf: Vec<f32> = if uses_belief_features {
+        Vec::with_capacity(n_batch * BELIEF_FEATURE_DIM)
+    } else {
+        Vec::new()
+    };
 
     for (row_idx, req) in batch.iter().enumerate() {
         let r = &req.row;
@@ -1430,9 +1558,9 @@ fn run_batch(
                 r.state_dim, state_dim, row_idx
             ));
             for req in batch {
-                let _ = req.response.send(Err(InferenceError::SchemaMismatch(
-                    format!("{}", err),
-                )));
+                let _ = req
+                    .response
+                    .send(Err(InferenceError::SchemaMismatch(format!("{}", err))));
             }
             return;
         }
@@ -1442,9 +1570,9 @@ fn run_batch(
                 r.action_dim, action_dim, row_idx
             ));
             for req in batch {
-                let _ = req.response.send(Err(InferenceError::SchemaMismatch(
-                    format!("{}", err),
-                )));
+                let _ = req
+                    .response
+                    .send(Err(InferenceError::SchemaMismatch(format!("{}", err))));
             }
             return;
         }
@@ -1474,9 +1602,9 @@ fn run_batch(
                     "batched run: slot tensors missing on v3.2/v3.4 row".into(),
                 );
                 for req in batch {
-                    let _ = req.response.send(Err(InferenceError::SchemaMismatch(
-                        format!("{}", err),
-                    )));
+                    let _ = req
+                        .response
+                        .send(Err(InferenceError::SchemaMismatch(format!("{}", err))));
                 }
                 return;
             };
@@ -1485,14 +1613,27 @@ fn run_batch(
                     "batched run: slot features missing on v3.2/v3.4 row".into(),
                 );
                 for req in batch {
-                    let _ = req.response.send(Err(InferenceError::SchemaMismatch(
-                        format!("{}", err),
-                    )));
+                    let _ = req
+                        .response
+                        .send(Err(InferenceError::SchemaMismatch(format!("{}", err))));
                 }
                 return;
             };
             slot_card_ids_buf.extend_from_slice(slot_ids);
             slot_features_buf.extend_from_slice(slot_feats);
+        }
+        if uses_belief_features {
+            let Some(belief) = r.belief_features.as_ref() else {
+                let err =
+                    InferenceError::SchemaMismatch("batched run: belief_features missing".into());
+                for req in batch {
+                    let _ = req
+                        .response
+                        .send(Err(InferenceError::SchemaMismatch(format!("{}", err))));
+                }
+                return;
+            };
+            belief_features_buf.extend_from_slice(belief);
         }
     }
 
@@ -1518,24 +1659,22 @@ fn run_batch(
             return;
         }
     };
-    let card_ids_arr = match Array::from_shape_vec(
-        (n_batch, NUM_ZONES, MAX_CARDS_PER_ZONE),
-        card_ids_buf,
-    ) {
-        Ok(a) => a,
-        Err(e) => {
-            broadcast_err(batch, format!("card_ids reshape: {e}"));
-            return;
-        }
-    };
-    let action_card_idx_arr =
-        match Array::from_shape_vec((n_batch, max_n, 2), action_card_idx_buf) {
+    let card_ids_arr =
+        match Array::from_shape_vec((n_batch, NUM_ZONES, MAX_CARDS_PER_ZONE), card_ids_buf) {
             Ok(a) => a,
             Err(e) => {
-                broadcast_err(batch, format!("action_card_idx reshape: {e}"));
+                broadcast_err(batch, format!("card_ids reshape: {e}"));
                 return;
             }
         };
+    let action_card_idx_arr = match Array::from_shape_vec((n_batch, max_n, 2), action_card_idx_buf)
+    {
+        Ok(a) => a,
+        Err(e) => {
+            broadcast_err(batch, format!("action_card_idx reshape: {e}"));
+            return;
+        }
+    };
     let slot_card_ids_arr = if needs_slots {
         match Array::from_shape_vec((n_batch, UMA_SLOT_COUNT), slot_card_ids_buf) {
             Ok(a) => Some(a),
@@ -1561,15 +1700,29 @@ fn run_batch(
     } else {
         None
     };
+    let belief_features_arr = if uses_belief_features {
+        match Array::from_shape_vec((n_batch, BELIEF_FEATURE_DIM), belief_features_buf) {
+            Ok(a) => Some(a),
+            Err(e) => {
+                broadcast_err(batch, format!("belief_features reshape: {e}"));
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
-    let inputs_res = match schema {
-        GraphSchema::V3_0
-        | GraphSchema::V3_1
-        | GraphSchema::V3_3
-        | GraphSchema::V3_5
-        | GraphSchema::V3_6
-        | GraphSchema::V3_7
-        | GraphSchema::V3_8 => (|| -> Result<_, InferenceError> {
+    let inputs_res = match (schema, belief_features_arr.as_ref()) {
+        (
+            GraphSchema::V3_0
+            | GraphSchema::V3_1
+            | GraphSchema::V3_3
+            | GraphSchema::V3_5
+            | GraphSchema::V3_6
+            | GraphSchema::V3_7
+            | GraphSchema::V3_8,
+            None,
+        ) => (|| -> Result<_, InferenceError> {
             Ok(ort::inputs![
                 "state_features" => TensorRef::from_array_view(&state_arr)?,
                 "action_features" => TensorRef::from_array_view(&action_features_arr)?,
@@ -1578,7 +1731,26 @@ fn run_batch(
                 "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
             ])
         })(),
-        GraphSchema::V3_2 | GraphSchema::V3_4 => {
+        (
+            GraphSchema::V3_0
+            | GraphSchema::V3_1
+            | GraphSchema::V3_3
+            | GraphSchema::V3_5
+            | GraphSchema::V3_6
+            | GraphSchema::V3_7
+            | GraphSchema::V3_8,
+            Some(belief),
+        ) => (|| -> Result<_, InferenceError> {
+            Ok(ort::inputs![
+                "state_features" => TensorRef::from_array_view(&state_arr)?,
+                "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+                "belief_features" => TensorRef::from_array_view(belief)?,
+            ])
+        })(),
+        (GraphSchema::V3_2 | GraphSchema::V3_4, belief_opt) => {
             let slot_ids = slot_card_ids_arr
                 .as_ref()
                 .expect("slot tensors built above for v3.2/v3.4");
@@ -1586,15 +1758,28 @@ fn run_batch(
                 .as_ref()
                 .expect("slot tensors built above for v3.2/v3.4");
             (|| -> Result<_, InferenceError> {
-                Ok(ort::inputs![
-                    "state_features" => TensorRef::from_array_view(&state_arr)?,
-                    "action_features" => TensorRef::from_array_view(&action_features_arr)?,
-                    "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
-                    "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
-                    "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
-                    "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
-                    "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
-                ])
+                if let Some(belief) = belief_opt {
+                    Ok(ort::inputs![
+                        "state_features" => TensorRef::from_array_view(&state_arr)?,
+                        "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                        "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                        "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                        "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+                        "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
+                        "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
+                        "belief_features" => TensorRef::from_array_view(belief)?,
+                    ])
+                } else {
+                    Ok(ort::inputs![
+                        "state_features" => TensorRef::from_array_view(&state_arr)?,
+                        "action_features" => TensorRef::from_array_view(&action_features_arr)?,
+                        "action_mask" => TensorRef::from_array_view(&action_mask_arr)?,
+                        "card_ids_by_zone" => TensorRef::from_array_view(&card_ids_arr)?,
+                        "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
+                        "uma_slot_card_ids" => TensorRef::from_array_view(slot_ids)?,
+                        "uma_slot_features" => TensorRef::from_array_view(slot_feats)?,
+                    ])
+                }
             })()
         }
     };
@@ -1665,9 +1850,7 @@ fn run_batch(
 
 fn broadcast_err(batch: Vec<BatchedRequest>, msg: String) {
     for req in batch {
-        let _ = req
-            .response
-            .send(Err(InferenceError::Ort(msg.clone())));
+        let _ = req.response.send(Err(InferenceError::Ort(msg.clone())));
     }
 }
 
@@ -1700,9 +1883,7 @@ fn extract_logits_and_value(
         )));
     }
     if value_flat.is_empty() {
-        return Err(InferenceError::OutputShape(
-            "value tensor is empty".into(),
-        ));
+        return Err(InferenceError::OutputShape("value tensor is empty".into()));
     }
     Ok((logits_flat.to_vec(), value_flat[0]))
 }
@@ -1716,7 +1897,10 @@ fn greedy_masked_softmax(logits: &[f32]) -> Vec<f32> {
     }
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let max = if max.is_finite() { max } else { 0.0 };
-    let mut exps: Vec<f32> = logits.iter().map(|&v| ((v - max) as f64).exp() as f32).collect();
+    let mut exps: Vec<f32> = logits
+        .iter()
+        .map(|&v| ((v - max) as f64).exp() as f32)
+        .collect();
     let sum: f64 = exps.iter().map(|&v| v as f64).sum();
     if sum > 0.0 {
         for p in exps.iter_mut() {
@@ -1752,8 +1936,7 @@ fn card_vocab_metadata_hash() -> String {
     // hash today; surface a defensive default that still triggers the
     // parity comparison).
     let raw = include_str!("../../../../../shared/src/cardVocab.json");
-    let parsed: serde_json::Value =
-        serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
+    let parsed: serde_json::Value = serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
     parsed
         .get("hash")
         .and_then(|v| v.as_str())
@@ -1810,7 +1993,8 @@ fn read_state_features_last_dim(session: &Session) -> Option<i64> {
 fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceError> {
     let session_inputs = session.inputs();
     let inputs: Vec<&str> = session_inputs.iter().map(|i| i.name()).collect();
-    let input_set: std::collections::BTreeSet<&str> = inputs.iter().copied().collect();
+    let mut input_set: std::collections::BTreeSet<&str> = inputs.iter().copied().collect();
+    let has_belief_features = input_set.remove(BELIEF_INPUT);
     let required_v3: std::collections::BTreeSet<&str> =
         REQUIRED_V3_INPUTS.iter().copied().collect();
     let required_v3_2: std::collections::BTreeSet<&str> = REQUIRED_V3_INPUTS
@@ -1825,6 +2009,17 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
     // schema-mismatch path.
     let has_slot_ids = input_set.contains("uma_slot_card_ids");
     let has_slot_feats = input_set.contains("uma_slot_features");
+    if has_belief_features {
+        let belief_dim = read_belief_features_last_dim(session);
+        if let Some(d) = belief_dim {
+            if d as usize != BELIEF_FEATURE_DIM {
+                return Err(InferenceError::SchemaMismatch(format!(
+                    "graph belief_features last dim {} does not match expected {}; inputs {:?}",
+                    d, BELIEF_FEATURE_DIM, inputs
+                )));
+            }
+        }
+    }
     if has_slot_ids ^ has_slot_feats {
         return Err(InferenceError::SchemaMismatch(format!(
             "graph declares exactly one of `uma_slot_card_ids` / \
@@ -1864,7 +2059,9 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
         return Err(InferenceError::SchemaMismatch(format!(
             "graph input set {:?} does not match v3.0/v3.1 contract {:?} or \
              v3.2 contract {:?}",
-            inputs, REQUIRED_V3_INPUTS, required_v3_2.iter().copied().collect::<Vec<_>>()
+            inputs,
+            REQUIRED_V3_INPUTS,
+            required_v3_2.iter().copied().collect::<Vec<_>>()
         )));
     }
 
@@ -1885,7 +2082,15 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
         Some(d) => Err(InferenceError::SchemaMismatch(format!(
             "graph state_features last dim {} does not match v3.0 ({}), \
              v3.1 ({}), v3.3 ({}), v3.5 ({}), v3.6 ({}), v3.7 ({}), or v3.8 ({}); inputs {:?}",
-            d, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3, STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7, STATE_DIM_V3_8, inputs
+            d,
+            STATE_DIM_V3,
+            STATE_DIM_V3_1,
+            STATE_DIM_V3_3,
+            STATE_DIM_V3_5,
+            STATE_DIM_V3_6,
+            STATE_DIM_V3_7,
+            STATE_DIM_V3_8,
+            inputs
         ))),
         None => {
             // No concrete state_features shape — fall back to v3.0 for
@@ -1895,6 +2100,26 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
             Ok(GraphSchema::V3_0)
         }
     }
+}
+
+fn graph_has_belief_features(session: &Session) -> bool {
+    session.inputs().iter().any(|i| i.name() == BELIEF_INPUT)
+}
+
+fn read_belief_features_last_dim(session: &Session) -> Option<i64> {
+    for inp in session.inputs().iter() {
+        if inp.name() == BELIEF_INPUT {
+            if let Some(shape) = inp.dtype().tensor_shape() {
+                if let Some(&last) = shape.last() {
+                    if last > 0 {
+                        return Some(last);
+                    }
+                }
+            }
+            return None;
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -2005,10 +2230,9 @@ mod tests {
                 SideId::Opponent
             };
             let legal_seed = format!("{}:legal", seed);
-            let (legal, _used) = with_rng(
-                Rng::from_seed(legal_seed.as_str(), "legal"),
-                || enumerate_legal_ai_actions(&state, side),
-            );
+            let (legal, _used) = with_rng(Rng::from_seed(legal_seed.as_str(), "legal"), || {
+                enumerate_legal_ai_actions(&state, side)
+            });
             if legal.is_empty() {
                 continue;
             }
@@ -2023,9 +2247,8 @@ mod tests {
 
         let inline =
             InferenceSession::load_on(onnx_path, Device::Cpu).expect("load inline B=1 CPU");
-        let batched =
-            InferenceSession::load_on_with_batching(onnx_path, Device::Cpu, 4, 5_000)
-                .expect("load batched B=4 CPU");
+        let batched = InferenceSession::load_on_with_batching(onnx_path, Device::Cpu, 4, 5_000)
+            .expect("load batched B=4 CPU");
 
         // Drive the 4 samples through inline sequentially first, then
         // hammer them through the batched session from 4 worker
@@ -2051,7 +2274,11 @@ mod tests {
 
         let mut worst_dprob: f32 = 0.0;
         let mut worst_dvalue: f32 = 0.0;
-        for (i, (inl, bat)) in inline_outputs.iter().zip(batched_outputs.iter()).enumerate() {
+        for (i, (inl, bat)) in inline_outputs
+            .iter()
+            .zip(batched_outputs.iter())
+            .enumerate()
+        {
             assert_eq!(
                 inl.probs.len(),
                 bat.probs.len(),
@@ -2085,8 +2312,10 @@ mod tests {
         );
 
         // Sanity: dispatcher actually batched.
-        let (batches, requests) =
-            batched_arc.dispatcher().expect("dispatcher present").stats();
+        let (batches, requests) = batched_arc
+            .dispatcher()
+            .expect("dispatcher present")
+            .stats();
         assert_eq!(requests as usize, samples.len());
         assert!(batches >= 1);
 
@@ -2154,10 +2383,9 @@ mod tests {
                 SideId::Opponent
             };
             let legal_seed = format!("{}:legal", seed);
-            let (legal, _used) = with_rng(
-                Rng::from_seed(legal_seed.as_str(), "legal"),
-                || enumerate_legal_ai_actions(&state, side),
-            );
+            let (legal, _used) = with_rng(Rng::from_seed(legal_seed.as_str(), "legal"), || {
+                enumerate_legal_ai_actions(&state, side)
+            });
             if legal.is_empty() {
                 continue;
             }
@@ -2170,8 +2398,8 @@ mod tests {
             samples.len()
         );
 
-        let session = InferenceSession::load_on(onnx_path, Device::Cpu)
-            .expect("load inline CPU session");
+        let session =
+            InferenceSession::load_on(onnx_path, Device::Cpu).expect("load inline CPU session");
 
         let individual_outputs: Vec<PredictionV3> = samples
             .iter()
@@ -2193,7 +2421,11 @@ mod tests {
         assert_eq!(batched_outputs.len(), individual_outputs.len());
         let mut worst_dprob: f32 = 0.0;
         let mut worst_dvalue: f32 = 0.0;
-        for (i, (ind, bat)) in individual_outputs.iter().zip(batched_outputs.iter()).enumerate() {
+        for (i, (ind, bat)) in individual_outputs
+            .iter()
+            .zip(batched_outputs.iter())
+            .enumerate()
+        {
             assert_eq!(
                 ind.probs.len(),
                 bat.probs.len(),

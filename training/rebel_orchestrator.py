@@ -30,7 +30,7 @@ def main() -> None:
     if not args.skip_export:
         run(
             [
-                sys.executable,
+                training_python(repo),
                 str(repo / "training" / "export_onnx.py"),
                 "--checkpoint",
                 str(train_dir / "checkpoint.pt"),
@@ -155,7 +155,7 @@ def build_train_cmd(
 ) -> list[str]:
     settings = effective_training_settings(args)
     train_cmd = [
-        sys.executable,
+        training_python(repo),
         str(repo / "training" / "train_bc.py"),
         "--data",
         str(data_path),
@@ -207,6 +207,13 @@ def build_train_cmd(
     if args.kl_anchor_checkpoint:
         train_cmd.extend(["--kl-anchor-checkpoint", args.kl_anchor_checkpoint])
     return train_cmd
+
+
+def training_python(repo: Path) -> str:
+    venv_python = repo / "training" / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        return str(venv_python)
+    return sys.executable
 
 
 def validate_rebel_rows(path: Path) -> dict[str, Any]:
