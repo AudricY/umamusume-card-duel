@@ -1,0 +1,243 @@
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+def main() -> None:
+    args = parse_args()
+    repo = Path(__file__).resolve().parents[1]
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    data_path = out_dir / "rebel-selfplay.jsonl"
+    selfplay_manifest = out_dir / "selfplay.manifest.json"
+    train_dir = out_dir / "train"
+    export_path = out_dir / "policy.onnx"
+
+    run(
+        [
+            "cargo",
+            "run",
+            "-p",
+            "sim-cli",
+            "--bin",
+            "sim-rebel-selfplay",
+            "--",
+            "--seeds",
+            str(args.games),
+            "--seed-start",
+            str(args.seed_start),
+            "--particles",
+            str(args.particles),
+            "--search-iterations",
+            str(args.search_iterations),
+            "--rollout-steps",
+            str(args.rollout_steps),
+            "--max-steps",
+            str(args.max_steps),
+            "--model-side",
+            args.model_side,
+            "--deck-sampling",
+            args.deck_sampling,
+            "--out",
+            str(data_path),
+            "--manifest-out",
+            str(selfplay_manifest),
+        ],
+        cwd=repo / "engine-rs",
+    )
+    row_summary = validate_rebel_rows(data_path)
+
+    train_cmd = [
+        sys.executable,
+        str(repo / "training" / "train_bc.py"),
+        "--data",
+        str(data_path),
+        "--out-dir",
+        str(train_dir),
+        "--data-mode",
+        "rebel",
+        "--epochs",
+        str(args.epochs),
+        "--batch-size",
+        str(args.batch_size),
+        "--state-dim",
+        str(args.state_dim),
+        "--device",
+        args.device,
+        "--value-weight",
+        str(args.value_weight),
+        "--policy-weight",
+        str(args.policy_weight),
+        "--kl-anchor-weight",
+        str(args.kl_anchor_weight),
+        "--entropy-bonus",
+        str(args.entropy_bonus),
+    ]
+    if args.q_value_head:
+        train_cmd.extend(["--q-value-head", "--q-value-weight", str(args.q_value_weight)])
+    if args.uma_slot_tokens:
+        train_cmd.append("--uma-slot-tokens")
+    if args.kl_anchor_checkpoint:
+        train_cmd.extend(["--kl-anchor-checkpoint", args.kl_anchor_checkpoint])
+    run(train_cmd, cwd=repo)
+
+    export_status: dict[str, Any] = {"status": "skipped", "reason": "--skip-export"}
+    if not args.skip_export:
+        run(
+            [
+                sys.executable,
+                str(repo / "training" / "export_onnx.py"),
+                "--checkpoint",
+                str(train_dir / "checkpoint.pt"),
+                "--out",
+                str(export_path),
+            ],
+            cwd=repo,
+        )
+        export_status = {"status": "ok", "onnx": str(export_path)}
+
+    manifest = {
+        "name": "R17-rebel-e2e",
+        "status": "complete",
+        "data_mode": "rebel",
+        "engine": "rust",
+        "selfplay_binary": "sim-rebel-selfplay",
+        "search": "public-belief-cfr-v1",
+        "deck_sampling": args.deck_sampling,
+        "model_side": args.model_side,
+        "artifacts": {
+            "selfplay": str(data_path),
+            "selfplay_manifest": str(selfplay_manifest),
+            "train_dir": str(train_dir),
+            "export": export_status,
+        },
+        "row_summary": row_summary,
+        "knobs": {
+            "games": args.games,
+            "seed_start": args.seed_start,
+            "particles": args.particles,
+            "search_iterations": args.search_iterations,
+            "rollout_steps": args.rollout_steps,
+            "max_steps": args.max_steps,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "state_dim": args.state_dim,
+            "q_value_head": args.q_value_head,
+            "q_value_weight": args.q_value_weight,
+            "kl_anchor_weight": args.kl_anchor_weight,
+            "entropy_bonus": args.entropy_bonus,
+        },
+        "gates": {
+            "fixed": {"status": "not-run", "reason": "first e2e smoke trains/export artifacts only"},
+            "uniform_deck_diverse": {"status": "not-run", "reason": "run with --deck-sampling uniform for data generation first"},
+            "side_split": {"status": "recorded-in-row-fields", "field": "sideId"},
+        },
+    }
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
+    print(json.dumps(manifest, indent=2))
+
+
+def validate_rebel_rows(path: Path) -> dict[str, Any]:
+    required = {
+        "kind",
+        "schemaVersion",
+        "beliefSchemaVersion",
+        "observation",
+        "beliefFeatures",
+        "publicHistoryDigest",
+        "legalActions",
+        "searchPolicy",
+        "searchActionValues",
+        "beliefValue",
+        "privateStateValues",
+        "valueTarget",
+        "particleCount",
+        "searchIterations",
+        "searchAlgorithm",
+        "beliefSampler",
+        "playerDeckId",
+        "opponentDeckId",
+    }
+    rows = 0
+    policy_entropy_sum = 0.0
+    legal_hist: dict[str, int] = {}
+    with path.open("r", encoding="utf8") as fh:
+        for line_number, line in enumerate(fh, start=1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            missing = sorted(required - set(row))
+            if missing:
+                raise SystemExit(f"{path}:{line_number}: missing keys {missing}")
+            if row["kind"] != "rebel-selfplay":
+                raise SystemExit(f"{path}:{line_number}: bad kind {row['kind']!r}")
+            if int(row["schemaVersion"]) != 1 or int(row["beliefSchemaVersion"]) != 1:
+                raise SystemExit(f"{path}:{line_number}: bad schema versions")
+            actions = row["legalActions"]
+            policy = row["searchPolicy"]
+            q_values = row["searchActionValues"]
+            if len(actions) < 2 or len(policy) != len(actions) or len(q_values) != len(actions):
+                raise SystemExit(f"{path}:{line_number}: action/search target length mismatch")
+            total = sum(float(v) for v in policy)
+            if abs(total - 1.0) > 1e-4:
+                raise SystemExit(f"{path}:{line_number}: searchPolicy sums to {total}")
+            belief_vector = (row.get("beliefFeatures") or {}).get("vector") or []
+            if len(belief_vector) != 16:
+                raise SystemExit(f"{path}:{line_number}: belief feature dim {len(belief_vector)} != 16")
+            policy_entropy_sum += -sum(float(p) * safe_log(float(p)) for p in policy if float(p) > 0.0)
+            legal_hist[str(len(actions))] = legal_hist.get(str(len(actions)), 0) + 1
+            rows += 1
+    if rows == 0:
+        raise SystemExit(f"{path}: no rebel-selfplay rows")
+    return {
+        "rows": rows,
+        "legal_action_count_histogram": legal_hist,
+        "mean_search_policy_entropy": policy_entropy_sum / rows,
+    }
+
+
+def safe_log(value: float) -> float:
+    import math
+
+    return math.log(max(value, 1e-12))
+
+
+def run(cmd: list[str], *, cwd: Path) -> None:
+    print("+ " + " ".join(cmd), flush=True)
+    subprocess.run(cmd, cwd=str(cwd), check=True)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run one R17 ReBeL E2E iteration.")
+    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--games", type=int, default=1)
+    parser.add_argument("--seed-start", type=int, default=0)
+    parser.add_argument("--particles", type=int, default=16)
+    parser.add_argument("--search-iterations", type=int, default=16)
+    parser.add_argument("--rollout-steps", type=int, default=40)
+    parser.add_argument("--max-steps", type=int, default=120)
+    parser.add_argument("--model-side", choices=["player", "opponent", "both"], default="both")
+    parser.add_argument("--deck-sampling", default="fixed")
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--state-dim", type=int, default=110)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--policy-weight", type=float, default=1.0)
+    parser.add_argument("--value-weight", type=float, default=0.1)
+    parser.add_argument("--q-value-head", action="store_true")
+    parser.add_argument("--q-value-weight", type=float, default=0.0)
+    parser.add_argument("--uma-slot-tokens", action="store_true")
+    parser.add_argument("--kl-anchor-checkpoint", default=None)
+    parser.add_argument("--kl-anchor-weight", type=float, default=0.0)
+    parser.add_argument("--entropy-bonus", type=float, default=0.0)
+    parser.add_argument("--skip-export", action="store_true")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    main()
