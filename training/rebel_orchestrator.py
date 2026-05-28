@@ -28,6 +28,7 @@ class RebelLoopState:
 def main() -> None:
     args = parse_args()
     repo = Path(__file__).resolve().parents[1]
+    resolve_runtime_devices(args, repo)
     out_dir = Path(args.out_dir)
     if not out_dir.is_absolute():
         out_dir = repo / out_dir
@@ -103,6 +104,7 @@ def main() -> None:
             "entropy_bonus": args.entropy_bonus,
             "use_release_binary": args.use_release_binary,
             "selfplay_onnx_path": args.selfplay_onnx_path,
+            "selfplay_device": effective_selfplay_device(args),
             "neural_policy_weight": args.neural_policy_weight,
             "neural_value_weight": args.neural_value_weight,
             "neural_leaf_weight": args.neural_leaf_weight,
@@ -143,6 +145,8 @@ def run_loop(args: argparse.Namespace, repo: Path, out_dir: Path) -> None:
         replay_window=args.replay_window,
         replay_old_fraction=args.replay_old_fraction,
         fixed_kl_anchor=args.fixed_kl_anchor,
+        device=args.device,
+        selfplay_device=effective_selfplay_device(args),
     )
 
     start_iter = max((int(r["iteration"]) for r in state.iterations), default=-1) + 1
@@ -243,8 +247,27 @@ def run_loop_iteration(
         kl_anchor_checkpoint=iter_args.kl_anchor_checkpoint,
     )
     t0 = time.time()
-    events.emit(iteration=iteration, stage="selfplay", event_type="started", seed_start=seed_start)
-    run(build_selfplay_cmd(iter_args, repo, data_path, selfplay_manifest), cwd=repo / "engine-rs", env=ort_env(repo))
+    pool_record = {"selfplay_vs_pool": False}
+    events.emit(
+        iteration=iteration,
+        stage="selfplay",
+        event_type="started",
+        seed_start=seed_start,
+        selfplay_vs_pool=bool(args.selfplay_vs_pool),
+    )
+    if args.selfplay_vs_pool:
+        pool_record = run_pool_selfplay(
+            args=iter_args,
+            repo=repo,
+            loop_dir=loop_dir,
+            iter_dir=iter_dir,
+            state=state,
+            data_path=data_path,
+            selfplay_manifest=selfplay_manifest,
+            events=events,
+        )
+    if not pool_record.get("selfplay_vs_pool"):
+        run(build_selfplay_cmd(iter_args, repo, data_path, selfplay_manifest), cwd=repo / "engine-rs", env=ort_env(repo))
     row_summary = validate_rebel_rows(data_path)
     selfplay_elapsed = time.time() - t0
     events.emit(
@@ -321,6 +344,7 @@ def run_loop_iteration(
         "onnx": str(export_path),
         "selfplay": str(data_path),
         "selfplay_manifest": str(selfplay_manifest),
+        "selfplay_pool": pool_record,
         "train_data": str(train_data_path),
         "row_summary": row_summary,
         "train_row_summary": train_row_summary,
@@ -433,6 +457,221 @@ def snapshot_promoted_artifacts(loop_dir: Path, record: dict[str, Any]) -> dict[
         "onnx_meta": str(meta_dst) if meta_dst else None,
         "wilson_lower": record.get("wilson_lower"),
     }
+
+
+def load_pool_entries_from_state(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf8"))
+    except Exception:
+        return []
+    entries: list[dict[str, Any]] = []
+    for record in payload.get("iterations") or []:
+        entry = pool_entry_from_iteration(record, source="state_file")
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def pool_entry_from_iteration(record: dict[str, Any], *, source: str) -> dict[str, Any] | None:
+    if not record.get("promote"):
+        return None
+    snapshot = record.get("pool_snapshot") or {}
+    onnx = snapshot.get("onnx") or record.get("onnx")
+    checkpoint = snapshot.get("checkpoint") or record.get("checkpoint")
+    if not onnx or not checkpoint:
+        return None
+    return {
+        "iteration": int(record.get("iteration", -1)),
+        "checkpoint": str(Path(checkpoint).resolve()),
+        "onnx": str(Path(onnx).resolve()),
+        "wilson_lower": float(record.get("wilson_lower") or snapshot.get("wilson_lower") or 0.0),
+        "source": source,
+    }
+
+
+def resolve_selfplay_pool(args: argparse.Namespace, state: RebelLoopState) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if args.pool_state_file:
+        for entry in load_pool_entries_from_state(Path(args.pool_state_file)):
+            key = entry["onnx"]
+            if key not in seen:
+                seen.add(key)
+                entries.append(entry)
+    for record in state.iterations:
+        entry = pool_entry_from_iteration(record, source="current_run")
+        if entry is None:
+            continue
+        key = entry["onnx"]
+        if key not in seen:
+            seen.add(key)
+            entries.append(entry)
+    entries.sort(key=lambda item: int(item["iteration"]), reverse=True)
+    return entries[: max(1, int(args.pool_size))]
+
+
+def pfsp_weights_from_pool(pool: list[dict[str, Any]], floor: float) -> list[float]:
+    if not pool:
+        return []
+    raw = [max(floor, float(entry.get("wilson_lower") or 0.0)) for entry in pool]
+    if sum(raw) <= 0.0:
+        return [1.0 / len(pool)] * len(pool)
+    if all(weight <= floor + 1.0e-9 for weight in raw):
+        return [1.0 / len(pool)] * len(pool)
+    total = sum(raw)
+    return [weight / total for weight in raw]
+
+
+def allocate_games(total: int, weights: list[float]) -> list[int]:
+    if total <= 0 or not weights:
+        return []
+    if total < len(weights):
+        out = [0] * len(weights)
+        for index in sorted(range(len(weights)), key=lambda i: weights[i], reverse=True)[:total]:
+            out[index] = 1
+        return out
+    raw = [weight * total for weight in weights]
+    out = [int(value) for value in raw]
+    leftover = total - sum(out)
+    if leftover > 0:
+        order = sorted(range(len(weights)), key=lambda i: (raw[i] - out[i], weights[i]), reverse=True)
+        for index in order[:leftover]:
+            out[index] += 1
+    return out
+
+
+def run_pool_selfplay(
+    *,
+    args: argparse.Namespace,
+    repo: Path,
+    loop_dir: Path,
+    iter_dir: Path,
+    state: RebelLoopState,
+    data_path: Path,
+    selfplay_manifest: Path,
+    events: EventWriter,
+) -> dict[str, Any]:
+    pool = resolve_selfplay_pool(args, state)
+    if not pool:
+        events.emit(
+            iteration=args.events_iteration,
+            stage="selfplay-pool",
+            event_type="fallback_to_single",
+            reason="empty_pool",
+        )
+        return {"selfplay_vs_pool": False, "reason": "empty_pool"}
+
+    weights = pfsp_weights_from_pool(pool, float(args.pfsp_floor))
+    games_alloc = allocate_games(int(args.games), weights)
+    invocations = [(entry, weight, games) for entry, weight, games in zip(pool, weights, games_alloc) if games > 0]
+    if not invocations:
+        return {"selfplay_vs_pool": False, "reason": "zero_games_alloc"}
+
+    events.emit(
+        iteration=args.events_iteration,
+        stage="selfplay-pool",
+        event_type="pool_resolved",
+        pool=[
+            {
+                "pool_iter": entry["iteration"],
+                "onnx": entry["onnx"],
+                "checkpoint": entry["checkpoint"],
+                "weight": weight,
+                "games": games,
+                "source": entry["source"],
+            }
+            for entry, weight, games in invocations
+        ],
+    )
+
+    seed_cursor = int(args.seed_start)
+    total_rows = 0
+    per_invocation: list[dict[str, Any]] = []
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    with data_path.open("w", encoding="utf8") as out_fh:
+        for entry, weight, games in invocations:
+            label = f"iter-{int(entry['iteration']):03d}" if int(entry["iteration"]) >= 0 else "warm"
+            part_path = iter_dir / f"rebel-selfplay-vs-{label}.jsonl"
+            part_manifest = iter_dir / f"selfplay-vs-{label}.manifest.json"
+            part_args = argparse.Namespace(**vars(args))
+            part_args.games = games
+            part_args.seed_start = seed_cursor
+            part_args.selfplay_onnx_path = entry["onnx"]
+            events.emit(
+                iteration=args.events_iteration,
+                stage="selfplay-pool",
+                event_type="invocation_started",
+                pool_iter=entry["iteration"],
+                onnx=entry["onnx"],
+                games=games,
+                seed_start=seed_cursor,
+            )
+            run(build_selfplay_cmd(part_args, repo, part_path, part_manifest), cwd=repo / "engine-rs", env=ort_env(repo))
+            rows = append_jsonl_with_pool_annotation(part_path, out_fh, entry)
+            total_rows += rows
+            per_invocation.append(
+                {
+                    "pool_iter": entry["iteration"],
+                    "checkpoint": entry["checkpoint"],
+                    "onnx": entry["onnx"],
+                    "weight": weight,
+                    "games": games,
+                    "seed_start": seed_cursor,
+                    "rows": rows,
+                    "manifest": str(part_manifest),
+                }
+            )
+            events.emit(
+                iteration=args.events_iteration,
+                stage="selfplay-pool",
+                event_type="invocation_completed",
+                pool_iter=entry["iteration"],
+                rows=rows,
+            )
+            seed_cursor += games
+
+    manifest = {
+        "args": {
+            "selfplayVsPool": True,
+            "poolSize": args.pool_size,
+            "pfspFloor": args.pfsp_floor,
+            "seedStart": args.seed_start,
+            "games": args.games,
+            "out": str(data_path),
+            "manifestOut": str(selfplay_manifest),
+        },
+        "summary": {
+            "games": sum(item["games"] for item in per_invocation),
+            "rows": total_rows,
+            "perPoolInvocations": len(per_invocation),
+        },
+        "pool": per_invocation,
+    }
+    selfplay_manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf8")
+    return {
+        "selfplay_vs_pool": True,
+        "pool_size": args.pool_size,
+        "pfsp_floor": args.pfsp_floor,
+        "pool": per_invocation,
+        "rows": total_rows,
+    }
+
+
+def append_jsonl_with_pool_annotation(src: Path, out_fh, entry: dict[str, Any]) -> int:
+    rows = 0
+    with src.open("r", encoding="utf8") as fh:
+        for raw in fh:
+            if not raw.strip():
+                continue
+            row = json.loads(raw)
+            row["poolPolicyIter"] = int(entry["iteration"])
+            row["poolPolicyOnnx"] = entry["onnx"]
+            row["poolPolicyCheckpoint"] = entry["checkpoint"]
+            out_fh.write(json.dumps(row) + "\n")
+            rows += 1
+    return rows
 
 
 def resolve_kl_anchor(
@@ -581,12 +820,13 @@ def build_selfplay_cmd(
         ]
     )
     if args.selfplay_onnx_path:
+        selfplay_device = effective_selfplay_device(args)
         cmd.extend(
             [
                 "--onnx-path",
                 str(args.selfplay_onnx_path),
                 "--device",
-                args.selfplay_device,
+                selfplay_device,
                 "--cuda-device-id",
                 str(args.selfplay_cuda_device_id),
                 "--neural-policy-weight",
@@ -602,6 +842,37 @@ def build_selfplay_cmd(
             ]
         )
     return cmd
+
+
+def resolve_runtime_devices(args: argparse.Namespace, repo: Path) -> None:
+    if args.device == "auto":
+        args.device = "cuda" if torch_cuda_available(repo) else "cpu"
+    if args.selfplay_device == "auto":
+        args.selfplay_device = "cuda" if args.device == "cuda" else "cpu"
+
+
+def effective_selfplay_device(args: argparse.Namespace) -> str:
+    if args.selfplay_device == "auto":
+        return "cuda" if args.device == "cuda" else "cpu"
+    return args.selfplay_device
+
+
+def torch_cuda_available(repo: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                training_python(repo),
+                "-c",
+                "import torch; print('1' if torch.cuda.is_available() else '0')",
+            ],
+            cwd=str(repo),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0 and result.stdout.strip().splitlines()[-1:] == ["1"]
 
 
 def effective_training_settings(args: argparse.Namespace) -> dict[str, Any]:
@@ -884,6 +1155,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replay-window", type=int, default=3)
     parser.add_argument("--replay-old-fraction", type=float, default=0.4)
     parser.add_argument("--fixed-kl-anchor", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--selfplay-vs-pool", action="store_true")
+    parser.add_argument("--pool-size", type=int, default=5)
+    parser.add_argument("--pfsp-floor", type=float, default=0.05)
+    parser.add_argument("--pool-state-file", default=None)
     parser.add_argument("--smoke", action="store_true", help="Use tiny training defaults for CPU smoke runs.")
     parser.add_argument("--games", type=int, default=1)
     parser.add_argument("--seed-start", type=int, default=0)
@@ -896,7 +1171,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--use-release-binary", action="store_true")
     parser.add_argument("--selfplay-onnx-path", default=None)
-    parser.add_argument("--selfplay-device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--selfplay-device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--selfplay-cuda-device-id", type=int, default=0)
     parser.add_argument("--neural-policy-weight", type=float, default=0.25)
     parser.add_argument("--neural-value-weight", type=float, default=0.25)

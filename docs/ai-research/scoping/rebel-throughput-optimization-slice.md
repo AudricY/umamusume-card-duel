@@ -396,6 +396,8 @@ Cross-iteration replay and fixed KL anchor:
 - The multi-iteration orchestrator now materializes a mixed training JSONL from current self-play plus prior loop vintages (`--cross-iter-replay`, `--replay-window`, `--replay-old-fraction`).
 - `--fixed-kl-anchor` keeps the KL regularizer anchored to the original warm-start/promoted checkpoint instead of chasing the moving previous checkpoint.
 - The training command receives the loop event sink, so train/eval events are part of the same per-iteration trace.
+- Promoted checkpoints/ONNX files are snapshotted under `loop/pool/iter-XXX/` so later runs can consume a stable policy pool.
+- `--selfplay-vs-pool` can generate ReBeL rows from a bounded promoted policy pool, using Wilson-lower-based PFSP weights with `--pool-size`, `--pfsp-floor`, and optional `--pool-state-file`. Rows are annotated with the pool policy checkpoint/ONNX provenance.
 
 Replay/KL smoke:
 
@@ -420,6 +422,11 @@ Interpretation:
 - ReBeL model-valued search now uses CUDA for the hot value-head path when `--onnx-path ... --device cuda --neural-leaf-weight 1.0` is set.
 - On this measured search shape, inline CUDA (`--inference-batch-size 1`) is best because each public-belief decision already submits a large particle/action matrix as one batch. Dispatcher batching is still available for cross-worker coalescing, but it is not the right default for this workload yet.
 - Rollout-only CPU can still be competitive because the current rollout evaluator is lightweight. The gain from CUDA is that ideal/ReBeL-style neural value search is no longer CPU-bound by per-leaf model calls; it replaces 168k rollout leaves with 168k GPU-backed value predictions at roughly rollout-only wall time on this slice.
+
+Device resolution:
+
+- `rebel_orchestrator.py --device auto` resolves to CUDA when the training Python can import Torch and `torch.cuda.is_available()` is true.
+- `--selfplay-device auto` follows the resolved training device, so a CUDA training run also uses CUDA ONNX Runtime for ReBeL self-play once a self-play ONNX is available. Override with `--selfplay-device cpu` when intentionally keeping search inference on CPU.
 
 Remaining work:
 

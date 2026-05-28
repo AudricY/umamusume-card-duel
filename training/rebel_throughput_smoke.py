@@ -20,7 +20,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         "workers": 8,
         "use_release_binary": False,
         "selfplay_onnx_path": "/tmp/policy.onnx",
-        "selfplay_device": "cuda",
+        "selfplay_device": "auto",
         "selfplay_cuda_device_id": 0,
         "neural_policy_weight": 0.25,
         "neural_value_weight": 0.25,
@@ -99,6 +99,15 @@ def main() -> None:
         raise AssertionError(f"smoke command should keep tiny batch: {smoke_cmd}")
     if "--amp" in smoke_cmd or "--dataloader-workers" in smoke_cmd:
         raise AssertionError(f"smoke command should not enable CUDA throughput flags: {smoke_cmd}")
+
+    smoke_selfplay_cmd = build_selfplay_cmd(
+        _args(smoke=True, device="cpu", selfplay_device="auto"),
+        repo,
+        Path("/tmp/rebel.jsonl"),
+        Path("/tmp/selfplay.json"),
+    )
+    if not _contains_pair(smoke_selfplay_cmd, "--device", "cpu"):
+        raise AssertionError(f"selfplay auto device should follow CPU training device: {smoke_selfplay_cmd}")
 
     print("rebel_throughput_smoke: ok")
 

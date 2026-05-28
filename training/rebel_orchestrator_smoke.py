@@ -23,10 +23,15 @@ sys.path.insert(0, str(ROOT))
 from events import EventWriter  # noqa: E402
 from rebel_orchestrator import (  # noqa: E402
     RebelLoopState,
+    allocate_games,
+    append_jsonl_with_pool_annotation,
+    load_pool_entries_from_state,
     materialize_replay_mix,
+    pfsp_weights_from_pool,
     preflight_release_binaries,
     read_jsonl_lines,
     resolve_kl_anchor,
+    resolve_selfplay_pool,
     snapshot_promoted_artifacts,
 )
 
@@ -38,6 +43,8 @@ def _args(**overrides: object) -> argparse.Namespace:
         "replay_old_fraction": 0.4,
         "fixed_kl_anchor": True,
         "kl_anchor_checkpoint": None,
+        "pool_state_file": None,
+        "pool_size": 5,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -208,12 +215,85 @@ def test_promoted_artifacts_snapshot_to_pool() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_selfplay_pool_resolution_and_allocation() -> None:
+    state = RebelLoopState(
+        iterations=[
+            {
+                "iteration": 0,
+                "promote": True,
+                "wilson_lower": 0.2,
+                "pool_snapshot": {
+                    "checkpoint": "/tmp/pool/iter-000/checkpoint.pt",
+                    "onnx": "/tmp/pool/iter-000/policy.onnx",
+                },
+            },
+            {
+                "iteration": 1,
+                "promote": True,
+                "wilson_lower": 0.6,
+                "pool_snapshot": {
+                    "checkpoint": "/tmp/pool/iter-001/checkpoint.pt",
+                    "onnx": "/tmp/pool/iter-001/policy.onnx",
+                },
+            },
+        ]
+    )
+    pool = resolve_selfplay_pool(_args(pool_size=2), state)
+    assert [entry["iteration"] for entry in pool] == [1, 0], pool
+    weights = pfsp_weights_from_pool(pool, floor=0.05)
+    assert weights[0] > weights[1], weights
+    assert abs(sum(weights) - 1.0) < 1e-9, weights
+    assert allocate_games(5, weights) == [4, 1]
+    assert allocate_games(1, weights) == [1, 0]
+
+
+def test_pool_state_file_and_annotation() -> None:
+    work = Path(tempfile.mkdtemp(prefix="uma-rebel-pool-state-"))
+    try:
+        state_path = work / "orchestrator-state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "iterations": [
+                        {"iteration": 0, "promote": False},
+                        {
+                            "iteration": 2,
+                            "promote": True,
+                            "checkpoint": str(work / "iter-2" / "train" / "checkpoint.pt"),
+                            "onnx": str(work / "iter-2" / "policy.onnx"),
+                            "wilson_lower": 0.5,
+                        },
+                    ]
+                }
+            ),
+            encoding="utf8",
+        )
+        entries = load_pool_entries_from_state(state_path)
+        assert len(entries) == 1, entries
+        assert entries[0]["iteration"] == 2
+        assert entries[0]["source"] == "state_file"
+
+        src = work / "rows.jsonl"
+        _write_rows(src, "row", 2)
+        out = work / "annotated.jsonl"
+        with out.open("w", encoding="utf8") as fh:
+            rows = append_jsonl_with_pool_annotation(src, fh, entries[0])
+        assert rows == 2
+        annotated = [json.loads(line) for line in out.read_text(encoding="utf8").splitlines()]
+        assert {row["poolPolicyIter"] for row in annotated} == {2}
+        assert all("poolPolicyOnnx" in row and "poolPolicyCheckpoint" in row for row in annotated)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main() -> None:
     test_replay_mix_materializes_bounded_old_fraction()
     test_replay_passthrough_when_disabled()
     test_fixed_kl_anchor_stays_pinned()
     test_release_binary_preflight_reports_missing_and_stale()
     test_promoted_artifacts_snapshot_to_pool()
+    test_selfplay_pool_resolution_and_allocation()
+    test_pool_state_file_and_annotation()
     print(json.dumps({"status": "PASS"}, indent=2))
 
 
