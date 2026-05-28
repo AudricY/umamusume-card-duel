@@ -34,6 +34,7 @@ from rebel_orchestrator import (  # noqa: E402
     resolve_kl_anchor,
     resolve_selfplay_pool,
     snapshot_promoted_artifacts,
+    validate_rebel_rows,
 )
 
 
@@ -56,6 +57,46 @@ def _write_rows(path: Path, prefix: str, count: int) -> None:
     with path.open("w", encoding="utf8") as fh:
         for index in range(count):
             fh.write(json.dumps({"row": f"{prefix}-{index}"}) + "\n")
+
+
+def _valid_rebel_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "kind": "rebel-selfplay",
+        "schemaVersion": 1,
+        "beliefSchemaVersion": 1,
+        "observation": {},
+        "beliefFeatures": {"vector": [0.0] * 16},
+        "publicHistoryDigest": "digest",
+        "legalActions": [{"type": "pass"}, {"type": "playTrainer"}],
+        "selectedActionIndex": 1,
+        "searchPolicy": [0.25, 0.75],
+        "searchActionValues": [0.1, 0.2],
+        "beliefValue": 0.15,
+        "privateStateValues": [0.1, 0.2],
+        "valueTarget": None,
+        "particleCount": 2,
+        "searchIterations": 4,
+        "searchAlgorithm": "public-belief-cfr-v1",
+        "beliefSampler": "public-history-particles-v1",
+        "searchDiagnostics": {
+            "particleCount": 2,
+            "legalActionCount": 2,
+            "searchIterations": 4,
+            "policyEntropy": 0.56,
+        },
+        "beliefAudit": {},
+        "playerDeckId": "player",
+        "opponentDeckId": "opponent",
+    }
+    row.update(overrides)
+    return row
+
+
+def _write_rebel_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
 
 
 def test_replay_mix_materializes_bounded_old_fraction() -> None:
@@ -318,6 +359,66 @@ def test_gate_cmd_forwards_production_thresholds() -> None:
         assert any(cmd[i] == flag and cmd[i + 1] == value for i in range(len(cmd) - 1)), cmd
 
 
+def test_validate_rebel_rows_enforces_training_schema() -> None:
+    work = Path(tempfile.mkdtemp(prefix="uma-rebel-schema-"))
+    try:
+        good = work / "good.jsonl"
+        _write_rebel_rows(
+            good,
+            [
+                _valid_rebel_row(
+                    poolPolicyIter=3,
+                    poolPolicyOnnx="/tmp/policy.onnx",
+                    poolPolicyCheckpoint="/tmp/checkpoint.pt",
+                )
+            ],
+        )
+        summary = validate_rebel_rows(good)
+        assert summary["rows"] == 1, summary
+        assert summary["pool_policy_histogram"] == {"3": 1}, summary
+
+        bad_selected = work / "bad-selected.jsonl"
+        _write_rebel_rows(bad_selected, [_valid_rebel_row(selectedActionIndex=2)])
+        try:
+            validate_rebel_rows(bad_selected)
+        except SystemExit as exc:
+            assert "selectedActionIndex" in str(exc), exc
+        else:
+            raise AssertionError("bad selectedActionIndex should fail validation")
+
+        bad_diag = work / "bad-diag.jsonl"
+        _write_rebel_rows(
+            bad_diag,
+            [
+                _valid_rebel_row(
+                    searchDiagnostics={
+                        "particleCount": 2,
+                        "legalActionCount": 3,
+                        "searchIterations": 4,
+                        "policyEntropy": 0.0,
+                    }
+                )
+            ],
+        )
+        try:
+            validate_rebel_rows(bad_diag)
+        except SystemExit as exc:
+            assert "legalActionCount" in str(exc), exc
+        else:
+            raise AssertionError("diagnostics mismatch should fail validation")
+
+        bad_pool = work / "bad-pool.jsonl"
+        _write_rebel_rows(bad_pool, [_valid_rebel_row(poolPolicyIter=1)])
+        try:
+            validate_rebel_rows(bad_pool)
+        except SystemExit as exc:
+            assert "incomplete pool annotation" in str(exc), exc
+        else:
+            raise AssertionError("partial pool annotation should fail validation")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main() -> None:
     test_replay_mix_materializes_bounded_old_fraction()
     test_replay_passthrough_when_disabled()
@@ -327,6 +428,7 @@ def main() -> None:
     test_selfplay_pool_resolution_and_allocation()
     test_pool_state_file_and_annotation()
     test_gate_cmd_forwards_production_thresholds()
+    test_validate_rebel_rows_enforces_training_schema()
     print(json.dumps({"status": "PASS"}, indent=2))
 
 
