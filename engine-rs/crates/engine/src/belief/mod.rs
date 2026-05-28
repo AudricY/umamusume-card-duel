@@ -144,6 +144,24 @@ pub fn build_public_belief_state(
     rng: &mut Rng,
 ) -> PublicBeliefState {
     let legal_actions = with_rng_borrow(rng, || enumerate_legal_ai_actions(state, observer_side));
+    build_public_belief_state_with_legal_actions(
+        state,
+        observer_side,
+        public_history,
+        legal_actions,
+        config,
+        rng,
+    )
+}
+
+pub fn build_public_belief_state_with_legal_actions(
+    state: &GameState,
+    observer_side: SideId,
+    public_history: PublicHistory,
+    legal_actions: Vec<LegalAiAction>,
+    config: &BeliefBuildConfig,
+    rng: &mut Rng,
+) -> PublicBeliefState {
     let particle_count = config.particle_count.max(1);
     let mut particles = Vec::with_capacity(particle_count);
     for index in 0..particle_count {
@@ -200,7 +218,12 @@ fn resample_hidden_zones(state: &mut GameState, observer_side: SideId, rng: &mut
     let opponent = state.side_mut(opponent_side);
     let hand_len = opponent.hand.len();
     let deck_len = opponent.deck.len();
-    let mut unknown: Vec<CardId> = opponent.hand.iter().chain(opponent.deck.iter()).copied().collect();
+    let mut unknown: Vec<CardId> = opponent
+        .hand
+        .iter()
+        .chain(opponent.deck.iter())
+        .copied()
+        .collect();
     shuffle_in_place(&mut unknown, rng);
     opponent.hand.clear();
     opponent.deck.clear();
@@ -240,14 +263,17 @@ fn hidden_assignment(state: &GameState, observer_side: SideId) -> HiddenZoneAssi
     }
 }
 
-fn build_belief_features(particles: &[PrivateWorldParticle], observer_side: SideId) -> BeliefFeatures {
+fn build_belief_features(
+    particles: &[PrivateWorldParticle],
+    observer_side: SideId,
+) -> BeliefFeatures {
     let total_weight = particles.iter().map(|p| p.weight).sum::<f64>().max(1e-12);
     let mut opp_hand = BTreeMap::<CardId, f64>::new();
     let mut opp_deck = BTreeMap::<CardId, f64>::new();
     let mut own_deck = BTreeMap::<CardId, f64>::new();
-    let mut hand_counts = Vec::new();
-    let mut opp_deck_counts = Vec::new();
-    let mut own_deck_counts = Vec::new();
+    let mut hand_count_sum = 0.0;
+    let mut opp_deck_count_sum = 0.0;
+    let mut own_deck_count_sum = 0.0;
     let mut fingerprints = BTreeMap::<String, f64>::new();
 
     for particle in particles {
@@ -262,9 +288,9 @@ fn build_belief_features(particles: &[PrivateWorldParticle], observer_side: Side
         for cid in unique_cards(own.deck.iter().copied()) {
             *own_deck.entry(cid).or_default() += particle.weight;
         }
-        hand_counts.push(opp.hand.len() as f64);
-        opp_deck_counts.push(opp.deck.len() as f64);
-        own_deck_counts.push(own.deck.len() as f64);
+        hand_count_sum += opp.hand.len() as f64;
+        opp_deck_count_sum += opp.deck.len() as f64;
+        own_deck_count_sum += own.deck.len() as f64;
         *fingerprints
             .entry(format!(
                 "{:?}|{:?}|{:?}",
@@ -277,11 +303,12 @@ fn build_belief_features(particles: &[PrivateWorldParticle], observer_side: Side
 
     let entropy = entropy_from_maps([&opp_hand, &opp_deck, &own_deck], total_weight);
     let diversity = fingerprints.len() as f64 / particles.len().max(1) as f64;
+    let particle_len = particles.len().max(1) as f64;
     let vector = vec![
         particles.len() as f32 / 128.0,
-        mean(&hand_counts) as f32 / 10.0,
-        mean(&opp_deck_counts) as f32 / 20.0,
-        mean(&own_deck_counts) as f32 / 20.0,
+        (hand_count_sum / particle_len) as f32 / 10.0,
+        (opp_deck_count_sum / particle_len) as f32 / 20.0,
+        (own_deck_count_sum / particle_len) as f32 / 20.0,
         entropy as f32 / 16.0,
         diversity as f32,
         max_prob(&opp_hand, total_weight) as f32,
@@ -328,10 +355,12 @@ fn probability_rows(map: &BTreeMap<CardId, f64>, total_weight: f64) -> Vec<Hidde
     let cat = catalog();
     map.iter()
         .filter_map(|(cid, mass)| {
-            cat.interner.resolve(*cid).map(|label| HiddenZoneProbability {
-                card_id: label.to_string(),
-                probability: mass / total_weight,
-            })
+            cat.interner
+                .resolve(*cid)
+                .map(|label| HiddenZoneProbability {
+                    card_id: label.to_string(),
+                    probability: mass / total_weight,
+                })
         })
         .collect()
 }
@@ -341,17 +370,13 @@ fn entropy_from_maps<const N: usize>(maps: [&BTreeMap<CardId, f64>; N], total_we
         .flat_map(|m| m.values())
         .map(|mass| {
             let p = mass / total_weight;
-            if p > 0.0 { -p * p.ln() } else { 0.0 }
+            if p > 0.0 {
+                -p * p.ln()
+            } else {
+                0.0
+            }
         })
         .sum()
-}
-
-fn mean(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        0.0
-    } else {
-        values.iter().sum::<f64>() / values.len() as f64
-    }
 }
 
 fn max_prob(map: &BTreeMap<CardId, f64>, total_weight: f64) -> f64 {
@@ -386,7 +411,8 @@ mod tests {
     fn belief_builder_emits_particles_and_fixed_width_features() {
         let rng = Rng::from_seed("belief-test:selfplay", "selfplay");
         let (state, mut rng) = with_rng(rng, setup_ai_vs_ai_game);
-        let history = PublicHistory::from_state(&state, "matikanetannhauser", "matikanetannhauser", 0);
+        let history =
+            PublicHistory::from_state(&state, "matikanetannhauser", "matikanetannhauser", 0);
         let config = BeliefBuildConfig {
             particle_count: 8,
             seed_label: "belief-test".to_string(),

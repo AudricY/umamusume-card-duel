@@ -41,6 +41,8 @@ pub struct RebelSearchDiagnostics {
     pub information_set_key: String,
     pub particle_count: usize,
     pub legal_action_count: usize,
+    pub particle_action_evaluations: usize,
+    pub rollout_leaf_calls: usize,
     pub search_iterations: u32,
     pub policy_entropy: f64,
     pub particle_action_agreement: f64,
@@ -77,6 +79,8 @@ pub fn run_public_belief_search(
                 information_set_key: belief.public_history_digest.clone(),
                 particle_count: belief.particles.len(),
                 legal_action_count: 0,
+                particle_action_evaluations: 0,
+                rollout_leaf_calls: 0,
                 search_iterations: 0,
                 policy_entropy: 0.0,
                 particle_action_agreement: 0.0,
@@ -91,16 +95,23 @@ pub fn run_public_belief_search(
     let mut action_weight = vec![0.0; action_count];
     let mut private_state_values = Vec::with_capacity(belief.particles.len());
     let mut particle_best = Vec::with_capacity(belief.particles.len());
+    let mut rollout_leaf_calls = 0usize;
 
     for (particle_index, particle) in belief.particles.iter().enumerate() {
         let particle_weight = particle.weight.max(0.0);
         let mut per_particle = vec![0.0; action_count];
         for (action_index, action) in belief.legal_actions.iter().enumerate() {
-            let mut next = particle.game_state.clone();
-            let forced = with_rng_borrow(rng, || get_forced_attack_coin_results(&next));
-            next = with_rng_borrow(rng, || {
-                advance_modeled_turn_step(&next, belief.observer_side, action, forced)
+            let forced =
+                with_rng_borrow(rng, || get_forced_attack_coin_results(&particle.game_state));
+            let next = with_rng_borrow(rng, || {
+                advance_modeled_turn_step(
+                    &particle.game_state,
+                    belief.observer_side,
+                    action,
+                    forced,
+                )
             });
+            rollout_leaf_calls += 1;
             let value = rollout_leaf_value_for_state(
                 &next,
                 belief.observer_side,
@@ -150,6 +161,8 @@ pub fn run_public_belief_search(
             information_set_key: belief.public_history_digest.clone(),
             particle_count: belief.particles.len(),
             legal_action_count: action_count,
+            particle_action_evaluations: belief.particles.len() * action_count,
+            rollout_leaf_calls,
             search_iterations: config.iterations,
             policy_entropy: entropy(&root_policy),
             particle_action_agreement: agreement,
