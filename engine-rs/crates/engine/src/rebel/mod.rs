@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::belief::PublicBeliefState;
 use crate::core::constants::SideId;
-use crate::core::random::Rng;
+use crate::core::random::{with_rng, Rng};
 use crate::dispatcher::{advance_modeled_turn_step, get_forced_attack_coin_results};
 use crate::mcts::driver::rollout_leaf_value_for_state;
 use crate::policy::types::LegalAiAction;
@@ -97,8 +97,10 @@ pub fn run_public_belief_search(
         let mut per_particle = vec![0.0; action_count];
         for (action_index, action) in belief.legal_actions.iter().enumerate() {
             let mut next = particle.game_state.clone();
-            let forced = get_forced_attack_coin_results(&next);
-            next = advance_modeled_turn_step(&next, belief.observer_side, action, forced);
+            let forced = with_rng_borrow(rng, || get_forced_attack_coin_results(&next));
+            next = with_rng_borrow(rng, || {
+                advance_modeled_turn_step(&next, belief.observer_side, action, forced)
+            });
             let value = rollout_leaf_value_for_state(
                 &next,
                 belief.observer_side,
@@ -195,6 +197,13 @@ fn argmax_f64(values: &[f64]) -> usize {
         }
     }
     best
+}
+
+fn with_rng_borrow<T>(rng: &mut Rng, f: impl FnOnce() -> T) -> T {
+    let taken = rng.clone();
+    let (out, used) = with_rng(taken, f);
+    *rng = used;
+    out
 }
 
 fn entropy(policy: &[f64]) -> f64 {

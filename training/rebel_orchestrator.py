@@ -12,6 +12,8 @@ def main() -> None:
     args = parse_args()
     repo = Path(__file__).resolve().parents[1]
     out_dir = Path(args.out_dir)
+    if not out_dir.is_absolute():
+        out_dir = repo / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     data_path = out_dir / "rebel-selfplay.jsonl"
     selfplay_manifest = out_dir / "selfplay.manifest.json"

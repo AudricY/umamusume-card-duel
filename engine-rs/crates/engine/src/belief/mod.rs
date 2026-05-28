@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::card_id::CardId;
 use crate::core::catalog::{catalog, Card};
 use crate::core::constants::SideId;
-use crate::core::random::Rng;
+use crate::core::random::{with_rng, Rng};
 use crate::core::state::GameState;
 use crate::dispatcher::state_hash;
 use crate::policy::actions::enumerate_legal_ai_actions;
@@ -143,7 +143,7 @@ pub fn build_public_belief_state(
     config: &BeliefBuildConfig,
     rng: &mut Rng,
 ) -> PublicBeliefState {
-    let legal_actions = enumerate_legal_ai_actions(state, observer_side);
+    let legal_actions = with_rng_borrow(rng, || enumerate_legal_ai_actions(state, observer_side));
     let particle_count = config.particle_count.max(1);
     let mut particles = Vec::with_capacity(particle_count);
     for index in 0..particle_count {
@@ -186,6 +186,13 @@ pub fn build_public_belief_state(
         belief_features,
         audit,
     }
+}
+
+fn with_rng_borrow<T>(rng: &mut Rng, f: impl FnOnce() -> T) -> T {
+    let taken = rng.clone();
+    let (out, used) = with_rng(taken, f);
+    *rng = used;
+    out
 }
 
 fn resample_hidden_zones(state: &mut GameState, observer_side: SideId, rng: &mut Rng) {
