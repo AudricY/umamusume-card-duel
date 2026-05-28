@@ -17,6 +17,7 @@ class RebelLoopState:
     promoted_checkpoint: str | None = None
     promoted_onnx: str | None = None
     promoted_wilson_lower: float | None = None
+    kl_anchor_checkpoint: str | None = None
     iterations: list[dict[str, Any]] = field(default_factory=list)
     consecutive_failures: int = 0
     halted: bool = False
@@ -120,6 +121,11 @@ def run_loop(args: argparse.Namespace, repo: Path, out_dir: Path) -> None:
         state.promoted_checkpoint = str(Path(args.init_from_checkpoint).resolve())
     if state.promoted_onnx is None and args.selfplay_onnx_path:
         state.promoted_onnx = str(Path(args.selfplay_onnx_path).resolve())
+    if state.kl_anchor_checkpoint is None:
+        if args.kl_anchor_checkpoint:
+            state.kl_anchor_checkpoint = str(Path(args.kl_anchor_checkpoint).resolve())
+        elif args.init_from_checkpoint:
+            state.kl_anchor_checkpoint = str(Path(args.init_from_checkpoint).resolve())
     save_loop_state(loop_dir / "orchestrator-state.json", state)
     events.emit_run(
         stage="rebel-orchestrator",
@@ -146,6 +152,8 @@ def run_loop(args: argparse.Namespace, repo: Path, out_dir: Path) -> None:
             state.promoted_checkpoint = record["checkpoint"]
             state.promoted_onnx = record["onnx"]
             state.promoted_wilson_lower = record["wilson_lower"]
+            if state.kl_anchor_checkpoint is None:
+                state.kl_anchor_checkpoint = record["checkpoint"]
             state.consecutive_failures = 0
         else:
             state.consecutive_failures += 1
@@ -168,6 +176,7 @@ def run_loop(args: argparse.Namespace, repo: Path, out_dir: Path) -> None:
         promoted_checkpoint=state.promoted_checkpoint,
         promoted_onnx=state.promoted_onnx,
         promoted_wilson_lower=state.promoted_wilson_lower,
+        kl_anchor_checkpoint=state.kl_anchor_checkpoint,
     )
     final = {
         "name": "R17-rebel-loop",
@@ -178,6 +187,7 @@ def run_loop(args: argparse.Namespace, repo: Path, out_dir: Path) -> None:
         "promoted_checkpoint": state.promoted_checkpoint,
         "promoted_onnx": state.promoted_onnx,
         "promoted_wilson_lower": state.promoted_wilson_lower,
+        "kl_anchor_checkpoint": state.kl_anchor_checkpoint,
         "iterations_run": len(state.iterations),
     }
     (out_dir / "manifest.json").write_text(json.dumps(final, indent=2) + "\n", encoding="utf8")
@@ -551,8 +561,19 @@ def ort_env(repo: Path) -> dict[str, str]:
     import os
 
     env = os.environ.copy()
+    lib_dirs: list[str] = []
+    nvidia_root = repo / "training" / ".venv" / "lib" / "python3.12" / "site-packages" / "nvidia"
+    if nvidia_root.is_dir():
+        lib_dirs.extend(str(p) for p in nvidia_root.glob("*/lib") if p.is_dir())
+    capi = repo / "training" / ".venv" / "lib" / "python3.12" / "site-packages" / "onnxruntime" / "capi"
+    if capi.is_dir():
+        lib_dirs.append(str(capi))
+    if lib_dirs:
+        existing = env.get("LD_LIBRARY_PATH", "")
+        existing_parts = existing.split(":") if existing else []
+        prepend = [p for p in lib_dirs if p not in existing_parts]
+        env["LD_LIBRARY_PATH"] = ":".join(prepend + existing_parts)
     if "ORT_DYLIB_PATH" not in env:
-        capi = repo / "training" / ".venv" / "lib" / "python3.12" / "site-packages" / "onnxruntime" / "capi"
         candidate = capi / "libonnxruntime.so.1.22.0"
         if candidate.exists():
             env["ORT_DYLIB_PATH"] = str(candidate)

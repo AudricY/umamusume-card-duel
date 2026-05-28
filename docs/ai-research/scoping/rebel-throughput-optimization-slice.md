@@ -351,6 +351,23 @@ command: sim-rebel-selfplay --seeds 1 --model-side player --particles 2 --search
 first decision: neuralLeafBatchRows=20 neuralLeafCalls=20 rolloutLeafCalls=0
 ```
 
+CUDA setup and smoke:
+
+```text
+training/.venv/bin/python -m pip install -r training/requirements-gpu.txt
+torch: 2.7.1+cu126, cuda_available=True, device=NVIDIA RTX 5000 Ada Generation Laptop GPU
+onnxruntime: 1.22.0, providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+command: sim-rebel-selfplay --seeds 1 --model-side player --particles 2 --search-iterations 4 --rollout-steps 5 --max-steps 20 --workers 1 --onnx-path /tmp/rebel-two-stage-smoke/loop/iter-1/policy.onnx --device cuda --cuda-device-id 0 --neural-leaf-weight 1.0 --neural-policy-weight 0.25 --neural-value-weight 0.25 --inference-batch-size 4
+result: loaded device=Cuda { device_id: 0 }; first decision neuralLeafBatchRows=20 neuralLeafCalls=20 rolloutLeafCalls=0.
+```
+
+CUDA training smoke:
+
+```text
+command: python training/rebel_orchestrator.py --out-dir /tmp/rebel-cuda-train-smoke --smoke --games 1 --particles 2 --search-iterations 4 --rollout-steps 5 --max-steps 20 --model-side player --workers 1 --epochs 1 --device cuda --amp --skip-export --skip-gates
+result: train_bc.py PASS, device=cuda, amp=true, ONNX roundtrip PASS.
+```
+
 Neural worker determinism:
 
 ```text
@@ -368,5 +385,5 @@ iteration 1 row diagnostics: neuralLeafWeight=1.0, neuralLeafBatchRows=4, neural
 
 Remaining work:
 
-- Run the neural leaf path on CUDA hardware and record GPU utilization/throughput. CPU ORT smoke proves wiring and determinism, but not GPU saturation.
+- Record a larger CUDA throughput/GPU-utilization sweep after choosing production values for `--particles`, `--workers`, and `--selfplay-inference-batch-size`.
 - For production, replace `--skip-gates` bootstrap promotion with real gate thresholds once the neural-leaf recipe is stable.
