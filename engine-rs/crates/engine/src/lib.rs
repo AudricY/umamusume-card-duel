@@ -11,6 +11,7 @@
 //! - `fingerprint` ↔ `backend/src/sim/stateFingerprint.ts`
 
 pub mod core;
+pub mod belief;
 pub mod deck_sampling;
 pub mod dispatcher;
 pub mod fingerprint;
@@ -20,5 +21,6 @@ pub mod headless_setup;
 pub mod inference;
 pub mod mcts;
 pub mod policy;
+pub mod rebel;
 
 pub use crate::core::random;
