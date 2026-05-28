@@ -17,6 +17,13 @@ work. Model-strength research lives in `docs/ai-research-backlog.md`.
 
 ## P0 - Highest Leverage
 
+0. **Schema-contract hardening preflight.**
+   Add one guard that checks TS action/state feature constants, Rust policy
+   feature dispatch, Python `ACTION_DIM`/state schema constants, card vocab
+   hash, checkpoint metadata, and ONNX metadata before training/export/eval.
+   Acceptance: a planted mismatch fails clearly before any long run starts.
+   Queue: `schema-contract-hardening`.
+
 1. **Canonical benchmark registry.**
    Define named protocols such as `rulebot_side_balanced_n120`,
    `rulebot_side_balanced_n1000`, `production_rollout_leaf_smoke`,
@@ -57,21 +64,28 @@ work. Model-strength research lives in `docs/ai-research-backlog.md`.
    legal-action count, and setup/first-mover features. Acceptance: state
    whether CIs separate and list contributing buckets.
 
-7. **Eval manifest comparator.**
+7. **Rust matchup balance dashboard.**
+   Use Rust `sim-eval-gate --deck-sampling=uniform` manifests as the source of
+   truth for per-matchup balance. Report Wilson interval, side split, average
+   points, terminal reason, turn count, fallback/no-op count, and hardest/easiest
+   matchup deltas. Acceptance: one generated report from an existing or new
+   uniform gate manifest. Queue: `matchup-balance-dashboard`.
+
+8. **Eval manifest comparator.**
    Add a tool that compares gate manifests and emits WR/Wilson deltas, side
    splits, points, terminal reasons, fallback/no-op counts, latency/progress
    timing where available, and exact config differences.
 
-8. **AI investigation workbench.**
+9. **AI investigation workbench.**
    Promote `AiTelemetryPanel` from raw JSON to grouped decision audits with
    export/import of a single state, so bad decisions can become fixtures.
 
-9. **Adaptive difficulty profiles.**
+10. **Adaptive difficulty profiles.**
    Expose transparent profiles such as Beginner = rule bot, Standard =
    value-head/adaptive fallback, Expert = rollout-leaf. Persist the choice
    locally.
 
-10. **GPU inference execution provider for sim/gate throughput.**
+11. **GPU inference execution provider for sim/gate throughput.**
     Add opt-in `--device cuda` to sim-eval-gate / sim-mcts-selfplay so ONNX
     inference can run on the local NVIDIA RTX 5000 Ada (or any CUDA box).
     Lifts the `Mutex<Session>` serialization that caps Slice 3c parallelism
@@ -83,20 +97,20 @@ work. Model-strength research lives in `docs/ai-research-backlog.md`.
 
 ## P2 - Measurement, Data Quality, And Deck UX
 
-11. **Decision trace schema validator.**
+12. **Decision trace schema validator.**
     Validate training examples, traces, self-play rows, outcomes, and manifests
     for seed/source/episode fields, schema-feature mismatch, card vocab ids,
     malformed legal actions, and invalid selected actions.
 
-12. **Benchmark artifact index.**
+13. **Benchmark artifact index.**
     Generate a searchable index of canonical manifests and reports, including
     config, seed ranges, side split, model artifact, and headline result.
 
-13. **OOD and coverage drift gate.**
+14. **OOD and coverage drift gate.**
     Compare new data/eval traces against the coverage audit slices and fail
     fast on drift in contested decision-state coverage.
 
-14. **Rich data bank at new throughput + deck-variety regime.**
+15. **Rich data bank at new throughput + deck-variety regime.**
     Contingent P2 data-direction probe (queue
     `rich-data-bank-at-throughput-variety-regime`). Tests whether the R7
     raw-policy SL plateau (wl <= 0.33 across R7/R8/R7.b.2/mcts-distill-v1) is
@@ -116,36 +130,36 @@ work. Model-strength research lives in `docs/ai-research-backlog.md`.
     a duplicate of the attention probe. Scope:
     `docs/ai-research/scoping/rich-data-bank-at-throughput-variety-regime.md`.
 
-15. **Deck Doctor.**
+16. **Deck Doctor.**
     Analyze deck composition and suggest legal, concrete improvements using
     card roles, energy curve, attacker lines, and trainer/supporter balance.
 
-16. **Tutorial scenarios with AI feedback.**
+17. **Tutorial scenarios with AI feedback.**
     Build small forced scenarios that teach tactical lessons using the same
     fixture machinery as the forced-state suite.
 
 ## P3 - Later Bets
 
-17. **GPU-fed MCTS scaling probe.**
+18. **GPU-fed MCTS scaling probe.**
     Tooling support for the research line in `docs/ai-research-backlog.md`;
     promote only if it changes the search-wrapped strength/latency frontier.
 
-18. **Search ablation matrix.**
+19. **Search ablation matrix.**
     Compare rollout leaf, value leaf, hybrid leaf, adaptive halt, simulation
     budgets, and root variants under named benchmarks.
 
-19. **Rule-bot-covered relabel corpus pipeline.**
+20. **Rule-bot-covered relabel corpus pipeline.**
     Productionize the P1 data recipe after the research acceptance criteria
     prove it is worth keeping.
 
-20. **Post-game why-did-I-lose investigator.**
+21. **Post-game why-did-I-lose investigator.**
     Summarize concrete game-swing moments from logs, legal actions, and MCTS
     deltas without overclaiming hidden intent.
 
-21. **Raw-policy reopen gate.**
+22. **Raw-policy reopen gate.**
     A placeholder only: require new coverage evidence and a pre-registered
     reopen criterion before spending compute on raw-policy SL again. (Item
-    14 is the active execution path for this gate; this item remains as the
+    15 is the active execution path for this gate; this item remains as the
     generic placeholder for future reopen criteria.)
 
 ## Closed Pointer

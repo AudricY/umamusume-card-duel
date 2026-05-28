@@ -6,81 +6,50 @@ in progress, scoping, or analysis docs. See `docs/ai-research/README.md`.
 
 ## Current Anchor
 
-**Two user directives 2026-05-22 — both must hold for any new training.**
+**Current directives and refinement as of 2026-05-28.**
 
-**(A) No more AI research or training without deck variety.** Every post-R110
-measurement was taken on a single near-mirror Matikane vs Matikane matchup;
-`defaultAiOpponentDeckId='riceShowerHaruUrara'` does not match any id in
-`aiPremadeDecks`, silently falling back to AI-flavor Matikane. 11 AI decks and
-2 player decks otherwise unused in sim. Featurizer is deck-agnostic (verified
-zero OOV across all decks). Training-bearing forward lines (W6-fix HP sweep,
-per-game-PFSP league retry, value-head data-program Stages 2/3, any new
-self-play loop) are BLOCKED until `deck-pair-sampling` Slices P0+1+2 land.
-Canonical scope: `docs/ai-research/scoping/deck-pair-sampling.md`; queue
-`deck-pair-sampling` (P1).
+**(A) No more AI research or training without deck variety.** This gate is now
+SATISFIED for the Rust/orchestrator path: `deck-pair-sampling` Slices P0+1+2
+landed 2026-05-22 and self-play defaults to uniform deck sampling while fixed
+eval gates remain available for historical comparability. Slice 3 v3.2
+uniform-gate also landed. Future training-bearing lines should keep
+`--deck-sampling=uniform` for self-play and report both fixed-matchup and
+uniform/diverse evidence when a result may be matchup-conditional. Canonical
+scope: `docs/ai-research/scoping/deck-pair-sampling.md`; queue
+`deck-pair-sampling`.
 
 **(B) All training and research uses per-Uma slot tokens (v3.2) from now on.**
 `uses_uma_slot_tokens=True` is mandatory for any new training; v3.0 (96-d /
 110-d) and v3.1 (164-d) become historical baselines only. v3.2 infra is
 landed end-to-end (C1-C7 bit-exact, Rust featurizer Slice 3, `serve_onnx`
-schema 3.2 dispatch). The existing 0.5811 tight-gate ceiling is a v3.0
-reference; **the v3.2 ceiling is unknown**. Tight-gate re-verdict #3 (C8
-iter-0, v3.2, n=120 `wl=0.5955`) is now the highest-leverage next measurement
-— it establishes the v3.2 ceiling under the current production rollout-leaf
-recipe. Production pin **stays at 96-d v3.0 (0.6479)** until a v3.2 ckpt
-clears it on the diverse-matchup gate.
+schema 3.2 dispatch). The v3.2 n=10k tight-gate ceiling is now measured:
+`wilson_lower=0.5877`, a marginal-positive +0.0066 over the v3.0 0.5811
+ceiling but still interval-overlapping. Production pin stays conservative
+until a v3.2-or-later checkpoint clears the fixed and matchup-diverse gates
+decisively.
 
 **Combined gate for any new training:** v3.2 architecture **AND**
-deck-variety sampling active. Measurement-only work on existing checkpoints
-(re-verdict #3 on v3.2; high-sim regime probe on v3.2 ckpts) remains
-unblocked.
+deck-variety sampling active. This no longer blocks the Rust/orchestrator
+training path; it remains a guardrail for legacy TS self-play or new tooling.
 
-As of 2026-05-18:
+**2026-05-28 refinement from repo/agent findings:** the highest-value next
+research is off the feature-tail axis. The repeated player-vs-opponent gap is
+the only signal clearly above Wilson/noise after v3.6/v3.7/v3.8/v5 schema and
+action-expression probes. Prioritize: (1) `per-side-asymmetry-probe`; (2)
+Rust-backed matchup/balance matrix and regression dashboard; (3) schema-contract
+hardening across TS/Rust/Python; then revisit W6 HP or architecture probes only
+with explicit gates.
 
-- **Production stays pinned 96-d.** Rollout-leaf MCTS at W6 iter-2 is the
-  current production claim: Wilson lower 0.6479 vs rule bot at the
-  side-balanced n=120 gate. Canonical details:
-  `docs/ai-research/progress/r15.md` and the R1-R14 historical record in
-  `docs/ai-performance-research-progress.md`.
-- **The iter-2-peak-then-regress is now a characterized schema-independent
-  recipe property.** Reproduced across BOTH 96-d and 110-d v3; 0.6479 is
-  itself W6's *transient iter-2 peak*, not a stable optimum. The R110 v3
-  reproduction was MARGINAL (best-promoted iter-2 0.6042 at n=120). Tight-gate
-  re-verdict 2026-05-21 at n=10,000 resolved the v3 ceiling to **Wilson-lower
-  0.5811 / point 0.5908 / upper 0.6004** — 0.6042 was n=120 high-tail noise.
-  Pin position unchanged; strength claim downgrades to MARGINAL-WEAK. Where
-  this backlog reads "0.6042 iter-2 ceiling" below, the honest comparator is
-  now 0.5811. Canonical: `docs/ai-research/progress/r110.md` §1 + §4d.
-- **The search-free/raw-policy SL line is closed.** Labels, objective,
-  representation, and label-shape all failed to approach the 0.40 gate
-  (R7/R8/R7.b.2/mcts-distill v1). Do not spend compute on another isolated
-  raw-policy tweak without explicit new evidence.
-- **Cheap inference remains a fallback, not the production claim.** Value-head
-  leaf plus adaptive-ratio=1.5 sits around the 0.39-0.45 Wilson-lower envelope
-  across seed ranges and is only a latency fallback.
-- **Side asymmetry is real enough to disclose.** Current rollout-leaf evidence
-  is aggregate side-balanced strength, not a per-side guarantee.
-- **User reprioritization (2026-05-19): hyperparameter tuning is
-  deprioritized.** Land ALL model-feature-upgrade and training-data-upgrade
-  items first, then return to the W6 regularization-dose sweep. The active
-  frontier is now (1) the cheap contested-state coverage pilot, then (2) the
-  R16-P2 per-Uma slot-token model-feature migration, then downstream data
-  items; the W6 loop anti-degradation **regularization-dose sweep is the
-  deprioritized HP tuning** and runs only after that block lands (still
-  user-gated). R16-P1 temporal/turn-state features were implemented and
-  **ablated NO-GO** (v3.1 ≈ v3.0, no Wilson-lower win;
-  `docs/ai-research/progress/r16.md`). Live operational state and forward
-  order are in `docs/ai-agent-state/queue.json`.
-- **Post-data-work ceiling path (2026-05-21 sequencing refinement).** The
-  iter-2-peak-then-rot ceiling has two layered fixes, cheapest first:
-  **(A)** W6 recipe-fix HP sweep — already-landed flags (cross-iter replay
-  + fixed KL anchor, commit `d44de3f`) at tuned-down strengths; cheap,
-  in-methodology, R110 A/B chain intact. **(B)** Value-head leaf at MCTS
-  (item 0d below) — R111 recipe-axis change; heavy, breaks the R110 A/B
-  chain. Run (B) only if (A) cannot clear the 0.6042 iter-2 ceiling — pay
-  the methodology-break cost at most once. This sequence sits behind the
-  active data block; nothing changes about the current forward order, only
-  what comes after it.
+- Production remains pinned to the 96-d v3.0 rollout-leaf line until a newer
+  checkpoint clears fixed and diverse gates decisively.
+- The R110 v3 fixed-matchup n=10k ceiling is `wl=0.5811`; v3.2's n=10k
+  ceiling is `wl=0.5877`, marginal-positive but interval-overlapping.
+- Search-free/raw-policy SL remains closed unless item 15 in
+  `docs/ai-feature-engineering-backlog.md` or equivalent new coverage evidence
+  explicitly reopens it.
+- Cheap value-head inference is a fallback only; value-head-leaf is closed as
+  a strength lever under current evidence.
+- W6 HP, high-sim, set-attention, and history-feature lines are user-gated and sequence behind the per-side asymmetry first cut.
 
 ## Active Search-Wrapped Frontier
 
@@ -198,13 +167,36 @@ Forward items, ordered by user prioritization 2026-05-21:
    side-conditioned eval routine; flips from 'blocked on evidence' to
    'actionable post `rust-port-orchestrator-wiring`'.
 
+5a. **Per-side asymmetry probe — P1, next research cut.**
+   Four independent tight-gate families now corroborate a roughly +0.055 to
+   +0.07 opponent-side advantage while schema/action-tail changes stay flat.
+   Cheapest first cut: heuristic AI per-side baseline, then featurizer
+   perspective-swap parity smoke, then MCTS root-side path audit if needed.
+   Acceptance: classify the gap as intrinsic-rule, feature/observation bug,
+   corpus-side bias, MCTS-side bug, or unresolved; only then schedule a fix or
+   balancing run. Queue: `per-side-asymmetry-probe`.
+
+5b. **Rust matchup/balance matrix — P1 support line.**
+   Use Rust `sim-eval-gate --deck-sampling=uniform` as the canonical
+   balance-eval path. Report per-matchup Wilson intervals, side split,
+   average points, terminal reasons, turn count, and fallback/no-op counts.
+   This is additive to fixed tight-gates and should feed product balance and
+   future PFSP-deck sampling decisions. Queue: `matchup-balance-dashboard`.
+
+5c. **Schema-contract hardening — P1 support line.**
+   Recent action-feature schema churn and the v33 correctness-fix hazard show
+   that TS/Rust/Python feature contracts can drift silently. Add a single
+   preflight that checks state/action dims, schema versions, card vocab hash,
+   ONNX metadata, and Rust/Python feature dispatch compatibility before
+   training/export/eval. Queue: `schema-contract-hardening`.
+
 6. **RL/PPO from a strong search-wrapped checkpoint — P3.**
    Later strategic bet. Do not use it to bypass search-wrapped gates above.
    Throughput-unlock note: Rust 140x partially lifts the self-play barrier
    that made PPO Phase J prohibitive. Worth a fresh scoping pass after
    `rust-port-orchestrator-wiring` lands.
 
-6b. **Deck-pair sampling for self-play and eval — P1, BLOCKING all new training (user directive 2026-05-22A).** Combines with directive 2026-05-22B (v3.2-only): any new training runs under v3.2 architecture AND uniform deck sampling.
+6b. **Deck-pair sampling for self-play and eval — DONE-P1, guardrail remains.** Combines with directive 2026-05-22B (v3.2-only): any new training runs under v3.2 architecture AND uniform deck sampling.
    Surfaced 2026-05-22 via deck-selection investigation: every post-R110
    measurement (the 0.5811 tight-gate ceiling, the iter-2-peak-then-rot
    characterization, the v3.0/v3.1/v3.2 representation verdicts) was taken on
@@ -213,12 +205,13 @@ Forward items, ordered by user prioritization 2026-05-21:
    `aiPremadeDecks`; the fallback silently lands on `ai_decks.first()`
    (AI-flavor Matikane). 11 AI decks and 2 player decks otherwise unused in
    sim. Featurizer is deck-agnostic (global card vocab covers every card in
-   every deck, zero OOV verified). Re-surfaces archived items §6 + §13 from
-   `docs/archive/ai-research/ai-performance-research-backlog.md`. Lands
-   ADDITIVE — fixed-matchup tight-gates stay; diverse-matchup gate is a second
-   gate. Scope: `docs/ai-research/scoping/deck-pair-sampling.md`; queue
-   `deck-pair-sampling`. P0 (defaults-bug fix + deck-legality smoke) is the
-   cheapest autonomous step; Slices 1-3 are user-gated.
+   every deck, zero OOV verified). P0+1+2 landed 2026-05-22; Slice 3 v3.2
+   first-gate also landed. Fixed-matchup tight-gates stay; diverse-matchup
+   gates are additive. Remaining work is measurement/tooling: v3.0 fixed-to-
+   uniform n=10k if needed, PFSP-weighted deck sampling only with a new
+   weighting rule and explicit gate, and the matchup/balance dashboard in 5b.
+   Scope: `docs/ai-research/scoping/deck-pair-sampling.md`; queue
+   `deck-pair-sampling`.
 
 7. **Per-game PFSP league retry — P3, deferred-revisit.**
    Infra already built (`training/opponent_pool.py`: snapshots, PFSP weights,
@@ -286,8 +279,10 @@ section).
   explicitly calls for it" gate is now SATISFIED by the 2026-05-19
   reprioritization. Still sequence it AFTER the cheap coverage pilot
   (leverage-per-cost); it remains a 3–4-day model/ONNX migration.
-- Do not re-open representation/capacity tuning off the R110 MARGINAL band;
-  the forward line is the loop-recipe axis only (`docs/ai-research/progress/r110.md`).
+- Do not re-open feature-tail/schema/action-expressivity tuning off the R110
+  MARGINAL band. v3.6/v3.7/v3.8/v5 all failed to break the roughly 0.59
+  tight-gate ceiling; the forward line is off-axis diagnosis first,
+  especially per-side asymmetry (`docs/ai-research/progress/r110.md`).
 - Carve-out from "do not re-open representation/capacity tuning":
   set-attention architecture probe (item 3b) is the *trunk-shape* axis
   (inductive bias), not capacity tuning and not feature-schema; user-gated,
