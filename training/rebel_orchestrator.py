@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -157,6 +158,11 @@ def run_loop(args: argparse.Namespace, repo: Path, out_dir: Path) -> None:
         record = run_loop_iteration(args, repo, loop_dir, iteration, state, events)
         state.iterations.append(record)
         if record["promote"]:
+            record["pool_snapshot"] = snapshot_promoted_artifacts(loop_dir, record)
+            (Path(record["dir"]) / "manifest.json").write_text(
+                json.dumps(record, indent=2) + "\n",
+                encoding="utf8",
+            )
             state.promoted_checkpoint = record["checkpoint"]
             state.promoted_onnx = record["onnx"]
             state.promoted_wilson_lower = record["wilson_lower"]
@@ -399,6 +405,34 @@ def preflight_release_binaries(repo: Path, events: EventWriter | None = None) ->
             "Rebuild with: (cd engine-rs && cargo build --release -p sim-cli "
             "--bin sim-rebel-selfplay --bin sim-eval-gate)."
         )
+
+
+def snapshot_promoted_artifacts(loop_dir: Path, record: dict[str, Any]) -> dict[str, Any]:
+    iteration = int(record["iteration"])
+    snapshot_dir = loop_dir / "pool" / f"iter-{iteration:03d}"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_src = Path(record["checkpoint"])
+    onnx_src = Path(record["onnx"])
+    checkpoint_dst = snapshot_dir / "checkpoint.pt"
+    onnx_dst = snapshot_dir / "policy.onnx"
+    shutil.copy2(checkpoint_src, checkpoint_dst)
+    shutil.copy2(onnx_src, onnx_dst)
+
+    meta_src = onnx_src.with_suffix(onnx_src.suffix + ".meta.json")
+    meta_dst = None
+    if meta_src.exists():
+        meta_dst = snapshot_dir / meta_src.name
+        shutil.copy2(meta_src, meta_dst)
+
+    return {
+        "iteration": iteration,
+        "dir": str(snapshot_dir),
+        "checkpoint": str(checkpoint_dst),
+        "onnx": str(onnx_dst),
+        "onnx_meta": str(meta_dst) if meta_dst else None,
+        "wilson_lower": record.get("wilson_lower"),
+    }
 
 
 def resolve_kl_anchor(
