@@ -433,12 +433,34 @@ fn advance_rollout_wave(
         }
     }
 
-    // Phase 2 — one batched network call for every decision/leaf node this wave.
+    // Phase 2 — one batched network call for every UNIQUE decision/leaf node this
+    // wave. Many requests share byte-identical model inputs: at observer decision
+    // nodes every particle sees the same masked public observation (the
+    // public-belief info-set property), and chance-iteration copies coincide until
+    // chance diverges. Deduplicating collapses the redundant forward passes
+    // (~60% of leaves at the measured relational config). Identical inputs
+    // deterministically yield identical outputs, so every distilled target is
+    // byte-for-byte unchanged. belief_features is constant across the wave, so the
+    // dedup key is just (observation, legal_actions); first-occurrence order is
+    // canonical because req_obs is built in canonical rollout order, keeping the
+    // unique batch deterministic and invariant to particle ordering.
     if !req_obs.is_empty() {
-        let batch: Vec<(&PublicObservation, &[LegalAiAction], Option<&[f32]>)> = req_obs
+        let mut key_to_slot: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::with_capacity(req_obs.len());
+        let mut unique_req: Vec<usize> = Vec::new();
+        let mut slot_of_req: Vec<usize> = Vec::with_capacity(req_obs.len());
+        for k in 0..req_obs.len() {
+            let key = serde_json::to_string(&(&req_obs[k], &req_legal[k]))
+                .expect("serialize rebel leaf dedup key");
+            let slot = *key_to_slot.entry(key).or_insert_with(|| {
+                unique_req.push(k);
+                unique_req.len() - 1
+            });
+            slot_of_req.push(slot);
+        }
+        let batch: Vec<(&PublicObservation, &[LegalAiAction], Option<&[f32]>)> = unique_req
             .iter()
-            .zip(req_legal.iter())
-            .map(|(obs, legal)| (obs, legal.as_slice(), Some(belief_features)))
+            .map(|&k| (&req_obs[k], req_legal[k].as_slice(), Some(belief_features)))
             .collect();
         let predictions = match session.predict_v3_batch_with_belief(&batch) {
             Ok(predictions) => predictions,
@@ -446,8 +468,12 @@ fn advance_rollout_wave(
             // the derived policy/value targets.
             Err(e) => panic!("ReBeL batched leaf inference failed: {e}"),
         };
-        *evals += predictions.len();
-        for (k, prediction) in predictions.into_iter().enumerate() {
+        // Count LOGICAL leaf evaluations (one per request) so the recorded
+        // search-work diagnostic is identical with or without dedup; dedup only
+        // reduces the count of actual network forward passes (predictions.len()).
+        *evals += req_obs.len();
+        for k in 0..req_obs.len() {
+            let prediction = &predictions[slot_of_req[k]];
             let index = req_rollout[k];
             let mover = req_mover[k];
             let observer_value = to_observer(prediction.value as f64, mover, observer);

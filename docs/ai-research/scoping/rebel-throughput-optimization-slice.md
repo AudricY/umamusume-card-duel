@@ -589,22 +589,60 @@ standalone bench hangs single-threaded at CUDA session load unless the ORT env
 (`LD_LIBRARY_PATH` for venv nvidia/ORT libs + `ORT_DYLIB_PATH`) is set — the
 harness now replicates `rebel_orchestrator.ort_env`.
 
-## Follow-up — wave-batch the policy-improvement rollout (2026-05-29)
+## Follow-up — wave-batch the policy-improvement rollout (2026-05-29) — LANDED
 
-The search rewrite (`rebel/mod.rs`; see `progress/r17.md` §9) replaced the single
-batched one-ply leaf with a per-action rollout to `max_depth` modeled-turn steps.
-Each rollout step issues one `predict_v3_with_belief`, batched only *across
-concurrent workers* by the dispatcher — the in-tree rollout predicts are no longer
-collected into one super-batch the way the old leaf was. That trades throughput for
-correctness (a real improvement operator + no zero-leaf bias). The R20 numbers above
-were measured on the OLD one-ply leaf and no longer characterize the new search.
+**Status: implemented in the §9 search rewrite itself** (not deferred).
+`run_public_belief_search` carries a `Vec<Rollout>` advanced in **lockstep depth**;
+`advance_rollout_wave` issues one batched `predict_v3_batch_with_belief` per depth
+wave (≈`max_depth` batched calls/decision), restoring intra-decision batching
+without changing the algorithm. The R21 result paragraph above already reflects this
+(34 g/s, mean_fill ~329). The R20 numbers earlier in this doc were measured on the
+OLD one-ply leaf and do not characterize the current search — see the re-baseline
+below.
 
-Separable optimization: advance all `(particle × root-action × iteration)` rollouts
-of a decision in **lockstep depth** and issue one batched
-`predict_v3_batch_with_belief` per depth wave (size up to particles·actions·iters),
-instead of per-rollout sequential single predicts. That restores intra-decision
-batching (≈`max_depth` batched calls/decision) without changing the algorithm.
-Pre-req: refactor `run_public_belief_search` to carry a `Vec<Rollout>` advanced in
-lockstep (the current sequential structure was chosen for correctness-first
-clarity). Not a correctness blocker — size the first corrected run (R21) small
-enough to run under cross-worker batching alone.
+## 2026-05-29 — Re-baseline + within-wave eval dedup on the v6 relational model (2.5×)
+
+Measured on the **h128/d3 relational model (0.752M params, `runs/rebel-v6-smoke/init/policy.onnx`)**
+at the live v6 self-improvement config (`particles 8 / iterations 16 / max_depth 8 /
+neural-policy=value=0.25`).
+
+**The two dispatch levers are NULL for this model** (unlike R20's smaller model,
+where batch-size was a 3.3× lever). It is GPU-**compute**-bound through the single
+inference-dispatch thread (~84-94% util), so neither bigger batches nor more workers
+help — confirming the inference-bound profile:
+
+```text
+batch-size (workers=4):  32→0.469  64→0.467  128→0.463  256→0.432  512→0.404 g/s   (flat→worse; batches collapse 3496→321, util 84→94%)
+workers    (bs=64):       4→0.518   8→0.523  12→0.514  16→0.498  24→0.493 g/s     (w8 peak = +1%, then worse: more workers contend with the dispatch thread)
+```
+
+The live loop's `--selfplay-inference-batch-size 32 --workers 4` was therefore
+already near-optimal; do NOT carry R20's batch=512 recommendation to this model.
+
+**The real lever is forward-pass COUNT.** Within each lockstep wave many requests
+share byte-identical model inputs — at observer decision nodes every particle sees
+the same masked public observation (the info-set property), and chance-iteration
+copies coincide until chance diverges. Measured `unique/total ≈ 0.35-0.39` ⇒ **~61%
+of leaf evaluations are redundant**. `advance_rollout_wave` now deduplicates them:
+unique `(observation, legal_actions)` inputs are evaluated once (belief_features is
+constant wave-wide) and the prediction is scattered to every sharing rollout
+(first-occurrence order keeps the unique batch deterministic). `particleActionEvaluations`
+still counts logical leaves, so the diagnostic/row schema is unchanged.
+
+**Result (24-game GPU, relational config):** `0.469 → 1.158 g/s = 2.47×`; dispatcher
+`requests 216840 → 83488` (−61.5%, exactly the dedup ratio). ~9× on a single CPU
+game (pure single-thread inference). Commit: see `perf(rebel)` dedup commit.
+
+**Determinism validation:**
+- CPU (the single-thread deterministic reference, the only path the worker-determinism
+  contract was ever verified on): clean vs dedup **byte-identical** ⇒ dedup is
+  algorithmically exact.
+- GPU: clean vs dedup differ by **max 2.67e-5** with **zero** structural / policy-argmax
+  / sampled-action mismatches. A control shows the **clean** binary ALSO differs
+  workers-1-vs-4 on GPU, so this is **pre-existing GPU batch-composition FP
+  nondeterminism, not introduced by dedup** (the loop already runs GPU workers=4).
+- `rebel::` unit tests 3/3 incl. `info_set_invariant_under_particle_permutation`.
+
+**Next lever (out of scope here, needs a quality call):** further throughput requires
+cutting the *logical* search work — fewer particles / iterations / depth (changes the
+target) — or FP16 / TensorRT EP (changes numerics). Both are user-gated.
