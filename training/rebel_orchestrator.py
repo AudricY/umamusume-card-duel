@@ -1429,7 +1429,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gate-games", type=int, default=20)
     parser.add_argument("--gate-seed-start", type=int, default=90000)
     parser.add_argument("--gate-sims", type=int, default=100)
-    parser.add_argument("--gate-leaf", choices=["rollout", "value-head"], default="rollout")
+    # Default value-head: ReBeL self-play deploys the model with a neural leaf
+    # (--neural-leaf-weight 1.0, the R20-corrected setup), and the value head is
+    # the primary thing self-play trains. A rollout-leaf gate bypasses the value
+    # head entirely (it only exercises the policy prior), so it is structurally
+    # blind to what the loop optimizes. value-head leaf matches the deployed
+    # configuration and is the "intended matched recipe" recorded in the
+    # AlphaZero-style-training postmortem; eval_gate.rs's rollout default is a
+    # pre-/predict stand-in. Pass --gate-leaf rollout to opt back into the
+    # model-independent terminal-outcome gate (robust to value miscalibration).
+    parser.add_argument("--gate-leaf", choices=["rollout", "value-head"], default="value-head")
     parser.add_argument("--gate-max-steps", type=int, default=500)
     parser.add_argument("--gate-workers", type=int, default=1)
     parser.add_argument("--gate-batch-size", type=int, default=1)
