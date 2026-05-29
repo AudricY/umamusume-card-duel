@@ -658,7 +658,18 @@ would need an autocast re-export or the TensorRT EP. fp8 needs TensorRT + calibr
 perturb the value/policy *training targets* this binary emits — the opposite of the
 R20 target-fidelity fix.
 
-**The two real remaining levers** (bigger, user-gated): (1) cut *logical* search work
-— fewer particles / iterations / depth (changes the target; quality call); (2) break
-the single-thread dispatch serialization — multiple CUDA streams / multi-threaded
-inference (engineering change). The cheap, exact win (dedup) is taken.
+**GPU-parallelism is NOT a lever (measured, falsified).** Running two
+sim-rebel-selfplay processes concurrently on the one GPU gives **0.843 g/s aggregate
+vs 1.199 g/s for a single process** — NEGATIVE scaling (each drops to ~0.43 g/s). The
+GPU cannot parallelize this many-tiny-kernel workload; a second CUDA context only adds
+contention. So multi-stream / multi-threaded dispatch / process-sharding will NOT
+help — the GPU is the hard wall, serialized on kernel-launch/scheduling for the 0.75M
+model's tiny matmuls.
+
+**The ONE real remaining lever is pass COUNT** (throughput ∝ 1/passes, proven by
+dedup): cut *logical* search work — fewer particles / iterations / depth. This is a
+search-quality tradeoff (user-gated), not a model-architecture or engine change. The
+per-pass cost is near its floor on this GPU; a cheaper model (smaller / non-attention
+trunk) would lower per-pass cost but changes the chosen architecture. The cheap,
+exact, no-quality-cost win (dedup, 2.5×) is taken; everything past it trades quality,
+changes the architecture, or needs different hardware.
