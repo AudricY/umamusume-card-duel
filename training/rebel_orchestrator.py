@@ -28,7 +28,6 @@ class RebelLoopState:
 def main() -> None:
     args = parse_args()
     repo = Path(__file__).resolve().parents[1]
-    validate_leaf_args(args)
     resolve_runtime_devices(args, repo)
     out_dir = Path(args.out_dir)
     if not out_dir.is_absolute():
@@ -93,7 +92,8 @@ def main() -> None:
             "seed_start": args.seed_start,
             "particles": args.particles,
             "search_iterations": args.search_iterations,
-            "rollout_steps": args.rollout_steps,
+            "max_depth": args.max_depth,
+            "policy_temperature": args.policy_temperature,
             "max_steps": args.max_steps,
             "workers": args.workers,
             "epochs": args.epochs,
@@ -108,8 +108,6 @@ def main() -> None:
             "selfplay_device": effective_selfplay_device(args),
             "neural_policy_weight": args.neural_policy_weight,
             "neural_value_weight": args.neural_value_weight,
-            "neural_leaf_weight": args.neural_leaf_weight,
-            "allow_rollout_leaf": args.allow_rollout_leaf,
             "selfplay_inference_batch_size": args.selfplay_inference_batch_size,
             "selfplay_inference_max_wait_us": args.selfplay_inference_max_wait_us,
         },
@@ -366,8 +364,8 @@ def run_loop_iteration(
         "row_summary": row_summary,
         "train_row_summary": train_row_summary,
         "replay": replay_summary,
-        "neural_leaf_weight": args.neural_leaf_weight,
-        "allow_rollout_leaf": args.allow_rollout_leaf,
+        "max_depth": args.max_depth,
+        "policy_temperature": args.policy_temperature,
         "gates": gates,
         "wilson_lower": wilson_lower,
         "previous_wilson_lower": previous,
@@ -855,8 +853,10 @@ def build_selfplay_cmd(
             str(args.particles),
             "--search-iterations",
             str(args.search_iterations),
-            "--rollout-steps",
-            str(args.rollout_steps),
+            "--max-depth",
+            str(args.max_depth),
+            "--policy-temperature",
+            str(args.policy_temperature),
             "--max-steps",
             str(args.max_steps),
             "--model-side",
@@ -885,34 +885,13 @@ def build_selfplay_cmd(
                 str(args.neural_policy_weight),
                 "--neural-value-weight",
                 str(args.neural_value_weight),
-                "--neural-leaf-weight",
-                str(args.neural_leaf_weight),
                 "--inference-batch-size",
                 str(args.selfplay_inference_batch_size),
                 "--inference-max-wait-us",
                 str(args.selfplay_inference_max_wait_us),
             ]
         )
-    if getattr(args, "allow_rollout_leaf", False):
-        cmd.append("--allow-rollout-leaf")
     return cmd
-
-
-def validate_leaf_args(args: argparse.Namespace) -> None:
-    """Guard against shipping the info-incorrect determinized rollout leaf.
-
-    The determinized rollout leaf is information-incorrect; the loop must train
-    the value head on the grounded MC outcome with a pure neural leaf
-    (--neural-leaf-weight 1.0). Any blend toward the rollout leaf requires an
-    explicit opt-in via --allow-rollout-leaf (ablation only).
-    """
-    if float(args.neural_leaf_weight) < 1.0 and not args.allow_rollout_leaf:
-        raise SystemExit(
-            "Refusing to run: --neural-leaf-weight "
-            f"{args.neural_leaf_weight} < 1.0 blends in the information-incorrect "
-            "determinized rollout leaf. Pass --allow-rollout-leaf to opt into "
-            "this ablation, or set --neural-leaf-weight 1.0 for the corrected loop."
-        )
 
 
 def resolve_runtime_devices(args: argparse.Namespace, repo: Path) -> None:
@@ -1028,6 +1007,18 @@ def build_train_cmd(
         train_cmd.append("--uma-slot-tokens")
     if getattr(args, "model_variant", "mlp") != "mlp":
         train_cmd.extend(["--model-variant", str(args.model_variant)])
+    # T1.3 / T2.6 / model-feature flags forwarded to the ReBeL distill trainer
+    # (train_bc.py --data-mode rebel). All default to the train_bc.py defaults,
+    # so unset is byte-identical (no extra cmd tokens). Mirrors the
+    # --uma-slot-tokens conditional-append pattern directly above.
+    if getattr(args, "value_loss_mode", "mse") != "mse":
+        train_cmd.extend(["--value-loss-mode", str(args.value_loss_mode)])
+    if getattr(args, "side_swap_augment", False):
+        train_cmd.append("--side-swap-augment")
+    if getattr(args, "card_features", False):
+        train_cmd.append("--card-features")
+    if getattr(args, "no_contextual_actions", False):
+        train_cmd.append("--no-contextual-actions")
     if args.kl_anchor_checkpoint:
         train_cmd.extend(["--kl-anchor-checkpoint", args.kl_anchor_checkpoint])
     if getattr(args, "events_out", None):
@@ -1364,7 +1355,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--particles", type=int, default=16)
     parser.add_argument("--search-iterations", type=int, default=16)
-    parser.add_argument("--rollout-steps", type=int, default=40)
+    parser.add_argument("--max-depth", type=int, default=8)
+    parser.add_argument("--policy-temperature", type=float, default=0.5)
     parser.add_argument("--max-steps", type=int, default=120)
     parser.add_argument("--model-side", choices=["player", "opponent", "both"], default="both")
     parser.add_argument("--deck-sampling", default="fixed")
@@ -1375,17 +1367,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--selfplay-cuda-device-id", type=int, default=0)
     parser.add_argument("--neural-policy-weight", type=float, default=0.25)
     parser.add_argument("--neural-value-weight", type=float, default=0.25)
-    parser.add_argument("--neural-leaf-weight", type=float, default=1.0)
-    parser.add_argument(
-        "--allow-rollout-leaf",
-        action="store_true",
-        default=False,
-        help=(
-            "Opt into the information-incorrect determinized rollout leaf in "
-            "ReBeL search (ablation only). Without this flag a "
-            "--neural-leaf-weight < 1.0 is rejected at preflight."
-        ),
-    )
     parser.add_argument("--selfplay-inference-batch-size", type=int, default=1)
     parser.add_argument("--selfplay-inference-max-wait-us", type=int, default=2_000)
     parser.add_argument("--epochs", type=int, default=1)
@@ -1413,6 +1394,21 @@ def parse_args() -> argparse.Namespace:
                              "aware); requires --uma-slot-tokens. Rides the existing "
                              "belief (8-input) ONNX dispatch with no graph-signature "
                              "change.")
+    # T1.3 / T2.6 / model-feature flags forwarded to train_bc.py (see
+    # build_train_cmd). All default to the train_bc.py defaults so unset is
+    # byte-identical to pre-change ReBeL loops.
+    parser.add_argument("--value-loss-mode", choices=["mse", "bce"], default="mse",
+                        help="T1.3: forwarded to train_bc.py --value-loss-mode "
+                             "(mse default; bce trains value as win-probability).")
+    parser.add_argument("--side-swap-augment", action="store_true",
+                        help="T2.6: forwarded to train_bc.py --side-swap-augment "
+                             "(value-only side-swapped training copies).")
+    parser.add_argument("--card-features", action="store_true",
+                        help="Forwarded to train_bc.py --card-features "
+                             "(ModelConfig.uses_card_features=True).")
+    parser.add_argument("--no-contextual-actions", action="store_true",
+                        help="Forwarded to train_bc.py --no-contextual-actions "
+                             "(ModelConfig.relational_contextual_actions=False).")
     parser.add_argument("--kl-anchor-checkpoint", default=None)
     parser.add_argument("--kl-anchor-weight", type=float, default=0.0)
     parser.add_argument("--entropy-bonus", type=float, default=0.0)

@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from events import EventWriter
 from uma_ai.dataset import JsonlPolicyDataset, collate_policy_batch
@@ -15,6 +15,7 @@ from uma_ai.rebel_dataset import RebelSelfPlayDataset, collate_rebel_selfplay_ba
 from uma_ai.selfplay_dataset import MctsSelfPlayDataset, collate_mcts_selfplay_batch
 from uma_ai.features import ACTION_DIM, ACTION_FEATURE_SCHEMA_VERSION, STATE_DIM, card_vocab_metadata, schema_version_for_state_dim
 from uma_ai.model import CandidatePolicyNet, ModelConfig
+from uma_ai.side_swap import SideSwapAugmentedDataset
 
 
 def main() -> None:
@@ -100,8 +101,32 @@ def main() -> None:
         loader_kwargs["num_workers"] = dataloader_workers
         loader_kwargs["pin_memory"] = True
         loader_kwargs["persistent_workers"] = True
+    # T2.6 side-swap augmentation (opt-in, --side-swap-augment). Wrap ONLY the
+    # training stream: `SideSwapAugmentedDataset` doubles the base dataset
+    # (even global idx = original row, odd = its value-only perspective-swapped
+    # copy with NEGATED value target and policy_loss_scale=0.0). Train indices
+    # `i` are remapped to `[2*i, 2*i+1]` so each training row contributes both
+    # itself and its swap. Validation, diagnostics, and dataset summaries keep
+    # the unwrapped base dataset + base indices — we never evaluate on the
+    # synthetic swapped rows (the value-only swap is a training-time symmetry
+    # prior, not a held-out distribution). Default OFF → byte-identical.
+    if args.side_swap_augment:
+        train_dataset: Dataset = SideSwapAugmentedDataset(
+            dataset,
+            state_dim=state_dim,
+            uses_uma_slot_tokens=uses_uma_slot_tokens,
+            ablations=ablations,
+        )
+        train_subset_indices = [
+            swapped_index
+            for base_index in train_indices
+            for swapped_index in (2 * base_index, 2 * base_index + 1)
+        ]
+    else:
+        train_dataset = dataset
+        train_subset_indices = train_indices
     train_loader = DataLoader(
-        Subset(dataset, train_indices),
+        Subset(train_dataset, train_subset_indices),
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
@@ -120,7 +145,15 @@ def main() -> None:
     # (auto-gates 5-input vs 7-input ONNX graph) and serve_onnx (schema
     # dispatch). No CLI flag on the exporter side — the pivot is the
     # checkpoint config, per C5.
-    config = ModelConfig(
+    # T-flag-threading: `--card-features` / `--no-contextual-actions` drive the
+    # two model-side ModelConfig fields owned by model.py
+    # (`uses_card_features`, `relational_contextual_actions`). They are added to
+    # ModelConfig only via the cross-agent contract; gate the kwargs on the
+    # field actually existing on ModelConfig so this trainer stays runnable even
+    # if model.py has not yet landed those fields (forward-compatible). Once the
+    # fields exist the kwargs flow through unchanged. ModelConfig.from_dict
+    # already filters unknown keys, so a checkpoint round-trips cleanly.
+    model_config_kwargs: dict[str, Any] = dict(
         state_dim=state_dim,
         hidden_dim=args.hidden_dim,
         depth=args.depth,
@@ -133,6 +166,12 @@ def main() -> None:
         q_value_scalar_bias=args.q_value_scalar_bias,
         uses_belief_features=args.data_mode == "rebel" or bool(args.belief_features),
     )
+    _model_config_fields = set(ModelConfig.__dataclass_fields__)
+    if "uses_card_features" in _model_config_fields:
+        model_config_kwargs["uses_card_features"] = bool(args.card_features)
+    if "relational_contextual_actions" in _model_config_fields:
+        model_config_kwargs["relational_contextual_actions"] = not bool(args.no_contextual_actions)
+    config = ModelConfig(**model_config_kwargs)
     model = CandidatePolicyNet(config).to(device)
     # distill-throughput-spike Phase 1: torch.compile is applied AFTER
     # checkpoint load + optimizer construction (see further below) so the
@@ -244,8 +283,9 @@ def main() -> None:
             entropy_bonus=args.entropy_bonus,
             policy_weight=args.policy_weight,
             q_value_weight=args.q_value_weight,
+            value_loss_mode=args.value_loss_mode,
         )
-        val_metrics = evaluate(model, val_loader, value_weight=args.value_weight, q_value_weight=args.q_value_weight) if val_loader else {}
+        val_metrics = evaluate(model, val_loader, value_weight=args.value_weight, q_value_weight=args.q_value_weight, value_loss_mode=args.value_loss_mode) if val_loader else {}
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
         history.append(record)
         if args.verbose:
@@ -275,8 +315,8 @@ def main() -> None:
                     tb_writer.add_scalar(f"val/{key}", float(value), epoch)
             tb_writer.flush()
 
-    final_train = evaluate(model, train_loader, value_weight=args.value_weight, q_value_weight=args.q_value_weight)
-    final_val = evaluate(model, val_loader, value_weight=args.value_weight, q_value_weight=args.q_value_weight) if val_loader else {}
+    final_train = evaluate(model, train_loader, value_weight=args.value_weight, q_value_weight=args.q_value_weight, value_loss_mode=args.value_loss_mode)
+    final_val = evaluate(model, val_loader, value_weight=args.value_weight, q_value_weight=args.q_value_weight, value_loss_mode=args.value_loss_mode) if val_loader else {}
     if tb_writer is not None:
         for key, value in final_train.items():
             if isinstance(value, (int, float)) and value == value:
@@ -287,8 +327,8 @@ def main() -> None:
         tb_writer.flush()
         tb_writer.close()
     diagnostics = {
-        "train": evaluate_grouped(model, dataset, train_indices, value_weight=args.value_weight, q_value_weight=args.q_value_weight, batch_size=args.batch_size, collate_fn=collate_fn),
-        "val": evaluate_grouped(model, dataset, val_indices, value_weight=args.value_weight, q_value_weight=args.q_value_weight, batch_size=args.batch_size, collate_fn=collate_fn) if val_indices else {},
+        "train": evaluate_grouped(model, dataset, train_indices, value_weight=args.value_weight, q_value_weight=args.q_value_weight, batch_size=args.batch_size, collate_fn=collate_fn, value_loss_mode=args.value_loss_mode),
+        "val": evaluate_grouped(model, dataset, val_indices, value_weight=args.value_weight, q_value_weight=args.q_value_weight, batch_size=args.batch_size, collate_fn=collate_fn, value_loss_mode=args.value_loss_mode) if val_indices else {},
     }
     rng_state = {
         "torch": torch.get_rng_state().tolist(),
@@ -781,6 +821,7 @@ def run_epoch(
     entropy_bonus: float = 0.0,
     policy_weight: float = 1.0,
     q_value_weight: float = 0.0,
+    value_loss_mode: str = "mse",
 ) -> dict[str, float]:
     model.train()
     totals = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "q_value_loss": 0.0, "accuracy": 0.0, "count": 0.0, "kl_loss": 0.0, "entropy": 0.0}
@@ -816,6 +857,12 @@ def run_epoch(
                 logits, values = outputs  # type: ignore[misc]
                 q_values = None
             weights = normalized_weights(batch["sample_weights"])
+            # T2.6 side-swap: per-row POLICY multiplier (1.0 for normal rows,
+            # 0.0 for value-only swapped copies). `.get(...)` returns None when
+            # the augmentation is off (collator omits the key) — then policy
+            # weights stay exactly `weights`, byte-identical to pre-T2.6.
+            policy_loss_scales = batch.get("policy_loss_scales")
+            policy_weights = weights if policy_loss_scales is None else weights * policy_loss_scales
             policy_targets = batch.get("policy_targets")
             if policy_targets is not None:
                 # R12 phase C: soft cross-entropy on the masked log-softmax.
@@ -824,10 +871,10 @@ def run_epoch(
                 # sum even if policy_targets[i] happens to be > 0.
                 log_probs = masked_log_softmax_logits(logits, batch["action_mask"])
                 per_row = -(policy_targets * log_probs).sum(dim=1)
-                policy_loss = weighted_mean(per_row, weights)
+                policy_loss = weighted_mean(per_row, policy_weights)
             else:
-                policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
-            value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
+                policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), policy_weights)
+            value_loss = weighted_mean(value_loss_per_row(values, batch["value_targets"], value_loss_mode), weights)
             q_value_loss = q_loss_from_batch(q_values, batch)
             kl_loss = torch.zeros((), device=logits.device)
             if anchor_model is not None and kl_anchor_weight > 0.0:
@@ -906,6 +953,7 @@ def evaluate(
     *,
     value_weight: float,
     q_value_weight: float = 0.0,
+    value_loss_mode: str = "mse",
 ) -> dict[str, float]:
     if loader is None:
         return {}
@@ -932,14 +980,17 @@ def evaluate(
             logits, values = outputs  # type: ignore[misc]
             q_values = None
         weights = normalized_weights(batch["sample_weights"])
+        # T2.6 side-swap: per-row policy multiplier; None when augmentation off.
+        policy_loss_scales = batch.get("policy_loss_scales")
+        policy_weights = weights if policy_loss_scales is None else weights * policy_loss_scales
         policy_targets = batch.get("policy_targets")
         if policy_targets is not None:
             log_probs = masked_log_softmax_logits(logits, batch["action_mask"])
             per_row = -(policy_targets * log_probs).sum(dim=1)
-            policy_loss = weighted_mean(per_row, weights)
+            policy_loss = weighted_mean(per_row, policy_weights)
         else:
-            policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), weights)
-        value_loss = weighted_mean(nn.functional.mse_loss(values, batch["value_targets"], reduction="none"), weights)
+            policy_loss = weighted_mean(nn.functional.cross_entropy(logits, batch["targets"], reduction="none"), policy_weights)
+        value_loss = weighted_mean(value_loss_per_row(values, batch["value_targets"], value_loss_mode), weights)
         q_value_loss = q_loss_from_batch(q_values, batch)
         loss = policy_loss + value_loss * value_weight + q_value_loss * q_value_weight
         accumulate(totals, loss, policy_loss, value_loss, logits, batch["targets"], q_value_loss=q_value_loss)
@@ -956,6 +1007,7 @@ def evaluate_grouped(
     q_value_weight: float,
     batch_size: int,
     collate_fn=collate_policy_batch,
+    value_loss_mode: str = "mse",
 ) -> dict[str, dict[str, dict[str, float]]]:
     if not indices:
         return {}
@@ -979,6 +1031,7 @@ def evaluate_grouped(
                 DataLoader(Subset(dataset, group_indices), batch_size=batch_size, shuffle=False, collate_fn=collate_fn),
                 value_weight=value_weight,
                 q_value_weight=q_value_weight,
+                value_loss_mode=value_loss_mode,
             )
             for name, group_indices in sorted(category_groups.items())
         }
@@ -1164,6 +1217,35 @@ def normalized_weights(weights: torch.Tensor) -> torch.Tensor:
 
 def weighted_mean(losses: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     return (losses * weights).sum() / weights.sum().clamp_min(1.0e-6)
+
+
+# T1.3 value-as-win-probability BCE clamp epsilon. Keeps the probability args
+# strictly inside (0, 1) so `binary_cross_entropy` never hits log(0) / log(1)
+# at the tanh saturation tails.
+_VALUE_BCE_EPS = 1.0e-6
+
+
+def value_loss_per_row(
+    values: torch.Tensor,
+    value_targets: torch.Tensor,
+    mode: str = "mse",
+) -> torch.Tensor:
+    """Per-row value loss against tanh-range ([-1, 1]) predictions/targets.
+
+    - "mse" (default): the legacy `mse_loss` on the raw [-1, 1] outputs —
+      byte-identical to pre-T1.3 behavior.
+    - "bce": value-as-win-probability. Map both prediction and target from
+      [-1, 1] to a win-probability in [0, 1] (p = (x + 1) / 2), then take the
+      binary cross-entropy. The value head / exported scalar are UNCHANGED
+      (still tanh, still [-1, 1]) — only the training objective differs, so
+      there is no ONNX / serving change.
+    """
+
+    if mode == "bce":
+        p_pred = ((values + 1.0) / 2.0).clamp(_VALUE_BCE_EPS, 1.0 - _VALUE_BCE_EPS)
+        p_tgt = (value_targets.clamp(-1.0, 1.0) + 1.0) / 2.0
+        return nn.functional.binary_cross_entropy(p_pred, p_tgt, reduction="none")
+    return nn.functional.mse_loss(values, value_targets, reduction="none")
 
 
 def feature_schema_metadata(state_dim: int = STATE_DIM) -> dict[str, Any]:
@@ -1407,6 +1489,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--belief-features", action="store_true",
                         help="Enable the ReBeL public-belief feature branch. "
                              "--data-mode rebel enables this automatically.")
+    # T1.3 value-as-win-probability loss. Default "mse" is byte-identical to
+    # pre-T1.3 behavior. "bce" maps the tanh value output AND the target from
+    # [-1, 1] to a win-probability in [0, 1] and takes the binary
+    # cross-entropy. The value head / exported scalar are UNCHANGED (still
+    # tanh, [-1, 1]) — no ONNX / serving change.
+    parser.add_argument("--value-loss-mode", choices=["mse", "bce"], default="mse",
+                        help="T1.3: value loss objective. 'mse' (default, "
+                             "byte-identical) regresses the raw [-1, 1] tanh "
+                             "output. 'bce' treats value as a win-probability "
+                             "(p=(x+1)/2) and takes binary cross-entropy; the "
+                             "value head/exported scalar stay tanh [-1, 1].")
+    # T2.6 side-swap symmetry augmentation. Default OFF → byte-identical. When
+    # ON, every TRAINING row also yields a value-only, perspective-swapped copy
+    # (negated value target, policy loss zeroed). Validation/diagnostics are
+    # unaffected. See uma_ai/side_swap.py.
+    parser.add_argument("--side-swap-augment", action="store_true",
+                        help="T2.6: augment the training stream with value-only "
+                             "side-swapped copies of each row (negated value "
+                             "target via the zero-sum identity; policy loss "
+                             "zeroed on swapped copies). Val/diagnostics "
+                             "unchanged. Default OFF.")
+    # Flag threading for the two model-side ModelConfig fields owned by
+    # model.py. Both are passed into the ModelConfig(...) construction (gated on
+    # the field existing, for cross-agent forward-compatibility).
+    parser.add_argument("--card-features", action="store_true",
+                        help="Set ModelConfig.uses_card_features=True (model-side "
+                             "card-feature branch owned by model.py). Default OFF "
+                             "→ uses_card_features=False.")
+    parser.add_argument("--no-contextual-actions", action="store_true",
+                        help="Set ModelConfig.relational_contextual_actions=False "
+                             "(disable the relational/contextual action encoder "
+                             "owned by model.py). Default (flag absent) keeps "
+                             "relational_contextual_actions=True.")
     return parser.parse_args()
 
 

@@ -112,6 +112,29 @@ pub fn deck_by_id(deck_id: &str) -> Option<&'static [CardId]> {
         .map(|d| d.card_ids.as_slice())
 }
 
+/// All deck lists registered under `deck_id`, across both the player-side
+/// (`premadeDecks`) and AI-side (`aiPremadeDecks`) registries, player-side
+/// first.
+///
+/// The same id can appear in BOTH registries with DIFFERENT card lists —
+/// e.g. `"matikanetannhauser"` is a 20-card single-uma list under
+/// `premadeDecks` but a mixed list (with `matikanefukukitaru*`) under
+/// `aiPremadeDecks`. `deck_by_id` only returns the player-side match, which
+/// is ambiguous for the AI opponent. Callers that need to reconcile a deck
+/// id against an *observed* state (belief complement) should consider every
+/// candidate and pick the one consistent with the state.
+pub fn deck_lists_by_id(deck_id: &str) -> Vec<&'static [CardId]> {
+    let r = decks();
+    let mut out: Vec<&'static [CardId]> = Vec::new();
+    for d in r.player_decks.iter().filter(|d| d.id == deck_id) {
+        out.push(d.card_ids.as_slice());
+    }
+    for d in r.ai_decks.iter().filter(|d| d.id == deck_id) {
+        out.push(d.card_ids.as_slice());
+    }
+    out
+}
+
 /// Default player deck — first match in `premadeDecks`, with the same
 /// `mihonoBourbon` / `premadeDecks[0]` cascading fallback as
 /// `gameData.ts:149-152`.

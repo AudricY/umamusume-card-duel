@@ -43,6 +43,10 @@ class RebelSelfPlaySample:
     action_card_idx: np.ndarray | None = None
     uma_slot_card_ids: np.ndarray | None = None
     uma_slot_features: np.ndarray | None = None
+    # T2.6 side-swap augmentation: per-sample POLICY-loss multiplier (value
+    # loss keeps `sample_weight`). 1.0 default → byte-identical; swapped
+    # value-only copies set 0.0. See `uma_ai/side_swap.py`.
+    policy_loss_scale: float = 1.0
 
 
 class RebelSelfPlayDataset(Dataset[RebelSelfPlaySample]):
@@ -198,6 +202,11 @@ def collate_rebel_selfplay_batch(samples: list[RebelSelfPlaySample]) -> dict[str
     q_targets = np.zeros((batch_size, max_actions), dtype=np.float32)
     q_target_mask = np.zeros((batch_size, max_actions), dtype=np.bool_)
     belief_features = np.zeros((batch_size, BELIEF_FEATURE_DIM), dtype=np.float32)
+    # T2.6 side-swap per-row policy-loss multiplier (see collate_policy_batch).
+    policy_loss_scales = np.array(
+        [float(getattr(sample, "policy_loss_scale", 1.0)) for sample in samples],
+        dtype=np.float32,
+    )
 
     max_cards_per_zone = max(CARD_ID_SHAPES.values())
     card_ids_buffer = np.zeros((batch_size, len(ZONE_ORDER), max_cards_per_zone), dtype=np.int64)
@@ -250,6 +259,8 @@ def collate_rebel_selfplay_batch(samples: list[RebelSelfPlaySample]) -> dict[str
         "card_ids_by_zone": torch.from_numpy(card_ids_buffer),
         "action_card_idx": torch.from_numpy(action_card_idx_buffer),
     }
+    if np.any(policy_loss_scales != 1.0):
+        batch["policy_loss_scales"] = torch.from_numpy(policy_loss_scales)
     if uma_slot_card_ids_buffer is not None and uma_slot_features_buffer is not None:
         batch["uma_slot_card_ids"] = torch.from_numpy(uma_slot_card_ids_buffer)
         batch["uma_slot_features"] = torch.from_numpy(uma_slot_features_buffer)

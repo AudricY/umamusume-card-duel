@@ -88,6 +88,13 @@ class PolicySample:
     # `(uma_slot_card_ids != 0)`.
     uma_slot_card_ids: np.ndarray | None = None
     uma_slot_features: np.ndarray | None = None
+    # T2.6 side-swap augmentation: per-sample multiplier on the POLICY loss
+    # only (NOT the value loss, which keeps `sample_weight`). Defaults to 1.0
+    # so unaugmented samples are byte-identical. Side-swapped copies set this
+    # to 0.0 — the action set / ordering is not recoverable under a public
+    # perspective swap, so swapped copies train value-only (see
+    # `uma_ai/side_swap.py`).
+    policy_loss_scale: float = 1.0
 
 
 class JsonlPolicyDataset(Dataset[PolicySample]):
@@ -369,6 +376,15 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
     targets = np.zeros((batch_size,), dtype=np.int64)
     value_targets = np.zeros((batch_size,), dtype=np.float32)
     sample_weights = np.ones((batch_size,), dtype=np.float32)
+    # T2.6 side-swap: per-row policy-loss multiplier. `getattr(..., 1.0)`
+    # keeps this non-crashing across data paths / older sample objects. Only
+    # emitted into the batch dict when at least one row is non-default (1.0),
+    # so unaugmented runs stay byte-identical (key absent → training loop's
+    # `.get(...)` returns None → no policy masking).
+    policy_loss_scales = np.array(
+        [float(getattr(sample, "policy_loss_scale", 1.0)) for sample in samples],
+        dtype=np.float32,
+    )
 
     # R7.b.2 Phase 2: only emit the embedding tensors when every sample in
     # the batch has them. Same gating pattern as `policy_targets` below:
@@ -478,6 +494,8 @@ def collate_policy_batch(samples: list[PolicySample]) -> dict[str, torch.Tensor]
     }
     if policy_targets is not None:
         batch["policy_targets"] = torch.from_numpy(policy_targets)
+    if np.any(policy_loss_scales != 1.0):
+        batch["policy_loss_scales"] = torch.from_numpy(policy_loss_scales)
     if card_ids_buffer is not None and action_card_idx_buffer is not None:
         batch["card_ids_by_zone"] = torch.from_numpy(card_ids_buffer)
         batch["action_card_idx"] = torch.from_numpy(action_card_idx_buffer)
