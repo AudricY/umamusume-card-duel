@@ -225,9 +225,9 @@ def main() -> None:
     # the attention/slot-token flags against a set-attention ckpt, does not
     # crash at the distill step with a state-dict mismatch.
     args = _maybe_override_dims_from_checkpoint(args, state.promoted_checkpoint, events_path)
-    if args.model_variant == "set_attention" and not args.uma_slot_tokens:
+    if args.model_variant in ("set_attention", "relational") and not args.uma_slot_tokens:
         raise SystemExit(
-            "--model-variant set_attention requires --uma-slot-tokens "
+            f"--model-variant {args.model_variant} requires --uma-slot-tokens "
             "(or an init checkpoint whose model_config enables slot tokens)."
         )
     if args.engine == "rust":
@@ -2124,15 +2124,15 @@ def parse_args() -> argparse.Namespace:
                         "make_v32_slot_token_init.py from a v3.0 source). "
                         "No exporter-side CLI flag — the pivot is the "
                         "checkpoint config, per C5.")
-    p.add_argument("--model-variant", choices=["mlp", "set_attention"], default="mlp",
-                   help="R7.b.3 set-attention probe: forwarded to "
-                        "train_bc.py --model-variant for distill. Default "
-                        "mlp preserves legacy v3.0/v3.1/v3.2 loops. "
-                        "set_attention requires --uma-slot-tokens and "
-                        "hidden_dim=64; when the init checkpoint records a "
-                        "non-default model_config.model_variant, the "
-                        "orchestrator auto-infers it to avoid state_dict "
-                        "mismatches on attention-loop resumes.")
+    p.add_argument("--model-variant", choices=["mlp", "set_attention", "relational"], default="mlp",
+                   help="Forwarded to train_bc.py --model-variant for distill. "
+                        "Default mlp preserves legacy v3.0/v3.1/v3.2 loops. "
+                        "set_attention requires --uma-slot-tokens and hidden_dim=64. "
+                        "'relational' is the v6 attention-native trunk (requires "
+                        "--uma-slot-tokens; rides the v3.2/belief ONNX dispatch). "
+                        "When the init checkpoint records a non-default "
+                        "model_config.model_variant, the orchestrator auto-infers "
+                        "it to avoid state_dict mismatches on resume.")
     p.add_argument("--kl-anchor-weight", type=float, default=0.0,
                    help="Optional anti-forgetting anchor weight (init checkpoint as anchor).")
     # T1.3 / T2.6 / model-feature flags forwarded to the distill trainer

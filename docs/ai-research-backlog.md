@@ -63,27 +63,14 @@ with explicit gates.
    within sampling noise). Queue `r16-p2-per-uma-slot-tokens`; canonical
    `docs/ai-research/progress/r16.md`.
 
-0b. **W6 loop anti-degradation recipe — DEPRIORITIZED ordering, REFRAMED
-   role (ceiling-path step A).** Demoted from TOP PRIORITY to P3 by the
-   2026-05-19 user reprioritization: runs only AFTER all three core
-   predecessors land (coverage pilot → R16-P2 → deep data program: corpus
-   recipe → preference/value-data), and stays user-gated. **Strategic role
-   refined 2026-05-21**: this is not just deprioritized HP tuning — it is
-   the *cheap, in-methodology, R110-A/B-preserving* first attempt at the
-   iter-2-peak-then-rot ceiling. One or two HP runs decides whether
-   containment alone clears 0.6042; if it does NOT, escalate to item 0d
-   (value-head leaf at MCTS, the heavy recipe-axis fix). Gate-depth = option
-   B: it is **NOT** gated on the conditional side-balancing item or the P3
-   manual mistake catalog (those fire on their own triggers; gating W6
-   behind the conditional item could block it indefinitely). Operational
-   predecessor set is canonical in `docs/ai-agent-state/queue.json`.
-   Mechanism still CONFIRMED via R111 (iter-3 rot eliminated; recipe-fix
-   landed commit `d44de3f`, cross-iter replay buffer + fixed iter-0/SL KL
-   anchor in `r12_orchestrator.py`) but over-damps at default HP — policy
-   froze then decayed (0.5527→0.5358), below the 0.6042 baseline iter-2
-   peak. Reopen knobs: lower/anneal the fixed-KL-anchor weight from 0.05
-   and/or reduce replay old-fraction (0.40) / window (3). Canonical:
-   `docs/ai-research/progress/r110.md` §4c; queue `w6-loop-anti-degradation`.
+0b. **W6 loop anti-degradation recipe — DEPRIORITIZED P3, user-gated.**
+   Mechanism CONFIRMED (R111 iter-3 rot eliminated; recipe-fix commit
+   `d44de3f`, cross-iter replay buffer + fixed iter-0/SL KL anchor) but
+   over-damps at default HP — policy froze then decayed (0.5527→0.5358),
+   below the 0.6042 iter-2 peak. Reopen knobs (KL-anchor weight, replay
+   old-fraction/window), gate-depth, and predecessor set canonical in
+   `docs/ai-research/progress/r110.md` §4c + `docs/ai-agent-state/queue.json`;
+   queue `w6-loop-anti-degradation`.
 
 0d. **Value-head leaf at MCTS — CLOSED as strength lever 2026-05-21.**
    vhleaf loop on the C8-W6FIX-ON seed descended after iter-1, best
@@ -129,6 +116,27 @@ with explicit gates.
     do NOT proceed to Slice 3 without explicit user gate. Canonical scope:
     `docs/ai-research/scoping/set-attention-architecture-probe.md`;
     queue `set-attention-architecture-probe`.
+
+3c. **v6 relational-trunk model scheme — IMPLEMENTED + SMOKE-GREEN,
+    UNTRAINED 2026-05-29.** The unconstrained successor to 3b: a multi-layer
+    attention trunk that REPLACES the sum-pool MLP (cross-attention
+    candidate-policy head + CLS value head + first-class ReBeL belief token +
+    own/opp polarity embeddings), `model_variant="relational"`. Clean break —
+    backward compat explicitly out of scope, so no zero-init parity dance.
+    Reuses the v3.2 (7-input) / belief (8-input) ONNX signature verbatim →
+    ZERO Rust/featurizer/serve changes (dispatch keys on state_dim+input-set,
+    not model_variant); re-extracts from existing self-play traces. Landed:
+    `RelationalTrunk` in `training/uma_ai/model.py`, `training/v6_relational_smoke.py`
+    (12/12 PASS: ONNX roundtrip max_abs_diff ~2e-7, signature parity,
+    trainability), `--model-variant relational` in train_bc + r12 + rebel
+    orchestrators. Rationale rests on a STRUCTURAL argument (sum-pool collapses
+    relational structure), NOT the stale `~0.59` ceiling — that ceiling was
+    measured on the pre-correction MCTS line (R18/R19 buggy value target +
+    info-incorrect leaf; corrected R20 supersedes). Pre-registered gate:
+    train under corrected ReBeL R20 (`--data-mode rebel --belief-features`),
+    promote on R19/R20 champion head-to-head, run mlp-vs-relational from the
+    same seed to isolate the trunk axis. Canonical:
+    `docs/ai-research/scoping/v6-relational-trunk-scoping.md`.
 
 4. **Value/action-value data program — P2 (3-stage ladder).**
    Data/training prerequisite for item 0d (value-head leaf at MCTS). Three
@@ -288,6 +296,16 @@ section).
   (inductive bias), not capacity tuning and not feature-schema; user-gated,
   does not auto-launch. Canonical scope:
   `docs/ai-research/scoping/set-attention-architecture-probe.md`.
+- The `~0.59` tight-gate "ceiling" and the "feature-tail is dead" verdicts are
+  STALE-BASELINE, not load-bearing: measured on the pre-correction MCTS
+  sum-pool line (R18/R19 buggy value target + info-incorrect leaf; corrected
+  ReBeL R20 supersedes — `project_rebel_correctness_r20`). Do not cite them as
+  a hard ceiling for forward bets; re-baseline under R20.
+- Carve-out (trunk axis, sibling to 3b): the v6 relational-trunk scheme (item
+  3c) replaces the sum-pool MLP wholesale and is exempt from the feature-tail
+  guardrail (it changes the *trunk*, not the featurization). User-directed
+  2026-05-29; does not auto-launch a training run. Canonical:
+  `docs/ai-research/scoping/v6-relational-trunk-scoping.md`.
 
 ## Historical Pointers
 

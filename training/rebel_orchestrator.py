@@ -1005,6 +1005,8 @@ def build_train_cmd(
         train_cmd.extend(["--q-value-head", "--q-value-weight", str(args.q_value_weight)])
     if args.uma_slot_tokens:
         train_cmd.append("--uma-slot-tokens")
+    if getattr(args, "model_variant", "mlp") != "mlp":
+        train_cmd.extend(["--model-variant", str(args.model_variant)])
     # T1.3 / T2.6 / model-feature flags forwarded to the ReBeL distill trainer
     # (train_bc.py --data-mode rebel). All default to the train_bc.py defaults,
     # so unset is byte-identical (no extra cmd tokens). Mirrors the
@@ -1385,6 +1387,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--q-value-head", action="store_true")
     parser.add_argument("--q-value-weight", type=float, default=0.0)
     parser.add_argument("--uma-slot-tokens", action="store_true")
+    parser.add_argument("--model-variant", choices=["mlp", "set_attention", "relational"],
+                        default="mlp",
+                        help="Trunk architecture forwarded to train_bc. 'relational' "
+                             "is the v6 attention-native trunk (ReBeL-belief-token "
+                             "aware); requires --uma-slot-tokens. Rides the existing "
+                             "belief (8-input) ONNX dispatch with no graph-signature "
+                             "change.")
     # T1.3 / T2.6 / model-feature flags forwarded to train_bc.py (see
     # build_train_cmd). All default to the train_bc.py defaults so unset is
     # byte-identical to pre-change ReBeL loops.
