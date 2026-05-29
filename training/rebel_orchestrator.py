@@ -1026,6 +1026,8 @@ def build_train_cmd(
         train_cmd.extend(["--q-value-head", "--q-value-weight", str(args.q_value_weight)])
     if args.uma_slot_tokens:
         train_cmd.append("--uma-slot-tokens")
+    if getattr(args, "model_variant", "mlp") != "mlp":
+        train_cmd.extend(["--model-variant", str(args.model_variant)])
     if args.kl_anchor_checkpoint:
         train_cmd.extend(["--kl-anchor-checkpoint", args.kl_anchor_checkpoint])
     if getattr(args, "events_out", None):
@@ -1404,6 +1406,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--q-value-head", action="store_true")
     parser.add_argument("--q-value-weight", type=float, default=0.0)
     parser.add_argument("--uma-slot-tokens", action="store_true")
+    parser.add_argument("--model-variant", choices=["mlp", "set_attention", "relational"],
+                        default="mlp",
+                        help="Trunk architecture forwarded to train_bc. 'relational' "
+                             "is the v6 attention-native trunk (ReBeL-belief-token "
+                             "aware); requires --uma-slot-tokens. Rides the existing "
+                             "belief (8-input) ONNX dispatch with no graph-signature "
+                             "change.")
     parser.add_argument("--kl-anchor-checkpoint", default=None)
     parser.add_argument("--kl-anchor-weight", type=float, default=0.0)
     parser.add_argument("--entropy-bonus", type=float, default=0.0)

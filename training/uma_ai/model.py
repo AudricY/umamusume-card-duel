@@ -11,6 +11,7 @@ from .features import (
     STATE_DIM,
     UMA_SLOT_COUNT,
     UMA_SLOT_FEATURE_DIM,
+    UMA_SLOT_ORDER,
     ZONE_ORDER,
 )
 
@@ -47,7 +48,17 @@ SET_ATTN_MAX_CARDS_PER_ZONE = max(CARD_ID_SHAPES.values())
 SET_ATTN_NUM_CARD_TOKENS = NUM_ZONES * SET_ATTN_MAX_CARDS_PER_ZONE
 SET_ATTN_NUM_TOKENS = 1 + SET_ATTN_NUM_CARD_TOKENS + UMA_SLOT_COUNT  # 1 + 240 + 10 = 251
 
-_VALID_MODEL_VARIANTS = ("mlp", "set_attention")
+_VALID_MODEL_VARIANTS = ("mlp", "set_attention", "relational")
+
+# v6 relational scheme: default encoder hyperparameters. d_model is the trunk
+# `hidden_dim` (so the cross-attention policy head and CLS value head share
+# the trunk width); `relational_layers`/`relational_heads`/`relational_ffn_mult`
+# size the pre-LN transformer. Unlike the set-attention probe these are NOT
+# pinned to 64 — the v6 scheme is a clean break with no warm-start-parity
+# constraint, so the trunk is free to be wide and deep.
+RELATIONAL_DEFAULT_LAYERS = 4
+RELATIONAL_DEFAULT_HEADS = 8
+RELATIONAL_DEFAULT_FFN_MULT = 2
 _VALID_VALUE_ADAPTERS = ("none", "mlp")
 
 # R16-P2 C2: board-zone lane indices into `card_ids_by_zone` (axis=1). When the
@@ -128,6 +139,12 @@ class ModelConfig:
     # are inert so existing checkpoints keep the same graph and parameter set.
     uses_belief_features: bool = False
     belief_feature_dim: int = BELIEF_FEATURE_DIM
+    # v6 relational scheme: transformer-encoder hyperparameters consumed only
+    # when `model_variant == "relational"`. d_model is `hidden_dim`. Inert for
+    # mlp/set_attention (filtered defaults keep their configs byte-identical).
+    relational_layers: int = RELATIONAL_DEFAULT_LAYERS
+    relational_heads: int = RELATIONAL_DEFAULT_HEADS
+    relational_ffn_mult: int = RELATIONAL_DEFAULT_FFN_MULT
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -360,6 +377,254 @@ class SetAttentionEncoder(nn.Module):
         return state_encoded
 
 
+class RelationalTrunk(nn.Module):
+    """v6 relational / attention-native trunk (``model_variant="relational"``).
+
+    The v6 scheme is a clean break from the sum-pool MLP. Where R7.b.3's
+    ``SetAttentionEncoder`` is a *1-layer zero-init residual* bolted on top of
+    the frozen v3.2 sum-pool trunk (so a v3.2 warm-start stays bit-stable),
+    this trunk is the **primary representation**: a multi-layer pre-LN
+    transformer that fully replaces the sum-pool path. Backward compatibility
+    is explicitly out of scope, so nothing is zero-initialized for parity.
+
+    Hypothesis: the strength bottleneck is the trunk's inability to express
+    relations between board entities (the sum-pool collapses card/slot
+    structure), NOT the scalar feature tail. The additive-tail schema ladder
+    (v3.3-v3.8 / action v5) saturated near the same band, and those verdicts
+    were taken on MCTS runs that later proved to carry training-loop
+    correctness bugs (the corrected ReBeL R20 line supersedes R18/R19). v6
+    therefore re-baselines the *architecture* axis under the corrected loop.
+
+    It consumes the SAME v3.2 (slot) / belief input tensors as the sum-pool
+    trunk and emits ``(logits, value)`` positionally, so a relational
+    checkpoint exports to the identical 7-input / 8-input ONNX signature and
+    is served by the existing ``serve_onnx`` + Rust dispatch with NO schema
+    changes (dispatch keys on state_dim + input-name set, not model_variant).
+
+    Token sequence (FROZEN order):
+        position 0:                              CLS + projected 110-d state
+        position 1 .. 1+NUM_CARD_TOKENS-1:       card tokens (8 zones * 30)
+        next UMA_SLOT_COUNT:                     per-Uma slot tokens
+        last (iff uses_belief_features):         public-belief token
+
+    Every token also carries a learned polarity embedding (neutral / own /
+    opp). This is the relational analog of the per-side-asymmetry probe: the
+    two sides share weights and are distinguished by an explicit polarity
+    signal rather than by separate sum-pool lanes, so the trunk reasons about
+    "my board vs their board" symmetrically.
+    """
+
+    def __init__(self, config: "ModelConfig", *, card_embed: nn.Embedding) -> None:
+        super().__init__()
+        d = config.hidden_dim
+        n_heads = config.relational_heads
+        if d % n_heads != 0:
+            raise ValueError(
+                f"model_variant='relational' requires hidden_dim ({d}) divisible "
+                f"by relational_heads ({n_heads})."
+            )
+        self.d_model = d
+        self.uses_belief = config.uses_belief_features
+
+        # Shared identity table (also used by the action source/target pair).
+        self.card_embed = card_embed
+        self.card_embed_proj = nn.Linear(CARD_EMBED_DIM, d)
+        self.slot_feature_proj = nn.Linear(UMA_SLOT_FEATURE_DIM, d)
+        # Project the 110-d global scalar vector into the CLS token so the
+        # globals (points / turn / phase / energy budgets) the card tokens do
+        # not carry stay in the trunk's input distribution.
+        self.state_proj = nn.Linear(config.state_dim, d)
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+        # Positional / type embeddings. Small init so they do not dominate the
+        # card identity signal early in training.
+        self.zone_pos_embed = nn.Embedding(NUM_ZONES, d)
+        self.card_slot_pos_embed = nn.Embedding(SET_ATTN_MAX_CARDS_PER_ZONE, d)
+        self.uma_slot_pos_embed = nn.Embedding(UMA_SLOT_COUNT, d)
+        # Polarity: 0 = neutral (e.g. stadium), 1 = own, 2 = opp.
+        self.polarity_embed = nn.Embedding(3, d)
+        for emb in (
+            self.zone_pos_embed,
+            self.card_slot_pos_embed,
+            self.uma_slot_pos_embed,
+            self.polarity_embed,
+        ):
+            nn.init.trunc_normal_(emb.weight, std=0.02)
+
+        # Per-position polarity indices, derived from the FROZEN zone/slot
+        # name orders so the mapping cannot drift silently. Registered as
+        # buffers (move with .to(device), saved in the state_dict as int64).
+        zone_polarity = [_name_polarity(name) for name in ZONE_ORDER]
+        slot_polarity = [_name_polarity(name) for name in UMA_SLOT_ORDER]
+        self.register_buffer(
+            "zone_polarity", torch.tensor(zone_polarity, dtype=torch.int64), persistent=True
+        )
+        self.register_buffer(
+            "slot_polarity", torch.tensor(slot_polarity, dtype=torch.int64), persistent=True
+        )
+
+        if self.uses_belief:
+            self.belief_proj = nn.Linear(config.belief_feature_dim, d)
+            # A learned "this is the belief token" type marker.
+            self.belief_type = nn.Parameter(torch.zeros(1, 1, d))
+            nn.init.trunc_normal_(self.belief_type, std=0.02)
+        else:
+            self.belief_proj = None
+            self.belief_type = None
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d,
+            nhead=n_heads,
+            dim_feedforward=config.relational_ffn_mult * d,
+            dropout=config.dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=config.relational_layers)
+
+        # Candidate-conditioned policy head: each action is a query token that
+        # cross-attends over the encoded board, so every candidate gets a
+        # board summary filtered through its own lens (the relational payoff
+        # over a single shared pooled context).
+        self.action_in_proj = nn.Linear(
+            config.action_dim + ACTION_PAIR_FANOUT * CARD_EMBED_DIM, d
+        )
+        self.action_query_norm = nn.LayerNorm(d)
+        self.policy_cross_attn = nn.MultiheadAttention(
+            d, n_heads, dropout=config.dropout, batch_first=True
+        )
+        self.policy_out = nn.Sequential(
+            nn.LayerNorm(3 * d),
+            nn.Linear(3 * d, d),
+            nn.GELU(),
+            nn.Linear(d, 1),
+        )
+        # Value head reads the CLS token (whole public-state value); for a
+        # belief graph the CLS has already attended to the belief token.
+        self.value_head = nn.Sequential(
+            nn.LayerNorm(d),
+            nn.Linear(d, d // 2),
+            nn.GELU(),
+            nn.Linear(d // 2, 1),
+            nn.Tanh(),
+        )
+
+    def forward(
+        self,
+        state_features: torch.Tensor,
+        action_features: torch.Tensor,
+        action_mask: torch.Tensor,
+        card_ids_by_zone: torch.Tensor | None,
+        action_card_idx: torch.Tensor | None,
+        uma_slot_card_ids: torch.Tensor | None,
+        uma_slot_features: torch.Tensor | None,
+        belief_features: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size = state_features.shape[0]
+        num_actions = action_features.shape[1]
+        device = state_features.device
+        dtype = state_features.dtype
+        d = self.d_model
+
+        # Defensive defaults mirror the legacy forward: absent tensors read as
+        # all-pad (card_id 0 → embed(0)=0 via padding_idx, pad mask True).
+        if card_ids_by_zone is None:
+            card_ids_by_zone = torch.zeros(
+                (batch_size, NUM_ZONES, SET_ATTN_MAX_CARDS_PER_ZONE),
+                dtype=torch.int64,
+                device=device,
+            )
+        if uma_slot_card_ids is None or uma_slot_features is None:
+            uma_slot_card_ids = torch.zeros(
+                (batch_size, UMA_SLOT_COUNT), dtype=torch.int64, device=device
+            )
+            uma_slot_features = torch.zeros(
+                (batch_size, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM),
+                dtype=dtype,
+                device=device,
+            )
+
+        # CLS token = learned vector + projected global state vector.
+        cls = self.cls_token.expand(batch_size, -1, -1).to(dtype=dtype)
+        cls = cls + self.state_proj(state_features).unsqueeze(1)
+
+        # Card tokens: embed → project to d, + zone-type + within-zone-pos +
+        # zone polarity. Pad where card_id == 0.
+        card_tokens = self.card_embed_proj(self.card_embed(card_ids_by_zone))
+        card_tokens = card_tokens + self.zone_pos_embed.weight.unsqueeze(0).unsqueeze(2)
+        card_tokens = card_tokens + self.card_slot_pos_embed.weight.unsqueeze(0).unsqueeze(0)
+        zone_pol = self.polarity_embed(self.zone_polarity)  # [NUM_ZONES, d]
+        card_tokens = card_tokens + zone_pol.unsqueeze(0).unsqueeze(2)
+        card_tokens = card_tokens.reshape(batch_size, SET_ATTN_NUM_CARD_TOKENS, d)
+        card_pad = (card_ids_by_zone == 0).reshape(batch_size, SET_ATTN_NUM_CARD_TOKENS)
+
+        # Uma slot tokens: embed + per-slot scalar features + slot-pos +
+        # slot polarity. Pad where the slot is absent (card_id == 0).
+        slot_tokens = self.card_embed_proj(self.card_embed(uma_slot_card_ids))
+        slot_tokens = slot_tokens + self.slot_feature_proj(uma_slot_features)
+        slot_tokens = slot_tokens + self.uma_slot_pos_embed.weight.unsqueeze(0)
+        slot_pol = self.polarity_embed(self.slot_polarity)  # [UMA_SLOT_COUNT, d]
+        slot_tokens = slot_tokens + slot_pol.unsqueeze(0)
+        slot_pad = uma_slot_card_ids == 0
+
+        token_list = [cls, card_tokens, slot_tokens]
+        cls_pad = torch.zeros((batch_size, 1), dtype=torch.bool, device=device)
+        pad_list = [cls_pad, card_pad, slot_pad]
+
+        if self.uses_belief:
+            if belief_features is None:
+                belief_features = torch.zeros(
+                    (batch_size, self.belief_proj.in_features), dtype=dtype, device=device
+                )
+            belief_token = self.belief_proj(belief_features).unsqueeze(1) + self.belief_type
+            token_list.append(belief_token.to(dtype=dtype))
+            pad_list.append(torch.zeros((batch_size, 1), dtype=torch.bool, device=device))
+
+        tokens = torch.cat(token_list, dim=1)
+        pad_mask = torch.cat(pad_list, dim=1)
+
+        # CLS is always unmasked, so no attention row is fully masked → no NaN.
+        encoded = self.encoder(tokens, src_key_padding_mask=pad_mask)
+        cls_out = encoded[:, 0, :]
+
+        # Candidate queries: action features ⊕ source/target card embeds.
+        if action_card_idx is not None:
+            pair_embed = self.card_embed(action_card_idx).reshape(
+                batch_size, num_actions, ACTION_PAIR_FANOUT * CARD_EMBED_DIM
+            )
+        else:
+            pair_embed = torch.zeros(
+                (batch_size, num_actions, ACTION_PAIR_FANOUT * CARD_EMBED_DIM),
+                dtype=action_features.dtype,
+                device=device,
+            )
+        query = self.action_in_proj(torch.cat([action_features, pair_embed], dim=-1))
+        query = self.action_query_norm(query)
+        attended, _ = self.policy_cross_attn(
+            query, encoded, encoded, key_padding_mask=pad_mask, need_weights=False
+        )
+        joint = torch.cat([attended, query, attended * query], dim=-1)
+        logits = self.policy_out(joint).squeeze(-1)
+        logits = logits.masked_fill(~action_mask.bool(), torch.finfo(logits.dtype).min)
+
+        value = self.value_head(cls_out).squeeze(-1)
+        return logits, value
+
+
+def _name_polarity(name: str) -> int:
+    """Map a frozen zone / slot name to a polarity index (0 neutral, 1 own,
+    2 opp). Used to build the relational trunk's polarity buffers."""
+
+    if name.startswith("own"):
+        return 1
+    if name.startswith("opp"):
+        return 2
+    return 0
+
+
 class CandidatePolicyNet(nn.Module):
     """Candidate-conditioned policy/value network for variable legal-action sets."""
 
@@ -383,7 +648,48 @@ class CandidatePolicyNet(nn.Module):
             )
         if self.config.belief_feature_dim <= 0:
             raise ValueError("belief_feature_dim must be positive")
+        is_relational = self.config.model_variant == "relational"
+        if is_relational:
+            # v6 consumes the v3.2 slot-token tensors (so it exports to the
+            # 7-input / 8-input signature the existing dispatch already
+            # serves). The Q-head / value-adapter are MCTS-era sum-pool
+            # add-ons outside the v6 scope.
+            if not self.config.uses_uma_slot_tokens:
+                raise ValueError(
+                    "model_variant='relational' requires uses_uma_slot_tokens=True; "
+                    "the v6 relational trunk consumes the v3.2 slot-token tensors."
+                )
+            if self.config.uses_q_value_head or self.config.value_adapter != "none":
+                raise ValueError(
+                    "model_variant='relational' does not support uses_q_value_head "
+                    "or value_adapter (outside v6 scope); leave both at defaults."
+                )
         hidden = self.config.hidden_dim
+        if is_relational:
+            # v6 relational scheme: a multi-layer attention trunk REPLACES the
+            # sum-pool MLP. Build only the shared card-embed table + the
+            # relational stack, None out every legacy submodule (so a
+            # relational checkpoint's state_dict carries no dead sum-pool
+            # parameters), and return — the legacy construction below is
+            # skipped entirely. The shared `card_embed` is constructed here
+            # rather than reusing the legacy position so the relational path
+            # has no init-order coupling to the mlp/set_attention path.
+            self.card_embed = nn.Embedding(CARD_VOCAB_TABLE_SIZE, CARD_EMBED_DIM, padding_idx=0)
+            self.state_encoder = None
+            self.action_encoder = None
+            self.belief_encoder = None
+            self.zone_projection = None
+            self.joint_projection = None
+            self.joint_blocks = None
+            self.policy_head = None
+            self.value_head = None
+            self.value_adapter = None
+            self.q_value_head = None
+            self.uma_slot_encoder = None
+            self.set_attention_encoder = None
+            self.relational = RelationalTrunk(self.config, card_embed=self.card_embed)
+            return
+        self.relational = None
         # R7.b.3 set-attention probe: the "mlp" variant is the legacy
         # additive state_encoder / zone_projection / uma_slot_encoder trunk.
         # The "set_attention" variant keeps that trunk live and adds a
@@ -572,6 +878,23 @@ class CandidatePolicyNet(nn.Module):
                                cap, which read as 0 (pad).
             action_card_idx:   `[B, A, 2]` (int64; col 0 = source, col 1 = target).
         """
+
+        # v6 relational scheme: a fully separate attention trunk that emits
+        # the same (logits, value) — dispatch here and skip the sum-pool path.
+        if self.relational is not None:
+            logits, value = self.relational(
+                state_features,
+                action_features,
+                action_mask,
+                card_ids_by_zone,
+                action_card_idx,
+                uma_slot_card_ids,
+                uma_slot_features,
+                belief_features,
+            )
+            if return_q_values:
+                return logits, value, None
+            return logits, value
 
         batch_size = state_features.shape[0]
         num_actions = action_features.shape[1]

@@ -1374,18 +1374,20 @@ def parse_args() -> argparse.Namespace:
                              "(default) is a bit-identical no-op. bc mode "
                              "only. Resample RNG seeded by --seed.")
     parser.add_argument("--model-variant",
-                        choices=["mlp", "set_attention"],
+                        choices=["mlp", "set_attention", "relational"],
                         default="mlp",
-                        help="R7.b.3 set-attention probe: 'mlp' (default) is "
-                             "byte-identical to the legacy v3.0/v3.1/v3.2 "
-                             "sum-pool trunk. 'set_attention' builds a 1-layer "
-                             "self-attention encoder over the per-card / "
-                             "per-slot tokens; requires --uma-slot-tokens "
-                             "(consumes v3.2 inputs) and hidden_dim=64 "
-                             "(SET_ATTN_D_MODEL). The new variant is recorded "
-                             "in the checkpoint's model_config and read by "
-                             "export_onnx for the 7-input ONNX graph (no new "
-                             "graph signature — rides the v3.2 dispatch).")
+                        help="'mlp' (default) is byte-identical to the legacy "
+                             "v3.0/v3.1/v3.2 sum-pool trunk. 'set_attention' "
+                             "(R7.b.3) adds a 1-layer zero-init self-attention "
+                             "residual over the v3.2 tokens (needs hidden_dim=64). "
+                             "'relational' is the v6 scheme: a multi-layer "
+                             "attention trunk that REPLACES the sum-pool MLP "
+                             "(cross-attention candidate policy head + CLS value "
+                             "head, ReBeL-belief-token-aware). All three require "
+                             "--uma-slot-tokens and ride the v3.2 (7-input) / "
+                             "belief (8-input) ONNX dispatch with no new graph "
+                             "signature; the variant is recorded in model_config "
+                             "and surfaced in the export sidecar.")
     parser.add_argument("--uma-slot-tokens", action="store_true",
                         help="R16-P2 C6: opt into the per-Uma slot-token "
                              "branch end-to-end. Drives the dataset packer "
