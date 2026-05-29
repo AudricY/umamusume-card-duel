@@ -28,6 +28,7 @@ class RebelLoopState:
 def main() -> None:
     args = parse_args()
     repo = Path(__file__).resolve().parents[1]
+    validate_leaf_args(args)
     resolve_runtime_devices(args, repo)
     out_dir = Path(args.out_dir)
     if not out_dir.is_absolute():
@@ -108,6 +109,7 @@ def main() -> None:
             "neural_policy_weight": args.neural_policy_weight,
             "neural_value_weight": args.neural_value_weight,
             "neural_leaf_weight": args.neural_leaf_weight,
+            "allow_rollout_leaf": args.allow_rollout_leaf,
             "selfplay_inference_batch_size": args.selfplay_inference_batch_size,
             "selfplay_inference_max_wait_us": args.selfplay_inference_max_wait_us,
         },
@@ -364,6 +366,8 @@ def run_loop_iteration(
         "row_summary": row_summary,
         "train_row_summary": train_row_summary,
         "replay": replay_summary,
+        "neural_leaf_weight": args.neural_leaf_weight,
+        "allow_rollout_leaf": args.allow_rollout_leaf,
         "gates": gates,
         "wilson_lower": wilson_lower,
         "previous_wilson_lower": previous,
@@ -750,9 +754,34 @@ def materialize_replay_mix(
         events.emit(iteration=iteration, stage="replay", event_type="passthrough", **summary)
         return current_selfplay, summary
 
+    # Replay-vintage guard: only mix in OLD-iteration rows whose decision used a
+    # pure neural leaf. Rows where `rolloutLeafUsed` is truthy are rollout-
+    # contaminated; rows missing the field entirely are old-vintage (pre-fix)
+    # and treated as contaminated. This stops contaminated policy/Q targets from
+    # leaking into the corrected training mix. Current-iteration rows are always
+    # kept as-is (handled below).
     old_pool: list[str] = []
+    dropped_contaminated = 0
     for path in prior_paths:
-        old_pool.extend(read_jsonl_lines(path))
+        for line in read_jsonl_lines(path):
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                dropped_contaminated += 1
+                continue
+            if not isinstance(row, dict) or row.get("rolloutLeafUsed"):
+                dropped_contaminated += 1
+                continue
+            if "rolloutLeafUsed" not in row:
+                dropped_contaminated += 1
+                continue
+            old_pool.append(line)
+    print(
+        "[rebel-orchestrator] replay-vintage guard: kept "
+        f"{len(old_pool)} old rows, dropped {dropped_contaminated} "
+        "rollout-contaminated/old-vintage rows",
+        flush=True,
+    )
     old_fraction = min(0.95, max(0.0, float(args.replay_old_fraction)))
     old_target = int(round(len(current_lines) * old_fraction / max(1.0e-9, 1.0 - old_fraction)))
     old_count = min(len(old_pool), old_target)
@@ -784,6 +813,7 @@ def materialize_replay_mix(
         "current_rows": len(current_lines),
         "old_rows": len(old_lines),
         "old_pool_rows": len(old_pool),
+        "old_dropped_contaminated": dropped_contaminated,
         "total_rows": len(current_lines) + len(old_lines),
         "old_fraction_target": old_fraction,
         "old_fraction_actual": len(old_lines) / max(1, len(current_lines) + len(old_lines)),
@@ -863,7 +893,26 @@ def build_selfplay_cmd(
                 str(args.selfplay_inference_max_wait_us),
             ]
         )
+    if getattr(args, "allow_rollout_leaf", False):
+        cmd.append("--allow-rollout-leaf")
     return cmd
+
+
+def validate_leaf_args(args: argparse.Namespace) -> None:
+    """Guard against shipping the info-incorrect determinized rollout leaf.
+
+    The determinized rollout leaf is information-incorrect; the loop must train
+    the value head on the grounded MC outcome with a pure neural leaf
+    (--neural-leaf-weight 1.0). Any blend toward the rollout leaf requires an
+    explicit opt-in via --allow-rollout-leaf (ablation only).
+    """
+    if float(args.neural_leaf_weight) < 1.0 and not args.allow_rollout_leaf:
+        raise SystemExit(
+            "Refusing to run: --neural-leaf-weight "
+            f"{args.neural_leaf_weight} < 1.0 blends in the information-incorrect "
+            "determinized rollout leaf. Pass --allow-rollout-leaf to opt into "
+            "this ablation, or set --neural-leaf-weight 1.0 for the corrected loop."
+        )
 
 
 def resolve_runtime_devices(args: argparse.Namespace, repo: Path) -> None:
@@ -1325,6 +1374,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--neural-policy-weight", type=float, default=0.25)
     parser.add_argument("--neural-value-weight", type=float, default=0.25)
     parser.add_argument("--neural-leaf-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--allow-rollout-leaf",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt into the information-incorrect determinized rollout leaf in "
+            "ReBeL search (ablation only). Without this flag a "
+            "--neural-leaf-weight < 1.0 is rejected at preflight."
+        ),
+    )
     parser.add_argument("--selfplay-inference-batch-size", type=int, default=1)
     parser.add_argument("--selfplay-inference-max-wait-us", type=int, default=2_000)
     parser.add_argument("--epochs", type=int, default=1)

@@ -159,7 +159,13 @@ def load_rebel_selfplay_samples(
                 uma_slot_card_ids = None
                 uma_slot_features = None
 
-            value_target = float(example.get("beliefValue", example.get("valueTarget", 0.0)) or 0.0)
+            # Value head trains on the grounded Monte-Carlo outcome (+1/-1/0 by
+            # actual game winner, observer perspective), NOT the search's own
+            # bootstrapped/rollout-contaminated `beliefValue`.
+            vt = example.get("valueTarget")
+            if vt is None:
+                raise RowSchemaError(f"Missing valueTarget at {path}:{line_number}")
+            value_target = float(vt)
             yield RebelSelfPlaySample(
                 state_features=state_features,
                 action_features=action_features,

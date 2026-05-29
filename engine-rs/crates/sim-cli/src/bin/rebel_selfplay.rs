@@ -77,6 +77,12 @@ struct Args {
     neural_value_weight: f64,
     #[arg(long, default_value_t = 1.0)]
     neural_leaf_weight: f64,
+    /// Opt into the (info-incorrect) determinized rollout leaf as an ablation.
+    /// Default false: the neural/observation leaf is the only sound production
+    /// leaf. Without a model loaded this flag is REQUIRED, otherwise the run
+    /// exits rather than silently emitting degenerate leaf values.
+    #[arg(long, default_value_t = false)]
+    allow_rollout_leaf: bool,
     #[arg(long, default_value_t = 1)]
     inference_batch_size: usize,
     #[arg(long, default_value_t = 2_000)]
@@ -106,6 +112,12 @@ impl Args {
             "neuralPolicyWeight": self.neural_policy_weight,
             "neuralValueWeight": self.neural_value_weight,
             "neuralLeafWeight": self.neural_leaf_weight,
+            "effectiveNeuralLeafWeight": if self.onnx_path.is_some() {
+                self.neural_leaf_weight
+            } else {
+                0.0
+            },
+            "allowRolloutLeaf": self.allow_rollout_leaf,
             "inferenceBatchSize": self.inference_batch_size,
             "inferenceMaxWaitUs": self.inference_max_wait_us,
             "dataMode": "rebel",
@@ -146,6 +158,7 @@ struct RebelSelfPlayRow {
     search_action_values: Vec<f64>,
     belief_value: f64,
     private_state_values: Vec<f64>,
+    rollout_leaf_used: bool,
     value_target: Option<i8>,
     particle_count: usize,
     search_iterations: u32,
@@ -337,10 +350,20 @@ fn drive_one_game(
             let search_start = Instant::now();
             let search = run_public_belief_search(&belief, search_config, &mut search_rng);
             let search_wall = search_start.elapsed();
-            let greedy_index = argmax_f64(&search.root_action_values).min(legal.len() - 1);
+            // Play on-policy w.r.t. the RECORDED policy target (root_policy, the
+            // CFR average strategy), not the raw action values, so the played
+            // move matches the distribution the head is distilled toward. The
+            // recorded `searchPolicy` stays the unscaled `root_policy`.
+            let greedy_index = argmax_f64(&search.root_policy).min(legal.len() - 1);
             let selected_action_index =
                 if model_moves < temperature_moves && temperature_value > 0.0 {
-                    search.sampled_action_index.min(legal.len() - 1)
+                    // Exploration phase: sample the played move from a
+                    // temperature-scaled copy of root_policy (p_i^(1/T)
+                    // renormalized). The recorded policy target is left
+                    // unscaled — only the played move is tempered.
+                    let mut play_rng = step_rng.fork(format!("play:{}", s).as_str());
+                    sample_tempered_policy(&search.root_policy, temperature_value, &mut play_rng)
+                        .min(legal.len() - 1)
                 } else {
                     greedy_index
                 };
@@ -472,6 +495,7 @@ fn row_from_search(
         search_action_values: search.root_action_values,
         belief_value: search.public_belief_value,
         private_state_values: search.private_state_values,
+        rollout_leaf_used: search.rollout_leaf_used,
         value_target: None,
         particle_count: search.diagnostics.particle_count,
         search_iterations: search.diagnostics.search_iterations,
@@ -505,10 +529,55 @@ fn argmax_f64(values: &[f64]) -> usize {
     best
 }
 
+/// Sample an index from a temperature-scaled copy of `policy`
+/// (`p_i^(1/T)` renormalized). At `T == 1.0` this is the raw policy; as
+/// `T -> 0` it sharpens toward argmax; larger `T` flattens toward uniform.
+/// The input `policy` is NOT mutated — this only affects the played move,
+/// never the recorded policy target. Falls back to argmax when the scaled
+/// mass is degenerate (non-positive / non-finite total or non-positive `T`).
+fn sample_tempered_policy(policy: &[f64], temperature: f64, rng: &mut Rng) -> usize {
+    if policy.is_empty() {
+        return 0;
+    }
+    if temperature <= 0.0 || !temperature.is_finite() {
+        return argmax_f64(policy);
+    }
+    let inv_t = 1.0 / temperature;
+    let scaled: Vec<f64> = policy
+        .iter()
+        .map(|p| if *p > 0.0 { p.powf(inv_t) } else { 0.0 })
+        .collect();
+    let total: f64 = scaled.iter().sum();
+    if total <= 0.0 || !total.is_finite() {
+        return argmax_f64(policy);
+    }
+    let mut r = rng.next_f64() * total;
+    for (index, w) in scaled.iter().enumerate() {
+        r -= *w;
+        if r <= 0.0 {
+            return index;
+        }
+    }
+    scaled.len() - 1
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let sampling = DeckSampling::parse(&args.deck_sampling)
         .map_err(|e| anyhow::anyhow!("--deck-sampling: {}", e))?;
+    // Sound-leaf guard: without a model the only available leaf is the
+    // info-incorrect determinized rollout. Refuse to run rather than silently
+    // fall back to it; the operator must explicitly opt into the ablation.
+    if args.onnx_path.is_none() && !args.allow_rollout_leaf {
+        eprintln!(
+            "sim-rebel-selfplay: no --onnx-path and --allow-rollout-leaf not set. \
+             The neural/observation leaf is the only sound production leaf; refusing \
+             to silently use the info-incorrect determinized rollout. Pass an ONNX \
+             model via --onnx-path, or pass --allow-rollout-leaf to opt into the \
+             (info-incorrect) rollout ablation."
+        );
+        std::process::exit(2);
+    }
     if let Some(onnx) = args.onnx_path.as_ref() {
         let device = match args.device.as_str() {
             "cpu" => Device::Cpu,
@@ -588,6 +657,7 @@ fn main() -> Result<()> {
         } else {
             0.0
         },
+        allow_rollout_leaf: args.allow_rollout_leaf,
         algorithm: "public-belief-cfr-v1".to_string(),
     };
     let mut writer: Option<fs::File> = match args.out.as_ref() {
@@ -770,6 +840,19 @@ mod tests {
         assert_eq!(
             manifest.get("search").and_then(Value::as_str),
             Some("public-belief-cfr-v1")
+        );
+        // Provenance: the rollout-leaf ablation gate and the effective neural
+        // leaf weight are stamped into the manifest. With no --onnx-path the
+        // effective leaf weight collapses to 0.0 and the ablation is off.
+        assert_eq!(
+            manifest.get("allowRolloutLeaf").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            manifest
+                .get("effectiveNeuralLeafWeight")
+                .and_then(Value::as_f64),
+            Some(0.0)
         );
     }
 }

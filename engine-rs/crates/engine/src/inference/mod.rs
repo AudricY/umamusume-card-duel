@@ -270,7 +270,18 @@ unsafe impl Sync for SessionGuard {}
 enum SessionStorage {
     Inline(SessionGuard),
     Dispatched,
+    /// Test-only deterministic stub. Carries a closure that maps a
+    /// `PublicObservation` (the PUBLIC information set) to a scalar value and a
+    /// uniform policy over the legal actions. It depends ONLY on the public
+    /// observation — never on particle identity or belief features — which is
+    /// precisely the property the ReBeL info-set-invariance test needs to
+    /// assert. Constructed via `InferenceSession::new_test_stub`.
+    #[cfg(test)]
+    Stub(StubFn),
 }
+
+#[cfg(test)]
+type StubFn = std::sync::Arc<dyn Fn(&PublicObservation) -> f32 + Send + Sync>;
 
 /// Loaded in-process ONNX session — thread-safe per ORT's contract
 /// (`unsafe impl Send + Sync for Session`); callers wrap in an `Arc`
@@ -302,6 +313,29 @@ impl InferenceSession {
     /// (yet) exposed a `--device` flag.
     pub fn load(onnx_path: &Path) -> Result<Self, InferenceError> {
         Self::load_on(onnx_path, Device::Cpu)
+    }
+
+    /// Test-only deterministic stub session. The supplied closure is the leaf
+    /// value oracle: it receives the PUBLIC observation and returns a scalar
+    /// `value`. Both `predict_v3_with_belief` and `predict_v3_batch_with_belief`
+    /// dispatch to it, ignoring belief features entirely and returning a uniform
+    /// policy over the legal actions. This lets tests install (via `set_global`)
+    /// a model whose output depends ONLY on the public information set, which is
+    /// the invariant the ReBeL search must preserve across particle orderings.
+    #[cfg(test)]
+    pub fn new_test_stub<F>(value_fn: F) -> Self
+    where
+        F: Fn(&PublicObservation) -> f32 + Send + Sync + 'static,
+    {
+        InferenceSession {
+            session: SessionStorage::Stub(std::sync::Arc::new(value_fn)),
+            dispatcher: None,
+            onnx_path: PathBuf::from("<test-stub>"),
+            schema: GraphSchema::V3_2,
+            uses_belief_features: false,
+            action_dim: 0,
+            device: Device::Cpu,
+        }
     }
 
     /// Construct an `InferenceSession` on a specific execution provider.
@@ -481,6 +515,8 @@ impl InferenceSession {
             SessionStorage::Inline(SessionGuard::Cpu(cell))
             | SessionStorage::Inline(SessionGuard::Cuda(cell)) => cell.into_inner(),
             SessionStorage::Dispatched => unreachable!("load_on always returns Inline"),
+            #[cfg(test)]
+            SessionStorage::Stub(_) => unreachable!("load_on never returns Stub"),
         };
 
         let dispatcher = BatchedDispatcher::start(
@@ -541,6 +577,14 @@ impl InferenceSession {
                 "legalActions must not be empty".into(),
             ));
         }
+        #[cfg(test)]
+        if let SessionStorage::Stub(value_fn) = &self.session {
+            let n = legal_actions.len();
+            return Ok(PredictionV3 {
+                probs: vec![1.0 / n as f32; n],
+                value: value_fn(observation),
+            });
+        }
         let row = pack_row(
             self.schema,
             self.uses_belief_features,
@@ -570,6 +614,11 @@ impl InferenceSession {
                 return Err(InferenceError::OutputShape(
                     "Dispatched storage without dispatcher".into(),
                 ));
+            }
+            #[cfg(test)]
+            SessionStorage::Stub(_) => {
+                // Unreachable: the stub branch returns above before `pack_row`.
+                unreachable!("Stub storage handled before packing");
             }
         };
         run_inline_row(guard, self.schema, &row)
@@ -636,6 +685,15 @@ impl InferenceSession {
             let (obs, legal, belief) = batch[0];
             return Ok(vec![self.predict_v3_with_belief(obs, legal, belief)?]);
         }
+        // Test-only stub: per-row delegate to the public-only value oracle.
+        #[cfg(test)]
+        if matches!(self.session, SessionStorage::Stub(_)) {
+            let mut out = Vec::with_capacity(batch.len());
+            for (obs, legal, belief) in batch.iter() {
+                out.push(self.predict_v3_with_belief(obs, legal, *belief)?);
+            }
+            return Ok(out);
+        }
         // Pack rows up-front; both the inline batch and the dispatcher
         // fan-out path consume `PackedRow`s.
         let mut rows: Vec<PackedRow> = Vec::with_capacity(batch.len());
@@ -675,6 +733,11 @@ impl InferenceSession {
                     )
                 })?;
                 dispatcher.predict_many(rows)
+            }
+            #[cfg(test)]
+            SessionStorage::Stub(_) => {
+                // Unreachable: the stub branch returns above before packing.
+                unreachable!("Stub storage handled before packing");
             }
         }
     }

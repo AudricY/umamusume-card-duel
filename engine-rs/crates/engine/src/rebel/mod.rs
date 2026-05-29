@@ -27,6 +27,14 @@ pub struct RebelSearchConfig {
     pub neural_policy_weight: f64,
     pub neural_value_weight: f64,
     pub neural_leaf_weight: f64,
+    /// Opt-in gate for the determinized heuristic rollout leaf
+    /// (`rollout_leaf_value_for_state`). That leaf is info-INCORRECT for this
+    /// imperfect-information game (strategy fusion): it evaluates each
+    /// determinized particle as if its private state were common knowledge.
+    /// The neural/observation leaf is the only sound production leaf, so the
+    /// rollout path is OFF by default and reachable only as an explicit
+    /// ablation (`--allow-rollout-leaf`).
+    pub allow_rollout_leaf: bool,
     pub algorithm: String,
 }
 
@@ -39,6 +47,7 @@ impl Default for RebelSearchConfig {
             neural_policy_weight: 0.0,
             neural_value_weight: 0.0,
             neural_leaf_weight: 0.0,
+            allow_rollout_leaf: false,
             algorithm: "public-belief-cfr-v1".to_string(),
         }
     }
@@ -72,6 +81,10 @@ pub struct BeliefSearchResult {
     pub public_belief_value: f64,
     pub private_state_values: Vec<f64>,
     pub sampled_action_index: usize,
+    /// True iff this decision evaluated at least one determinized rollout leaf,
+    /// i.e. the (info-incorrect) rollout ablation was both enabled and actually
+    /// exercised. Serialized downstream as `rolloutLeafUsed`.
+    pub rollout_leaf_used: bool,
     pub diagnostics: RebelSearchDiagnostics,
     pub legal_actions: Vec<LegalAiAction>,
     pub search_algorithm: String,
@@ -90,6 +103,7 @@ pub fn run_public_belief_search(
             public_belief_value: 0.0,
             private_state_values: Vec::new(),
             sampled_action_index: 0,
+            rollout_leaf_used: false,
             diagnostics: RebelSearchDiagnostics {
                 information_set_key: belief.public_history_digest.clone(),
                 particle_count: belief.particles.len(),
@@ -121,8 +135,24 @@ pub fn run_public_belief_search(
     let mut neural_leaf_batch_rows = 0usize;
     let search_iterations = config.iterations.max(1) as usize;
     let neural_leaf_weight = config.neural_leaf_weight.clamp(0.0, 1.0);
-    let use_rollouts = neural_leaf_weight < 1.0 || crate::inference::global().is_none();
+    // Rollouts are info-incorrect; they NEVER run unless the operator explicitly
+    // opts into the ablation via `allow_rollout_leaf`. Even then they only fire
+    // when the neural leaf cannot fully cover the leaf value (weight < 1.0 or no
+    // model loaded).
+    let use_rollouts = config.allow_rollout_leaf
+        && (neural_leaf_weight < 1.0 || crate::inference::global().is_none());
     let use_neural_leaf = neural_leaf_weight > 0.0;
+    // Loud-fail: with the rollout leaf disabled (the production default), the
+    // neural leaf is the ONLY value source. Refusing to silently emit zeroed
+    // leaf values when no model is loaded keeps corrupted targets out of the
+    // training data.
+    if use_neural_leaf && !use_rollouts && crate::inference::global().is_none() {
+        panic!(
+            "ReBeL leaf evaluation has no value source: no inference model loaded \
+             and the rollout leaf is disabled; pass --allow-rollout-leaf to opt \
+             into the (info-incorrect) rollout ablation"
+        );
+    }
     let mut base_leaf_values: Vec<Vec<f64>> = vec![vec![0.0; action_count]; belief.particles.len()];
     let mut leaf_observations: Vec<PublicObservation> = Vec::new();
     let mut leaf_legal_actions: Vec<Vec<LegalAiAction>> = Vec::new();
@@ -174,7 +204,13 @@ pub fn run_public_belief_search(
                     } else {
                         let legal = enumerate_legal_ai_actions(&next, belief.observer_side);
                         if legal.is_empty() {
-                            neural_leaf_counts[particle_index][action_index] += 1;
+                            // Non-terminal leaf with no legal actions and no model
+                            // input. Do NOT increment the count with an implicit 0
+                            // value: that biased the per-(particle, action) neural
+                            // average toward 0 for no defensible reason. Skipping it
+                            // leaves the average over the genuinely-evaluated leaves;
+                            // if NO leaf is ever evaluated for this slot, the
+                            // aggregation below falls back to the rollout value.
                         } else {
                             leaf_observations
                                 .push(build_public_observation(&next, belief.observer_side));
@@ -208,9 +244,13 @@ pub fn run_public_belief_search(
                         neural_leaf_counts[particle_index][action_index] += 1;
                     }
                 }
-                Err(_) => {
-                    neural_leaf_sums = vec![vec![0.0; action_count]; belief.particles.len()];
-                    neural_leaf_counts = vec![vec![0; action_count]; belief.particles.len()];
+                Err(e) => {
+                    // Hard failure: silently zeroing the leaf sums/counts here
+                    // injected zero-valued leaves into the search aggregation,
+                    // which corrupts both the action values and the derived
+                    // policy/value targets. Fail loudly with the underlying
+                    // inference error instead.
+                    panic!("ReBeL neural leaf inference failed: {e}");
                 }
             }
         }
@@ -243,47 +283,20 @@ pub fn run_public_belief_search(
             *value /= *weight;
         }
     }
-    // Honest CFR over the empirical action_values (replaces the prior softmax(Q)/T=1
-    // target, which produced near-uniform searchPolicy whenever rollouts saturated).
-    // Regret-matching over fixed v(a) converges to argmax; the average strategy is
-    // exposed as the policy target so the head learns the same expert action under
-    // policy distillation.
-    let rollout_policy = {
-        let cfr_iterations: usize = 128;
-        let k = action_count;
-        let mut cumulative_regret = vec![0.0f64; k];
-        let mut strategy_sum = vec![0.0f64; k];
-        let mut sigma = vec![1.0 / k as f64; k];
-        for _ in 0..cfr_iterations {
-            let mean_value: f64 = sigma
-                .iter()
-                .zip(action_values.iter())
-                .map(|(s, v)| s * v)
-                .sum();
-            for a in 0..k {
-                cumulative_regret[a] += action_values[a] - mean_value;
-            }
-            let positive_sum: f64 = cumulative_regret.iter().map(|r| r.max(0.0)).sum();
-            if positive_sum > 0.0 {
-                for a in 0..k {
-                    sigma[a] = cumulative_regret[a].max(0.0) / positive_sum;
-                }
-            } else {
-                for a in 0..k {
-                    sigma[a] = 1.0 / k as f64;
-                }
-            }
-            for a in 0..k {
-                strategy_sum[a] += sigma[a];
-            }
-        }
-        let total: f64 = strategy_sum.iter().sum();
-        if total > 0.0 && total.is_finite() {
-            strategy_sum.iter().map(|s| s / total).collect()
-        } else {
-            vec![1.0 / k as f64; k]
-        }
-    };
+    // Regret-matching over the empirical action_values (replaces the prior
+    // softmax(Q)/T=1 target, which produced near-uniform searchPolicy whenever
+    // rollouts saturated).
+    //
+    // HONEST LABELING: this is NOT equilibrium CFR. CFR's regret is computed
+    // against a counterfactual value vector that itself depends on the opponent's
+    // current strategy and is recomputed every iteration. Here action_values is a
+    // FIXED vector for the whole loop, so regret-matching just concentrates the
+    // average strategy on argmax(action_values) (with ties split). It is a smooth
+    // argmax over a single value estimate, exposed as the policy target so the
+    // head learns the same expert action under policy distillation. The on-wire
+    // `algorithm` string is left as "public-belief-cfr-v1" for schema continuity;
+    // do not read it as a claim of CFR equilibrium convergence.
+    let rollout_policy = average_strategy_from_values(&action_values);
     let mut neural_value = None;
     let root_policy = if config.neural_policy_weight > 0.0 || config.neural_value_weight > 0.0 {
         if let Some(session) = crate::inference::global() {
@@ -338,6 +351,7 @@ pub fn run_public_belief_search(
         public_belief_value,
         private_state_values,
         sampled_action_index,
+        rollout_leaf_used: use_rollouts && rollout_leaf_calls > 0,
         diagnostics: RebelSearchDiagnostics {
             information_set_key: belief.public_history_digest.clone(),
             particle_count: belief.particles.len(),
@@ -350,13 +364,65 @@ pub fn run_public_belief_search(
             neural_value_weight: config.neural_value_weight,
             neural_leaf_weight: config.neural_leaf_weight,
             neural_value,
-            search_iterations: config.iterations,
+            // Report the EFFECTIVE per-(particle, action) sampling budget that
+            // actually ran (`config.iterations.max(1)`), not the raw configured
+            // value, so diagnostics and the emitted `searchIterations` match the
+            // work performed even when `iterations == 0`.
+            search_iterations: search_iterations as u32,
             policy_entropy: entropy(&root_policy),
             particle_action_agreement: agreement,
             aggregate_q_variance: variance(&action_values),
         },
         legal_actions: belief.legal_actions.clone(),
         search_algorithm: config.algorithm.clone(),
+    }
+}
+
+/// Regret-matching average strategy over a FIXED value vector.
+///
+/// See the call site for the honest-labeling note: because `action_values`
+/// does not change across iterations, the cumulative regret accumulates
+/// monotonically in favor of `argmax(action_values)`, and the time-averaged
+/// strategy concentrates its mass there. The returned distribution always sums
+/// to 1 (falling back to uniform on a degenerate/empty value vector). Extracted
+/// from `run_public_belief_search` so it can be unit-tested directly.
+fn average_strategy_from_values(action_values: &[f64]) -> Vec<f64> {
+    let k = action_values.len();
+    if k == 0 {
+        return Vec::new();
+    }
+    let cfr_iterations: usize = 128;
+    let mut cumulative_regret = vec![0.0f64; k];
+    let mut strategy_sum = vec![0.0f64; k];
+    let mut sigma = vec![1.0 / k as f64; k];
+    for _ in 0..cfr_iterations {
+        let mean_value: f64 = sigma
+            .iter()
+            .zip(action_values.iter())
+            .map(|(s, v)| s * v)
+            .sum();
+        for a in 0..k {
+            cumulative_regret[a] += action_values[a] - mean_value;
+        }
+        let positive_sum: f64 = cumulative_regret.iter().map(|r| r.max(0.0)).sum();
+        if positive_sum > 0.0 {
+            for a in 0..k {
+                sigma[a] = cumulative_regret[a].max(0.0) / positive_sum;
+            }
+        } else {
+            for a in 0..k {
+                sigma[a] = 1.0 / k as f64;
+            }
+        }
+        for a in 0..k {
+            strategy_sum[a] += sigma[a];
+        }
+    }
+    let total: f64 = strategy_sum.iter().sum();
+    if total > 0.0 && total.is_finite() {
+        strategy_sum.iter().map(|s| s / total).collect()
+    } else {
+        vec![1.0 / k as f64; k]
     }
 }
 
@@ -376,19 +442,6 @@ fn mix_policy(rollout_policy: &[f64], neural_policy: &[f32], neural_weight: f64)
     } else {
         rollout_policy.to_vec()
     }
-}
-
-fn softmax(values: &[f64]) -> Vec<f64> {
-    if values.is_empty() {
-        return Vec::new();
-    }
-    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let exp = values.iter().map(|v| (v - max).exp()).collect::<Vec<_>>();
-    let total = exp.iter().sum::<f64>();
-    if total <= 0.0 || !total.is_finite() {
-        return vec![1.0 / values.len() as f64; values.len()];
-    }
-    exp.into_iter().map(|v| v / total).collect()
 }
 
 fn sample_policy(policy: &[f64], rng: &mut Rng) -> usize {
@@ -444,5 +497,154 @@ fn _side_key(side: SideId) -> &'static str {
     match side {
         SideId::Player => "player",
         SideId::Opponent => "opponent",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::belief::{build_public_belief_state, BeliefBuildConfig, PublicHistory};
+    use crate::core::random::{with_rng, Rng};
+    use crate::headless_setup::setup_ai_vs_ai_game;
+    use crate::inference::{self, InferenceSession};
+    use std::sync::Once;
+
+    /// Deterministic, public-only value oracle: hash the serialized public
+    /// observation to a stable scalar in [-1, 1]. Crucially this depends ONLY
+    /// on the public observation — never on particle identity, ordering, or
+    /// belief features — which is the invariant the search must preserve.
+    fn public_only_value(obs: &PublicObservation) -> f32 {
+        let json = serde_json::to_string(obs).expect("serialize observation");
+        let mut h: u64 = 1469598103934665603; // FNV-1a offset basis
+        for b in json.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        // Map to (-1, 1) deterministically.
+        ((h % 20001) as f64 / 10000.0 - 1.0) as f32
+    }
+
+    static INSTALL_STUB: Once = Once::new();
+
+    /// Install the public-only stub into the process-global inference slot.
+    /// `set_global` is a `OnceLock`, so we guard with `Once` and tolerate the
+    /// (benign) case where another test installed first — we only rely on the
+    /// global being *some* public-only oracle. No engine test other than this
+    /// module calls `set_global`, so the installed session is ours.
+    fn install_public_only_stub() {
+        INSTALL_STUB.call_once(|| {
+            inference::set_global(InferenceSession::new_test_stub(public_only_value));
+        });
+    }
+
+    /// Build a belief state at the game's initial position for the player side.
+    fn build_initial_belief(seed: &str, particle_count: usize) -> crate::belief::PublicBeliefState {
+        let rng = Rng::from_seed(format!("rebel-test:{seed}"), "rebel-test");
+        let (state, mut rng) = with_rng(rng, setup_ai_vs_ai_game);
+        let history = PublicHistory::from_state(&state, "matikanetannhauser", "matikanetannhauser", 0);
+        let config = BeliefBuildConfig {
+            particle_count,
+            seed_label: format!("rebel-test:{seed}"),
+        };
+        build_public_belief_state(&state, SideId::Player, history, &config, &mut rng)
+    }
+
+    fn neural_leaf_config() -> RebelSearchConfig {
+        RebelSearchConfig {
+            iterations: 4,
+            max_depth: 1,
+            rollout_steps: 8,
+            neural_policy_weight: 0.0,
+            neural_value_weight: 0.0,
+            neural_leaf_weight: 1.0,
+            allow_rollout_leaf: false,
+            algorithm: "public-belief-cfr-v1".to_string(),
+        }
+    }
+
+    /// Info-set invariance: with the neural leaf as the only value source
+    /// (`neural_leaf_weight = 1.0`, `allow_rollout_leaf = false`) and a value
+    /// oracle that depends ONLY on the public observation, permuting the
+    /// particle set must yield a bit-identical `root_policy`, and zero rollout
+    /// leaves must be evaluated.
+    ///
+    /// Coverage note: this asserts the strongest *exactly checkable* property —
+    /// invariance under particle PERMUTATION (the brief's clause (a)) — because
+    /// the per-particle leaf observation can legitimately differ across distinct
+    /// particle SAMPLES once an action advances and reveals previously-hidden
+    /// cards. Permutation invariance isolates the aggregation order from the
+    /// result, which is exactly the strategy-fusion guard the production leaf
+    /// must satisfy.
+    #[test]
+    fn info_set_invariant_under_particle_permutation() {
+        install_public_only_stub();
+        let config = neural_leaf_config();
+
+        let belief = build_initial_belief("perm", 8);
+
+        let mut search_rng_a = Rng::from_seed("rebel-test:search", "rebel-test");
+        let result_a = run_public_belief_search(&belief, &config, &mut search_rng_a);
+
+        // Reverse the particle ordering (a permutation of the SAME particle
+        // set, with matching weights) and re-run with the SAME search RNG seed.
+        let mut permuted = belief.clone();
+        permuted.particles.reverse();
+        permuted.particle_weights.reverse();
+
+        let mut search_rng_b = Rng::from_seed("rebel-test:search", "rebel-test");
+        let result_b = run_public_belief_search(&permuted, &config, &mut search_rng_b);
+
+        assert_eq!(
+            result_a.root_policy.len(),
+            result_b.root_policy.len(),
+            "policy length must be stable across particle permutation"
+        );
+        for (i, (a, b)) in result_a
+            .root_policy
+            .iter()
+            .zip(result_b.root_policy.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a, b,
+                "root_policy[{i}] diverged under particle permutation: {a} vs {b}"
+            );
+        }
+
+        // (b) No determinized rollout leaf was evaluated.
+        assert_eq!(
+            result_a.diagnostics.rollout_leaf_calls, 0,
+            "rollout leaf must never run with allow_rollout_leaf=false"
+        );
+        assert_eq!(result_b.diagnostics.rollout_leaf_calls, 0);
+        assert!(!result_a.rollout_leaf_used);
+        assert!(!result_b.rollout_leaf_used);
+    }
+
+    /// CFR average strategy over a FIXED value vector concentrates mass on the
+    /// argmax and sums to 1.
+    #[test]
+    fn cfr_average_strategy_concentrates_on_argmax() {
+        let action_values = vec![0.1, 0.9, 0.3, 0.2];
+        let policy = average_strategy_from_values(&action_values);
+
+        let sum: f64 = policy.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "policy must sum to 1, got {sum}");
+
+        let argmax = super::argmax_f64(&action_values);
+        assert_eq!(argmax, 1, "argmax of the fixed value vector is index 1");
+        for (i, p) in policy.iter().enumerate() {
+            if i == argmax {
+                assert!(
+                    *p > 0.99,
+                    "argmax index must carry nearly all mass, got {p}"
+                );
+            } else {
+                assert!(
+                    *p < 0.01,
+                    "non-argmax index {i} should carry near-zero mass, got {p}"
+                );
+            }
+        }
     }
 }

@@ -34,6 +34,7 @@ from rebel_orchestrator import (  # noqa: E402
     resolve_kl_anchor,
     resolve_selfplay_pool,
     snapshot_promoted_artifacts,
+    validate_leaf_args,
     validate_rebel_rows,
 )
 
@@ -47,16 +48,20 @@ def _args(**overrides: object) -> argparse.Namespace:
         "kl_anchor_checkpoint": None,
         "pool_state_file": None,
         "pool_size": 5,
+        "neural_leaf_weight": 1.0,
+        "allow_rollout_leaf": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
 
 
-def _write_rows(path: Path, prefix: str, count: int) -> None:
+def _write_rows(path: Path, prefix: str, count: int, *, rollout_leaf_used: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf8") as fh:
         for index in range(count):
-            fh.write(json.dumps({"row": f"{prefix}-{index}"}) + "\n")
+            fh.write(
+                json.dumps({"row": f"{prefix}-{index}", "rolloutLeafUsed": rollout_leaf_used}) + "\n"
+            )
 
 
 def _valid_rebel_row(**overrides: object) -> dict[str, object]:
@@ -160,6 +165,67 @@ def test_replay_passthrough_when_disabled() -> None:
         }
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def test_replay_drops_rollout_contaminated_and_old_vintage_rows() -> None:
+    work = Path(tempfile.mkdtemp(prefix="uma-rebel-replay-vintage-"))
+    try:
+        loop = work / "loop"
+        iter_dir = loop / "iter-2"
+        current = iter_dir / "rebel-selfplay.jsonl"
+
+        # iter-0: pre-fix vintage rows that lack the rolloutLeafUsed field.
+        old_dir = loop / "iter-0"
+        old_dir.mkdir(parents=True, exist_ok=True)
+        with (old_dir / "rebel-selfplay.jsonl").open("w", encoding="utf8") as fh:
+            for index in range(4):
+                fh.write(json.dumps({"row": f"oldvintage-{index}"}) + "\n")
+
+        # iter-1: mix of clean (kept) and rollout-contaminated (dropped) rows.
+        iter1 = loop / "iter-1" / "rebel-selfplay.jsonl"
+        iter1.parent.mkdir(parents=True, exist_ok=True)
+        with iter1.open("w", encoding="utf8") as fh:
+            for index in range(4):
+                fh.write(json.dumps({"row": f"clean-{index}", "rolloutLeafUsed": False}) + "\n")
+            for index in range(4):
+                fh.write(json.dumps({"row": f"dirty-{index}", "rolloutLeafUsed": True}) + "\n")
+
+        _write_rows(current, "cur", 6)
+
+        mixed, summary = materialize_replay_mix(
+            args=_args(replay_window=2, replay_old_fraction=0.4),
+            loop_dir=loop,
+            iter_dir=iter_dir,
+            iteration=2,
+            current_selfplay=current,
+            events=EventWriter(loop),
+        )
+
+        assert summary["status"] == "materialized", summary
+        # Only the 4 iter-1 clean rows are eligible; 4 dirty + 4 old-vintage dropped.
+        assert summary["old_pool_rows"] == 4, summary
+        assert summary["old_dropped_contaminated"] == 8, summary
+        lines = read_jsonl_lines(mixed)
+        old_lines = lines[6:]
+        assert old_lines, lines
+        assert all("clean-" in line for line in old_lines), old_lines
+        assert all("dirty-" not in line and "oldvintage-" not in line for line in old_lines), old_lines
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_leaf_weight_guard_requires_allow_rollout_leaf() -> None:
+    # Pure neural leaf (default) is always allowed.
+    validate_leaf_args(_args(neural_leaf_weight=1.0, allow_rollout_leaf=False))
+    # Blended leaf without opt-in is rejected.
+    try:
+        validate_leaf_args(_args(neural_leaf_weight=0.5, allow_rollout_leaf=False))
+    except SystemExit as exc:
+        assert "allow-rollout-leaf" in str(exc), exc
+    else:
+        raise AssertionError("neural_leaf_weight < 1.0 without allow_rollout_leaf should fail")
+    # Blended leaf WITH explicit opt-in is allowed (ablation path).
+    validate_leaf_args(_args(neural_leaf_weight=0.5, allow_rollout_leaf=True))
 
 
 def test_fixed_kl_anchor_stays_pinned() -> None:
@@ -422,6 +488,8 @@ def test_validate_rebel_rows_enforces_training_schema() -> None:
 def main() -> None:
     test_replay_mix_materializes_bounded_old_fraction()
     test_replay_passthrough_when_disabled()
+    test_replay_drops_rollout_contaminated_and_old_vintage_rows()
+    test_leaf_weight_guard_requires_allow_rollout_leaf()
     test_fixed_kl_anchor_stays_pinned()
     test_release_binary_preflight_reports_missing_and_stale()
     test_promoted_artifacts_snapshot_to_pool()

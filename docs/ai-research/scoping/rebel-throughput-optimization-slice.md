@@ -503,3 +503,53 @@ GPU-bound), sampling live GPU util. It **refuses CUDA configs while a live
 sim-rebel-selfplay/sim-eval-gate is running** (`--force` to override), so the heavy
 sweep can only run once the live run frees the GPU. Run it then to settle items 1-4
 with production-scale numbers.
+
+## 2026-05-29 — Correctness sweep (info-incorrect leaf + mistargeted value head)
+
+A correctness audit of the loop (not throughput) found and fixed the following.
+These ship together; a corrected run must start fresh (the live R18 run was
+trained on the pre-fix targets and is not retro-fixable).
+
+1. **Value head trained on the wrong field (headline bug).**
+   `training/uma_ai/rebel_dataset.py` read `beliefValue` (the search's own
+   bootstrapped, rollout-contaminated, partly self-referential value) because
+   `dict.get("beliefValue", example.get("valueTarget", 0))` always finds
+   `beliefValue` — the grounded MC outcome `valueTarget` (+1/-1/0 by winner,
+   observer perspective) never fired. **Fix:** train the value head (and the
+   q-head scalar-value consistency term) on `valueTarget`; raise if absent.
+   Decision: the value target is the **grounded MC outcome**, not a bootstrap —
+   correct for this depth-1, no-recursive-solve setup.
+
+2. **Determinized rollout leaf is information-incorrect (strategy fusion).**
+   `rollout_leaf_value_for_state` plays out a fully-instantiated particle world
+   (opponent hidden cards revealed) with a fixed heuristic, then averages over
+   particles — PIMC strategy fusion, the pathology ReBeL's belief value exists
+   to avoid. The neural/observation leaf (opponent hand masked, `observation.rs`)
+   is the only sound leaf. **Fix:** rollout is now OFF by default and reachable
+   only via an explicit `--allow-rollout-leaf` ablation. `--neural-leaf-weight`
+   default stays 1.0; the orchestrator rejects `< 1.0` without the ablation flag
+   (`validate_leaf_args`). The previous silent `inference::global().is_none()`
+   fallback to rollout, and the silent zero-leaf reset on inference error, now
+   **panic** instead of emitting corrupted targets.
+
+3. **Replay-vintage guard.** Cross-iteration replay now drops old rows whose
+   `rolloutLeafUsed` is true or absent (pre-fix / contaminated), logging counts,
+   so rollout-contaminated policy/Q targets cannot leak into a corrected mix.
+
+4. **Info-set invariant test now exists** (was only a requirement at
+   "Wave/CFR batching" / e2e §F): `rebel::tests::info_set_invariant_under_particle_permutation`
+   installs a public-only value oracle and asserts `root_policy` is invariant to
+   particle permutation with zero rollout calls at weight 1.0. Coverage caveat:
+   it checks permutation invariance exactly; full distinct-sample invariance is
+   not bit-checkable (post-action public observations can legitimately differ).
+   The decision side was already info-set-clean by construction (policy is a
+   particle-aggregated public distribution); this guards against regression.
+
+5. **Nits:** played move is now `argmax(root_policy)` (on-policy with the
+   distilled target, was `argmax(Q)`); `temperature_value` now actually scales
+   the played-move sampling (`p^(1/T)`), recorded target unscaled; the
+   `searchIterations` diagnostic reports the effective budget; the CFR block is
+   honestly labeled (regret-matching over a fixed value vector ≈ smooth argmax,
+   NOT equilibrium CFR — the `public-belief-cfr-v1` wire string is kept for
+   schema continuity). New `--allow-rollout-leaf` and `rolloutLeafUsed` /
+   `allowRolloutLeaf` / `effectiveNeuralLeafWeight` provenance are stamped.

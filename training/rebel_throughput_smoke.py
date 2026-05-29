@@ -25,6 +25,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         "neural_policy_weight": 0.25,
         "neural_value_weight": 0.25,
         "neural_leaf_weight": 1.0,
+        "allow_rollout_leaf": False,
         "selfplay_inference_batch_size": 32,
         "selfplay_inference_max_wait_us": 2000,
         "epochs": 1,
@@ -88,6 +89,21 @@ def main() -> None:
     for flag, value in required_selfplay_pairs.items():
         if not _contains_pair(selfplay_cmd, flag, value):
             raise AssertionError(f"missing {flag} {value} in selfplay command: {selfplay_cmd}")
+    # The corrected loop must default the leaf weight to a pure neural leaf.
+    if not _contains_pair(selfplay_cmd, "--neural-leaf-weight", "1.0"):
+        raise AssertionError(f"default selfplay cmd should pin --neural-leaf-weight 1.0: {selfplay_cmd}")
+    # Default must NOT opt into the info-incorrect determinized rollout leaf.
+    if "--allow-rollout-leaf" in selfplay_cmd:
+        raise AssertionError(f"default selfplay cmd must not include --allow-rollout-leaf: {selfplay_cmd}")
+    # ...but it must be appended when the flag is set.
+    allow_cmd = build_selfplay_cmd(
+        _args(allow_rollout_leaf=True),
+        repo,
+        Path("/tmp/rebel.jsonl"),
+        Path("/tmp/selfplay.json"),
+    )
+    if "--allow-rollout-leaf" not in allow_cmd:
+        raise AssertionError(f"--allow-rollout-leaf should be appended when enabled: {allow_cmd}")
 
     smoke_cmd = build_train_cmd(
         _args(smoke=True, device="cpu", amp=None, dataloader_workers=None, init_from_checkpoint=None),
