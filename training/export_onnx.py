@@ -90,15 +90,25 @@ def main() -> None:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    state = torch.zeros((1, graph_state_dim), dtype=torch.float32)
-    actions = torch.zeros((1, args.max_actions, ACTION_DIM), dtype=torch.float32)
-    mask = torch.ones((1, args.max_actions), dtype=torch.bool)
+    # v6 relational fix: the dynamo ONNX exporter infers a dim as STATIC when
+    # the example trace uses size 1 for it. The relational trunk's value head
+    # reads `encoded[:, 0, :]` ([B, S, d] -> [B, d]); traced at batch=1 the
+    # exporter bakes batch=1 into that path (value output becomes [1] and the
+    # value-head Gemm reshape only holds when B==1), so Rust batched leaf
+    # inference (B>1) fails with a Reshape mismatch. Tracing at batch=2 makes
+    # the batch axis genuinely dynamic. The sum-pool MLP / set_attention graphs
+    # are unaffected by a batch=1 trace (no per-token sequence slice), so they
+    # keep batch=1 to stay byte-identical to every existing export.
+    trace_batch = 2 if config.model_variant == "relational" else 1
+    state = torch.zeros((trace_batch, graph_state_dim), dtype=torch.float32)
+    actions = torch.zeros((trace_batch, args.max_actions, ACTION_DIM), dtype=torch.float32)
+    mask = torch.ones((trace_batch, args.max_actions), dtype=torch.bool)
     # R7.b.2 Phase 3: two new int64 tensors flow into the embedding pass.
     # All zeros are a valid no-op input (index 0 = pad row, kept zero by
     # `padding_idx=0`), matching the additive-residual null behaviour
     # validated in Phase 2's smoke contract (4).
-    card_ids_by_zone = torch.zeros((1, NUM_ZONES, MAX_CARDS_PER_ZONE), dtype=torch.int64)
-    action_card_idx = torch.zeros((1, args.max_actions, 2), dtype=torch.int64)
+    card_ids_by_zone = torch.zeros((trace_batch, NUM_ZONES, MAX_CARDS_PER_ZONE), dtype=torch.int64)
+    action_card_idx = torch.zeros((trace_batch, args.max_actions, 2), dtype=torch.int64)
 
     # R16-P2 C5: per-Uma slot-token branch gates the 7-input ONNX graph.
     # When `model_config.uses_uma_slot_tokens` is False (v3.0/v3.1), the
@@ -112,9 +122,9 @@ def main() -> None:
     # contributes a structural zero residual; the graph still exercises the
     # Gather/Concat/MatMul ops so ORT shape-inference matches export-time.
     if config.uses_uma_slot_tokens:
-        uma_slot_card_ids = torch.zeros((1, UMA_SLOT_COUNT), dtype=torch.int64)
+        uma_slot_card_ids = torch.zeros((trace_batch, UMA_SLOT_COUNT), dtype=torch.int64)
         uma_slot_features = torch.zeros(
-            (1, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), dtype=torch.float32
+            (trace_batch, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), dtype=torch.float32
         )
         positional_inputs = (
             state,
@@ -210,7 +220,7 @@ def main() -> None:
             else _BeliefExportWrapper(model)
         )
         export_model.eval()
-        belief_features = torch.zeros((1, config.belief_feature_dim), dtype=torch.float32)
+        belief_features = torch.zeros((trace_batch, config.belief_feature_dim), dtype=torch.float32)
         positional_inputs = positional_inputs + (belief_features,)
         input_names.append("belief_features")
         dynamic_axes["belief_features"] = {0: "batch"}

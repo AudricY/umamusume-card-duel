@@ -1221,6 +1221,15 @@ def ort_env(repo: Path) -> dict[str, str]:
     return env
 
 
+# Belief vector dim emitted by the Rust selfplay binary. Must stay in lockstep
+# with the engine (`belief/mod.rs` BELIEF_FEATURE_DIM = 16 summary + 107
+# hand-range = 123) and the trainer-side `uma_ai.model.BELIEF_FEATURE_DIM` /
+# `uma_ai.rebel_dataset` shape check. Kept as a literal here so this lightweight
+# orchestrator controller stays torch-free (model.py imports torch; the
+# controller deliberately probes CUDA via a subprocess rather than importing).
+_BELIEF_FEATURE_DIM = 16 + 107  # = 123
+
+
 def validate_rebel_rows(path: Path) -> dict[str, Any]:
     required = {
         "kind",
@@ -1284,8 +1293,11 @@ def validate_rebel_rows(path: Path) -> dict[str, Any]:
             if not all_finite(private_values):
                 raise SystemExit(f"{path}:{line_number}: non-finite privateStateValues")
             belief_vector = (row.get("beliefFeatures") or {}).get("vector") or []
-            if len(belief_vector) != 16:
-                raise SystemExit(f"{path}:{line_number}: belief feature dim {len(belief_vector)} != 16")
+            if len(belief_vector) != _BELIEF_FEATURE_DIM:
+                raise SystemExit(
+                    f"{path}:{line_number}: belief feature dim "
+                    f"{len(belief_vector)} != {_BELIEF_FEATURE_DIM}"
+                )
             if not all_finite(belief_vector):
                 raise SystemExit(f"{path}:{line_number}: non-finite belief feature")
             diagnostics = row.get("searchDiagnostics") or {}

@@ -69,7 +69,7 @@ def _valid_rebel_row(**overrides: object) -> dict[str, object]:
         "schemaVersion": 1,
         "beliefSchemaVersion": 1,
         "observation": {},
-        "beliefFeatures": {"vector": [0.0] * 16},
+        "beliefFeatures": {"vector": [0.0] * 123},  # BELIEF_FEATURE_DIM (16 summary + 107 hand-range)
         "publicHistoryDigest": "digest",
         "legalActions": [{"type": "pass"}, {"type": "playTrainer"}],
         "selectedActionIndex": 1,
