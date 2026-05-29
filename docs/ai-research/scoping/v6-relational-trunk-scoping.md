@@ -164,16 +164,88 @@ threaded by `r12_orchestrator.py` and `rebel_orchestrator.py`
   is a follow-up (cf. `project_model_size_transition_h256_d4`), not a blocker
   for the strength gate.
 
-## Open forks (post-gate)
+## Representation & feature-improvement brainstorm (2026-05-29)
 
-- **v6.1 richer signature** — if v6 clears structurally but the arithmetic
-  crutch proves load-bearing, re-add the v3.7 lethal/ETA channels as explicit
-  *derived-fact tokens* (not a scalar tail). Pre-register before running.
-- **Token pruning** — drop the 60 discard tokens (or pack present-only) if
-  throughput is the binding constraint; ONNX needs a fixed shape so this is a
-  featurizer-side change.
-- **Per-side asymmetry** — if the polarity-shared trunk measurably narrows the
-  opponent-side gap, feed that into `per-side-asymmetry-probe-scoping.md`.
+Four-lens subagent brainstorm (info-completeness / tokenization geometry /
+ReBeL belief / training objectives). Two cross-cutting findings dominate:
+
+- **Convergence: the card-embedding table is the #1 lever.** Three lenses
+  independently landed on it — `card_embed` is `nn.Embedding(108, 32,
+  padding_idx=0)`, randomly initialized, supervised only by RL signal, and the
+  relational trunk leans on it for EVERY token (card/slot/action). 107 cards ×
+  32-d with a skewed self-play distribution → rare cards under-learned. The
+  static mechanics (attack damage/cost, HP, weakness, effect-kind) live in
+  `cards.json` and are vocab-id-keyed, so they can be baked in.
+- **Correctness smell in the belief (echoes the stale-verdict caveat):** the
+  per-card hand range is ALREADY computed in `build_belief_features`
+  (`engine-rs/.../belief/mod.rs:329`) and then DISCARDED — only 16 scalar
+  moments reach the model. Worse, particles are a permutation of the
+  opponent's TRUE hand+deck multiset (`belief/mod.rs:216-235`), so the
+  "belief" is a near-deterministic point mass, not a range, and the true hand
+  is always in support. ReBeL is the paradigm; this is a real ceiling.
+
+### Tier 1 — cheap pre-gate ablations (model/loss only, no serving/resim change)
+
+Test as BC / short-ReBeL ablations on the v6 path BEFORE the expensive R20
+strength gate; all ride the existing ONNX signature.
+
+1. **Catalog-grounded card embeddings.** Init `card_embed` rows from `cards.json`
+   mechanics and/or add a mechanics-prediction aux head (pretrain →
+   `--init-from-checkpoint`, or a joint anchor loss). Optionally factor the
+   table (type ⊕ stage ⊕ role ⊕ residual). De-risks the v6 gate itself — a
+   random 32-d table is a weak prior for a trunk whose thesis is *relating*
+   cards. Cost: model.py + train_bc, ONNX-unchanged.
+2. **Belief per-card hand range.** Emit the already-computed presence vector
+   onto `belief_features`; bump `BELIEF_FEATURE_DIM` in `belief/mod.rs:23` +
+   `model.py` lockstep. Rides the 8-input belief signature; the v6 belief token
+   becomes a real range. Highest ReBeL lift per cost. (Stronger variant:
+   per-card belief *tokens* via the shared `card_embed`.)
+3. **Value-as-win-probability (BCE) calibration.** Reparam the value loss as
+   BCE on `(value+1)/2`; keeps the exported scalar in [-1,1] (ONNX-unchanged).
+   Targets the documented value-head noise (`progress/r16.md:141-272`).
+4. **Fix the v6 policy-head leak.** The cross-attention head re-reads the RAW
+   `card_embed(action_card_idx)` for source/target (`model.py` policy head)
+   instead of the CONTEXTUALIZED encoder token for that card — discarding the
+   board-aware representation the trunk just computed. Gather the encoded token
+   (needs an action→token-position index). Model-side polish on shipped code.
+
+### Tier 2 — deeper bets (higher ceiling / cost; after Tier 1 + corrected-loop baseline)
+
+5. **Belief real-range resampling.** Resample hidden zones from the unseen
+   deck-list complement (deck list is public) + public-history filtering, not
+   the true multiset. The structural ReBeL correctness fix; needs revealed-card
+   bookkeeping. Canonical home: `rebel-e2e-scoping.md`.
+6. **Side-swap symmetry.** Own↔opp augmentation + a value-negation consistency
+   loss (zero-sum ⇒ `value(s) = -value(swap(s))`). Attacks the +~0.06
+   opponent-side gap the v6 polarity embed only addresses architecturally.
+   Training-loop only; cross-link `per-side-asymmetry-probe-scoping.md`.
+7. **Selected featurizer re-extracts that fill genuine blind spots** the trunk
+   cannot derive: own-side deck-composition inference (the heuristic AI uses
+   `deck_inference.rs`; the model sees only scalar `deckCount`), and un-gating
+   the backward-looking `usedAbilityThisTurn` feature into a forward
+   opp-threat / attack-roster summary. Featurizer-only re-extract (no resim).
+   Hold the broader scalar-tail set unless Tier-1 embedding grounding
+   underperforms (the trunk should derive much of it).
+
+### Tier 3 — defer / spike-first
+
+- **Action/turn-history tokens (R7.b.4).** Never tested; needs a trace
+  cross-row reconstruction spike first, then a new ONNX input.
+- **Threat-matrix attention bias.** The data-dependent `[S,S]` version is a
+  heavy new input; the static role-pair bias variant is model-only and cheap —
+  do that first.
+- **Evolution-chain field / opponent-next-action / terminal-reason heads.**
+  Need new obs fields or trace relabels (resim or backfill).
+- **Token pruning / present-only packing.** Throughput lever (60 of 251 tokens
+  are discards); featurizer-side fixed-shape change. Gate on a measured
+  per-leaf wall, not assumed.
+
+### Recommended sequence
+
+Tier 1 in order 1 → 2 → 3 → 4 (each a clean A/B that also sharpens the v6 gate
+itself), then re-evaluate Tier 2 against the corrected-R20 mlp-vs-relational
+baseline. Belief items (2, 5) are the highest-ceiling line given ReBeL is the
+paradigm; embedding grounding (1) is the highest-conviction-per-cost.
 
 ## Implementation pointers
 
