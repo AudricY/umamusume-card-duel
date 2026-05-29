@@ -166,6 +166,20 @@ threaded by `r12_orchestrator.py` and `rebel_orchestrator.py`
 
 ## Representation & feature-improvement brainstorm (2026-05-29)
 
+**Implementation status (2026-05-29): all Tier-1 + Tier-2 items below are
+IMPLEMENTED, validated, and committed** (untrained — these are ablation knobs
+for the v6 gate, not yet a strength result). Commits `8dcb556` (catalog
+embeddings #1, contextual policy head #4, belief per-card range #2),
+`13c1ed1` (BCE value loss #3, side-swap #6, belief complement resampling #5),
+`a6b5460` (v6 deck-composition featurizer #7a). Validation: `v6_relational_smoke`
+13/13, `v6_python_rust_parity_smoke` ALL GATES PASS, full `cargo test -p engine`
+green, capstone full-stack ONNX export ~1e-7. Caveats: (#7a) deck-composition is
+wired + parity-tested but emits ZEROS until `PublicObservation` carries the own
+deck-card-id list (single hook `*_v6_own_deck_card_ids`); (#7b) un-gate
+ability/attack-roster was folded into #1 (catalog mechanics ride every token).
+All knobs are config/flag-gated and default to off/ablatable except the v6
+contextual policy head (default on). Next: gate them under corrected ReBeL R20.
+
 Four-lens subagent brainstorm (info-completeness / tokenization geometry /
 ReBeL belief / training objectives). Two cross-cutting findings dominate:
 
