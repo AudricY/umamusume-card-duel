@@ -243,7 +243,47 @@ pub fn run_public_belief_search(
             *value /= *weight;
         }
     }
-    let rollout_policy = softmax(&action_values);
+    // Honest CFR over the empirical action_values (replaces the prior softmax(Q)/T=1
+    // target, which produced near-uniform searchPolicy whenever rollouts saturated).
+    // Regret-matching over fixed v(a) converges to argmax; the average strategy is
+    // exposed as the policy target so the head learns the same expert action under
+    // policy distillation.
+    let rollout_policy = {
+        let cfr_iterations: usize = 128;
+        let k = action_count;
+        let mut cumulative_regret = vec![0.0f64; k];
+        let mut strategy_sum = vec![0.0f64; k];
+        let mut sigma = vec![1.0 / k as f64; k];
+        for _ in 0..cfr_iterations {
+            let mean_value: f64 = sigma
+                .iter()
+                .zip(action_values.iter())
+                .map(|(s, v)| s * v)
+                .sum();
+            for a in 0..k {
+                cumulative_regret[a] += action_values[a] - mean_value;
+            }
+            let positive_sum: f64 = cumulative_regret.iter().map(|r| r.max(0.0)).sum();
+            if positive_sum > 0.0 {
+                for a in 0..k {
+                    sigma[a] = cumulative_regret[a].max(0.0) / positive_sum;
+                }
+            } else {
+                for a in 0..k {
+                    sigma[a] = 1.0 / k as f64;
+                }
+            }
+            for a in 0..k {
+                strategy_sum[a] += sigma[a];
+            }
+        }
+        let total: f64 = strategy_sum.iter().sum();
+        if total > 0.0 && total.is_finite() {
+            strategy_sum.iter().map(|s| s / total).collect()
+        } else {
+            vec![1.0 / k as f64; k]
+        }
+    };
     let mut neural_value = None;
     let root_policy = if config.neural_policy_weight > 0.0 || config.neural_value_weight > 0.0 {
         if let Some(session) = crate::inference::global() {

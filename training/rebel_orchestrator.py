@@ -449,6 +449,12 @@ def snapshot_promoted_artifacts(loop_dir: Path, record: dict[str, Any]) -> dict[
         meta_dst = snapshot_dir / meta_src.name
         shutil.copy2(meta_src, meta_dst)
 
+    # ONNX external-data sidecar — required by ONNX Runtime when the export
+    # uses external data format. Missing → SIGSEGV in sim-rebel-selfplay.
+    data_src = onnx_src.with_suffix(onnx_src.suffix + ".data")
+    if data_src.exists():
+        shutil.copy2(data_src, snapshot_dir / data_src.name)
+
     return {
         "iteration": iteration,
         "dir": str(snapshot_dir),
