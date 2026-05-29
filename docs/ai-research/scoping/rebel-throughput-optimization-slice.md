@@ -643,6 +643,22 @@ game (pure single-thread inference). Commit: see `perf(rebel)` dedup commit.
   nondeterminism, not introduced by dedup** (the loop already runs GPU workers=4).
 - `rebel::` unit tests 3/3 incl. `info_set_invariant_under_particle_permutation`.
 
-**Next lever (out of scope here, needs a quality call):** further throughput requires
-cutting the *logical* search work — fewer particles / iterations / depth (changes the
-target) — or FP16 / TensorRT EP (changes numerics). Both are user-gated.
+**Why precision (fp16/fp8/fp4) is the WRONG axis here.** The workload is
+**per-request dispatch-overhead bound**, not GPU-FLOP-bound: (a) at fixed request
+count, throughput is ~invariant to batch size (clean: 0.469→0.404 g/s for bs 32→512
+while util climbs 84→94%); (b) throughput scales ~inversely with request COUNT
+(dedup cut requests 2.60× → throughput 2.47×, near-linear). So the cost is dominated
+by per-request work on the single inference-dispatch thread (pack / launch / sync),
+not arithmetic. Lower precision cuts FLOPs *per* pass — which isn't the bottleneck —
+so it cannot help much. Empirically: fp16 via `onnxconverter_common`
+(`keep_io_types`) does NOT round-trip this relational attention trunk (mixed
+fp16/fp32 `MatMul`/`_to_copy` type errors; ORT rejects the graph); a real fp16 trial
+would need an autocast re-export or the TensorRT EP. fp8 needs TensorRT + calibration
+(no ORT-CUDA path for an fp8 ONNX) and fp4 has no practical path; both would also
+perturb the value/policy *training targets* this binary emits — the opposite of the
+R20 target-fidelity fix.
+
+**The two real remaining levers** (bigger, user-gated): (1) cut *logical* search work
+— fewer particles / iterations / depth (changes the target; quality call); (2) break
+the single-thread dispatch serialization — multiple CUDA streams / multi-threaded
+inference (engineering change). The cheap, exact win (dedup) is taken.
