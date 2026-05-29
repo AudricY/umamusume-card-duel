@@ -553,3 +553,38 @@ trained on the pre-fix targets and is not retro-fixable).
    NOT equilibrium CFR — the `public-belief-cfr-v1` wire string is kept for
    schema continuity). New `--allow-rollout-leaf` and `rolloutLeafUsed` /
    `allowRolloutLeaf` / `effectiveNeuralLeafWeight` provenance are stamped.
+
+### 2026-05-29 — Measured dispatch re-baseline at leaf=1.0 (corrected binary)
+
+Ran `bench_rebel_selfplay_throughput.py --preset dispatch` against the corrected
+binary in the production regime (leaf=1.0, rollouts off, GPU-bound), particles 32
+/ iterations 32, 16 games/config, on the R18 pool ONNX. CSV archived at
+`runs/R20-rebel-correct-20260529/throughput-dispatch-sweep.csv`.
+
+```text
+batch  max_wait_us  workers  games/s  mean_fill  gpu_util_mean
+64     10000        24       1.30     64         30%
+256    10000        24       3.04     254        26%
+512    10000        24       4.25     501        30%   <- best
+512    40000        24       4.00     506        30%
+256     2000        24       3.15     240        25%
+256    10000        30       3.05     253        26%
+```
+
+Conclusions:
+- **Batch size is the dominant lever** (64→256→512 ⇒ 1.30→3.04→4.25 g/s). Use 512.
+- **max-wait 10000 ≥ 40000** (tail stalls hurt slightly); 10k is the pick.
+- **24 workers ≥ 30** (30 adds contention, no gain). Keep 24.
+- **leaf=1.0 ≈ 2× leaf=0.8**: 4.25 g/s vs R18's 2.05 g/s at identical particles/
+  iters — the rollout removal is simultaneously the correctness fix and the
+  throughput win. GPU util still only ~30% (residual per-cell state-advance +
+  observation-build CPU cost), so further gains would come from cutting that
+  fixed CPU work, not from more dispatch tuning.
+
+Applied to the corrected run **R20** (`runs/R20-rebel-correct-20260529`):
+`--neural-leaf-weight 1.0 --selfplay-inference-batch-size 512
+--selfplay-inference-max-wait-us 10000 --workers 24` (+ `--allow-rollout-leaf`
+solely so iter-0 can cold-start with no model; inert from iter-1 on). NOTE: the
+standalone bench hangs single-threaded at CUDA session load unless the ORT env
+(`LD_LIBRARY_PATH` for venv nvidia/ORT libs + `ORT_DYLIB_PATH`) is set — the
+harness now replicates `rebel_orchestrator.ort_env`.
