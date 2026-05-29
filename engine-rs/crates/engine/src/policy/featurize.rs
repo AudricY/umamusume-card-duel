@@ -88,6 +88,37 @@ pub const STATE_DIM_V3_7: usize = 296;
 /// catalog lookup; no new obs-contract fields. NO trunk widening
 /// (hidden_dim=128/depth=2 preserved per scoping §13.3).
 pub const STATE_DIM_V3_8: usize = 304;
+/// Mirrors `STATE_DIM_V6` in Python — 126-d v6 own-deck-composition builder
+/// (finding T2.7 "remaining-deck inference"). Layout is the FROZEN v3.0 110-d
+/// head [0:110] (byte-identical — NOT the v3.x scalar-tail lineage) + a 16-slot
+/// OWN remaining-deck composition tail [110:126]: 6 kind buckets
+/// (basic_uma / stage1_uma / stage2_uma / supporter / item_or_tool / stadium)
+/// + 10 uma-type buckets (grass..dragon), each normalized by DECK_CARD_COUNT=20.
+///
+/// "Remaining in deck" mirrors `crate::flow::ai::deck_inference`
+/// (`get_known_remaining_deck_counts`): the multiset of card ids still in the
+/// own DECK zone (`SideState.deck`).
+///
+/// OBSERVATION-CONTRACT LIMITATION (intentional, documented): the
+/// `PublicObservation` exposes only `own.deck_count` (a scalar), NOT the deck's
+/// card-id list. `policy/types.rs` / `policy/observation.rs` are out of scope
+/// for this task, so `observation_state_features_v6(obs)` cannot resolve the
+/// remaining-deck ids today and the tail degrades to ZEROS (matching the Python
+/// `observation_to_features_v6` builder exactly — parity holds by construction).
+/// The bucketing math is implemented + parity-tested via the public helper
+/// [`v6_deck_composition_tail`] over an explicit card-id list, so the moment the
+/// obs contract grows an own-deck-card-ids field BOTH builders light up
+/// bit-identically with NO featurizer change.
+pub const STATE_DIM_V6: usize = 126;
+/// Engine deck size (`crate::core::constants::DECK_CARD_COUNT`) — the
+/// normalization cap for every v6 tail bucket (`/ 20`). Re-declared here so
+/// this task's edits stay scoped to `featurize.rs`; asserted equal to the
+/// canonical engine constant in the v6 unit tests (drift guard).
+pub const V6_DECK_CARD_COUNT: usize = 20;
+/// v6 kind-bucket count [110:116].
+pub const V6_KIND_BUCKET_COUNT: usize = 6;
+/// v6 uma-type-bucket count [116:126] (== `UmamusumeType` cardinality).
+pub const V6_TYPE_BUCKET_COUNT: usize = 10;
 /// Mirrors `ACTION_DIM` — pre-computed TS-side and carried verbatim on
 /// `LegalAiAction.features`.
 ///
@@ -1434,6 +1465,123 @@ pub fn observation_state_features_v3_8(obs: &PublicObservation) -> Vec<f32> {
     f[_V38_OWN_LOSE_IF_OPP_GUSTS] = v38_lose_if_opp_gusts_weakest_bench(&obs.own, &obs.opponent);
     // [303] own_can_gust_win_prize_race.
     f[_V38_OWN_GUST_WIN_RACE] = v38_can_gust_win_prize_race(&obs.own, &obs.opponent);
+
+    f
+}
+
+// ---------------------------------------------------------------------------
+// v6-own-deck-composition tail [110:126] (finding T2.7 "remaining-deck
+// inference"). See the `STATE_DIM_V6` doc-comment for the full schema + the
+// observation-contract limitation. Mirrors the Python `_v6_deck_composition_*`
+// helpers in `training/uma_ai/features.py` bit-for-bit.
+
+/// Map a card id to its v6 kind bucket index [0:6], or `None` if the catalog
+/// cannot resolve it. Mirrors `crate::flow::ai::deck_inference`
+/// classification (and the Python `_v6_card_kind_bucket`):
+///   umamusume stage 0 -> basic_uma (0)
+///   umamusume stage 1 -> stage1_uma (1)
+///   umamusume stage >=2 -> stage2_uma (2)   (engine lumps stage>0 into one
+///       `evolution_umamusume` counter; v6 splits stage1/stage2 — union identical)
+///   trainer Supporter -> supporter (3)
+///   trainer Item|Tool -> item_or_tool (4)
+///   trainer Stadium   -> stadium (5)
+fn v6_card_kind_bucket(card: &Card) -> Option<usize> {
+    match card {
+        Card::Umamusume(u) => {
+            if u.stage == 0 {
+                Some(0)
+            } else if u.stage == 1 {
+                Some(1)
+            } else {
+                Some(2)
+            }
+        }
+        Card::Trainer(t) => match t.trainer_type {
+            TrainerType::Supporter => Some(3),
+            TrainerType::Item | TrainerType::Tool => Some(4),
+            TrainerType::Stadium => Some(5),
+        },
+    }
+}
+
+/// For an umamusume card, return its uma-type bucket index in canonical
+/// `UmamusumeType` order [0:10] (grass..dragon), or `None` for non-Uma cards.
+/// `UmamusumeType as usize` is the canonical order matching the Python
+/// `_UMA_SLOT_ENERGY_TYPES` tuple. Mirrors Python `_v6_uma_type_bucket`.
+fn v6_uma_type_bucket(card: &Card) -> Option<usize> {
+    match card {
+        Card::Umamusume(u) => Some(u.r#type as usize),
+        Card::Trainer(_) => None,
+    }
+}
+
+/// Compute the 16-slot v6 deck-composition tail from an explicit list of OWN
+/// remaining-in-deck card ids (the engine's `get_known_remaining_deck_counts`
+/// input — `SideState.deck`). Returns `[f32; 16]`:
+///   [0:6]  kind buckets (each count / DECK_CARD_COUNT)
+///   [6:16] uma-type buckets (each count / DECK_CARD_COUNT)
+/// Empty / fully-unresolvable list -> all zeros (graceful degrade). Unresolved
+/// individual ids are skipped (matching the engine's `None => {}` no-op branch).
+/// Public so the parity-fixture test can validate the bucketing math directly.
+pub fn v6_deck_composition_tail(deck_card_ids: &[String]) -> [f32; V6_KIND_BUCKET_COUNT + V6_TYPE_BUCKET_COUNT]
+{
+    let mut tail = [0.0f32; V6_KIND_BUCKET_COUNT + V6_TYPE_BUCKET_COUNT];
+    if deck_card_ids.is_empty() {
+        return tail;
+    }
+    let cat = catalog();
+    let cap = V6_DECK_CARD_COUNT as f32;
+    for card_id in deck_card_ids {
+        let card = match cat.get_by_str(card_id) {
+            Some(c) => c,
+            None => continue,
+        };
+        if let Some(kind_idx) = v6_card_kind_bucket(card) {
+            tail[kind_idx] += 1.0 / cap;
+        }
+        if let Some(type_idx) = v6_uma_type_bucket(card) {
+            tail[V6_KIND_BUCKET_COUNT + type_idx] += 1.0 / cap;
+        }
+    }
+    tail
+}
+
+/// Resolve the OWN remaining-in-deck card-id list from the observation, or an
+/// empty slice if the obs contract does not expose it.
+///
+/// OBSERVATION-CONTRACT LIMITATION: the current `PublicObservation` exposes
+/// only `own.deck_count` (a scalar), NOT the deck's card-id list, so this
+/// returns an empty slice today and the v6 tail degrades to zeros. This is the
+/// single hook to flip once the obs contract grows an own-deck-card-ids field
+/// (owning agent) — point it at that field and the live signal turns on with no
+/// other featurizer change. Kept as a function (not inlined) so the limitation
+/// is documented at exactly one site, mirroring Python `_v6_own_deck_card_ids`.
+fn v6_own_deck_card_ids(_obs: &PublicObservation) -> &[String] {
+    // No own-deck card-id list in the PublicObservation contract today.
+    &[]
+}
+
+/// v6-own-deck-composition: 126-d builder. Slots [0:110] are byte-identical to
+/// the FROZEN v3.0 builder (produced by calling `observation_state_features`
+/// directly, NOT re-derived — the v6 relational trunk wants v3.0's token-
+/// friendly head, NOT a v3.x scalar tail); slots [110:126] are the OWN
+/// remaining-deck composition tail. The tail degrades to zeros when the
+/// observation does not expose the own deck card-id list (the current obs
+/// contract — see `STATE_DIM_V6`). Mirrors `observation_to_features_v6` in
+/// Python.
+pub fn observation_state_features_v6(obs: &PublicObservation) -> Vec<f32> {
+    let mut f = vec![0.0f32; STATE_DIM_V6];
+
+    // Head: byte-identical v3.0 builder output.
+    let head = observation_state_features(obs);
+    debug_assert_eq!(head.len(), STATE_DIM_V3);
+    f[..STATE_DIM_V3].copy_from_slice(&head);
+
+    // [110:126] own remaining-deck composition tail (zeros under the current
+    // obs contract — see `v6_own_deck_card_ids`).
+    let deck_ids = v6_own_deck_card_ids(obs);
+    let tail = v6_deck_composition_tail(deck_ids);
+    f[STATE_DIM_V3..STATE_DIM_V6].copy_from_slice(&tail);
 
     f
 }
@@ -3368,5 +3516,89 @@ mod tests {
         // Mirror of inference::tests::state_dim_dispatch_covers_v3_0_through_v3_6
         // — adding the v3.7 row keeps the dispatcher honest.
         assert_eq!(STATE_DIM_V3_7, 296);
+    }
+
+    #[test]
+    fn v6_state_vector_dimension_is_126() {
+        let obs = fixture();
+        let v = observation_state_features_v6(&obs);
+        assert_eq!(v.len(), STATE_DIM_V6);
+        assert_eq!(STATE_DIM_V6, 126);
+    }
+
+    #[test]
+    fn v6_head_is_byte_identical_to_v3_0() {
+        // Slots [0:110] MUST be byte-equal to the FROZEN v3.0 builder — v6
+        // layers its 16-slot deck tail on the v3.0 head, NOT the v3.x scalar
+        // lineage. This is the core layering contract.
+        let obs = fixture();
+        let v30 = observation_state_features(&obs);
+        let v6 = observation_state_features_v6(&obs);
+        assert_eq!(&v6[..STATE_DIM_V3], &v30[..]);
+    }
+
+    #[test]
+    fn v6_tail_is_zero_under_current_obs_contract() {
+        // OBSERVATION-CONTRACT LIMITATION: the PublicObservation exposes only
+        // own.deck_count (scalar), not the deck card-id list, so the tail
+        // degrades to zeros. This mirrors the Python builder bit-for-bit
+        // (both emit zeros) — parity holds by construction.
+        let obs = fixture();
+        let v6 = observation_state_features_v6(&obs);
+        for (i, &x) in v6[STATE_DIM_V3..STATE_DIM_V6].iter().enumerate() {
+            assert_eq!(x, 0.0, "v6 tail slot {} should be zero (no deck ids)", i);
+        }
+    }
+
+    #[test]
+    fn v6_deck_composition_tail_buckets_a_known_decklist() {
+        // Validates the bucketing math (kind + uma-type) directly over an
+        // explicit card-id list, the same list the Python parity smoke checks.
+        // 2x matikanetannhauserBasic (basic_uma, Psychic) +
+        // tazunaHayakawa (supporter) + symboliRudolfStage2 (stage2, Dragon) +
+        // matikanefukukitaruStage1 (stage1, Psychic).
+        let deck: Vec<String> = vec![
+            "matikanetannhauserBasic".to_string(),
+            "matikanetannhauserBasic".to_string(),
+            "tazunaHayakawa".to_string(),
+            "symboliRudolfStage2".to_string(),
+            "matikanefukukitaruStage1".to_string(),
+        ];
+        let tail = v6_deck_composition_tail(&deck);
+        let cap = V6_DECK_CARD_COUNT as f32;
+        // kind buckets: basic_uma=2, stage1=1, stage2=1, supporter=1.
+        assert_eq!(tail[0], 2.0 / cap, "basic_uma");
+        assert_eq!(tail[1], 1.0 / cap, "stage1_uma");
+        assert_eq!(tail[2], 1.0 / cap, "stage2_uma");
+        assert_eq!(tail[3], 1.0 / cap, "supporter");
+        assert_eq!(tail[4], 0.0, "item_or_tool");
+        assert_eq!(tail[5], 0.0, "stadium");
+        // uma-type buckets: Psychic (idx 4) = 3, Dragon (idx 9) = 1.
+        let type_base = V6_KIND_BUCKET_COUNT;
+        assert_eq!(tail[type_base + 4], 3.0 / cap, "psychic");
+        assert_eq!(tail[type_base + 9], 1.0 / cap, "dragon");
+        // All other type buckets zero.
+        for (i, &x) in tail[type_base..].iter().enumerate() {
+            if i != 4 && i != 9 {
+                assert_eq!(x, 0.0, "uma-type bucket {} should be zero", i);
+            }
+        }
+    }
+
+    #[test]
+    fn v6_deck_composition_tail_empty_is_zero() {
+        let tail = v6_deck_composition_tail(&[]);
+        assert!(tail.iter().all(|&x| x == 0.0));
+        // Unresolvable ids contribute to no bucket (engine `None => {}`).
+        let tail2 = v6_deck_composition_tail(&["not_a_real_card_id".to_string()]);
+        assert!(tail2.iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn v6_deck_card_count_matches_engine_deck_size() {
+        // Guard against drift between the v6 normalization cap and the engine
+        // DECK_CARD_COUNT (the literal deck size). If decks.rs changes the
+        // deck size, this fires and forces a v6-schema reconciliation.
+        assert_eq!(V6_DECK_CARD_COUNT, crate::core::constants::DECK_CARD_COUNT);
     }
 }

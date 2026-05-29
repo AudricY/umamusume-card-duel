@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 3,
+  "sideToAct": "player",
+  "phase": "bench",
+  "turnNumber": 1,
+  "firstPlayer": "player",
+  "pendingChoiceKind": null,
+  "temporal": {
+    "ownTurnsTaken": 1,
+    "opponentTurnsTaken": 0,
+    "ownIsFirstTurn": false,
+    "opponentIsFirstTurn": true
+  },
+  "own": {
+    "id": "player",
+    "points": 1,
+    "handCount": 4,
+    "handCardIds": [
+      "carrotJelly",
+      "aoiKiryuin",
+      "carrotHamburgerSteak",
+      "matikanetannhauserStage2"
+    ],
+    "deckCount": 15,
+    "discard": [],
+    "active": {
+      "uid": 1,
+      "cardId": "matikanefukukitaruStage1",
+      "species": "",
+      "stage": 0,
+      "hp": 100,
+      "maxHp": 100,
+      "energyTotal": 0,
+      "energies": {},
+      "specialConditions": [],
+      "toolCardId": null,
+      "usedAbilityThisTurn": false,
+      "turnState": {
+        "turnsInPlay": 1,
+        "enteredThisTurn": false,
+        "evolvedThisTurn": false,
+        "evolvedLastTurn": false,
+        "tookDamageLastTurn": false,
+        "tookDamageThisTurn": false,
+        "nextTurnDamageReduction": 0,
+        "attackBlockedThisTurn": false,
+        "paralysisRecoveryPending": false
+      }
+    },
+    "bench": [
+      null,
+      null,
+      null
+    ],
+    "energyZone": [],
+    "energyPool": [
+      "psychic"
+    ],
+    "usedSupporterThisTurn": false,
+    "usedRetreatThisTurn": false,
+    "usedStadiumThisTurn": false,
+    "turnState": {
+      "energyAttachmentsThisTurn": 0,
+      "bonusEnergyAttachments": 0,
+      "retreatCostReduction": 0,
+      "effectiveRetreatCostReduction": 0,
+      "activeAttackDamageBonus": 0,
+      "usedAbilityNameCountThisTurn": 0,
+      "usedAbilityNameCountThisGame": 0,
+      "guaranteedCoinFlipHeads": 0
+    }
+  },
+  "opponent": {
+    "id": "opponent",
+    "points": 2,
+    "handCount": 3,
+    "deckCount": 15,
+    "discard": [],
+    "active": {
+      "uid": 1,
+      "cardId": "symboliRudolfStage2",
+      "species": "",
+      "stage": 0,
+      "hp": 120,
+      "maxHp": 120,
+      "energyTotal": 0,
+      "energies": {},
+      "specialConditions": [],
+      "toolCardId": null,
+      "usedAbilityThisTurn": false,
+      "turnState": {
+        "turnsInPlay": 1,
+        "enteredThisTurn": false,
+        "evolvedThisTurn": false,
+        "evolvedLastTurn": false,
+        "tookDamageLastTurn": false,
+        "tookDamageThisTurn": false,
+        "nextTurnDamageReduction": 0,
+        "attackBlockedThisTurn": false,
+        "paralysisRecoveryPending": false
+      }
+    },
+    "bench": [
+      {
+        "uid": 3,
+        "cardId": "haruUraraBasicFullArt",
+        "species": "Haru Urara",
+        "stage": 0,
+        "hp": 90,
+        "maxHp": 90,
+        "energyTotal": 0,
+        "energies": {
+          "grass": 0,
+          "fire": 0,
+          "water": 0,
+          "lightning": 0,
+          "psychic": 0,
+          "fighting": 0,
+          "darkness": 0,
+          "steel": 0,
+          "colorless": 0,
+          "dragon": 0
+        },
+        "specialConditions": [],
+        "toolCardId": null,
+        "usedAbilityThisTurn": false,
+        "turnState": {
+          "turnsInPlay": 1,
+          "enteredThisTurn": false,
+          "evolvedThisTurn": false,
+          "evolvedLastTurn": false,
+          "tookDamageLastTurn": false,
+          "tookDamageThisTurn": false,
+          "nextTurnDamageReduction": 0,
+          "attackBlockedThisTurn": false,
+          "paralysisRecoveryPending": false
+        }
+      },
+      null,
+      null
+    ],
+    "energyZone": [],
+    "energyPool": [
+      "psychic"
+    ],
+    "usedSupporterThisTurn": false,
+    "usedRetreatThisTurn": false,
+    "usedStadiumThisTurn": false,
+    "turnState": {
+      "energyAttachmentsThisTurn": 0,
+      "bonusEnergyAttachments": 0,
+      "retreatCostReduction": 0,
+      "effectiveRetreatCostReduction": 0,
+      "activeAttackDamageBonus": 0,
+      "usedAbilityNameCountThisTurn": 0,
+      "usedAbilityNameCountThisGame": 0,
+      "guaranteedCoinFlipHeads": 0
+    }
+  },
+  "shared": {
+    "stadiumCardId": null,
+    "currentSide": "player",
+    "gameOver": false
+  },
+  "cardIdsByZone": {
+    "ownActive": [
+      38
+    ],
+    "oppActive": [
+      34
+    ],
+    "ownBench": [],
+    "oppBench": [
+      27
+    ],
+    "ownHand": [
+      17,
+      12,
+      16,
+      41
+    ],
+    "ownDiscard": [],
+    "oppDiscard": [],
+    "stadium": []
+  }
+}
