@@ -331,12 +331,27 @@ def run_loop_iteration(
             "side_split": {"status": "recorded-in-row-fields", "field": "sideId"},
         }
     else:
-        gates = run_gates(iter_args, repo, iter_dir, export_path)
+        gates = run_gates(iter_args, repo, iter_dir, export_path, champion_onnx=state.promoted_onnx)
     gate_elapsed = time.time() - t0
     fixed = gates.get("fixed") or {}
     previous = state.promoted_wilson_lower
+    head_to_head = bool(fixed.get("head_to_head"))
+    # `wilson_lower` is now a vs-champion number when the fixed gate ran
+    # head-to-head (and a vs-heuristic number for the iter-0 bootstrap).
+    # Stored on the record and, on promotion, into promoted_wilson_lower.
     wilson_lower = float(fixed.get("wilson_lower") or previous or 0.0)
-    promote = args.skip_gates or (bool(fixed.get("passed")) and (previous is None or wilson_lower >= previous))
+    # The monotone `wilson_lower >= previous` ratchet is GONE: the fixed
+    # gate's `passed` already encodes the right thing — (iter-0) beat the
+    # heuristic at --gate-min-ci-lower, OR (later) beat the champion
+    # head-to-head at 0.5 + margin.
+    gate_passed = bool(fixed.get("passed"))
+    promote = args.skip_gates or gate_passed
+    if args.skip_gates:
+        reason = "skip-gates"
+    elif head_to_head:
+        reason = "h2h-beat-champion" if promote else "h2h-below-champion"
+    else:
+        reason = "bootstrap-gate-passed" if promote else "bootstrap-gate-failed"
     record = {
         "iteration": iteration,
         "dir": str(iter_dir),
@@ -353,7 +368,8 @@ def run_loop_iteration(
         "wilson_lower": wilson_lower,
         "previous_wilson_lower": previous,
         "promote": promote,
-        "reason": "fixed-gate-improved-or-first" if promote else "fixed-gate-below-promoted-floor",
+        "head_to_head": head_to_head,
+        "reason": reason,
         "selfplay_elapsed_sec": selfplay_elapsed,
         "train_elapsed_sec": train_elapsed,
         "export_elapsed_sec": export_elapsed,
@@ -976,10 +992,37 @@ def training_python(repo: Path) -> str:
     return sys.executable
 
 
-def run_gates(args: argparse.Namespace, repo: Path, out_dir: Path, onnx_path: Path) -> dict[str, Any]:
+def run_gates(
+    args: argparse.Namespace,
+    repo: Path,
+    out_dir: Path,
+    onnx_path: Path,
+    champion_onnx: str | None = None,
+) -> dict[str, Any]:
     fixed_manifest = out_dir / "gate-fixed.manifest.json"
     uniform_manifest = out_dir / "gate-uniform.manifest.json"
-    fixed = run_gate(args, repo, onnx_path, fixed_manifest, deck_sampling="fixed", seed_start=args.gate_seed_start)
+    # FIXED gate is the promotion driver. When a champion exists, run it
+    # head-to-head (challenger-vs-champion) with the pass threshold set to
+    # 0.5 + margin so `passed` means "challenger beat champion". With no
+    # champion (iter-0 bootstrap) keep the absolute vs-heuristic gate at
+    # --gate-min-ci-lower.
+    if champion_onnx:
+        fixed_min_ci_lower: float | None = 0.5 + args.gate_promote_margin
+    else:
+        fixed_min_ci_lower = None
+    fixed = run_gate(
+        args,
+        repo,
+        onnx_path,
+        fixed_manifest,
+        deck_sampling="fixed",
+        seed_start=args.gate_seed_start,
+        opponent_onnx=champion_onnx,
+        min_ci_lower_override=fixed_min_ci_lower,
+    )
+    # UNIFORM gate stays exactly as today: absolute vs-heuristic, no
+    # champion opponent. It is a regression sanity signal, not the
+    # promotion driver.
     uniform = run_gate(
         args,
         repo,
@@ -1006,8 +1049,19 @@ def run_gate(
     *,
     deck_sampling: str,
     seed_start: int,
+    opponent_onnx: str | None = None,
+    min_ci_lower_override: float | None = None,
 ) -> dict[str, Any]:
-    cmd = build_gate_cmd(args, repo, onnx_path, manifest_path, deck_sampling=deck_sampling, seed_start=seed_start)
+    cmd = build_gate_cmd(
+        args,
+        repo,
+        onnx_path,
+        manifest_path,
+        deck_sampling=deck_sampling,
+        seed_start=seed_start,
+        opponent_onnx=opponent_onnx,
+        min_ci_lower_override=min_ci_lower_override,
+    )
     env = ort_env(repo)
     print("+ " + " ".join(cmd), flush=True)
     result = subprocess.run(cmd, cwd=str(repo / "engine-rs"), check=False, env=env)
@@ -1029,6 +1083,14 @@ def run_gate(
         "wilson_lower": (summary.get("wilson95") or {}).get("lower"),
         "player_side": summary.get("playerSide"),
         "opponent_side": summary.get("opponentSide"),
+        # Head-to-head bookkeeping: when set, this gate measured
+        # challenger-vs-champion and `passed`/`wilson_lower` are vs-champion
+        # numbers; otherwise it is the absolute vs-heuristic gate.
+        "head_to_head": bool(opponent_onnx),
+        "opponent_onnx": opponent_onnx,
+        "min_ci_lower": (
+            min_ci_lower_override if min_ci_lower_override is not None else args.gate_min_ci_lower
+        ),
     }
 
 
@@ -1040,6 +1102,8 @@ def build_gate_cmd(
     *,
     deck_sampling: str,
     seed_start: int,
+    opponent_onnx: str | None = None,
+    min_ci_lower_override: float | None = None,
 ) -> list[str]:
     if args.use_release_binary:
         cmd = [str(repo / "engine-rs" / "target" / "release" / "sim-eval-gate")]
@@ -1075,8 +1139,18 @@ def build_gate_cmd(
     )
     if args.gate_min_games > 0:
         cmd.extend(["--min-games", str(args.gate_min_games)])
-    if args.gate_min_ci_lower > 0.0:
-        cmd.extend(["--min-ci-lower", str(args.gate_min_ci_lower)])
+    # Head-to-head: when a champion is supplied the opponent side runs the
+    # champion model (same MCTS config) and the pass threshold becomes
+    # 0.5 + margin, so `passed` means "challenger beat champion". The
+    # explicit override takes precedence over the absolute vs-heuristic
+    # --gate-min-ci-lower (used only for the iter-0 bootstrap gate).
+    if opponent_onnx:
+        cmd.extend(["--opponent-onnx", opponent_onnx])
+    effective_min_ci_lower = (
+        min_ci_lower_override if min_ci_lower_override is not None else args.gate_min_ci_lower
+    )
+    if effective_min_ci_lower > 0.0:
+        cmd.extend(["--min-ci-lower", str(effective_min_ci_lower)])
     if args.gate_min_win_rate > 0.0:
         cmd.extend(["--min-win-rate", str(args.gate_min_win_rate)])
     return cmd
@@ -1286,6 +1360,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gate-min-games", type=int, default=0)
     parser.add_argument("--gate-min-ci-lower", type=float, default=0.0)
     parser.add_argument("--gate-min-win-rate", type=float, default=0.0)
+    parser.add_argument(
+        "--gate-promote-margin",
+        type=float,
+        default=0.0,
+        help=(
+            "Head-to-head promotion margin. When a champion exists, the FIXED "
+            "gate runs challenger-vs-champion (--opponent-onnx <champion>) and "
+            "its --min-ci-lower is set to 0.5 + this margin, so the Rust gate's "
+            "`passed` directly encodes 'challenger beat the champion at the 95%% "
+            "Wilson lower bound + margin'. Iter-0 bootstrap (no champion) keeps "
+            "the absolute vs-heuristic gate at --gate-min-ci-lower."
+        ),
+    )
     return parser.parse_args()
 
 

@@ -157,6 +157,21 @@ struct Args {
     /// libonnxruntime.so location.
     #[arg(long)]
     onnx_path: Option<String>,
+    /// Head-to-head challenger-vs-champion mode. Path to a SECOND ONNX
+    /// policy file (v3.0 graph) that drives the OPPONENT side's MCTS. When
+    /// set, the heuristic opponent is replaced by this champion model
+    /// running the SAME selection / sims / leaf config as the challenger
+    /// (loaded into the process-global session via `--onnx-path`). The
+    /// champion session is loaded with the same `--device` / `--batch-size`
+    /// / `--batch-wait-us` settings so the matchup is symmetric, and is
+    /// dispatched to via a per-thread session override (so the global stays
+    /// the challenger). Win attribution is unchanged: `model_side` is the
+    /// challenger, so `overall` / `wilson95.lower` mean "challenger beat
+    /// champion". Default empty/None → behavior identical to today
+    /// (heuristic opponent). Requires the same inference-needing config as
+    /// `--onnx-path` (`--prior policy` or `--leaf value-head`).
+    #[arg(long)]
+    opponent_onnx: Option<String>,
     /// GPU inference EP. `cpu` (default) uses the historical
     /// single-threaded ORT CPU path (FP-deterministic with
     /// `serve_onnx --ort-threads 1`). `cuda` loads the ONNX session on
@@ -356,6 +371,7 @@ fn wilson_interval(successes: u32, total: u32) -> (f64, f64) {
     ((center - half).max(0.0), (center + half).min(1.0))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drive_one_game(
     seed: u32,
     model_side: SideId,
@@ -364,6 +380,12 @@ fn drive_one_game(
     config: &MctsConfig,
     player_deck: Option<&[engine::core::card_id::CardId]>,
     opponent_deck: Option<&[engine::core::card_id::CardId]>,
+    // Head-to-head: when `Some`, the OPPONENT (non-model) side runs MCTS
+    // against this champion session instead of the heuristic. The session
+    // is activated via a per-thread inference override only for the
+    // duration of the opponent's `run_mcts` call, so the challenger's MCTS
+    // keeps dispatching to the process-global session.
+    opponent_session: Option<&Arc<InferenceSession>>,
 ) -> (Option<SideId>, &'static str) {
     let seed_str = seed.to_string();
     let rng = Rng::from_seed(format!("{}:selfplay", seed_str).as_str(), "selfplay");
@@ -400,6 +422,34 @@ fn drive_one_game(
                 let (mcts_result, used_rng) = with_rng(step_rng.clone(), || {
                     run_mcts(&state, side, config, model_url.as_str(), mcts_seed.as_str())
                 });
+                step_rng = used_rng;
+                mcts_result.selected_index.min(legal.len() - 1)
+            };
+            let chosen = legal[idx].clone();
+            let (ns, used_rng) = with_rng(step_rng.clone(), || {
+                let forced = get_forced_attack_coin_results(&state);
+                advance_modeled_turn_step(&state, side, &chosen, forced)
+            });
+            step_rng = used_rng;
+            ns
+        } else if let (Some(champion), true) = (opponent_session, legal.len() > 1) {
+            // Head-to-head: the non-model side is driven by the champion
+            // model with the SAME config as the challenger. Activate the
+            // champion as this thread's inference override only for the
+            // duration of the MCTS call, then restore the previous override
+            // (None — the global challenger session) so the challenger side
+            // keeps dispatching to the global.
+            let idx = if selection == "random" {
+                let r = step_rng.next_f64();
+                ((r * legal.len() as f64).floor() as usize).min(legal.len() - 1)
+            } else {
+                let mcts_seed = format!("{}:{:?}:{}:mcts", seed_str, side, s);
+                let model_url = config.model_url.clone();
+                let prev = inference::set_active_override(Some(Arc::clone(champion)));
+                let (mcts_result, used_rng) = with_rng(step_rng.clone(), || {
+                    run_mcts(&state, side, config, model_url.as_str(), mcts_seed.as_str())
+                });
+                inference::set_active_override(prev);
                 step_rng = used_rng;
                 mcts_result.selected_index.min(legal.len() - 1)
             };
@@ -532,6 +582,18 @@ fn main() -> Result<()> {
     }
     let needs_inference = selection != "random"
         && (matches!(prior, MctsPrior::Policy) || matches!(leaf, MctsLeaf::ValueHead));
+    let opponent_onnx = args
+        .opponent_onnx
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    if opponent_onnx.is_some() && !needs_inference {
+        anyhow::bail!(
+            "--opponent-onnx requires an inference-driven challenger: set \
+             --prior policy and/or --leaf value-head (the head-to-head \
+             opponent runs the SAME MCTS config as the challenger)."
+        );
+    }
     if needs_inference {
         let onnx = args
             .onnx_path
@@ -571,6 +633,35 @@ fn main() -> Result<()> {
              pass --onnx-path instead. The HTTP /predict path has been removed."
         );
     }
+    // Head-to-head: load the champion into a SECOND independent session
+    // using the SAME device / batching settings as the challenger so the
+    // matchup is symmetric. The challenger stays in the process-global
+    // session (loaded above); the champion is dispatched to via the
+    // per-thread override inside `drive_one_game`. Kept out of the global
+    // so every other caller (and the challenger side) is byte-for-byte
+    // unchanged. `Arc` so worker threads share one session.
+    let opponent_session: Option<Arc<InferenceSession>> = if let Some(path) = opponent_onnx.as_ref()
+    {
+        let (effective_batch_size, effective_wait_us) = if args.killshot_dispatch {
+            (args.killshot_batch_size, args.killshot_wait_us)
+        } else {
+            (args.batch_size, args.batch_wait_us)
+        };
+        let session = InferenceSession::load_on_with_batching(
+            std::path::Path::new(path),
+            device,
+            effective_batch_size,
+            effective_wait_us,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to load opponent ONNX session at {}: {}", path, e))?;
+        eprintln!(
+            "sim-eval-gate: head-to-head — loaded CHAMPION (opponent) session from {} (device={:?}, batch_size={}, batch_wait_us={})",
+            path, device, effective_batch_size, effective_wait_us
+        );
+        Some(Arc::new(session))
+    } else {
+        None
+    };
     // Mirror TS `evalGate.ts:43-49`: build the (seed, side) task list so
     // `--games N --model-side both` schedules 2N tasks (one per side per
     // seed), and `--games N --model-side player|opponent` schedules N
@@ -677,6 +768,7 @@ fn main() -> Result<()> {
             let running_wins_counter = Arc::clone(&running_wins_counter);
             let progress_writer = progress_writer.as_ref().map(Arc::clone);
             let sampling_arc = Arc::clone(&sampling_arc);
+            let opponent_session = opponent_session.as_ref().map(Arc::clone);
             let max_steps = args.max_steps;
             let start_for_worker = start;
             let total_tasks_u32 = total_tasks as u32;
@@ -706,6 +798,7 @@ fn main() -> Result<()> {
                         &config_arc,
                         player_deck_opt,
                         opponent_deck_opt,
+                        opponent_session.as_ref(),
                     );
                     let game_secs = game_start.elapsed().as_secs_f64();
                     let model_won = winner == Some(model_side);
@@ -908,6 +1001,7 @@ fn main() -> Result<()> {
         "progressOut": args.progress_out,
         "workers": args.workers,
         "deckSampling": args.deck_sampling,
+        "opponentOnnx": args.opponent_onnx,
         "waveSize": args.wave_size,
         "virtualLoss": args.virtual_loss,
         "batchSize": args.batch_size,

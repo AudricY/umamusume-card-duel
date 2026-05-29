@@ -2198,6 +2198,38 @@ pub fn global() -> Option<std::sync::Arc<InferenceSession>> {
     GLOBAL.get().cloned()
 }
 
+thread_local! {
+    /// Per-thread override for the active inference session. When `Some`, the
+    /// MCTS driver dispatches to this session instead of `global()`. Used by
+    /// head-to-head evaluation to drive one side's search with a *different*
+    /// (champion) session inside the same process, without disturbing the
+    /// global session used by every other caller. Defaults to `None`, so the
+    /// behavior of all existing callers is unchanged.
+    static ACTIVE_OVERRIDE: std::cell::RefCell<Option<std::sync::Arc<InferenceSession>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set (or clear, with `None`) the per-thread active-session override. The
+/// override is thread-local: it only affects MCTS work driven on the calling
+/// thread. Returns the previous value so callers can restore it (RAII-style)
+/// when nesting. Pass `None` to fall back to `global()`.
+pub fn set_active_override(
+    session: Option<std::sync::Arc<InferenceSession>>,
+) -> Option<std::sync::Arc<InferenceSession>> {
+    ACTIVE_OVERRIDE.with(|cell| cell.replace(session))
+}
+
+/// Borrow the session the MCTS driver should dispatch to: the thread-local
+/// override if one is set, otherwise the process-global session. This is the
+/// single access point used by the MCTS inference paths; `global()` is left
+/// intact for callers (rebel, sim-cli main) that intentionally want the
+/// process-global session.
+pub fn active() -> Option<std::sync::Arc<InferenceSession>> {
+    ACTIVE_OVERRIDE
+        .with(|cell| cell.borrow().clone())
+        .or_else(global)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -936,7 +936,7 @@ fn wave_run_priors(members: &mut [WaveMember], _config: &MctsConfig) {
     if indices.is_empty() {
         return;
     }
-    let session = crate::inference::global().expect(
+    let session = crate::inference::active().expect(
         "MCTS wave_run_priors: no inference session loaded — call \
          inference::set_global(...) before run_mcts (typically in the \
          sim-cli main()).",
@@ -1294,7 +1294,7 @@ fn predict_policy_and_value(
     _rng: &mut Rng,
 ) -> (Vec<f64>, f64) {
     let observation = build_public_observation(state, model_side);
-    let session = crate::inference::global().expect(
+    let session = crate::inference::active().expect(
         "MCTS predict_policy_and_value: no inference session loaded — \
          call inference::set_global(...) before run_mcts (typically in \
          the sim-cli main()).",
@@ -1630,7 +1630,7 @@ fn value_head_leaf_value(state: &GameState, model_side: SideId, _model_url: &str
         return mcts_terminal_value(state, model_side);
     }
     let observation = build_public_observation(state, model_side);
-    let session = crate::inference::global().expect(
+    let session = crate::inference::active().expect(
         "MCTS value_head_leaf_value: no inference session loaded — \
          call inference::set_global(...) before run_mcts (typically in \
          the sim-cli main()).",
