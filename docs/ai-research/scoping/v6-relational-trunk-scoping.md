@@ -1,8 +1,16 @@
 # v6 Relational-Trunk Model Scheme
 
 - **Date:** 2026-05-29
-- **Status:** IMPLEMENTED + SMOKE-GREEN, UNTRAINED. The model, training-CLI
-  wiring, and an ONNX/signature/trainability smoke landed this commit. No
+- **Status:** IMPLEMENTED + SMOKE-GREEN + E2E-VALIDATED, UNTRAINED. The model,
+  training-CLI wiring, and an ONNX/signature/trainability smoke landed first.
+  On the `feature-improvement → feat/ai` merge the full ReBeL self-improving
+  loop was run end-to-end on `--model-variant relational` (2-iteration CPU
+  smoke: self-play → validate → distill → export → R19 head-to-head gate →
+  promote-decision, clean halt). Two integration blockers were fixed there
+  (commit `7c94157`): the dynamo ONNX exporter baked a static batch dim when
+  traced at batch=1 (broke Rust batched leaf inference for the relational value
+  head — now traced at batch=2 for relational only); and `rebel_orchestrator`'s
+  `validate_rebel_rows` had a stale belief-dim literal (16 vs the live 123). No
   strength result yet — the pre-registered gate (below) has not been run.
 - **Routing:** canonical home for the v6 *model/trunk* scheme until it
   resolves. New backlog entry under "Active Search-Wrapped Frontier". This is
@@ -271,3 +279,10 @@ paradigm; embedding grounding (1) is the highest-conviction-per-cost.
   `training/.venv/bin/python training/v6_relational_smoke.py`.
 - CLI: `--model-variant relational` in `train_bc.py`, `r12_orchestrator.py`,
   `rebel_orchestrator.py` (all require `--uma-slot-tokens`).
+- Cold start: the relational trunk has no init-expander and the ReBeL loop has
+  no heuristic-only self-play path, so iteration 0 needs a bootstrap ONNX. Mint
+  a config-correct random checkpoint with `training/mint_relational_init.py`
+  then `export_onnx.py` it. E2E loop recipe (CPU smoke): `rebel_orchestrator.py
+  --model-variant relational --uma-slot-tokens --state-dim 110 --hidden-dim 128
+  --use-release-binary --device cpu --selfplay-onnx-path <init.onnx>
+  --init-from-checkpoint <init.pt> --iterations 2 --smoke` (small games/sims).
