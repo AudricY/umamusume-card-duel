@@ -13,7 +13,8 @@ def _args(**overrides: object) -> argparse.Namespace:
         "seed_start": 0,
         "particles": 2,
         "search_iterations": 4,
-        "rollout_steps": 5,
+        "max_depth": 8,
+        "policy_temperature": 0.5,
         "max_steps": 20,
         "model_side": "player",
         "deck_sampling": "fixed",
@@ -24,8 +25,6 @@ def _args(**overrides: object) -> argparse.Namespace:
         "selfplay_cuda_device_id": 0,
         "neural_policy_weight": 0.25,
         "neural_value_weight": 0.25,
-        "neural_leaf_weight": 1.0,
-        "allow_rollout_leaf": False,
         "selfplay_inference_batch_size": 32,
         "selfplay_inference_max_wait_us": 2000,
         "epochs": 1,
@@ -83,27 +82,31 @@ def main() -> None:
     required_selfplay_pairs = {
         "--onnx-path": "/tmp/policy.onnx",
         "--device": "cuda",
-        "--neural-leaf-weight": "1.0",
+        "--max-depth": "8",
+        "--policy-temperature": "0.5",
         "--inference-batch-size": "32",
     }
     for flag, value in required_selfplay_pairs.items():
         if not _contains_pair(selfplay_cmd, flag, value):
             raise AssertionError(f"missing {flag} {value} in selfplay command: {selfplay_cmd}")
-    # The corrected loop must default the leaf weight to a pure neural leaf.
-    if not _contains_pair(selfplay_cmd, "--neural-leaf-weight", "1.0"):
-        raise AssertionError(f"default selfplay cmd should pin --neural-leaf-weight 1.0: {selfplay_cmd}")
-    # Default must NOT opt into the info-incorrect determinized rollout leaf.
+    # The corrected loop's neural leaf has no rollout knobs to forward.
+    if "--rollout-steps" in selfplay_cmd:
+        raise AssertionError(f"selfplay cmd must not forward removed --rollout-steps: {selfplay_cmd}")
+    if "--neural-leaf-weight" in selfplay_cmd:
+        raise AssertionError(f"selfplay cmd must not forward removed --neural-leaf-weight: {selfplay_cmd}")
     if "--allow-rollout-leaf" in selfplay_cmd:
-        raise AssertionError(f"default selfplay cmd must not include --allow-rollout-leaf: {selfplay_cmd}")
-    # ...but it must be appended when the flag is set.
-    allow_cmd = build_selfplay_cmd(
-        _args(allow_rollout_leaf=True),
+        raise AssertionError(f"selfplay cmd must not forward removed --allow-rollout-leaf: {selfplay_cmd}")
+    # Overridden search knobs must propagate to the selfplay argv.
+    tuned_cmd = build_selfplay_cmd(
+        _args(max_depth=12, policy_temperature=0.25),
         repo,
         Path("/tmp/rebel.jsonl"),
         Path("/tmp/selfplay.json"),
     )
-    if "--allow-rollout-leaf" not in allow_cmd:
-        raise AssertionError(f"--allow-rollout-leaf should be appended when enabled: {allow_cmd}")
+    if not _contains_pair(tuned_cmd, "--max-depth", "12"):
+        raise AssertionError(f"--max-depth override should propagate: {tuned_cmd}")
+    if not _contains_pair(tuned_cmd, "--policy-temperature", "0.25"):
+        raise AssertionError(f"--policy-temperature override should propagate: {tuned_cmd}")
 
     smoke_cmd = build_train_cmd(
         _args(smoke=True, device="cpu", amp=None, dataloader_workers=None, init_from_checkpoint=None),

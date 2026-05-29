@@ -588,3 +588,23 @@ solely so iter-0 can cold-start with no model; inert from iter-1 on). NOTE: the
 standalone bench hangs single-threaded at CUDA session load unless the ORT env
 (`LD_LIBRARY_PATH` for venv nvidia/ORT libs + `ORT_DYLIB_PATH`) is set — the
 harness now replicates `rebel_orchestrator.ort_env`.
+
+## Follow-up — wave-batch the policy-improvement rollout (2026-05-29)
+
+The search rewrite (`rebel/mod.rs`; see `progress/r17.md` §9) replaced the single
+batched one-ply leaf with a per-action rollout to `max_depth` modeled-turn steps.
+Each rollout step issues one `predict_v3_with_belief`, batched only *across
+concurrent workers* by the dispatcher — the in-tree rollout predicts are no longer
+collected into one super-batch the way the old leaf was. That trades throughput for
+correctness (a real improvement operator + no zero-leaf bias). The R20 numbers above
+were measured on the OLD one-ply leaf and no longer characterize the new search.
+
+Separable optimization: advance all `(particle × root-action × iteration)` rollouts
+of a decision in **lockstep depth** and issue one batched
+`predict_v3_batch_with_belief` per depth wave (size up to particles·actions·iters),
+instead of per-rollout sequential single predicts. That restores intra-decision
+batching (≈`max_depth` batched calls/decision) without changing the algorithm.
+Pre-req: refactor `run_public_belief_search` to carry a `Vec<Rollout>` advanced in
+lockstep (the current sequential structure was chosen for correctness-first
+clarity). Not a correctness blocker — size the first corrected run (R21) small
+enough to run under cross-worker batching alone.

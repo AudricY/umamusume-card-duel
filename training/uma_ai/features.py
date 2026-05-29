@@ -197,6 +197,58 @@ STATE_FEATURE_SCHEMA_VERSION_V3_7 = 3.7
 # opp.usedSupporterThisTurn=False + opp.hand_count>0).
 STATE_DIM_V3_8 = 304
 STATE_FEATURE_SCHEMA_VERSION_V3_8 = 3.8
+# v6-own-deck-composition (finding T2.7 "remaining-deck inference"): v6 is the
+# FIRST schema layered on the FROZEN v3.0 110-d head (NOT the v3.x scalar-tail
+# lineage). v6 = v3.0 110-d head [0:110] (byte-identical) + a 16-slot OWN
+# remaining-deck composition tail [110:126]. The relational v6 trunk wants
+# card-relation signal from the slot/zone tokens (it inherits the v3.2 7-input
+# ONNX contract — `card_ids_by_zone` + `uma_slot_*`), so it builds on v3.0's
+# token-friendly head, not on v3.5+'s scalar arithmetic tails.
+#
+# Tail layout [110:126] (each bucket / DECK_CARD_COUNT=20):
+#   [110:116] kind buckets (6): basic_uma, stage1_uma, stage2_uma, supporter,
+#             item_or_tool, stadium — remaining count of that kind in own deck.
+#   [116:126] uma-type buckets (10): for umamusume cards remaining in own deck,
+#             count by the 10 energy/uma types in canonical order (grass, fire,
+#             water, lightning, psychic, fighting, darkness, steel, colorless,
+#             dragon).
+# "Remaining in deck" mirrors the engine's `get_known_remaining_deck_counts`
+# (`engine-rs/.../flow/ai/deck_inference.rs`): the multiset of card ids still
+# physically in the own DECK zone (not hand/discard/in-play).
+#
+# OBSERVATION-CONTRACT LIMITATION (documented, intentional): the
+# `PublicObservation` (TS `ai-policy/types.ts` + Rust `policy/types.rs`)
+# exposes only `own.deckCount` (a scalar) — it does NOT carry the own deck's
+# card-id list. The owning-agent obs contract was OUT of scope here
+# (`policy/types.rs` / `policy/observation.rs` are not editable in this task),
+# so neither the Python nor the Rust observation-based builder can resolve the
+# remaining-deck card ids today. Per the v6 graceful-degrade rule the tail is
+# emitted as ZEROS whenever the deck card-id list is unavailable. The bucketing
+# math itself is implemented + parity-tested via `_v6_deck_composition_tail`
+# (Python) / `v6_deck_composition_tail` (Rust) over an explicit card-id list, so
+# the moment the obs contract grows an own-deck-card-ids field BOTH builders
+# light up bit-identically with NO featurizer change. To populate the live
+# signal, extend the observation with the own deck card-id list (owning agent)
+# and have both `observation_to_features_v6` / `observation_state_features_v6`
+# read it (the hook is the `_v6_own_deck_card_ids` reader below).
+STATE_DIM_V6 = 126
+STATE_FEATURE_SCHEMA_VERSION_V6 = 6.0
+# Engine `DECK_CARD_COUNT` (`engine-rs/.../core/decks.rs`) / TS deck size — the
+# normalization cap for every v6 tail bucket. Matches the brief's /20 spec.
+_V6_DECK_CARD_COUNT = 20
+# v6 kind-bucket order [110:116]. FROZEN. `item_or_tool` fuses the engine's
+# Item + Tool TrainerType (both consumable/equip non-supporter non-stadium),
+# matching the brief's bucket list.
+_V6_KIND_ORDER: tuple[str, ...] = (
+    "basic_uma",
+    "stage1_uma",
+    "stage2_uma",
+    "supporter",
+    "item_or_tool",
+    "stadium",
+)
+_V6_KIND_BUCKET_BASE = 110
+_V6_TYPE_BUCKET_BASE = 116  # uma-type buckets reuse `_UMA_SLOT_ENERGY_TYPES`.
 assert STATE_DIM == STATE_DIM_V3, (
     f"STATE_DIM ({STATE_DIM}) must equal the frozen v3.0 dim "
     f"STATE_DIM_V3 ({STATE_DIM_V3}). The 110-d v3.0 builder is frozen for "
@@ -1761,6 +1813,161 @@ def observation_to_features_v3_8(
     return features
 
 
+# ---------------------------------------------------------------------------
+# v6-own-deck-composition tail [110:126] (finding T2.7 "remaining-deck
+# inference"). See the STATE_DIM_V6 header note above for the full schema +
+# the observation-contract limitation.
+
+def _v6_card_kind_bucket(card_id: str) -> int | None:
+    """Map a card id to its v6 kind bucket index [0:6], or None if the
+    catalog cannot resolve it.
+
+    Mirrors `engine-rs/.../flow/ai/deck_inference.rs` classification (and the
+    catalog `Card` variant / `TrainerType` enum) bit-for-bit:
+      umamusume stage 0 -> basic_uma (0)
+      umamusume stage 1 -> stage1_uma (1)
+      umamusume stage 2 -> stage2_uma (2)   (the engine lumps stage>0 into one
+          `evolution_umamusume` counter; v6 splits stage1/stage2 for the model
+          but the union is identical)
+      trainer supporter -> supporter (3)
+      trainer item|tool -> item_or_tool (4)
+      trainer stadium   -> stadium (5)
+    """
+
+    card = _get_card(card_id)
+    if not card:
+        return None
+    kind = str(card.get("kind", "") or "")
+    if kind == "umamusume":
+        stage = int(float(card.get("stage", 0) or 0))
+        if stage <= 0:
+            return 0
+        if stage == 1:
+            return 1
+        return 2  # stage >= 2
+    if kind == "trainer":
+        trainer_type = str(card.get("trainerType", "") or "")
+        if trainer_type == "supporter":
+            return 3
+        if trainer_type in ("item", "tool"):
+            return 4
+        if trainer_type == "stadium":
+            return 5
+    return None
+
+
+def _v6_uma_type_bucket(card_id: str) -> int | None:
+    """For an umamusume card id, return its uma-type bucket index in
+    `_UMA_SLOT_ENERGY_TYPES` order [0:10], or None for non-Uma / unresolved /
+    unknown type. The catalog `type` field is TitleCase (`"Psychic"`); the
+    energy-type vocab is lowercase, so we lowercase before lookup."""
+
+    card = _get_card(card_id)
+    if not card or str(card.get("kind", "") or "") != "umamusume":
+        return None
+    uma_type = str(card.get("type", "") or "").lower()
+    try:
+        return _UMA_SLOT_ENERGY_TYPES.index(uma_type)
+    except ValueError:
+        return None
+
+
+def _v6_deck_composition_tail(deck_card_ids: list[str] | None) -> np.ndarray:
+    """Compute the 16-slot v6 deck-composition tail from an explicit list of
+    own remaining-in-deck card ids.
+
+    `deck_card_ids` is the multiset of card ids physically still in the own
+    deck zone — i.e. the engine's `get_known_remaining_deck_counts` input
+    (`SideState.deck`). Returns a `np.float32[16]` vector:
+      [0:6]  kind buckets (each count / DECK_CARD_COUNT)
+      [6:16] uma-type buckets (each count / DECK_CARD_COUNT)
+    `None` / empty / fully-unresolvable list -> all zeros (graceful degrade).
+    Unresolved individual ids are skipped (they contribute to no bucket),
+    matching the engine's `None => {}` no-op branch in
+    `get_known_remaining_deck_counts`."""
+
+    tail = np.zeros(STATE_DIM_V6 - STATE_DIM_V3, dtype=np.float32)
+    if not deck_card_ids:
+        return tail
+    cap = float(_V6_DECK_CARD_COUNT)
+    for raw in deck_card_ids:
+        card_id = str(raw or "")
+        if not card_id:
+            continue
+        kind_idx = _v6_card_kind_bucket(card_id)
+        if kind_idx is not None:
+            tail[kind_idx] += 1.0 / cap
+        type_idx = _v6_uma_type_bucket(card_id)
+        if type_idx is not None:
+            tail[len(_V6_KIND_ORDER) + type_idx] += 1.0 / cap
+    return tail
+
+
+def _v6_own_deck_card_ids(observation: dict[str, Any]) -> list[str] | None:
+    """Resolve the own remaining-in-deck card-id list from the observation, or
+    None if the obs contract does not expose it.
+
+    OBSERVATION-CONTRACT LIMITATION: the current `PublicObservation` exposes
+    only `own.deckCount` (a scalar), NOT the deck's card-id list, so this
+    returns None today and the v6 tail degrades to zeros. The reader probes
+    the forward-compatible keys an owning-agent obs extension would use
+    (`own.deckCardIds` camelCase / `own.deck_card_ids` snake_case) so that the
+    instant the contract grows that field, `observation_to_features_v6` lights
+    up the live signal with NO change to this builder."""
+
+    own = observation.get("own", {}) or {}
+    deck_ids = own.get("deckCardIds")
+    if deck_ids is None:
+        deck_ids = own.get("deck_card_ids")
+    if deck_ids is None:
+        return None
+    if not isinstance(deck_ids, (list, tuple)):
+        return None
+    return [str(c) for c in deck_ids]
+
+
+def observation_to_features_v6(
+    observation: dict[str, Any], ablations: set[FeatureAblation] | None = None
+) -> np.ndarray:
+    """v6-own-deck-composition: 126-d. Slots [0:110] are byte-identical to the
+    FROZEN v3.0 builder (produced by calling `observation_to_features`
+    directly, NOT re-derived — the v6 relational trunk wants v3.0's token-
+    friendly head, NOT a v3.x scalar tail); slots [110:126] are the OWN
+    remaining-deck composition tail (6 kind buckets + 10 uma-type buckets).
+
+    The `state_v6_deck_composition` ablation zeroes [110:126]. The tail
+    degrades to zeros when the observation does not expose the own deck
+    card-id list (the current obs contract — see STATE_DIM_V6 header note)."""
+
+    base_ablations = set(ablations or set())
+    # v3.0 owns ablations that touch slots 0–109; the v6 tail ablation is
+    # applied below after the tail is written so the v3.0 head builder's slice
+    # asserts cannot silently drop it (mirrors v3.1's temporal-ablation split).
+    v30 = {a for a in base_ablations if a != "state_v6_deck_composition"}
+    head = observation_to_features(observation, ablations=v30)
+    assert head.shape == (STATE_DIM_V3,), (
+        f"v6 head reuse expected ({STATE_DIM_V3},), got {head.shape}"
+    )
+
+    features = np.zeros(STATE_DIM_V6, dtype=np.float32)
+    features[0:STATE_DIM_V3] = head
+
+    deck_card_ids = _v6_own_deck_card_ids(observation)
+    features[STATE_DIM_V3:STATE_DIM_V6] = _v6_deck_composition_tail(deck_card_ids)
+
+    # v6-tail ablation lives in `apply_state_ablations` (canonical home,
+    # mirrors `state_temporal_turn_v31`). Slots 0–109 ablations were already
+    # applied by the v3.0 head call; apply ONLY the v6 key here.
+    if "state_v6_deck_composition" in base_ablations:
+        apply_state_ablations(features, {"state_v6_deck_composition"})
+
+    assert features.shape == (STATE_DIM_V6,), (
+        f"observation_to_features_v6 emitted {features.shape}, "
+        f"expected ({STATE_DIM_V6},)."
+    )
+    return features
+
+
 # Builder selector keyed off the state dim. Mirrors the existing serve_onnx
 # `_SCHEMA_BY_STATE_DIM` discrimination (graph dim -> builder) so training /
 # dataset code can opt into v3.1/v3.3/v3.5/v3.6/v3.7 without a new framework:
@@ -1775,6 +1982,7 @@ _BUILDER_BY_STATE_DIM = {
     STATE_DIM_V3_6: observation_to_features_v3_6,
     STATE_DIM_V3_7: observation_to_features_v3_7,
     STATE_DIM_V3_8: observation_to_features_v3_8,
+    STATE_DIM_V6: observation_to_features_v6,
 }
 
 
@@ -1787,6 +1995,7 @@ _SCHEMA_VERSION_BY_STATE_DIM = {
     STATE_DIM_V3_6: STATE_FEATURE_SCHEMA_VERSION_V3_6,
     STATE_DIM_V3_7: STATE_FEATURE_SCHEMA_VERSION_V3_7,
     STATE_DIM_V3_8: STATE_FEATURE_SCHEMA_VERSION_V3_8,
+    STATE_DIM_V6: STATE_FEATURE_SCHEMA_VERSION_V6,
 }
 
 
@@ -2198,6 +2407,16 @@ def apply_state_ablations(features: np.ndarray, ablations: set[FeatureAblation])
     # `state_hygiene_v21` slice-zero pattern above.
     if "state_temporal_turn_v31" in ablations:
         features[110:164] = 0
+    # v6-own-deck-composition ablation hook: zero the 16 deck-composition
+    # slots [110:126] so callers can isolate the remaining-deck signal against
+    # the frozen v3.0 head. No-op on a 96/110-d array (numpy slice past the end
+    # is empty) — only bites the 126-d v6 vector. NOTE the slice [110:126]
+    # OVERLAPS the v3.1 temporal band [110:164]; the two keys are never both
+    # applied to the same vector (v6 and v3.1 are distinct, non-stacking
+    # schemas with disjoint state dims 126 vs 164). Mirrors the
+    # `state_temporal_turn_v31` slice-zero pattern above.
+    if "state_v6_deck_composition" in ablations:
+        features[110:126] = 0
 
 
 def apply_action_ablations(features: np.ndarray, ablations: set[FeatureAblation]) -> None:

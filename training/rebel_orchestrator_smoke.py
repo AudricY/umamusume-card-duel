@@ -34,7 +34,6 @@ from rebel_orchestrator import (  # noqa: E402
     resolve_kl_anchor,
     resolve_selfplay_pool,
     snapshot_promoted_artifacts,
-    validate_leaf_args,
     validate_rebel_rows,
 )
 
@@ -48,8 +47,8 @@ def _args(**overrides: object) -> argparse.Namespace:
         "kl_anchor_checkpoint": None,
         "pool_state_file": None,
         "pool_size": 5,
-        "neural_leaf_weight": 1.0,
-        "allow_rollout_leaf": False,
+        "max_depth": 8,
+        "policy_temperature": 0.5,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -212,20 +211,6 @@ def test_replay_drops_rollout_contaminated_and_old_vintage_rows() -> None:
         assert all("dirty-" not in line and "oldvintage-" not in line for line in old_lines), old_lines
     finally:
         shutil.rmtree(work, ignore_errors=True)
-
-
-def test_leaf_weight_guard_requires_allow_rollout_leaf() -> None:
-    # Pure neural leaf (default) is always allowed.
-    validate_leaf_args(_args(neural_leaf_weight=1.0, allow_rollout_leaf=False))
-    # Blended leaf without opt-in is rejected.
-    try:
-        validate_leaf_args(_args(neural_leaf_weight=0.5, allow_rollout_leaf=False))
-    except SystemExit as exc:
-        assert "allow-rollout-leaf" in str(exc), exc
-    else:
-        raise AssertionError("neural_leaf_weight < 1.0 without allow_rollout_leaf should fail")
-    # Blended leaf WITH explicit opt-in is allowed (ablation path).
-    validate_leaf_args(_args(neural_leaf_weight=0.5, allow_rollout_leaf=True))
 
 
 def test_fixed_kl_anchor_stays_pinned() -> None:
@@ -489,7 +474,6 @@ def main() -> None:
     test_replay_mix_materializes_bounded_old_fraction()
     test_replay_passthrough_when_disabled()
     test_replay_drops_rollout_contaminated_and_old_vintage_rows()
-    test_leaf_weight_guard_requires_allow_rollout_leaf()
     test_fixed_kl_anchor_stays_pinned()
     test_release_binary_preflight_reports_missing_and_stale()
     test_promoted_artifacts_snapshot_to_pool()

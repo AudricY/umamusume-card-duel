@@ -6,11 +6,11 @@
 //! increment (matches the recorder's selfplay row schema).
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -701,14 +701,16 @@ fn main() -> Result<()> {
         args.sims, args.k, args.rollout_steps, args.prior, args.leaf, args.seeds, args.model_side, total_tasks, args.seed_base, effective_workers, args.workers, args.wave_size, args.virtual_loss,
     );
 
-    let mut writer: Option<fs::File> = match args.out.as_ref() {
+    let mut writer: Option<BufWriter<fs::File>> = match args.out.as_ref() {
         Some(path) => {
             let p = PathBuf::from(path);
             if let Some(parent) = p.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("mkdir {}", parent.display()))?;
             }
-            Some(fs::File::create(&p).with_context(|| format!("create {}", path))?)
+            Some(BufWriter::new(
+                fs::File::create(&p).with_context(|| format!("create {}", path))?,
+            ))
         }
         None => None,
     };
@@ -745,6 +747,18 @@ fn main() -> Result<()> {
     let record_rows = args.record_rows;
     let record_rollout_leaf_rows = args.record_rollout_leaf_rows;
 
+    // Counts workers still alive so the streaming drain can distinguish
+    // "slot not filled yet" from "the worker owning this slot died". The
+    // Drop guard decrements on every exit path — normal return, `?`
+    // early-return, or panic — so the count is always accurate.
+    struct WorkerExitGuard<'a>(&'a AtomicUsize);
+    impl Drop for WorkerExitGuard<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Release);
+        }
+    }
+    let live_workers = Arc::new(AtomicUsize::new(effective_workers));
+
     std::thread::scope(|s| -> Result<()> {
         let mut handles = Vec::with_capacity(effective_workers);
         for _worker_id in 0..effective_workers {
@@ -753,7 +767,9 @@ fn main() -> Result<()> {
             let outcomes = Arc::clone(&outcomes);
             let config_arc = Arc::clone(&config_arc);
             let sampling_arc = Arc::clone(&sampling_arc);
+            let live_workers = Arc::clone(&live_workers);
             handles.push(s.spawn(move || -> Result<()> {
+                let _exit = WorkerExitGuard(&live_workers);
                 loop {
                     let task_index = task_cursor.fetch_add(1, Ordering::Relaxed);
                     if task_index >= tasks_arc.len() {
@@ -809,38 +825,69 @@ fn main() -> Result<()> {
                 Ok(())
             }));
         }
+        // Drain outcomes in task-index order *as games finish*, rather
+        // than after every worker has joined. Writing strictly in
+        // ascending slot order keeps aggregation and JSONL bytes
+        // identical to the sequential (`--workers 1`) baseline — only
+        // the timing of each write changes — while flushing per game
+        // makes rows visible live to `tail`/monitoring instead of
+        // appearing all-at-once at the end of the selfplay phase. The
+        // single-process worker pool only changes scheduling, not the
+        // per-game RNG (each game's RNG is seeded from `seed_base + i`
+        // independently), so deterministic re-ordering here is enough.
+        let mut next = 0usize;
+        while next < total_tasks {
+            let o = {
+                let mut guard = outcomes.lock().expect("outcomes mutex poisoned");
+                match guard[next].take() {
+                    Some(o) => o,
+                    None => {
+                        // Slot not filled yet. A worker fills its slot
+                        // while holding this same lock and only then
+                        // exits (decrementing `live_workers` via the Drop
+                        // guard), so observing `live_workers == 0` here —
+                        // under the lock — means this slot will never be
+                        // filled: a worker failed. Stop and let the join
+                        // below surface the real error/panic.
+                        if live_workers.load(Ordering::Acquire) == 0 {
+                            break;
+                        }
+                        drop(guard);
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                }
+            };
+            match o.terminal_reason.as_str() {
+                "game_over" => terminal_reasons.game_over += 1,
+                "stalled" => terminal_reasons.stalled += 1,
+                _ => terminal_reasons.max_steps += 1,
+            }
+            match o.winner.as_deref() {
+                Some("player") => player_wins += 1,
+                Some("opponent") => opponent_wins += 1,
+                _ => draws += 1,
+            }
+            if let Some(w) = writer.as_mut() {
+                for line in o.lines.iter() {
+                    writeln!(w, "{}", line)?;
+                }
+                w.flush()?;
+            }
+            next += 1;
+        }
         for h in handles {
             h.join().expect("worker thread panicked")?;
         }
+        if next < total_tasks {
+            anyhow::bail!(
+                "selfplay drain stopped at {}/{} games: a worker exited without filling its slot",
+                next,
+                total_tasks
+            );
+        }
         Ok(())
     })?;
-
-    // Drain outcomes in task-index order so aggregation and JSONL
-    // writes are byte-identical to the sequential (`--workers 1`)
-    // baseline, regardless of worker completion order. The
-    // single-process worker pool only changes scheduling, not the
-    // per-game RNG (each game's RNG is seeded from `seed_base + i`
-    // independently), so deterministic re-ordering here is enough.
-    let mut guard = outcomes.lock().expect("outcomes mutex poisoned");
-    for slot in guard.iter_mut() {
-        let o = slot.take().expect("worker did not fill outcome slot");
-        match o.terminal_reason.as_str() {
-            "game_over" => terminal_reasons.game_over += 1,
-            "stalled" => terminal_reasons.stalled += 1,
-            _ => terminal_reasons.max_steps += 1,
-        }
-        match o.winner.as_deref() {
-            Some("player") => player_wins += 1,
-            Some("opponent") => opponent_wins += 1,
-            _ => draws += 1,
-        }
-        if let Some(w) = writer.as_mut() {
-            for line in o.lines.iter() {
-                writeln!(w, "{}", line)?;
-            }
-        }
-    }
-    drop(guard);
 
     let elapsed = start.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();

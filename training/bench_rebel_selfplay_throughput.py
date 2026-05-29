@@ -129,27 +129,23 @@ def run_config(cfg: dict, onnx: str | None, seeds: int, seed_base: int,
         "--seeds", str(seeds), "--seed-base", str(seed_base),
         "--particles", str(cfg["particles"]),
         "--iterations", str(cfg["iterations"]),
-        "--rollout-steps", str(cfg["rollout_steps"]),
+        "--max-depth", str(cfg["max_depth"]),
+        "--policy-temperature", str(cfg["policy_temperature"]),
         "--max-steps", str(max_steps),
         "--model-side", model_side,
         "--deck-sampling", deck_sampling,
         "--workers", str(cfg["workers"]),
         "--device", cfg["device"],
-        "--neural-leaf-weight", str(cfg["neural_leaf_weight"]),
         "--neural-policy-weight", str(cfg["neural_policy_weight"]),
         "--neural-value-weight", str(cfg["neural_value_weight"]),
         "--inference-batch-size", str(cfg["inference_batch_size"]),
         "--inference-max-wait-us", str(cfg["inference_max_wait_us"]),
         "--out", str(out), "--manifest-out", str(man),
     ]
+    # --onnx-path is mandatory for the binary (it exits 2 without one); there is
+    # no rollout fallback after the correctness fix.
     if onnx:
         cmd += ["--onnx-path", onnx, "--cuda-device-id", "0"]
-    # Regime A configs blend in the determinized rollout leaf (neural_leaf_weight
-    # < 1.0). After the correctness fix the binary refuses that without an
-    # explicit ablation opt-in, so this benchmark — which intentionally MEASURES
-    # the rollout ablation's throughput cost — must pass the flag.
-    if float(cfg["neural_leaf_weight"]) < 1.0:
-        cmd.append("--allow-rollout-leaf")
 
     sampler = GpuSampler()
     sampler.start()
@@ -166,7 +162,7 @@ def run_config(cfg: dict, onnx: str | None, seeds: int, seed_base: int,
     if man.exists():
         summary = json.loads(man.read_text()).get("summary", {})
     return {
-        **{k: cfg[k] for k in ("tag", "device", "rollout_steps", "neural_leaf_weight",
+        **{k: cfg[k] for k in ("tag", "device", "max_depth", "policy_temperature",
                                "inference_batch_size", "inference_max_wait_us", "workers")},
         "games": summary.get("games"),
         "games_per_s": round(summary.get("gamesPerSec", 0.0), 3) if summary else None,
@@ -185,39 +181,31 @@ def preset_grid(name: str, base: dict) -> list[dict]:
         c = dict(base); c.update(over); c["tag"] = tag; grids.append(c)
 
     if name == "rebaseline":
-        # Regime A: rollout-blended (leaf<1) -> CPU-bound, win = fewer rollout steps + more workers
-        for rs in (96, 48, 32, 16):
-            add(f"A-rs{rs}", rollout_steps=rs, neural_leaf_weight=0.8)
+        # Search-cost sweep: deeper lookahead horizons cost CPU/inference per
+        # decision. Sweep max-depth at the production dispatch settings.
+        for md in (4, 8, 12, 16):
+            add(f"md{md}", max_depth=md)
         for w in (24, 30):
-            add(f"A-w{w}", workers=w, neural_leaf_weight=0.8, rollout_steps=96)
-        add("A-wait5k", neural_leaf_weight=0.8, rollout_steps=96, inference_max_wait_us=5000)
-        # Regime B: neural-only leaf (leaf=1.0, rollouts OFF) -> GPU-bound, win = dispatch tuning
-        for bs in (1, 128, 512):
-            add(f"B-bs{bs}", neural_leaf_weight=1.0, rollout_steps=0,
-                inference_batch_size=bs, inference_max_wait_us=2000)
-        add("B-bs512-wait40k", neural_leaf_weight=1.0, rollout_steps=0,
-            inference_batch_size=512, inference_max_wait_us=40000)
+            add(f"w{w}", workers=w)
+        add("wait5k", inference_max_wait_us=5000)
+        for bs in (128, 512):
+            add(f"bs{bs}", inference_batch_size=bs, inference_max_wait_us=2000)
+        add("bs512-wait40k", inference_batch_size=512, inference_max_wait_us=40000)
     elif name == "dispatch":
-        # Production regime after the correctness fix: leaf=1.0 (rollouts OFF,
-        # GPU-bound). The remaining throughput levers are the GPU dispatch
-        # (inference-batch-size, max-wait) and worker count. All configs here are
-        # the SOUND production leaf — no --allow-rollout-leaf needed.
+        # Production regime: neural leaf, GPU-bound. The throughput levers are
+        # the GPU dispatch (inference-batch-size, max-wait) and worker count.
         # bs1 (inline, no batching) is pathologically slow at production scale
         # (each leaf-matrix row becomes a separate CUDA call) and is not a
         # production candidate, so it is intentionally excluded from the grid.
         for bs in (64, 256, 512):
-            add(f"bs{bs}", neural_leaf_weight=1.0, rollout_steps=0,
-                inference_batch_size=bs, inference_max_wait_us=10000)
-        add("bs256-wait2k", neural_leaf_weight=1.0, rollout_steps=0,
-            inference_batch_size=256, inference_max_wait_us=2000)
-        add("bs512-wait40k", neural_leaf_weight=1.0, rollout_steps=0,
-            inference_batch_size=512, inference_max_wait_us=40000)
+            add(f"bs{bs}", inference_batch_size=bs, inference_max_wait_us=10000)
+        add("bs256-wait2k", inference_batch_size=256, inference_max_wait_us=2000)
+        add("bs512-wait40k", inference_batch_size=512, inference_max_wait_us=40000)
         for w in (24, 30):
-            add(f"w{w}", neural_leaf_weight=1.0, rollout_steps=0, workers=w,
-                inference_batch_size=256, inference_max_wait_us=10000)
-    elif name == "rollout-only":
-        for rs in (96, 48, 32, 16, 8):
-            add(f"rs{rs}", rollout_steps=rs, neural_leaf_weight=0.8)
+            add(f"w{w}", workers=w, inference_batch_size=256, inference_max_wait_us=10000)
+    elif name == "depth-only":
+        for md in (16, 12, 8, 4, 2):
+            add(f"md{md}", max_depth=md)
     elif name == "live":
         add("live-baseline")
     else:
@@ -234,7 +222,7 @@ def main() -> None:
     ap.add_argument("--model-side", default="both")
     ap.add_argument("--deck-sampling", default="uniform")
     ap.add_argument("--preset", default="rebaseline",
-                    choices=["rebaseline", "dispatch", "rollout-only", "live"])
+                    choices=["rebaseline", "dispatch", "depth-only", "live"])
     ap.add_argument("--timeout-s", type=int, default=1800)
     ap.add_argument("--out", default="/tmp/rebel-thru-sweep.csv")
     ap.add_argument("--force", action="store_true",
@@ -243,10 +231,14 @@ def main() -> None:
 
     if not BIN.exists():
         raise SystemExit(f"missing binary {BIN} (build engine-rs --release first)")
+    if not args.onnx_path:
+        raise SystemExit(
+            "--onnx-path is required: sim-rebel-selfplay has no rollout fallback "
+            "and exits 2 without an ONNX checkpoint.")
 
     base = {
-        "particles": 32, "iterations": 32, "rollout_steps": 96, "workers": 24,
-        "device": "cuda", "neural_leaf_weight": 0.8,
+        "particles": 32, "iterations": 32, "max_depth": 8, "policy_temperature": 0.5,
+        "workers": 24, "device": "cuda",
         "neural_policy_weight": 0.35, "neural_value_weight": 0.35,
         "inference_batch_size": 512, "inference_max_wait_us": 40000,
         "tag": "base",
@@ -261,7 +253,7 @@ def main() -> None:
             "frees the GPU, or pass --force.")
 
     rows: list[dict] = []
-    cols = ["tag", "device", "rollout_steps", "neural_leaf_weight", "inference_batch_size",
+    cols = ["tag", "device", "max_depth", "policy_temperature", "inference_batch_size",
             "inference_max_wait_us", "workers", "games", "games_per_s", "elapsed_s",
             "mean_fill", "gpu_util_mean", "gpu_util_max", "gpu_power_mean", "rc"]
     print(",".join(cols))

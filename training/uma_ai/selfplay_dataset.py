@@ -75,6 +75,10 @@ class MctsSelfPlaySample:
     # works without any payload-shape divergence.
     uma_slot_card_ids: np.ndarray | None = None
     uma_slot_features: np.ndarray | None = None
+    # T2.6 side-swap augmentation: per-sample POLICY-loss multiplier (value
+    # loss keeps `sample_weight`). 1.0 default → byte-identical; swapped
+    # value-only copies set 0.0. See `uma_ai/side_swap.py`.
+    policy_loss_scale: float = 1.0
 
 
 class MctsSelfPlayDataset(Dataset[MctsSelfPlaySample]):
@@ -265,6 +269,11 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
     policy_targets = np.zeros((batch_size, max_actions), dtype=np.float32)
     q_targets = np.zeros((batch_size, max_actions), dtype=np.float32)
     q_target_mask = np.zeros((batch_size, max_actions), dtype=np.bool_)
+    # T2.6 side-swap per-row policy-loss multiplier (see collate_policy_batch).
+    policy_loss_scales = np.array(
+        [float(getattr(sample, "policy_loss_scale", 1.0)) for sample in samples],
+        dtype=np.float32,
+    )
 
     # R16-P0: pack the v3 card-embedding tensors, mirroring
     # `collate_policy_batch`. `max_cards_per_zone` is the global cap (30,
@@ -352,6 +361,8 @@ def collate_mcts_selfplay_batch(samples: list[MctsSelfPlaySample]) -> dict[str, 
         "q_targets": torch.from_numpy(q_targets),
         "q_target_mask": torch.from_numpy(q_target_mask),
     }
+    if np.any(policy_loss_scales != 1.0):
+        batch["policy_loss_scales"] = torch.from_numpy(policy_loss_scales)
     if card_ids_buffer is not None and action_card_idx_buffer is not None:
         batch["card_ids_by_zone"] = torch.from_numpy(card_ids_buffer)
         batch["action_card_idx"] = torch.from_numpy(action_card_idx_buffer)

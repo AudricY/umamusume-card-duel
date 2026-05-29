@@ -1,7 +1,7 @@
 //! ReBeL public-belief self-play driver.
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,12 +43,16 @@ struct Args {
     seed_base: u32,
     #[arg(long, default_value_t = 64)]
     particles: usize,
-    #[arg(long, alias = "search-iterations", default_value_t = 64)]
+    #[arg(long, alias = "search-iterations", default_value_t = 2)]
     iterations: u32,
-    #[arg(long, default_value_t = 120)]
-    rollout_steps: u32,
-    #[arg(long, default_value_t = 1)]
+    /// Lookahead horizon, in modeled-turn steps after each root action, before
+    /// the network value bootstraps the leaf (policy-improvement rollout).
+    #[arg(long, default_value_t = 8)]
     max_depth: u32,
+    /// Softmax temperature mapping search action values to the recorded policy
+    /// target. Smaller = peakier.
+    #[arg(long, default_value_t = 0.5)]
+    policy_temperature: f64,
     #[arg(long, default_value = "player")]
     model_side: String,
     #[arg(long, default_value_t = 6)]
@@ -75,14 +79,6 @@ struct Args {
     neural_policy_weight: f64,
     #[arg(long, default_value_t = 0.25)]
     neural_value_weight: f64,
-    #[arg(long, default_value_t = 1.0)]
-    neural_leaf_weight: f64,
-    /// Opt into the (info-incorrect) determinized rollout leaf as an ablation.
-    /// Default false: the neural/observation leaf is the only sound production
-    /// leaf. Without a model loaded this flag is REQUIRED, otherwise the run
-    /// exits rather than silently emitting degenerate leaf values.
-    #[arg(long, default_value_t = false)]
-    allow_rollout_leaf: bool,
     #[arg(long, default_value_t = 1)]
     inference_batch_size: usize,
     #[arg(long, default_value_t = 2_000)]
@@ -96,8 +92,8 @@ impl Args {
             "seedBase": self.seed_base,
             "particles": self.particles,
             "iterations": self.iterations,
-            "rolloutSteps": self.rollout_steps,
             "maxDepth": self.max_depth,
+            "policyTemperature": self.policy_temperature,
             "modelSide": self.model_side,
             "temperatureMoves": self.temperature_moves,
             "temperatureValue": self.temperature_value,
@@ -111,19 +107,12 @@ impl Args {
             "cudaDeviceId": self.cuda_device_id,
             "neuralPolicyWeight": self.neural_policy_weight,
             "neuralValueWeight": self.neural_value_weight,
-            "neuralLeafWeight": self.neural_leaf_weight,
-            "effectiveNeuralLeafWeight": if self.onnx_path.is_some() {
-                self.neural_leaf_weight
-            } else {
-                0.0
-            },
-            "allowRolloutLeaf": self.allow_rollout_leaf,
             "inferenceBatchSize": self.inference_batch_size,
             "inferenceMaxWaitUs": self.inference_max_wait_us,
             "dataMode": "rebel",
             "engine": "rust",
             "selfplayBinary": "sim-rebel-selfplay",
-            "search": "public-belief-cfr-v1",
+            "search": "public-belief-policy-improvement-v2",
         })
     }
 }
@@ -565,16 +554,15 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let sampling = DeckSampling::parse(&args.deck_sampling)
         .map_err(|e| anyhow::anyhow!("--deck-sampling: {}", e))?;
-    // Sound-leaf guard: without a model the only available leaf is the
-    // info-incorrect determinized rollout. Refuse to run rather than silently
-    // fall back to it; the operator must explicitly opt into the ablation.
-    if args.onnx_path.is_none() && !args.allow_rollout_leaf {
+    // Sound-leaf guard: the network/observation value is the only leaf source.
+    // The information-incorrect heuristic rollout leaf has been removed, so a
+    // model is mandatory — the search panics without one. Fail fast here with a
+    // clear message instead.
+    if args.onnx_path.is_none() {
         eprintln!(
-            "sim-rebel-selfplay: no --onnx-path and --allow-rollout-leaf not set. \
-             The neural/observation leaf is the only sound production leaf; refusing \
-             to silently use the info-incorrect determinized rollout. Pass an ONNX \
-             model via --onnx-path, or pass --allow-rollout-leaf to opt into the \
-             (info-incorrect) rollout ablation."
+            "sim-rebel-selfplay: --onnx-path is required. The network/observation \
+             value is the only leaf source (the info-incorrect heuristic rollout \
+             leaf was removed); the public-belief search cannot run without a model."
         );
         std::process::exit(2);
     }
@@ -595,12 +583,11 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to load ONNX session at {}: {}", onnx, e))?;
         inference::set_global(session);
         eprintln!(
-            "sim-rebel-selfplay: loaded inference session from {} (device={:?}, neural_policy_weight={}, neural_value_weight={}, neural_leaf_weight={}, inference_batch_size={})",
+            "sim-rebel-selfplay: loaded inference session from {} (device={:?}, neural_policy_weight={}, neural_value_weight={}, inference_batch_size={})",
             onnx,
             device,
             args.neural_policy_weight,
             args.neural_value_weight,
-            args.neural_leaf_weight,
             args.inference_batch_size,
         );
     }
@@ -628,46 +615,34 @@ fn main() -> Result<()> {
     let total_tasks = tasks.len();
     let effective_workers = workers.max(1).min(total_tasks.max(1));
     eprintln!(
-        "sim-rebel-selfplay: seeds-per-side={} model-side={} (=> {} total games) base={} particles={} rollout_steps={} workers={} (requested {})",
+        "sim-rebel-selfplay: seeds-per-side={} model-side={} (=> {} total games) base={} particles={} max_depth={} workers={} (requested {})",
         args.seeds,
         args.model_side,
         total_tasks,
         args.seed_base,
         args.particles,
-        args.rollout_steps,
+        args.max_depth,
         effective_workers,
         args.workers,
     );
     let search_config = RebelSearchConfig {
         iterations: args.iterations,
         max_depth: args.max_depth,
-        rollout_steps: args.rollout_steps,
-        neural_policy_weight: if args.onnx_path.is_some() {
-            args.neural_policy_weight
-        } else {
-            0.0
-        },
-        neural_value_weight: if args.onnx_path.is_some() {
-            args.neural_value_weight
-        } else {
-            0.0
-        },
-        neural_leaf_weight: if args.onnx_path.is_some() {
-            args.neural_leaf_weight
-        } else {
-            0.0
-        },
-        allow_rollout_leaf: args.allow_rollout_leaf,
-        algorithm: "public-belief-cfr-v1".to_string(),
+        neural_policy_weight: args.neural_policy_weight,
+        neural_value_weight: args.neural_value_weight,
+        policy_temperature: args.policy_temperature,
+        algorithm: "public-belief-policy-improvement-v2".to_string(),
     };
-    let mut writer: Option<fs::File> = match args.out.as_ref() {
+    let mut writer: Option<BufWriter<fs::File>> = match args.out.as_ref() {
         Some(path) => {
             let p = PathBuf::from(path);
             if let Some(parent) = p.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("mkdir {}", parent.display()))?;
             }
-            Some(fs::File::create(&p).with_context(|| format!("create {}", path))?)
+            Some(BufWriter::new(
+                fs::File::create(&p).with_context(|| format!("create {}", path))?,
+            ))
         }
         None => None,
     };
@@ -697,6 +672,18 @@ fn main() -> Result<()> {
     let temperature_moves = args.temperature_moves;
     let temperature_value = args.temperature_value;
 
+    // Counts workers still alive so the streaming drain can distinguish
+    // "slot not filled yet" from "the worker owning this slot died". The
+    // Drop guard decrements on every exit path — normal return, `?`
+    // early-return, or panic — so the count is always accurate.
+    struct WorkerExitGuard<'a>(&'a AtomicUsize);
+    impl Drop for WorkerExitGuard<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Release);
+        }
+    }
+    let live_workers = Arc::new(AtomicUsize::new(effective_workers));
+
     std::thread::scope(|s| -> Result<()> {
         let mut handles = Vec::with_capacity(effective_workers);
         for _worker_id in 0..effective_workers {
@@ -705,7 +692,9 @@ fn main() -> Result<()> {
             let outcomes = Arc::clone(&outcomes);
             let search_config_arc = Arc::clone(&search_config_arc);
             let sampling_arc = Arc::clone(&sampling_arc);
+            let live_workers = Arc::clone(&live_workers);
             handles.push(s.spawn(move || -> Result<()> {
+                let _exit = WorkerExitGuard(&live_workers);
                 loop {
                     let task_index = task_cursor.fetch_add(1, Ordering::Relaxed);
                     if task_index >= tasks_arc.len() {
@@ -748,29 +737,63 @@ fn main() -> Result<()> {
                 Ok(())
             }));
         }
+        // Drain outcomes in task-index order *as games finish*, rather
+        // than after every worker has joined. Writing strictly in
+        // ascending slot order keeps aggregation and JSONL bytes
+        // identical to the sequential (`--workers 1`) baseline — only
+        // the timing of each write changes — while flushing per game
+        // makes rows visible live to `tail`/monitoring instead of
+        // appearing all-at-once at the end of the selfplay phase.
+        let mut next = 0usize;
+        while next < total_tasks {
+            let outcome = {
+                let mut guard = outcomes.lock().expect("outcomes mutex poisoned");
+                match guard[next].take() {
+                    Some(o) => o,
+                    None => {
+                        // Slot not filled yet. A worker fills its slot
+                        // while holding this same lock and only then
+                        // exits (decrementing `live_workers` via the Drop
+                        // guard), so observing `live_workers == 0` here —
+                        // under the lock — means this slot will never be
+                        // filled: a worker failed. Stop and let the join
+                        // below surface the real error/panic.
+                        if live_workers.load(Ordering::Acquire) == 0 {
+                            break;
+                        }
+                        drop(guard);
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                }
+            };
+            match outcome.winner.as_deref() {
+                Some("player") => player_wins += 1,
+                Some("opponent") => opponent_wins += 1,
+                _ => draws += 1,
+            }
+            if let Some(w) = writer.as_mut() {
+                for line in outcome.lines.iter() {
+                    writeln!(w, "{}", line)?;
+                }
+                w.flush()?;
+            }
+            timing_totals.add(outcome.timing);
+            games += 1;
+            next += 1;
+        }
         for h in handles {
             h.join().expect("worker thread panicked")?;
         }
+        if next < total_tasks {
+            anyhow::bail!(
+                "rebel selfplay drain stopped at {}/{} games: a worker exited without filling its slot",
+                next,
+                total_tasks
+            );
+        }
         Ok(())
     })?;
-
-    let mut guard = outcomes.lock().expect("outcomes mutex poisoned");
-    for slot in guard.iter_mut() {
-        let outcome = slot.take().expect("worker did not fill outcome slot");
-        match outcome.winner.as_deref() {
-            Some("player") => player_wins += 1,
-            Some("opponent") => opponent_wins += 1,
-            _ => draws += 1,
-        }
-        if let Some(w) = writer.as_mut() {
-            for line in outcome.lines.iter() {
-                writeln!(w, "{}", line)?;
-            }
-        }
-        timing_totals.add(outcome.timing);
-        games += 1;
-    }
-    drop(guard);
 
     let elapsed_secs = start.elapsed().as_secs_f64();
     let summary = RunSummary {
@@ -839,20 +862,17 @@ mod tests {
         );
         assert_eq!(
             manifest.get("search").and_then(Value::as_str),
-            Some("public-belief-cfr-v1")
+            Some("public-belief-policy-improvement-v2")
         );
-        // Provenance: the rollout-leaf ablation gate and the effective neural
-        // leaf weight are stamped into the manifest. With no --onnx-path the
-        // effective leaf weight collapses to 0.0 and the ablation is off.
+        // Provenance: the policy-improvement search records its lookahead
+        // horizon and policy temperature. The info-incorrect rollout-leaf knobs
+        // were removed, so they are no longer present in the manifest.
+        assert_eq!(manifest.get("maxDepth").and_then(Value::as_u64), Some(8));
         assert_eq!(
-            manifest.get("allowRolloutLeaf").and_then(Value::as_bool),
-            Some(false)
+            manifest.get("policyTemperature").and_then(Value::as_f64),
+            Some(0.5)
         );
-        assert_eq!(
-            manifest
-                .get("effectiveNeuralLeafWeight")
-                .and_then(Value::as_f64),
-            Some(0.0)
-        );
+        assert!(manifest.get("allowRolloutLeaf").is_none());
+        assert!(manifest.get("neuralLeafWeight").is_none());
     }
 }

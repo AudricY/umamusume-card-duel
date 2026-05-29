@@ -23,6 +23,7 @@ from uma_ai.features import (
     STATE_DIM_V3_6,
     STATE_DIM_V3_7,
     STATE_DIM_V3_8,
+    STATE_DIM_V6,
     UMA_SLOT_COUNT,
     UMA_SLOT_FEATURE_DIM,
     ZONE_ORDER,
@@ -37,6 +38,7 @@ from uma_ai.features import (
     observation_to_features_v3_5,
     observation_to_features_v3_6,
     observation_to_features_v3_7,
+    observation_to_features_v6,
     observation_to_uma_slots,
 )
 
@@ -268,6 +270,13 @@ _SCHEMA_TABLE: tuple[tuple[int, bool, bool, str, str], ...] = (
         "v3.8",
         "304-d v3.8 slim-feature-add (embedding inputs, no slot tokens; v3.7 head + 8-bit per-bench ETA + gust-swing catastrophe tail at [296:304]; action schema v4 at [48:52] OR v5 at [52:57] for fresh exports — discriminated by sidecar action_feature_schema_version, dispatch handles both via pack_row slicing)",
     ),
+    (
+        STATE_DIM_V6,
+        True,
+        True,
+        "v6",
+        "126-d v6 own-deck-composition (embedding + slot inputs; FROZEN v3.0 110-d head + 16-slot OWN remaining-deck composition tail at [110:126]: 6 kind buckets + 10 uma-type buckets / 20). 7-input slot-token contract (same input set as v3.2/v3.4), discriminated by state_dim=126. Tail degrades to zeros until the obs contract exposes own deck card-ids — see STATE_DIM_V6 in features.py",
+    ),
 )
 _PLACEHOLDER_DIMS: dict[int, str] = {}
 
@@ -289,7 +298,7 @@ def _lookup_schema(
     return None
 
 
-_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2", "v3.3", "v3.4", "v3.5", "v3.6", "v3.7", "v3.8"}
+_VALID_SCHEMA_TOKENS = {"v2", "v3", "v3.1", "v3.2", "v3.3", "v3.4", "v3.5", "v3.6", "v3.7", "v3.8", "v6"}
 
 
 def _resolve_feature_schema(requested: str, session: ort.InferenceSession) -> str:
@@ -573,6 +582,15 @@ def request_to_arrays(
     is_v3_5 = feature_schema == "v3.5"
     is_v3_6 = feature_schema == "v3.6"
     is_v3_7 = feature_schema == "v3.7"
+    # v6-own-deck-composition: 126-d state vector + per-Uma slot tokens (the
+    # 7-input contract, same as v3.2). The v6 lift is in the state-vector tail
+    # [110:126] PLUS the slot tensors that flow the relational trunk; the tail
+    # degrades to zeros until the obs exposes own deck card-ids (see
+    # `observation_to_features_v6`). `wants_slots` mirrors the Rust
+    # `needs_slots` (v3.2 / v3.4 / v6) — it gates the auxiliary slot-tensor
+    # feeds independently of the state-vector width.
+    is_v6 = feature_schema == "v6"
+    wants_slots = is_v3_2 or is_v6
     if is_v2:
         expected_state_dim = STATE_DIM_V2
         encode_state = observation_to_features_v2
@@ -601,6 +619,13 @@ def request_to_arrays(
         # tail at [246:296]. v3.6 head stays byte-stable.
         expected_state_dim = STATE_DIM_V3_7
         encode_state = observation_to_features_v3_7
+    elif is_v6:
+        # v6 = 126-d state vector (FROZEN v3.0 110-d head + 16-slot own
+        # remaining-deck composition tail at [110:126]) + per-Uma slot tokens
+        # (7-input contract). The slot-tensor feeds are attached below via the
+        # shared `wants_slots` guard.
+        expected_state_dim = STATE_DIM_V6
+        encode_state = observation_to_features_v6
     else:
         # Both v3 (110-d v3.0) and v3.2 (110-d v3.0 head + slot tokens) use
         # the SAME 110-d state builder. The v3.2 lift lives entirely in the
@@ -632,7 +657,7 @@ def request_to_arrays(
             action_card_idx = np.zeros((1, len(actions), 2), dtype=np.int64)
             for action_index, action in enumerate(actions):
                 action_card_idx[0, action_index, :] = action_card_idx_pair(action)
-        if is_v3_2:
+        if wants_slots:
             # R16-P2 C5: build the per-Uma slot tensors via C1's builder.
             # `observation_to_uma_slots` returns the FROZEN
             # `(int64[10], float32[10, UMA_SLOT_FEATURE_DIM])` contract;
@@ -663,7 +688,7 @@ def request_to_arrays(
                 action_card_idx = np.zeros(
                     (action_features.shape[0], action_features.shape[1], 2), dtype=np.int64
                 )
-        if is_v3_2:
+        if wants_slots:
             # R16-P2 C5: raw-arrays callers (training/debug paths) can
             # pre-pack the new slot tensors. Default to zero so the slot
             # branch collapses to the structural-null residual (verified
@@ -719,7 +744,7 @@ def request_to_arrays(
         # zeroed.
         feed["card_ids_by_zone"] = card_ids_by_zone.astype(np.int64)
         feed["action_card_idx"] = action_card_idx.astype(np.int64)
-    if is_v3_2:
+    if wants_slots:
         expected_slot_ids = (state_features.shape[0], UMA_SLOT_COUNT)
         if uma_slot_card_ids.shape != expected_slot_ids:
             raise ValueError(
@@ -736,10 +761,11 @@ def request_to_arrays(
                 f"uma_slot_features shape mismatch: got {uma_slot_features.shape}, "
                 f"expected {expected_slot_feats}"
             )
-        # ORT hard-rejects unknown feed keys: v3.0/v3.1 graphs must NOT
-        # receive these (v3.2 ONLY). The resolver's cross-input guard
-        # ensures `is_v3_2` is true iff the graph declares the slot
-        # inputs, so by reaching this branch the feed is safe to attach.
+        # ORT hard-rejects unknown feed keys: 5-input graphs (v3.0/v3.1/...)
+        # must NOT receive these (slot schemas ONLY — v3.2 / v6). The
+        # resolver's cross-input guard ensures `wants_slots` is true iff the
+        # graph declares the slot inputs, so by reaching this branch the feed
+        # is safe to attach.
         feed["uma_slot_card_ids"] = uma_slot_card_ids.astype(np.int64)
         feed["uma_slot_features"] = uma_slot_features.astype(np.float32)
     return feed, action_ids

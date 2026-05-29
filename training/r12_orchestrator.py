@@ -1536,6 +1536,18 @@ def run_distill(
         cmd.append("--uma-slot-tokens")
     if args.model_variant != "mlp":
         cmd.extend(["--model-variant", str(args.model_variant)])
+    # T1.3 / T2.6 / model-feature-flag passthroughs. All default to the
+    # train_bc.py defaults on the orchestrator side, so unset is byte-identical
+    # (no extra cmd tokens). Mirrors the --uma-slot-tokens / --model-variant
+    # conditional-append pattern directly above.
+    if getattr(args, "value_loss_mode", "mse") != "mse":
+        cmd.extend(["--value-loss-mode", str(args.value_loss_mode)])
+    if getattr(args, "side_swap_augment", False):
+        cmd.append("--side-swap-augment")
+    if getattr(args, "card_features", False):
+        cmd.append("--card-features")
+    if getattr(args, "no_contextual_actions", False):
+        cmd.append("--no-contextual-actions")
     # distill-throughput-spike Phase 1 passthroughs. All three default OFF
     # on the orchestrator side (matching the train_bc.py CLI defaults) so
     # unset is byte-identical to pre-spike behavior. Flip via explicit
@@ -2123,6 +2135,25 @@ def parse_args() -> argparse.Namespace:
                         "mismatches on attention-loop resumes.")
     p.add_argument("--kl-anchor-weight", type=float, default=0.0,
                    help="Optional anti-forgetting anchor weight (init checkpoint as anchor).")
+    # T1.3 / T2.6 / model-feature flags forwarded to the distill trainer
+    # (train_bc.py). All default to the train_bc.py defaults so unset is
+    # byte-identical to pre-change loops (build_train_cmd only appends a token
+    # when the value diverges from the default).
+    p.add_argument("--value-loss-mode", choices=["mse", "bce"], default="mse",
+                   help="T1.3: forwarded to train_bc.py --value-loss-mode. "
+                        "Default mse is byte-identical; bce trains value as a "
+                        "win-probability (no ONNX/serving change).")
+    p.add_argument("--side-swap-augment", action="store_true",
+                   help="T2.6: forwarded to train_bc.py --side-swap-augment. "
+                        "Adds value-only side-swapped copies to the distill "
+                        "training stream. Default OFF.")
+    p.add_argument("--card-features", action="store_true",
+                   help="Forwarded to train_bc.py --card-features "
+                        "(ModelConfig.uses_card_features=True). Default OFF.")
+    p.add_argument("--no-contextual-actions", action="store_true",
+                   help="Forwarded to train_bc.py --no-contextual-actions "
+                        "(ModelConfig.relational_contextual_actions=False). "
+                        "Default keeps it True.")
     # W6 recipe-fix (r110.md §4a). Default ON via the module constants above;
     # these flags exist so an A/B loop run can flip either fix off without a
     # code edit. --w6-fix-* take precedence over the constants when passed.

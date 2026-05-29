@@ -53,7 +53,7 @@ use crate::belief::BELIEF_FEATURE_DIM;
 use crate::policy::card_vocab::card_vocab;
 use crate::policy::featurize::{
     self, ACTION_DIM, MAX_CARDS_PER_ZONE, NUM_ZONES, STATE_DIM_V3, STATE_DIM_V3_1, STATE_DIM_V3_3,
-    STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7, STATE_DIM_V3_8, UMA_SLOT_COUNT,
+    STATE_DIM_V3_5, STATE_DIM_V3_6, STATE_DIM_V3_7, STATE_DIM_V3_8, STATE_DIM_V6, UMA_SLOT_COUNT,
     UMA_SLOT_FEATURE_DIM,
 };
 use crate::policy::types::{LegalAiAction, PublicObservation};
@@ -126,6 +126,16 @@ enum GraphSchema {
     /// (hidden_dim=128/depth=2 preserved). See
     /// `docs/ai-research/scoping/v38-slim-feature-add-scoping.md`.
     V3_8,
+    /// v6-own-deck-composition: 126-d state-features + 7-input contract
+    /// (WITH slot tokens — same input set as v3.2/v3.4). Layered on the
+    /// FROZEN v3.0 110-d head with a 16-slot OWN remaining-deck composition
+    /// tail at [110:126] (finding T2.7 "remaining-deck inference"). The v6
+    /// relational trunk consumes the per-Uma slot tokens + card_ids_by_zone,
+    /// so v6 inherits the v3.2 7-input ONNX signature; it is discriminated
+    /// from v3.2 (state_dim=110) and v3.4 (state_dim=167) by the
+    /// `state_features` last-dim (126). Action schema stays v3 (48-d), like
+    /// v3.2/v3.4. See `STATE_DIM_V6` in `policy/featurize.rs`.
+    V6,
 }
 
 /// Errors surfaced by the inference layer. We hide ORT's `Error` behind
@@ -829,6 +839,10 @@ fn pack_row(
             featurize::observation_state_features(observation),
             STATE_DIM_V3,
         ),
+        GraphSchema::V6 => (
+            featurize::observation_state_features_v6(observation),
+            STATE_DIM_V6,
+        ),
     };
     let n_actions = legal_actions.len();
     let action_dim = target_action_dim;
@@ -857,7 +871,7 @@ fn pack_row(
     let card_ids = featurize::observation_card_ids_by_zone(observation);
     let action_card_idx = featurize::action_card_idx_pairs_flat(legal_actions);
     let (slot_card_ids, slot_features) = match schema {
-        GraphSchema::V3_2 | GraphSchema::V3_4 => {
+        GraphSchema::V3_2 | GraphSchema::V3_4 | GraphSchema::V6 => {
             let (ids, feats) = featurize::observation_uma_slots(observation);
             (Some(ids), Some(feats))
         }
@@ -919,7 +933,7 @@ fn run_inline_row(
         Array::from_shape_vec((1, row.n_actions, 2), row.action_card_idx.clone())
             .map_err(|e| InferenceError::OutputShape(format!("action_card_idx reshape: {e}")))?;
     let slot_card_ids_arr = match (schema, row.slot_card_ids.as_ref()) {
-        (GraphSchema::V3_2 | GraphSchema::V3_4, Some(ids)) => Some(
+        (GraphSchema::V3_2 | GraphSchema::V3_4 | GraphSchema::V6, Some(ids)) => Some(
             Array::from_shape_vec((1, UMA_SLOT_COUNT), ids.clone()).map_err(|e| {
                 InferenceError::OutputShape(format!("uma_slot_card_ids reshape: {e}"))
             })?,
@@ -927,7 +941,7 @@ fn run_inline_row(
         _ => None,
     };
     let slot_features_arr = match (schema, row.slot_features.as_ref()) {
-        (GraphSchema::V3_2 | GraphSchema::V3_4, Some(feats)) => Some(
+        (GraphSchema::V3_2 | GraphSchema::V3_4 | GraphSchema::V6, Some(feats)) => Some(
             Array::from_shape_vec((1, UMA_SLOT_COUNT, UMA_SLOT_FEATURE_DIM), feats.clone())
                 .map_err(|e| {
                     InferenceError::OutputShape(format!("uma_slot_features reshape: {e}"))
@@ -978,13 +992,13 @@ fn run_inline_row(
             "action_card_idx" => TensorRef::from_array_view(&action_card_idx_arr)?,
             "belief_features" => TensorRef::from_array_view(belief)?,
         ],
-        (GraphSchema::V3_2 | GraphSchema::V3_4, belief_opt) => {
+        (GraphSchema::V3_2 | GraphSchema::V3_4 | GraphSchema::V6, belief_opt) => {
             let slot_ids = slot_card_ids_arr
                 .as_ref()
-                .expect("slot tensors built above for v3.2/v3.4");
+                .expect("slot tensors built above for v3.2/v3.4/v6");
             let slot_feats = slot_features_arr
                 .as_ref()
-                .expect("slot tensors built above for v3.2/v3.4");
+                .expect("slot tensors built above for v3.2/v3.4/v6");
             if let Some(belief) = belief_opt {
                 ort::inputs![
                     "state_features" => TensorRef::from_array_view(&state_arr)?,
@@ -1160,7 +1174,7 @@ fn run_inline_bucket(
         ));
     }
     let state_dim = rows[bucket[0]].state_dim;
-    let needs_slots = matches!(schema, GraphSchema::V3_2 | GraphSchema::V3_4);
+    let needs_slots = matches!(schema, GraphSchema::V3_2 | GraphSchema::V3_4 | GraphSchema::V6);
     // Per-row action_dim is set by pack_row from the graph's actual
     // action_features last dim; rows in a batch share the same width
     // (one session = one graph = one width).
@@ -1317,13 +1331,13 @@ fn run_inline_bucket(
                 "belief_features" => TensorRef::from_array_view(belief)?,
             ]
         }
-        (GraphSchema::V3_2 | GraphSchema::V3_4, belief_opt) => {
+        (GraphSchema::V3_2 | GraphSchema::V3_4 | GraphSchema::V6, belief_opt) => {
             let slot_ids = slot_card_ids_arr
                 .as_ref()
-                .expect("slot tensors built above for v3.2/v3.4");
+                .expect("slot tensors built above for v3.2/v3.4/v6");
             let slot_feats = slot_features_arr
                 .as_ref()
-                .expect("slot tensors built above for v3.2/v3.4");
+                .expect("slot tensors built above for v3.2/v3.4/v6");
             if let Some(belief) = belief_opt {
                 ort::inputs![
                     "state_features" => TensorRef::from_array_view(&state_arr)?,
@@ -1637,7 +1651,7 @@ fn run_batch(
     let mut action_mask_buf: Vec<bool> = vec![false; n_batch * max_n];
     let mut card_ids_buf: Vec<i64> = Vec::with_capacity(n_batch * NUM_ZONES * MAX_CARDS_PER_ZONE);
     let mut action_card_idx_buf: Vec<i64> = vec![0; n_batch * max_n * 2];
-    let needs_slots = matches!(schema, GraphSchema::V3_2 | GraphSchema::V3_4);
+    let needs_slots = matches!(schema, GraphSchema::V3_2 | GraphSchema::V3_4 | GraphSchema::V6);
     let mut slot_card_ids_buf: Vec<i64> = if needs_slots {
         Vec::with_capacity(n_batch * UMA_SLOT_COUNT)
     } else {
@@ -1856,13 +1870,13 @@ fn run_batch(
                 "belief_features" => TensorRef::from_array_view(belief)?,
             ])
         })(),
-        (GraphSchema::V3_2 | GraphSchema::V3_4, belief_opt) => {
+        (GraphSchema::V3_2 | GraphSchema::V3_4 | GraphSchema::V6, belief_opt) => {
             let slot_ids = slot_card_ids_arr
                 .as_ref()
-                .expect("slot tensors built above for v3.2/v3.4");
+                .expect("slot tensors built above for v3.2/v3.4/v6");
             let slot_feats = slot_features_arr
                 .as_ref()
-                .expect("slot tensors built above for v3.2/v3.4");
+                .expect("slot tensors built above for v3.2/v3.4/v6");
             (|| -> Result<_, InferenceError> {
                 if let Some(belief) = belief_opt {
                     Ok(ort::inputs![
@@ -2161,10 +2175,11 @@ fn validate_graph_signature(session: &Session) -> Result<GraphSchema, InferenceE
         return match read_state_features_last_dim(session) {
             Some(d) if d as usize == STATE_DIM_V3 => Ok(GraphSchema::V3_2),
             Some(d) if d as usize == STATE_DIM_V3_3 => Ok(GraphSchema::V3_4),
+            Some(d) if d as usize == STATE_DIM_V6 => Ok(GraphSchema::V6),
             Some(d) => Err(InferenceError::SchemaMismatch(format!(
                 "7-input slot-token graph has state_features last dim {} \
-                 — expected {} (v3.2) or {} (v3.4); inputs {:?}",
-                d, STATE_DIM_V3, STATE_DIM_V3_3, inputs
+                 — expected {} (v3.2), {} (v3.4), or {} (v6); inputs {:?}",
+                d, STATE_DIM_V3, STATE_DIM_V3_3, STATE_DIM_V6, inputs
             ))),
             None => Ok(GraphSchema::V3_2),
         };
