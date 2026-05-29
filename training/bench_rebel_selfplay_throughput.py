@@ -118,6 +118,12 @@ def run_config(cfg: dict, onnx: str | None, seeds: int, seed_base: int,
     ]
     if onnx:
         cmd += ["--onnx-path", onnx, "--cuda-device-id", "0"]
+    # Regime A configs blend in the determinized rollout leaf (neural_leaf_weight
+    # < 1.0). After the correctness fix the binary refuses that without an
+    # explicit ablation opt-in, so this benchmark — which intentionally MEASURES
+    # the rollout ablation's throughput cost — must pass the flag.
+    if float(cfg["neural_leaf_weight"]) < 1.0:
+        cmd.append("--allow-rollout-leaf")
 
     sampler = GpuSampler()
     sampler.start()
@@ -165,6 +171,21 @@ def preset_grid(name: str, base: dict) -> list[dict]:
                 inference_batch_size=bs, inference_max_wait_us=2000)
         add("B-bs512-wait40k", neural_leaf_weight=1.0, rollout_steps=0,
             inference_batch_size=512, inference_max_wait_us=40000)
+    elif name == "dispatch":
+        # Production regime after the correctness fix: leaf=1.0 (rollouts OFF,
+        # GPU-bound). The remaining throughput levers are the GPU dispatch
+        # (inference-batch-size, max-wait) and worker count. All configs here are
+        # the SOUND production leaf — no --allow-rollout-leaf needed.
+        for bs in (1, 64, 256, 512):
+            add(f"bs{bs}", neural_leaf_weight=1.0, rollout_steps=0,
+                inference_batch_size=bs, inference_max_wait_us=10000)
+        add("bs256-wait2k", neural_leaf_weight=1.0, rollout_steps=0,
+            inference_batch_size=256, inference_max_wait_us=2000)
+        add("bs512-wait40k", neural_leaf_weight=1.0, rollout_steps=0,
+            inference_batch_size=512, inference_max_wait_us=40000)
+        for w in (24, 30):
+            add(f"w{w}", neural_leaf_weight=1.0, rollout_steps=0, workers=w,
+                inference_batch_size=256, inference_max_wait_us=10000)
     elif name == "rollout-only":
         for rs in (96, 48, 32, 16, 8):
             add(f"rs{rs}", rollout_steps=rs, neural_leaf_weight=0.8)
@@ -184,7 +205,7 @@ def main() -> None:
     ap.add_argument("--model-side", default="both")
     ap.add_argument("--deck-sampling", default="uniform")
     ap.add_argument("--preset", default="rebaseline",
-                    choices=["rebaseline", "rollout-only", "live"])
+                    choices=["rebaseline", "dispatch", "rollout-only", "live"])
     ap.add_argument("--timeout-s", type=int, default=1800)
     ap.add_argument("--out", default="/tmp/rebel-thru-sweep.csv")
     ap.add_argument("--force", action="store_true",
