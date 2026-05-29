@@ -40,6 +40,31 @@ BIN = REPO / "engine-rs/target/release/sim-rebel-selfplay"
 FILL_RE = re.compile(r"batched_inference batches=(\d+) requests=(\d+) mean_fill=([\d.]+)")
 
 
+def ort_env() -> dict:
+    """Replicate rebel_orchestrator.ort_env: put the venv CUDA / ONNX Runtime
+    provider libs on LD_LIBRARY_PATH and point ORT_DYLIB_PATH at the bundled
+    onnxruntime so the binary's CUDA session loads (without this it hangs at
+    session init when launched outside the orchestrator)."""
+    env = os.environ.copy()
+    site = REPO / "training/.venv/lib/python3.12/site-packages"
+    lib_dirs: list = []
+    nvidia_root = site / "nvidia"
+    if nvidia_root.is_dir():
+        lib_dirs.extend(str(p) for p in nvidia_root.glob("*/lib") if p.is_dir())
+    capi = site / "onnxruntime/capi"
+    if capi.is_dir():
+        lib_dirs.append(str(capi))
+    if lib_dirs:
+        existing = env.get("LD_LIBRARY_PATH", "")
+        parts = existing.split(":") if existing else []
+        env["LD_LIBRARY_PATH"] = ":".join([p for p in lib_dirs if p not in parts] + parts)
+    if "ORT_DYLIB_PATH" not in env:
+        cand = capi / "libonnxruntime.so.1.22.0"
+        if cand.exists():
+            env["ORT_DYLIB_PATH"] = str(cand)
+    return env
+
+
 def _gpu_busy_with_sim() -> bool:
     """True if a sim-rebel-selfplay or sim-eval-gate (other than us) is running."""
     try:
@@ -61,14 +86,15 @@ class GpuSampler(threading.Thread):
     def __init__(self, period_s: float = 0.2):
         super().__init__(daemon=True)
         self.period_s = period_s
-        self._stop = threading.Event()
+        # NB: must NOT be named _stop — that shadows Thread._stop and breaks join().
+        self._stop_evt = threading.Event()
         self.utils: list[float] = []
         self.powers: list[float] = []
 
     def run(self) -> None:
         if not shutil.which("nvidia-smi"):
             return
-        while not self._stop.is_set():
+        while not self._stop_evt.is_set():
             try:
                 out = subprocess.run(
                     ["nvidia-smi", "--query-gpu=utilization.gpu,power.draw",
@@ -80,10 +106,10 @@ class GpuSampler(threading.Thread):
                 self.powers.append(float(p))
             except Exception:
                 pass
-            self._stop.wait(self.period_s)
+            self._stop_evt.wait(self.period_s)
 
     def stop(self) -> dict:
-        self._stop.set()
+        self._stop_evt.set()
         self.join(timeout=2)
         def stat(xs):
             return (round(sum(xs) / len(xs), 1), round(max(xs), 1)) if xs else (None, None)
@@ -128,7 +154,7 @@ def run_config(cfg: dict, onnx: str | None, seeds: int, seed_base: int,
     sampler = GpuSampler()
     sampler.start()
     t0 = time.monotonic()
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=ort_env())
     wall = time.monotonic() - t0
     gpu = sampler.stop()
 
@@ -176,7 +202,10 @@ def preset_grid(name: str, base: dict) -> list[dict]:
         # GPU-bound). The remaining throughput levers are the GPU dispatch
         # (inference-batch-size, max-wait) and worker count. All configs here are
         # the SOUND production leaf — no --allow-rollout-leaf needed.
-        for bs in (1, 64, 256, 512):
+        # bs1 (inline, no batching) is pathologically slow at production scale
+        # (each leaf-matrix row becomes a separate CUDA call) and is not a
+        # production candidate, so it is intentionally excluded from the grid.
+        for bs in (64, 256, 512):
             add(f"bs{bs}", neural_leaf_weight=1.0, rollout_steps=0,
                 inference_batch_size=bs, inference_max_wait_us=10000)
         add("bs256-wait2k", neural_leaf_weight=1.0, rollout_steps=0,
