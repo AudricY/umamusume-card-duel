@@ -442,3 +442,64 @@ Search-iteration budget:
 Remaining work:
 
 - Calibrate the production threshold values for the neural-leaf recipe; the orchestrator plumbing now supports enforcing them.
+
+## 2026-05-29 — Re-baseline at hidden=256/depth=4 (R18 live profile)
+
+**Why this section exists:** the CUDA sweep above (lines ~411–417) was measured on
+a single-worker smoke (386 rows) at the *old* model size. The model transitioned
+to `hidden=256 / depth=4`, which invalidates the "inline `--inference-batch-size 1`
+is best / GPU caps ~28%" verdict for the production shape. Do not cite those rows
+as the current optimum.
+
+**Live profile (R18, `runs/R18-rebel-kl-relaxed-20260528`, iter-2 self-play, completed):**
+config `--particles 32 --search-iterations 32 --rollout-steps 96 --max-steps 220
+--workers 24 --neural-leaf-weight 0.8 --inference-batch-size 512
+--inference-max-wait-us 40000 --device cuda`.
+
+- Throughput: **2.05 games/s, 52.8k inference rows/s** (768 games / 373.9s).
+- Dispatcher: batches fill to 512 **97.5%** of the time; `run_us` avg 4.6ms;
+  ~105.7 batches/s ⇒ GPU forward duty ≈ **49% of wall** (CPU-bound, GPU ~half idle).
+  `max_run_us` hits ~39ms — the `--inference-max-wait-us 40000` tail: partial
+  batches (fill 1–3) stall a full 40ms. Lowering max-wait caps that tail.
+
+**Crux — rollout cost at `neural-leaf-weight 0.8`:** the rollout gate is
+`use_rollouts = neural_leaf_weight < 1.0` (`engine-rs/crates/engine/src/rebel/mod.rs:123-125`),
+so at 0.8 the full `--rollout-steps 96` random rollout runs for **every** leaf cell
+and is then weighted only **20%** in the blend (`rebel/mod.rs:225-231`). We pay
+100% of rollout CPU for a 20%-weighted signal.
+
+**Measured rollout-step scaling** (CPU-only, `--neural-leaf-weight 0`, no ONNX, 6
+workers, 32 games, production search shape; ran alongside the live run without
+perturbing it — selfplay is `--device cpu` so zero GPU contention):
+
+```text
+rollout-steps  games/s   elapsed
+96             1.698     18.8s   (baseline)
+24             3.177     10.1s   (+87%)
+```
+
+Linear fit `cost = fixed + k·steps`: rollout is **~62% of CPU self-play time at 96
+steps**; fixed search/belief/CFR/clone overhead ~38%. Cutting 96→24 nearly doubles
+CPU-side throughput.
+
+**Recommendations for the NEXT run (cannot be applied to the live run — orchestrator
+args are fixed at launch):**
+
+1. **Lowest-risk, biggest win:** drop `--rollout-steps 96 → 24-32`. Rollout is only
+   20%-weighted at `leaf=0.8`, so quality cost is small; CPU saving is large
+   (measured ~+87% CPU-side; expect ~+40-60% end-to-end once neural inference is
+   included, since it dilutes the rollout share).
+2. **Cap dispatch tail:** `--selfplay-inference-max-wait-us 40000 → ~5000`. Removes
+   the 40ms stalls on the ~2.5% of batches that never fill.
+3. **Cheap:** `--workers 24 → 28-30` (32-core box; CPU-bound regime has headroom).
+4. **Quality-gated option:** `--neural-leaf-weight 1.0` removes rollouts entirely →
+   GPU-bound regime → then dispatch tuning (batch-size/max-wait) matters. Validate
+   gate win-rate does not regress before adopting.
+
+**Harness:** `training/bench_rebel_selfplay_throughput.py` runs the empirical
+re-baseline (`--preset rebaseline`): one-factor sweeps of rollout-steps, workers,
+max-wait (Regime A, leaf<1, CPU-bound) and inference-batch-size (Regime B, leaf=1.0,
+GPU-bound), sampling live GPU util. It **refuses CUDA configs while a live
+sim-rebel-selfplay/sim-eval-gate is running** (`--force` to override), so the heavy
+sweep can only run once the live run frees the GPU. Run it then to settle items 1-4
+with production-scale numbers.
