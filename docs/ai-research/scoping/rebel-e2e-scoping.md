@@ -1,7 +1,7 @@
 # ReBeL E2E Scoping
 
 - **Date:** 2026-05-28
-- **Status:** SCOPED-AWAITING-IMPLEMENTATION
+- **Status:** IMPLEMENTED — loop runs e2e (R17–R19); self-improvement OPEN. Results + verdicts: `docs/ai-research/progress/r17.md`.
 - **Parent evidence:** `docs/ai-research/analysis/alphazero-style-training-postmortem.md`
 - **Intent:** Start an end-to-end ReBeL-inspired line for this game: public-belief state construction, belief-aware search targets, self-play data capture, and a train/eval loop.
 
