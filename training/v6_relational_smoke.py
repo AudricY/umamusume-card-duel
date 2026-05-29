@@ -111,11 +111,19 @@ class _SlotBeliefWrap(torch.nn.Module):
 
 
 def _forward_checks(results: list[tuple[str, bool, str]]) -> None:
-    for hidden, belief in [(128, False), (256, False), (128, True)]:
+    # (hidden, belief, card_features, contextual_actions)
+    cases = [
+        (128, False, False, True),
+        (256, False, True, True),
+        (128, True, True, True),
+        (128, True, False, False),  # ablation: no catalog, no contextual gather
+    ]
+    for hidden, belief, card_features, contextual in cases:
         cfg = ModelConfig(
             state_dim=STATE_DIM, hidden_dim=hidden, depth=3,
             uses_uma_slot_tokens=True, model_variant="relational",
-            uses_belief_features=belief,
+            uses_belief_features=belief, uses_card_features=card_features,
+            relational_contextual_actions=contextual,
         )
         m = CandidatePolicyNet(cfg).eval()
         B, A = 3, 7
@@ -160,13 +168,15 @@ def _no_dead_params_check(results: list[tuple[str, bool, str]]) -> None:
     results.append(("no dead sum-pool params on relational net", ok, detail))
 
 
-def _roundtrip_check(belief: bool, results: list[tuple[str, bool, str]]) -> list[str]:
+def _roundtrip_check(
+    belief: bool, results: list[tuple[str, bool, str]], card_features: bool = False
+) -> list[str]:
     import onnxruntime as ort
 
     cfg = ModelConfig(
         state_dim=STATE_DIM, hidden_dim=128, depth=3,
         uses_uma_slot_tokens=True, model_variant="relational",
-        uses_belief_features=belief,
+        uses_belief_features=belief, uses_card_features=card_features,
     )
     m = CandidatePolicyNet(cfg).eval()
     B, A = 2, 6
@@ -215,7 +225,7 @@ def _roundtrip_check(belief: bool, results: list[tuple[str, bool, str]]) -> list
     dv = float(np.abs(tv.numpy() - ov.reshape(-1)).max())
     ok = dl < PASS_THRESHOLD and dv < PASS_THRESHOLD
     results.append((
-        f"onnx roundtrip belief={belief}", ok,
+        f"onnx roundtrip belief={belief} card_features={card_features}", ok,
         f"max_abs_diff logits={dl:.2e} value={dv:.2e}",
     ))
     return graph_in
@@ -273,8 +283,8 @@ def main() -> int:
     results: list[tuple[str, bool, str]] = []
     _forward_checks(results)
     _no_dead_params_check(results)
-    gi7 = _roundtrip_check(False, results)
-    gi8 = _roundtrip_check(True, results)
+    gi7 = _roundtrip_check(False, results, card_features=True)
+    gi8 = _roundtrip_check(True, results, card_features=True)
     _signature_checks(gi7, gi8, results)
     _regression_checks(results)
     _invariant_checks(results)

@@ -23,7 +23,14 @@ CARD_EMBED_DIM = 32
 CARD_VOCAB_TABLE_SIZE = 108  # 107 cards + reserved 0 for unknown/pad
 NUM_ZONES = len(ZONE_ORDER)
 ACTION_PAIR_FANOUT = 2  # source + target idx per action
-BELIEF_FEATURE_DIM = 16
+# T1.2 belief per-card range: the model-facing belief vector is the 16-d
+# summary PLUS a per-card opp-hand presence block over the card vocab (107),
+# emitted by the Rust `build_belief_features` (engine-rs/.../belief/mod.rs,
+# `BELIEF_FEATURE_DIM = 16 + BELIEF_HAND_RANGE_DIM`). Must stay in lockstep
+# with the Rust const; the per-card range turns the belief token from a handful
+# of scalar moments into an actual range over opponent hand-card identities.
+BELIEF_HAND_RANGE_DIM = 107  # == cardVocab vocabSize
+BELIEF_FEATURE_DIM = 16 + BELIEF_HAND_RANGE_DIM  # = 123
 
 # R7.b.3 set-attention probe: pre-trunk encoder hyperparameters. Frozen for
 # the Slice 1/2 path; widening or going to >1 layer fires only if Slice 2 is
@@ -145,6 +152,15 @@ class ModelConfig:
     relational_layers: int = RELATIONAL_DEFAULT_LAYERS
     relational_heads: int = RELATIONAL_DEFAULT_HEADS
     relational_ffn_mult: int = RELATIONAL_DEFAULT_FFN_MULT
+    # T1.1 catalog-grounded embeddings: fuse a projection of a constant,
+    # vocab-indexed catalog-mechanics table into every card token (ONNX-safe
+    # buffer, no new graph input, no Rust change). Default off (ablatable).
+    uses_card_features: bool = False
+    # T1.4 contextual-action policy head: the cross-attention head gathers the
+    # CONTEXTUALIZED encoder token for each action's source/target card (by
+    # in-graph card-id match) instead of re-reading the raw card_embed.
+    # Default on — it is the intended v6 behavior; set False to ablate.
+    relational_contextual_actions: bool = True
 
     def to_dict(self) -> dict[str, int | float]:
         return asdict(self)
@@ -430,6 +446,30 @@ class RelationalTrunk(nn.Module):
         self.card_embed = card_embed
         self.card_embed_proj = nn.Linear(CARD_EMBED_DIM, d)
         self.slot_feature_proj = nn.Linear(UMA_SLOT_FEATURE_DIM, d)
+
+        # T1.1 catalog-grounded card features: a constant [vocab, K] table of
+        # static mechanics, projected to d and ADDED to every card token's
+        # representation so identity carries mechanics. The table is a
+        # non-persistent buffer (re-derived from cards.json at construction);
+        # it bakes into the ONNX graph as a constant initializer — no new graph
+        # input, no Rust/serving change.
+        self.uses_card_features = config.uses_card_features
+        if self.uses_card_features:
+            from .card_catalog_features import (
+                CATALOG_FEATURE_DIM,
+                build_catalog_feature_table,
+            )
+
+            table = build_catalog_feature_table(card_embed.num_embeddings)
+            self.register_buffer(
+                "card_feature_table",
+                torch.from_numpy(table).to(torch.float32),
+                persistent=False,
+            )
+            self.card_feat_proj = nn.Linear(CATALOG_FEATURE_DIM, d)
+        else:
+            self.card_feature_table = None
+            self.card_feat_proj = None
         # Project the 110-d global scalar vector into the CLS token so the
         # globals (points / turn / phase / energy budgets) the card tokens do
         # not carry stay in the trunk's input distribution.
@@ -496,9 +536,14 @@ class RelationalTrunk(nn.Module):
         self.policy_cross_attn = nn.MultiheadAttention(
             d, n_heads, dropout=config.dropout, batch_first=True
         )
+        # T1.4: when contextual actions are on, the joint also carries the
+        # gathered contextualized source + target tokens → policy_out input is
+        # [attended, query, attended*query, ctx_src, ctx_tgt] = 5*d, else 3*d.
+        self.contextual_actions = config.relational_contextual_actions
+        policy_in = (5 if self.contextual_actions else 3) * d
         self.policy_out = nn.Sequential(
-            nn.LayerNorm(3 * d),
-            nn.Linear(3 * d, d),
+            nn.LayerNorm(policy_in),
+            nn.Linear(policy_in, d),
             nn.GELU(),
             nn.Linear(d, 1),
         )
@@ -511,6 +556,40 @@ class RelationalTrunk(nn.Module):
             nn.Linear(d // 2, 1),
             nn.Tanh(),
         )
+
+    def _card_repr(self, ids: torch.Tensor) -> torch.Tensor:
+        """Per-card token representation: projected identity embedding, plus
+        (T1.1) a projection of the constant catalog-mechanics row when enabled.
+        Works for any leading shape (`ids[..., ]` -> `[..., d]`)."""
+
+        rep = self.card_embed_proj(self.card_embed(ids))
+        if self.card_feature_table is not None:
+            feats = self.card_feature_table[ids]
+            rep = rep + self.card_feat_proj(feats.to(rep.dtype))
+        return rep
+
+    def _gather_context(
+        self,
+        encoded: torch.Tensor,      # [B, S, d] contextualized tokens
+        token_card_ids: torch.Tensor,  # [B, S] int64 (0 = CLS/belief/pad)
+        valid_token: torch.Tensor,  # [B, S] bool (non-pad card token)
+        query_ids: torch.Tensor,    # [B, A] int64 source/target card ids
+    ) -> torch.Tensor:
+        """T1.4: masked-mean-pool the contextualized encoder tokens whose card
+        id matches each action's source/target card. No match (or id 0) → zero.
+        Pure in-graph card-id match — needs no new ONNX input."""
+
+        # match[b, a, s] = valid_token[b, s] AND token_id[b, s] == query_id[b, a]
+        # AND query_id != 0. Broadcasting: [B,1,S] == [B,A,1] -> [B,A,S].
+        match = (
+            (token_card_ids.unsqueeze(1) == query_ids.unsqueeze(2))
+            & valid_token.unsqueeze(1)
+            & (query_ids.unsqueeze(2) != 0)
+        )
+        match_f = match.to(encoded.dtype)  # [B, A, S]
+        denom = match_f.sum(dim=2, keepdim=True).clamp_min(1.0)  # [B, A, 1]
+        # [B,A,S] @ [B,S,d] -> [B,A,d]; divide by match count (0 -> stays 0).
+        return torch.bmm(match_f, encoded) / denom
 
     def forward(
         self,
@@ -551,9 +630,9 @@ class RelationalTrunk(nn.Module):
         cls = self.cls_token.expand(batch_size, -1, -1).to(dtype=dtype)
         cls = cls + self.state_proj(state_features).unsqueeze(1)
 
-        # Card tokens: embed → project to d, + zone-type + within-zone-pos +
-        # zone polarity. Pad where card_id == 0.
-        card_tokens = self.card_embed_proj(self.card_embed(card_ids_by_zone))
+        # Card tokens: embed (+ catalog features) → d, + zone-type +
+        # within-zone-pos + zone polarity. Pad where card_id == 0.
+        card_tokens = self._card_repr(card_ids_by_zone)
         card_tokens = card_tokens + self.zone_pos_embed.weight.unsqueeze(0).unsqueeze(2)
         card_tokens = card_tokens + self.card_slot_pos_embed.weight.unsqueeze(0).unsqueeze(0)
         zone_pol = self.polarity_embed(self.zone_polarity)  # [NUM_ZONES, d]
@@ -561,9 +640,9 @@ class RelationalTrunk(nn.Module):
         card_tokens = card_tokens.reshape(batch_size, SET_ATTN_NUM_CARD_TOKENS, d)
         card_pad = (card_ids_by_zone == 0).reshape(batch_size, SET_ATTN_NUM_CARD_TOKENS)
 
-        # Uma slot tokens: embed + per-slot scalar features + slot-pos +
-        # slot polarity. Pad where the slot is absent (card_id == 0).
-        slot_tokens = self.card_embed_proj(self.card_embed(uma_slot_card_ids))
+        # Uma slot tokens: embed (+ catalog features) + per-slot scalar
+        # features + slot-pos + slot polarity. Pad where slot absent (id == 0).
+        slot_tokens = self._card_repr(uma_slot_card_ids)
         slot_tokens = slot_tokens + self.slot_feature_proj(uma_slot_features)
         slot_tokens = slot_tokens + self.uma_slot_pos_embed.weight.unsqueeze(0)
         slot_pol = self.polarity_embed(self.slot_polarity)  # [UMA_SLOT_COUNT, d]
@@ -606,7 +685,37 @@ class RelationalTrunk(nn.Module):
         attended, _ = self.policy_cross_attn(
             query, encoded, encoded, key_padding_mask=pad_mask, need_weights=False
         )
-        joint = torch.cat([attended, query, attended * query], dim=-1)
+        joint_parts = [attended, query, attended * query]
+        if self.contextual_actions:
+            # T1.4: align per-token card ids to the encoder sequence (CLS +
+            # card tokens + slot tokens [+ belief]); CLS/belief carry id 0.
+            belief_pad = (
+                [torch.zeros((batch_size, 1), dtype=torch.int64, device=device)]
+                if self.uses_belief
+                else []
+            )
+            token_card_ids = torch.cat(
+                [
+                    torch.zeros((batch_size, 1), dtype=torch.int64, device=device),
+                    card_ids_by_zone.reshape(batch_size, SET_ATTN_NUM_CARD_TOKENS),
+                    uma_slot_card_ids,
+                ]
+                + belief_pad,
+                dim=1,
+            )
+            valid_token = (token_card_ids != 0) & (~pad_mask)
+            if action_card_idx is not None:
+                src_ids = action_card_idx[..., 0]
+                tgt_ids = action_card_idx[..., 1]
+            else:
+                src_ids = torch.zeros(
+                    (batch_size, num_actions), dtype=torch.int64, device=device
+                )
+                tgt_ids = src_ids
+            ctx_src = self._gather_context(encoded, token_card_ids, valid_token, src_ids)
+            ctx_tgt = self._gather_context(encoded, token_card_ids, valid_token, tgt_ids)
+            joint_parts.extend([ctx_src, ctx_tgt])
+        joint = torch.cat(joint_parts, dim=-1)
         logits = self.policy_out(joint).squeeze(-1)
         logits = logits.masked_fill(~action_mask.bool(), torch.finfo(logits.dtype).min)
 
